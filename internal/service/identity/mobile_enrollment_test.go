@@ -295,6 +295,14 @@ func TestReportMobilePosture_DesktopSignalRejected(t *testing.T) {
 		{"firewall_enabled", repository.Posture{FirewallEnabled: boolPtr(true)}},
 		{"screen_lock", repository.Posture{ScreenLock: boolPtr(true)}},
 		{"patch_level", repository.Posture{PatchLevel: "2025-05"}},
+		// Expanded ZTNA signals (WS4): desktop endpoint-protection
+		// concepts with no mobile equivalent must be rejected too, so a
+		// mobile client can't populate a hard-gate input the platform
+		// can't legitimately measure.
+		{"edr_healthy", repository.Posture{EDRHealthy: boolPtr(true)}},
+		{"antivirus_enabled", repository.Posture{AntivirusEnabled: boolPtr(true)}},
+		{"antivirus_definitions_age_hours", repository.Posture{AntivirusDefinitionsAgeHours: ptrU32(12)}},
+		{"os_patch_days_since", repository.Posture{OSPatchDaysSince: ptrU32(3)}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -306,6 +314,29 @@ func TestReportMobilePosture_DesktopSignalRejected(t *testing.T) {
 				t.Errorf("err = %v, want ErrInvalidArgument", err)
 			}
 		})
+	}
+}
+
+// TestReportMobilePosture_CertificateHealthAccepted pins the deliberate
+// asymmetry in validateMobilePosture: certificate_health is platform
+// -agnostic (the mTLS identity leaf exists on every enrolled device),
+// so unlike the EDR/AV/patch signals it must NOT be rejected on a
+// mobile platform.
+func TestReportMobilePosture_CertificateHealthAccepted(t *testing.T) {
+	t.Parallel()
+	svc, _, tenantID := newSvc(t)
+	ctx := context.Background()
+	key := mobileKey(t)
+	if _, err := svc.EnrollMobileDevice(ctx, tenantID, identity.MobileEnrollInput{
+		DeviceKey: key, Platform: repository.DevicePlatformIOS,
+	}); err != nil {
+		t.Fatalf("enroll: %v", err)
+	}
+	if _, err := svc.ReportMobilePosture(ctx, tenantID, identity.MobilePostureInput{
+		DeviceKey: key,
+		Posture:   repository.Posture{CertificateHealth: repository.CertificateHealthHealthy},
+	}); err != nil {
+		t.Errorf("certificate_health must be accepted on mobile, got err = %v", err)
 	}
 }
 
