@@ -118,6 +118,67 @@ func (s *CMKService) UnwrapDataKey(ctx context.Context, tenantID uuid.UUID, wrap
 	return dek, nil
 }
 
+// ReWrapDataKey re-seals an existing wrapped DEK for tenantID from
+// whatever KEK currently protects it (wrapped.Kind / wrapped.KeyURI)
+// onto the explicit target KEK, WITHOUT changing the DEK plaintext.
+// This is the envelope primitive a cross-region tenant migration uses:
+// the small DEK is re-wrapped under the target region's KEK while the
+// (large) ciphertext the DEK protects is copied byte-for-byte, so no
+// bulk re-encryption is needed and the data stays decryptable in the
+// new region.
+//
+// The target ref is supplied explicitly by the caller rather than
+// resolved, because during a migration the tenant's designated region
+// (what the resolver returns) is deliberately still the SOURCE until
+// the final region-column flip — so this method does NOT run
+// enforceRegionBinding against the resolver. Instead it trusts the
+// migration orchestrator to pass the correct target-region KEK and
+// validates only that the ref is well-formed (a CMK target must name a
+// concrete region+key URI; the platform KEK is region-global). The
+// same caller encryption context supplied at wrap time must be supplied
+// here so the tenant-bound AAD matches on both unwrap and re-wrap.
+//
+// Fail-closed: the plaintext DEK is zeroized before return on every
+// path, and any unwrap/validate/wrap error returns a zero
+// WrappedDataKey.
+func (s *CMKService) ReWrapDataKey(ctx context.Context, tenantID uuid.UUID, wrapped WrappedDataKey, target TenantKeyRef, ec EncryptionContext) (WrappedDataKey, error) {
+	if tenantID == uuid.Nil {
+		return WrappedDataKey{}, fmt.Errorf("%w: empty tenant id", ErrInvalidKeyRef)
+	}
+	// Unwrap under the KEK that actually produced the envelope. This
+	// binds the tenant id into the AAD itself, so a DEK wrapped for one
+	// tenant cannot be re-wrapped for another.
+	plaintext, err := s.UnwrapDataKey(ctx, tenantID, wrapped, ec)
+	if err != nil {
+		return WrappedDataKey{}, err
+	}
+	defer Zeroize(plaintext)
+
+	// The requested tenant is authoritative for the target ref too.
+	target.TenantID = tenantID
+	if target.Kind == "" {
+		target.Kind = ProviderPlatform
+	}
+	if err := target.Validate(); err != nil {
+		return WrappedDataKey{}, err
+	}
+	target.Region = Normalize(target.Region)
+	provider, err := s.registry.For(target.Kind)
+	if err != nil {
+		return WrappedDataKey{}, err
+	}
+	boundEC, err := s.bindTenant(ec, tenantID)
+	if err != nil {
+		return WrappedDataKey{}, err
+	}
+	rewrapped, err := provider.WrapDataKey(ctx, target, plaintext, boundEC)
+	if err != nil {
+		return WrappedDataKey{}, fmt.Errorf("residency: re-wrap data key (tenant %s, %s->%s): %w",
+			tenantID, wrapped.Kind, target.Kind, err)
+	}
+	return rewrapped, nil
+}
+
 // resolveForWrite resolves the tenant's KEK, enforces the residency
 // region binding, selects the provider, and binds the tenant id into
 // the encryption context.

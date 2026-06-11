@@ -124,6 +124,44 @@ paths:
       summary: Suspend tenant
       responses:
         "200": { $ref: "#/components/responses/Tenant" }
+  /tenants/{tenant_id}/migrate-region:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [tenants]
+      operationId: migrateTenantRegion
+      summary: Start a cross-region migration for the tenant
+      description: >
+        Drives a resumable migration state machine that re-wraps the
+        tenant's data-encryption keys under the target region's KEK,
+        copies telemetry and object storage, re-pins the tenant onto a
+        target-region PoP, and finally flips the authoritative
+        tenants.region column. Any step failure rolls back every
+        completed step in reverse; the tenant is dual-read throughout so
+        no traffic is lost. Returns 202 with the migration record on a
+        successful run, 200 with a terminal record (rolled_back/failed)
+        if the run rolled back, 409 if a migration is already in flight,
+        and 422 if the tenant has no source region to migrate from.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/MigrateRegionRequest" }
+      responses:
+        "202": { $ref: "#/components/responses/TenantMigration" }
+        "200": { $ref: "#/components/responses/TenantMigration" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "422": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/migration-status:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [tenants]
+      operationId: getTenantMigrationStatus
+      summary: Get the tenant's most recent migration record
+      responses:
+        "200": { $ref: "#/components/responses/TenantMigration" }
+        "404": { $ref: "#/components/responses/Error" }
   /tenants/{tenant_id}/sites:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     get:
@@ -3489,6 +3527,11 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/PoPAssignment" }
+    TenantMigration:
+      description: cross-region tenant migration record
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/TenantMigration" }
   schemas:
     Error:
       type: object
@@ -3544,6 +3587,49 @@ components:
             authoritative listing surface.
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+    MigrateRegionRequest:
+      type: object
+      required: [target_region]
+      properties:
+        target_region:
+          type: string
+          description: >
+            The region to move the tenant to. Must be a non-empty
+            region token and differ from the tenant's current region.
+    TenantMigration:
+      type: object
+      required:
+        [id, tenant_id, source_region, target_region, state, dual_read,
+         attempts, checkpoint, created_at, updated_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        source_region: { type: string }
+        target_region: { type: string }
+        state:
+          type: string
+          enum:
+            [pending, rewrapping_keys, copying_telemetry, copying_objects,
+             reassigning_pop, updating_region, completed, rolling_back,
+             rolled_back, failed]
+        dual_read:
+          type: boolean
+          description: >
+            True while the tenant is served from both source and target
+            regions during an in-flight migration, so no traffic is lost.
+        detail:
+          type: string
+          description: Human-readable detail for the current state (e.g. failure cause).
+        attempts: { type: integer }
+        checkpoint:
+          type: object
+          description: >
+            Opaque per-step checkpoint the state machine resumes from;
+            defaults to an empty object before the first step records.
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        started_at: { type: string, format: date-time }
+        completed_at: { type: string, format: date-time }
     SiteCreateRequest:
       type: object
       required: [name]

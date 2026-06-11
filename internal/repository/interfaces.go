@@ -299,6 +299,41 @@ type ResidencyAuditRepository interface {
 	List(ctx context.Context, tenantID uuid.UUID, limit int) ([]ResidencyAuditEntry, error)
 }
 
+// TenantMigrationRepository owns the tenant_migrations table (migration
+// 059): the durable, resumable state machine for cross-region tenant
+// migrations (WS11). Create/Get/GetActive/Latest/Update are
+// tenant-scoped and enforce RLS via the `sng.tenant_id` GUC;
+// ListResumable runs under the system role so the background resume
+// runner can scan in-flight migrations across all tenants.
+type TenantMigrationRepository interface {
+	// Create inserts a new migration in the pending state. Returns
+	// ErrConflict if the tenant already has a non-terminal migration
+	// (the partial unique index uq_tenant_migrations_active), and
+	// ErrInvalidArgument if tenant_id / source / target are missing or
+	// source == target. The returned row carries the store-assigned
+	// id and timestamps.
+	Create(ctx context.Context, tenantID uuid.UUID, m TenantMigration) (TenantMigration, error)
+	// Get returns a migration by id, scoped to tenantID. ErrNotFound if
+	// it does not exist (or belongs to another tenant).
+	Get(ctx context.Context, tenantID, id uuid.UUID) (TenantMigration, error)
+	// GetActive returns the tenant's single in-flight (non-terminal)
+	// migration, or ErrNotFound when none is running.
+	GetActive(ctx context.Context, tenantID uuid.UUID) (TenantMigration, error)
+	// Latest returns the most recent migration for the tenant in any
+	// state (newest by created_at), or ErrNotFound when the tenant has
+	// never been migrated.
+	Latest(ctx context.Context, tenantID uuid.UUID) (TenantMigration, error)
+	// Update persists a state transition for an existing migration:
+	// state, dual_read, checkpoint, detail, attempts, started_at and
+	// completed_at are written; updated_at is bumped by the store.
+	// ErrNotFound if the migration does not exist for the tenant.
+	Update(ctx context.Context, tenantID uuid.UUID, m TenantMigration) (TenantMigration, error)
+	// ListResumable returns every non-terminal migration across all
+	// tenants, oldest-updated first, for the resumable runner to pick
+	// up after a control-plane restart. Runs under the system role.
+	ListResumable(ctx context.Context) ([]TenantMigration, error)
+}
+
 // --- Role -----------------------------------------------------------------
 
 // RoleRepository owns the roles + user_roles tables.

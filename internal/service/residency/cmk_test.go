@@ -249,6 +249,11 @@ func (p *recordingProvider) GenerateDataKey(_ context.Context, ref residency.Ten
 	}, nil
 }
 
+func (p *recordingProvider) WrapDataKey(_ context.Context, ref residency.TenantKeyRef, plaintext []byte, _ residency.EncryptionContext) (residency.WrappedDataKey, error) {
+	p.gotRef = ref
+	return residency.WrappedDataKey{Kind: p.kind, KeyURI: ref.KeyURI, Ciphertext: append([]byte("ct:"), plaintext...)}, nil
+}
+
 func (p *recordingProvider) UnwrapDataKey(_ context.Context, ref residency.TenantKeyRef, _ residency.WrappedDataKey, _ residency.EncryptionContext) ([]byte, error) {
 	p.gotRef = ref
 	return bytes.Repeat([]byte{0x01}, 32), nil

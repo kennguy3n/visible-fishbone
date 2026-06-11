@@ -166,6 +166,10 @@ type Store struct {
 	// Tenant-scoped; append-only record of fail-closed rejections.
 	residencyAudit map[uuid.UUID]repository.ResidencyAuditEntry
 
+	// Cross-region tenant migration state machine — see migration 059.
+	// Tenant-scoped; resumable + rollback-able. Keyed by migration id.
+	tenantMigrations map[uuid.UUID]repository.TenantMigration
+
 	// Threat-intel IOC snapshot — see migration 051. A single
 	// global whole-set snapshot (not tenant-scoped), so it is held
 	// as a flat slice replaced atomically by ReplaceAll.
@@ -260,6 +264,7 @@ func NewStore() *Store {
 		idpConfigs:             map[uuid.UUID]repository.IDPConfig{},
 		deviceIdentityBindings: map[deviceBindingKey]repository.DeviceIdentityBinding{},
 		residencyAudit:         map[uuid.UUID]repository.ResidencyAuditEntry{},
+		tenantMigrations:       map[uuid.UUID]repository.TenantMigration{},
 		clock:                  func() time.Time { return time.Now().UTC() },
 	}
 }

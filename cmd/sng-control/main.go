@@ -357,6 +357,29 @@ func run() error {
 		}
 	}()
 	go popSvc.Run(rootCtx, cfg.PoP.RegistryRefreshInterval)
+	// WORKSTREAM 11: resume any cross-region migration that a previous
+	// control-plane instance left in-flight, so a crash/restart mid
+	// migration is picked up from the durable checkpoint rather than
+	// stranding the tenant in dual-read. Only the elected leader drives
+	// resume so two instances never race the same state machine. Runs
+	// once on boot in the background so it never blocks readiness.
+	if rc.RegionMigrator != nil {
+		go func() {
+			if !elector.IsLeader() {
+				return
+			}
+			n, rerr := rc.RegionMigrator.ResumeAll(rootCtx)
+			if rerr != nil {
+				logger.Warn("sng-control: ws11 resume in-flight migrations failed",
+					slog.Int("resumed", n), slog.Any("error", rerr))
+				return
+			}
+			if n > 0 {
+				logger.Info("sng-control: ws11 resumed in-flight migrations",
+					slog.Int("resumed", n))
+			}
+		}()
+	}
 	// WORKSTREAM 8 threat-intel aggregator: one warm-up refresh per
 	// configured feed on start, then scheduled (default hourly)
 	// re-pulls plus a TTL sweeper, all tied to rootCtx. With no
@@ -646,6 +669,9 @@ type routerComponents struct {
 	AI                *aisvc.Service
 	Metering          *metering.MeteringService
 	PoP               *pop.Service
+	// RegionMigrator drives the WS11 cross-region tenant-migration state
+	// machine; the serve loop resumes any in-flight migration on boot.
+	RegionMigrator    *tenant.RegionMigrator
 	EvidenceScheduler *compliance.Scheduler
 	FeedManager       *aisvc.FeedManager
 	// Recompiler is the feed-driven auto-recompile worker. Nil when
@@ -683,6 +709,7 @@ func buildRouter(
 	store := postgres.NewStoreWithPool(pool)
 
 	tenantRepo := store.NewTenantRepository()
+	tenantMigrationRepo := store.NewTenantMigrationRepository()
 	siteRepo := store.NewSiteRepository()
 	// Short-TTL cache for the auth-middleware mobile device kill-switch.
 	// Decorating the device repository here means every status mutation
@@ -1387,6 +1414,35 @@ func buildRouter(
 	)
 	popHandler := handler.NewPoPHandler(popSvc, rbacSvc)
 
+	// --- WORKSTREAM 11: cross-region tenant migration -----------------
+	// The RegionMigrator drives the resumable migration state machine
+	// (migration 059). Two planes are wired from real services here:
+	//   * Region   — flips the authoritative tenants.region column, the
+	//                migration's commit point.
+	//   * PoP      — re-pins the tenant onto a Point-of-Presence in the
+	//                target region (and restores the previous pin on
+	//                rollback), adapting *pop.Service + its store to the
+	//                migrator's narrow PoPControl port.
+	// The DEK re-wrap, ClickHouse partition copy, and S3 object copy
+	// planes are left nil: those backends are single-region in this
+	// deployment, so their steps are logged no-ops (mirroring the
+	// opt-in residency Guard above). Wiring a second-region KMS / CH /
+	// S3 client turns each into an active step with no migrator change.
+	tenantMigrator, err := tenant.NewRegionMigrator(
+		tenantMigrationRepo,
+		tenantRepo,
+		auditRepo,
+		tenant.MigrationPlanes{
+			Region: tenant.NewRegionColumnPlane(tenantRepo),
+			PoP:    tenant.NewPoPReassigner(popControlAdapter{svc: popSvc, store: popStore}),
+		},
+		logger,
+	)
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("build region migrator: %w", err)
+	}
+	tenantMigrationHandler := handler.NewTenantMigrationHandler(tenantMigrator)
+
 	// Workstream 10 — per-tenant rate limiter: a fair per-tenant
 	// request budget enforced AFTER auth so one noisy tenant cannot
 	// exhaust shared control-plane capacity for the rest of the fleet.
@@ -1458,10 +1514,11 @@ func buildRouter(
 	}, logger)
 
 	router := handler.NewRouter(handler.RouterDeps{
-		Config:  cfg,
-		Logger:  logger,
-		Tenants: handler.NewTenantHandler(tenantSvc),
-		Sites:   handler.NewSiteHandler(siteSvc),
+		Config:          cfg,
+		Logger:          logger,
+		Tenants:         handler.NewTenantHandler(tenantSvc),
+		TenantMigration: tenantMigrationHandler,
+		Sites:           handler.NewSiteHandler(siteSvc),
 		Devices: func() *handler.DeviceHandler {
 			h := handler.NewDeviceHandler(identitySvc, deviceRepo, cfg.Auth.ClaimTokenTTL)
 			h.SetEnrollmentService(enrollmentSvc)
@@ -1552,6 +1609,7 @@ func buildRouter(
 		AI:                 aiSvc,
 		Metering:           meteringSvc,
 		PoP:                popSvc,
+		RegionMigrator:     tenantMigrator,
 		EvidenceScheduler:  evidenceScheduler,
 		FeedManager:        feedMgr,
 		Recompiler:         recompiler,
@@ -1617,6 +1675,44 @@ func (r tenantRegionResolver) TenantRegion(ctx context.Context, tenantID uuid.UU
 		return "", fmt.Errorf("resolve tenant region: %w", err)
 	}
 	return t.Region, nil
+}
+
+// popControlAdapter adapts *pop.Service (plus its store) onto the
+// tenant package's narrow PoPControl port so the WS11 migrator can
+// re-pin a tenant onto a Point-of-Presence in the target region
+// without the tenant package depending on the pop package. The pin is
+// written as an operator override so the PoP rebalancer treats it as
+// sticky and does not migrate the tenant back to a source-region PoP.
+type popControlAdapter struct {
+	svc   *pop.Service
+	store pop.Store
+}
+
+func (a popControlAdapter) AvailablePoPs() []tenant.PoPInfo {
+	pops := a.svc.ListAvailable()
+	out := make([]tenant.PoPInfo, 0, len(pops))
+	for _, p := range pops {
+		out = append(out, tenant.PoPInfo{ID: p.ID, Region: p.Region})
+	}
+	return out
+}
+
+func (a popControlAdapter) CurrentAssignment(ctx context.Context, tenantID uuid.UUID) (uuid.UUID, bool, error) {
+	asg, err := a.store.GetAssignment(ctx, tenantID)
+	if errors.Is(err, repository.ErrNotFound) {
+		return uuid.Nil, false, nil
+	}
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("get pop assignment: %w", err)
+	}
+	return asg.PoPID, true, nil
+}
+
+func (a popControlAdapter) SetAssignment(ctx context.Context, tenantID, popID uuid.UUID) error {
+	if _, err := a.svc.SetAssignment(ctx, tenantID, popID, true); err != nil {
+		return fmt.Errorf("set pop assignment: %w", err)
+	}
+	return nil
 }
 
 // buildAIHandler constructs the AI handler with an optional LLM
