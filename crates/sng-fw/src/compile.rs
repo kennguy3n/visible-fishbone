@@ -380,6 +380,27 @@ fn verb_to_action(v: Verb) -> Option<RuleAction> {
     }
 }
 
+/// Render the deterministic nftables script for an already-assembled rule
+/// set (resolved filter rules + zone table + NAT table + chain default
+/// verdict).
+///
+/// This is the exact routine [`RuleCompiler::compile`] runs internally to
+/// populate [`CompiledRuleSet::script`]. Exposing it lets callers that
+/// assemble a [`CompiledRuleSet`] directly — the efficacy harness's kernel
+/// conformance check, an offline `sng-fw` dry-run / `--check` — obtain the
+/// byte-identical artifact the kernel apply path ([`crate::engine::FirewallEngine::install`])
+/// loads, without re-deriving the translation. Output is deterministic:
+/// identical inputs yield identical bytes (and therefore an identical
+/// SHA-256 digest), so a rendered script can be compared across runs.
+pub fn render_nftables(
+    rules: &[FirewallRule],
+    zones: &ZoneTable,
+    nat: &NatTable,
+    default_action: RuleAction,
+) -> Result<NftablesScript, FirewallError> {
+    render_script(rules, zones, nat, default_action)
+}
+
 fn render_script(
     rules: &[FirewallRule],
     zones: &ZoneTable,

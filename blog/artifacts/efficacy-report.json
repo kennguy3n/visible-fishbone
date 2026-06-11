@@ -117,6 +117,117 @@
       ]
     },
     {
+      "function": "firewall_kernel",
+      "crate": "sng-fw",
+      "kind": "enforcement",
+      "tested": true,
+      "total_cases": 12,
+      "bad_cases": 7,
+      "good_cases": 5,
+      "tp": 7,
+      "fn": 0,
+      "tn": 5,
+      "fp": 0,
+      "catch_rate": 1.0,
+      "false_positive_rate": 0.0,
+      "accuracy": 1.0,
+      "precision": 1.0,
+      "targets": {
+        "catch_pass": 0.99,
+        "catch_warn": 0.9,
+        "fp_pass": 0.02,
+        "fp_warn": 0.05
+      },
+      "verdict": "PASS",
+      "notes": "Kernel nftables enforcement matches the userspace engine on all 12 corpus flows: the SNG-rendered ruleset was installed in a network namespace and each flow's verdict was read back from the kernel forward path (veth + counter). No kernel/userspace divergence.",
+      "cases": [
+        {
+          "description": "telnet to internal host (legacy, lateral movement)",
+          "bad": true,
+          "expected": "deny",
+          "actual": "deny",
+          "correct": true
+        },
+        {
+          "description": "SMB/445 east-west (ransomware spread vector)",
+          "bad": true,
+          "expected": "deny",
+          "actual": "deny",
+          "correct": true
+        },
+        {
+          "description": "RDP/3389 exposed to workstation",
+          "bad": true,
+          "expected": "deny",
+          "actual": "deny",
+          "correct": true
+        },
+        {
+          "description": "exfil to high port 9999",
+          "bad": true,
+          "expected": "deny",
+          "actual": "deny",
+          "correct": true
+        },
+        {
+          "description": "egress to known-bad net 203.0.113.0/24",
+          "bad": true,
+          "expected": "deny",
+          "actual": "deny",
+          "correct": true
+        },
+        {
+          "description": "unsanctioned tcp port 31337 (default-deny)",
+          "bad": true,
+          "expected": "deny",
+          "actual": "deny",
+          "correct": true
+        },
+        {
+          "description": "unsanctioned udp port 12345 (default-deny, UDP path)",
+          "bad": true,
+          "expected": "deny",
+          "actual": "deny",
+          "correct": true
+        },
+        {
+          "description": "HTTPS/443 to public web",
+          "bad": false,
+          "expected": "allow",
+          "actual": "allow",
+          "correct": true
+        },
+        {
+          "description": "HTTP/80 to public web",
+          "bad": false,
+          "expected": "allow",
+          "actual": "allow",
+          "correct": true
+        },
+        {
+          "description": "DNS/53 (UDP) to resolver",
+          "bad": false,
+          "expected": "allow",
+          "actual": "allow",
+          "correct": true
+        },
+        {
+          "description": "DNS/53 (TCP) zone transfer to resolver",
+          "bad": false,
+          "expected": "allow",
+          "actual": "allow",
+          "correct": true
+        },
+        {
+          "description": "HTTPS/443 to SaaS app",
+          "bad": false,
+          "expected": "allow",
+          "actual": "allow",
+          "correct": true
+        }
+      ]
+    },
+    {
       "function": "swg",
       "crate": "sng-swg",
       "kind": "enforcement",

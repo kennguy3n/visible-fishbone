@@ -1,0 +1,25 @@
+# SNG efficacy IPS *adversarial* corpus rules.
+#
+# A self-contained signature set hardened against the evasion techniques
+# in the companion `bad-*.pcap` fixtures: fragmented / session-spliced
+# delivery (caught after Suricata's defrag + stream reassembly), and
+# double-encoded URIs / DoH tunneling (caught by signatures that match
+# the evasion's on-the-wire byte pattern directly). Local SIDs use the
+# 1000020+ range to stay clear of the baseline corpus (`../test.rules`,
+# 1000001-1000007) per Suricata convention.
+
+# Reassembly-dependent: the pattern only exists once Suricata defragments
+# the IP datagram / reassembles the TCP stream.
+alert tcp any any -> any any (msg:"SNG-ADV directory traversal (defragmented/spliced)"; content:"/etc/passwd"; sid:1000020; rev:1;)
+alert tcp any any -> any any (msg:"SNG-ADV SQLi UNION SELECT (stream-spliced)"; content:"UNION SELECT"; nocase; sid:1000021; rev:1;)
+alert tcp any any -> any any (msg:"SNG-ADV EICAR (defragmented)"; content:"EICAR-STANDARD-ANTIVIRUS-TEST-FILE"; sid:1000022; rev:1;)
+
+# Double-encoded evasions: match the literal double-percent-encoded bytes
+# the attacker uses to slip past a single URL-decode pass.
+alert tcp any any -> any any (msg:"SNG-ADV double-encoded path traversal"; content:"%252e%252e"; nocase; sid:1000023; rev:1;)
+alert tcp any any -> any any (msg:"SNG-ADV double-encoded script tag (XSS)"; content:"%253cscript"; nocase; sid:1000024; rev:1;)
+
+# DNS-over-HTTPS tunneling: the RFC 8484 media type and the GET wire-format
+# query parameter. Catches DNS exfil tunneled over an HTTPS-style request.
+alert tcp any any -> any any (msg:"SNG-ADV DoH dns-message media type"; content:"application/dns-message"; nocase; sid:1000025; rev:1;)
+alert tcp any any -> any any (msg:"SNG-ADV DoH GET dns-query base64 parameter"; content:"/dns-query?dns="; nocase; sid:1000026; rev:1;)
