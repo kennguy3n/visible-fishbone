@@ -1,9 +1,13 @@
 package handler_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +30,24 @@ func newCASBNoOpsTestRouter(t *testing.T, wireReader bool) (
 	*memory.CASBDiscoveredAppRepository, *memory.CASBNoOpsStore,
 ) {
 	t.Helper()
+	noops := memory.NewCASBNoOpsStore()
+	var reader handler.CASBNoOpsReader
+	if wireReader {
+		reader = noops
+	}
+	router, tenantID, signed, appRepo := buildCASBNoOpsTestRouter(t, reader, nil)
+	return router, tenantID, signed, appRepo, noops
+}
+
+// buildCASBNoOpsTestRouter is the lower-level builder: it wires the CASB
+// handler with an explicit (possibly nil) NoOps reader and logger so a
+// test can inject a failing reader + capturing logger to exercise the
+// degradation-observability path. A nil reader leaves the handler in
+// discovery-only mode.
+func buildCASBNoOpsTestRouter(t *testing.T, reader handler.CASBNoOpsReader, logger *slog.Logger) (
+	http.Handler, uuid.UUID, string, *memory.CASBDiscoveredAppRepository,
+) {
+	t.Helper()
 	store := memory.NewStore()
 	tenantID := uuid.New()
 	if _, err := memory.NewTenantRepository(store).Create(context.Background(),
@@ -46,11 +68,13 @@ func newCASBNoOpsTestRouter(t *testing.T, wireReader bool) (
 		casb.PluginRegistry{},
 		nil,
 	)
-	noops := memory.NewCASBNoOpsStore()
 
 	h := handler.NewCASBHandler(svc)
-	if wireReader {
-		h.SetNoOpsReader(noops)
+	if logger != nil {
+		h.SetLogger(logger)
+	}
+	if reader != nil {
+		h.SetNoOpsReader(reader)
 	}
 
 	jwtSecret := "test-jwt-secret-key"
@@ -76,7 +100,19 @@ func newCASBNoOpsTestRouter(t *testing.T, wireReader bool) (
 	if err != nil {
 		t.Fatalf("sign jwt: %v", err)
 	}
-	return router, tenantID, signed, appRepo, noops
+	return router, tenantID, signed, appRepo
+}
+
+// failingNoOpsReader is a CASBNoOpsReader whose reads always error, used
+// to drive the attachVerdicts degradation path.
+type failingNoOpsReader struct{}
+
+func (failingNoOpsReader) ListClassifications(context.Context, uuid.UUID) ([]repository.AppClassification, error) {
+	return nil, fmt.Errorf("noops store down")
+}
+
+func (failingNoOpsReader) ListActions(context.Context, uuid.UUID, int) ([]repository.CASBAppAction, error) {
+	return nil, fmt.Errorf("noops store down")
 }
 
 func seedDiscoveredApp(t *testing.T, repo *memory.CASBDiscoveredAppRepository, tenantID uuid.UUID, name, vendor, category string, risk int) {
@@ -241,6 +277,38 @@ func TestCASBHandler_ListNoOpsActions(t *testing.T) {
 	}
 	if resp.Items[0].AppName != "OpenAI ChatGPT" || resp.Items[0].Enforcement != "protect" {
 		t.Errorf("unexpected action row: %+v", resp.Items[0])
+	}
+}
+
+func TestCASBHandler_ListApps_ClassificationStoreError_DegradesAndLogs(t *testing.T) {
+	t.Parallel()
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	router, tenantID, token, appRepo := buildCASBNoOpsTestRouter(t, failingNoOpsReader{}, logger)
+	seedDiscoveredApp(t, appRepo, tenantID, "OpenAI ChatGPT", "OpenAI", "genai", 72)
+
+	// A store error must not fail the listing — the app still lists,
+	// just without a verdict.
+	rec := doJSON(t, router, http.MethodGet, "/api/v1/tenants/"+tenantID.String()+"/casb/apps", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET apps status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(resp.Items) != 1 {
+		t.Fatalf("apps count = %d, want 1", len(resp.Items))
+	}
+	if _, ok := resp.Items[0]["verdict"]; ok {
+		t.Errorf("verdict present despite classification store error")
+	}
+
+	// The degradation must be observable, not silent.
+	if logged := buf.String(); !strings.Contains(logged, "NoOps classifications unavailable") {
+		t.Errorf("expected a degradation warning to be logged, got: %q", logged)
 	}
 }
 

@@ -1740,6 +1740,7 @@ func buildRouter(
 		CASB: func() *handler.CASBHandler {
 			h := handler.NewCASBHandler(casbSvc)
 			h.SetInlineService(inlineCASBSvc)
+			h.SetLogger(logger)
 			// Surface the shadow-IT NoOps verdict (classification +
 			// decided action) inline on the discovered-apps listing and
 			// expose the action timeline. The store is read-only here;

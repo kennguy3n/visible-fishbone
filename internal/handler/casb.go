@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -35,6 +36,7 @@ type CASBHandler struct {
 	svc    *casb.Service
 	inline *casb.InlineCASBService
 	noops  CASBNoOpsReader
+	logger *slog.Logger
 }
 
 // NewCASBHandler wires the handler.
@@ -59,6 +61,16 @@ func (h *CASBHandler) SetInlineService(svc *casb.InlineCASBService) {
 // discovery surface only and verdict fields are omitted.
 func (h *CASBHandler) SetNoOpsReader(r CASBNoOpsReader) {
 	h.noops = r
+}
+
+// SetLogger attaches a logger so the otherwise-silent NoOps verdict
+// degradation paths (a store error in attachVerdicts drops to the bare
+// inventory) emit an observability signal instead of failing dark.
+// Optional and nil-safe: every logging call guards on a non-nil logger,
+// so handlers constructed without one (e.g. discovery-only tests) keep
+// working.
+func (h *CASBHandler) SetLogger(l *slog.Logger) {
+	h.logger = l
 }
 
 // Register attaches routes.
@@ -404,11 +416,21 @@ const noopsActionScanLimit = 500
 // verdict, one per app) and the most recent decided action into the
 // matching discovered-app rows, joined by app name (the classification's
 // AppName is the discovered app's Name by construction). A missing
-// classification leaves Verdict nil (app discovered but not yet swept);
-// a store error degrades silently to the bare inventory.
+// classification leaves Verdict nil (app discovered but not yet swept).
+// A store error degrades to the bare inventory rather than failing the
+// listing, but is logged (when a logger is wired) so the degradation is
+// observable instead of silent.
 func (h *CASBHandler) attachVerdicts(ctx context.Context, tenantID uuid.UUID, items []casbAppResponse) {
 	classes, err := h.noops.ListClassifications(ctx, tenantID)
-	if err != nil || len(classes) == 0 {
+	if err != nil {
+		if h.logger != nil {
+			h.logger.WarnContext(ctx, "casb: NoOps classifications unavailable; serving discovered apps without verdict",
+				slog.String("tenant_id", tenantID.String()),
+				slog.String("error", err.Error()))
+		}
+		return
+	}
+	if len(classes) == 0 {
 		return
 	}
 	byName := make(map[string]repository.AppClassification, len(classes))
@@ -424,6 +446,13 @@ func (h *CASBHandler) attachVerdicts(ctx context.Context, tenantID uuid.UUID, it
 				latestAction[a.AppName] = a
 			}
 		}
+	} else if h.logger != nil {
+		// Classifications succeeded; only the supplementary action
+		// context is missing. Surface the verdict anyway (action
+		// omitted) but record why the badge will be absent.
+		h.logger.WarnContext(ctx, "casb: NoOps actions unavailable; serving verdicts without decided-action context",
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("error", aErr.Error()))
 	}
 	for i := range items {
 		c, ok := byName[items[i].Name]
