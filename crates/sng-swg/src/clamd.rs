@@ -182,6 +182,42 @@ struct Connection {
     session_started: bool,
 }
 
+/// A *genuine* clamd scan result — what the daemon actually told us about the
+/// bytes. This is deliberately narrower than [`ContentScanVerdict`]: it can
+/// only ever be the two content-intrinsic outcomes clamd reports for a
+/// well-formed INSTREAM reply (`OK` / `<Sig> FOUND`).
+///
+/// Keeping a separate type for "what the scan produced" vs "what the pipeline
+/// returns" makes the cache contract *structural* rather than disciplinary: a
+/// fail-posture verdict (the fail-open `Clean` or the fail-closed sentinel,
+/// produced by [`ClamdScanner::fail`]) reflects backend availability, not the
+/// content, and is a [`ContentScanVerdict`] that never exists as a
+/// `ScanOutcome`. Because `scan_once` yields a `ScanOutcome`, the cache-write
+/// path in [`ClamdScanner::scan`] can only ever see a content-intrinsic
+/// result — it is *impossible* to route a fail-open `Clean` through it, even
+/// if a future refactor reorders the arms. Every `ScanOutcome` is cacheable by
+/// construction, so caching no longer leans on call-order plus an
+/// `is_cacheable` gate.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ScanOutcome {
+    /// clamd replied `stream: OK`.
+    Clean,
+    /// clamd replied `stream: <Signature> FOUND`.
+    Malicious { signature: String },
+}
+
+impl ScanOutcome {
+    /// Lift a genuine scan result into the pipeline's verdict type. Total and
+    /// infallible: both variants map to their content-intrinsic, cacheable
+    /// [`ContentScanVerdict`] counterpart.
+    fn into_verdict(self) -> ContentScanVerdict {
+        match self {
+            Self::Clean => ContentScanVerdict::Clean,
+            Self::Malicious { signature } => ContentScanVerdict::Malicious { signature },
+        }
+    }
+}
+
 /// Bounded, connection-reusing pool. The semaphore caps *total* live
 /// connections: a permit is held for the whole checkout, and a new connection
 /// is opened only while holding a permit and finding the idle list empty, so
@@ -331,7 +367,7 @@ impl ClamdScanner {
     /// Run one INSTREAM scan: acquire a pool slot, reuse-or-open a connection,
     /// stream the bytes, parse the reply. Reuses the connection on success,
     /// discards it on any I/O error so a half-broken socket is never pooled.
-    async fn scan_once(&self, bytes: &[u8]) -> std::io::Result<ContentScanVerdict> {
+    async fn scan_once(&self, bytes: &[u8]) -> std::io::Result<ScanOutcome> {
         // Hold a permit for the whole checkout so total live connections stay
         // bounded by the pool size. The semaphore is owned by the pool for the
         // scanner's lifetime and is never closed, so `acquire` cannot fail in
@@ -381,11 +417,7 @@ impl ClamdScanner {
     }
 
     /// Execute the INSTREAM dialog on an already-checked-out connection.
-    async fn instream(
-        &self,
-        conn: &mut Connection,
-        bytes: &[u8],
-    ) -> std::io::Result<ContentScanVerdict> {
+    async fn instream(&self, conn: &mut Connection, bytes: &[u8]) -> std::io::Result<ScanOutcome> {
         let stream = &mut conn.stream;
         if !conn.session_started {
             stream.write_all(b"zIDSESSION\0").await?;
@@ -460,15 +492,22 @@ impl ContentScanner for ClamdScanner {
         // holds even under cancellation. The connection is intentionally *not*
         // returned to the idle list (it may be mid-reply / desynced).
         match tokio::time::timeout(self.inner.scan_timeout, self.scan_once(bytes)).await {
-            Ok(Ok(verdict)) => {
-                // Only cache deterministic scan results. Fail-posture verdicts
-                // are produced by `fail()` in the error arms below and never
-                // reach here; gating on `is_cacheable()` is belt-and-braces so
-                // a transient verdict can never be pinned even if a future
-                // refactor routes one through this branch.
-                if verdict.is_cacheable() {
-                    self.inner.cache.put(&key, verdict.clone());
-                }
+            Ok(Ok(outcome)) => {
+                // `outcome` is a `ScanOutcome`, so it is a genuine, content-
+                // intrinsic scan result by construction (`Clean` / `Malicious`)
+                // — a fail-posture verdict is a `ContentScanVerdict` that can
+                // never appear here. Caching is therefore unconditional and
+                // type-safe: it is structurally impossible to pin a fail-open
+                // `Clean` or the fail-closed sentinel under a content hash. The
+                // `debug_assert` documents (and pins, against a future
+                // `ContentScanVerdict` change) that the lifted verdict is
+                // cacheable.
+                let verdict = outcome.into_verdict();
+                debug_assert!(
+                    verdict.is_cacheable(),
+                    "ScanOutcome lifted to a non-cacheable verdict: {verdict:?}"
+                );
+                self.inner.cache.put(&key, verdict.clone());
                 verdict
             }
             Ok(Err(e)) => self.fail(&format!("io error: {e}")),
@@ -536,8 +575,11 @@ async fn read_until_nul<R: AsyncRead + Unpin>(
 ///
 /// Accepts both session (`<id>: stream: ...`) and one-shot (`stream: ...`)
 /// reply forms by anchoring on the `stream: ` token. Only the two well-formed
-/// outcomes resolve to a verdict: `OK` -> [`ContentScanVerdict::Clean`] and
-/// `<Sig> FOUND` -> [`ContentScanVerdict::Malicious`].
+/// outcomes resolve to a result: `OK` -> [`ScanOutcome::Clean`] and
+/// `<Sig> FOUND` -> [`ScanOutcome::Malicious`]. Returning a [`ScanOutcome`]
+/// (rather than a [`ContentScanVerdict`]) means a parsed reply is, by type,
+/// only ever a content-intrinsic result and can never be confused with a
+/// fail-posture verdict on the cache-write path.
 ///
 /// Any other reply — a clamd error string (`INSTREAM size limit exceeded
 /// ERROR`), a truncated frame, garbage — is *not* a scan result and must not
@@ -548,7 +590,7 @@ async fn read_until_nul<R: AsyncRead + Unpin>(
 /// [`std::io::Error`] so it flows through [`ClamdScanner::scan_once`] (which
 /// discards the possibly-desynced connection) into the scanner's `fail()`
 /// path, where the single source of fail-open/closed truth decides.
-fn parse_reply(reply: &[u8]) -> std::io::Result<ContentScanVerdict> {
+fn parse_reply(reply: &[u8]) -> std::io::Result<ScanOutcome> {
     let text = String::from_utf8_lossy(reply);
     let text = text.trim().trim_end_matches('\0').trim();
     // Anchor on the part after the last "stream: " so the `<id>: ` session
@@ -556,7 +598,7 @@ fn parse_reply(reply: &[u8]) -> std::io::Result<ContentScanVerdict> {
     let payload = text.rsplit("stream: ").next().unwrap_or(text).trim();
 
     if payload == "OK" {
-        Ok(ContentScanVerdict::Clean)
+        Ok(ScanOutcome::Clean)
     } else if let Some(sig) = payload.strip_suffix(" FOUND") {
         let signature = sig.trim();
         let signature = if signature.is_empty() {
@@ -564,7 +606,7 @@ fn parse_reply(reply: &[u8]) -> std::io::Result<ContentScanVerdict> {
         } else {
             signature.to_string()
         };
-        Ok(ContentScanVerdict::Malicious { signature })
+        Ok(ScanOutcome::Malicious { signature })
     } else {
         // Unexpected reply (clamd error, truncated frame, desynced session).
         // Treat it as a scan failure so the connection is dropped and the
@@ -1050,23 +1092,17 @@ mod tests {
 
     #[test]
     fn parse_reply_handles_session_and_oneshot_forms() {
-        assert_eq!(
-            parse_reply(b"1: stream: OK\0").unwrap(),
-            ContentScanVerdict::Clean
-        );
-        assert_eq!(
-            parse_reply(b"stream: OK").unwrap(),
-            ContentScanVerdict::Clean
-        );
+        assert_eq!(parse_reply(b"1: stream: OK\0").unwrap(), ScanOutcome::Clean);
+        assert_eq!(parse_reply(b"stream: OK").unwrap(), ScanOutcome::Clean);
         assert_eq!(
             parse_reply(b"1: stream: Win.Test.EICAR_HDB-1 FOUND\0").unwrap(),
-            ContentScanVerdict::Malicious {
+            ScanOutcome::Malicious {
                 signature: "Win.Test.EICAR_HDB-1".to_string()
             }
         );
         assert_eq!(
             parse_reply(b"stream: Some.Sig FOUND").unwrap(),
-            ContentScanVerdict::Malicious {
+            ScanOutcome::Malicious {
                 signature: "Some.Sig".to_string()
             }
         );
