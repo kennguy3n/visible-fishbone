@@ -338,8 +338,16 @@ rule archive_smuggled_executable {
         // payload's name is visible to a byte scanner without unpacking.
         //
         // Document-then-executable double extension (invoice.pdf.exe):
-        // never legitimate, so no trailing boundary is needed.
-        $double = /\.(pdf|docx?|xlsx?|pptx?|rtf|jpe?g|png|gif|txt|csv|html?|zip)\.(exe|scr|pif|com|bat|cmd|vbs|vbe|js|jse|wsf|wsh|hta|ps1|jar|lnk|msi|dll)/ nocase
+        // never legitimate, so no trailing boundary is needed. `js` is
+        // deliberately excluded from this list: it is a proper prefix of
+        // common benign extensions (`.json`, `.jsx`) and build artifacts
+        // (`index.html.js`), and a flat byte scan of a ZIP cannot see where
+        // the member name ends (the local-header copy is followed by the
+        // deflate stream and the central-directory copy by `PK\x01\x02`, so
+        // a trailing-boundary anchor would be unreliable). Malicious script
+        // *content* is still caught by the `javascript_*` rules, and the
+        // evasive encoded-JScript form keeps its dedicated `jse` token.
+        $double = /\.(pdf|docx?|xlsx?|pptx?|rtf|jpe?g|png|gif|txt|csv|html?|zip)\.(exe|scr|pif|com|bat|cmd|vbs|vbe|jse|wsf|wsh|hta|ps1|jar|lnk|msi|dll)/ nocase
         // A bare highly-dangerous extension whose name is essentially
         // never a legitimate substring prefix (so no lookahead needed).
         $bare = /\.(exe|scr|pif|vbe|jse|wsf|hta|lnk|msi)/ nocase
@@ -868,6 +876,45 @@ mod tests {
         docm.extend_from_slice(b"....xl/vbaProject.bin....Workbook_Open....");
         let m = engine.worst_match(&docm).expect("docm match");
         assert_eq!(m.rule, "office_macro_enabled");
+    }
+
+    #[test]
+    fn detects_ooxml_macro_with_compressed_vba_project() {
+        // A real .docm deflates vbaProject.bin, so the Auto_*/`*_Open` hook
+        // lives inside the compressed stream and is invisible to a flat byte
+        // scan. The plaintext `vbaProject.bin` member name in the ZIP
+        // local-file header must therefore be a sufficient signal on its own.
+        let engine = YaraEngine::with_builtin_rules().unwrap();
+        let mut docm = vec![0x50, 0x4B, 0x03, 0x04];
+        docm.extend_from_slice(b"....word/vbaProject.bin....<deflated VBA bytecode>....");
+        let m = engine.worst_match(&docm).expect("docm match");
+        assert_eq!(m.rule, "office_macro_enabled");
+
+        // A macro-free OOXML (plain .docx: ZIP magic, no VBA project) must
+        // still never match.
+        let mut docx = vec![0x50, 0x4B, 0x03, 0x04];
+        docx.extend_from_slice(b"....word/document.xml....word/styles.xml....");
+        assert!(engine.scan(&docx).is_empty());
+    }
+
+    #[test]
+    fn archive_smuggling_does_not_flag_json_or_jsx_members() {
+        // `data.txt.json` / `app.html.jsx` / `index.html.js` are benign
+        // double-component names whose tail begins with the `js` token; they
+        // must not be misread as `.<doc>.js` double-extension droppers.
+        let engine = YaraEngine::with_builtin_rules().unwrap();
+        let mut zip = vec![0x50, 0x4B, 0x03, 0x04];
+        zip.extend_from_slice(b"data.txt.json....app.html.jsx....index.html.js....");
+        assert!(
+            engine.scan(&zip).is_empty(),
+            "benign .json/.jsx/.html.js ZIP members must not match archive_smuggled_executable"
+        );
+
+        // A genuine document->executable double extension still fires.
+        let mut bad = vec![0x50, 0x4B, 0x03, 0x04];
+        bad.extend_from_slice(b"Invoice_2024.pdf.exe\x00\x00deflated-body");
+        let m = engine.worst_match(&bad).expect("double-extension match");
+        assert_eq!(m.rule, "archive_smuggled_executable");
     }
 
     #[test]
