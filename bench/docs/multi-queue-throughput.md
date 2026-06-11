@@ -115,13 +115,13 @@ The committed artifacts under [`../results/`](../results) were measured on
 an 8-vCPU x86 VM (`available_parallelism = 8`):
 
 - [`multiqueue-micro.json`](../results/multiqueue-micro.json) — `micro`
-  SKU, `raw-l3` / `xdp`. Single-stream floor ≈ **34 Gbps**, 16-queue
-  ceiling ≈ **239 Gbps** (a ~6.9× lift). The lean forwarding decision is
+  SKU, `raw-l3` / `xdp`. Single-stream floor ≈ **36 Gbps**, 16-queue
+  ceiling ≈ **279 Gbps** (a ~7.7× lift). The lean forwarding decision is
   pps-bound, so it scales near-linearly until the cores saturate.
 - [`multiqueue-medium-full-stack.json`](../results/multiqueue-medium-full-stack.json)
-  — `medium` SKU, `full-stack` / `xdp`. Single-stream floor ≈ **2.35
+  — `medium` SKU, `full-stack` / `xdp`. Single-stream floor ≈ **2.4
   Gbps** (below the 6 Gbps acceptance target), multi-queue ceiling ≈
-  **10.76 Gbps** (above it). This is the headline case: the single-stream
+  **11 Gbps** (above it). This is the headline case: the single-stream
   floor *undersells* a box that comfortably clears its target once it uses
   all its queues.
 
