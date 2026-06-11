@@ -1297,6 +1297,80 @@ mod tests {
     }
 
     #[test]
+    fn aws_secret_key_matches_via_validator() {
+        let c = ContentClassifier::compile(&[rule(
+            "aws",
+            PatternType::Regex,
+            "aws_access_key_id",
+            RuleAction::Block,
+        )])
+        .expect("compile");
+        // Real AWS access key shape (AKIA + 16 base32) → matched.
+        let hit = c.classify(
+            DlpChannel::BrowserUpload,
+            b"export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE",
+            &ContentMetadata::default(),
+        );
+        assert!(hit.is_match());
+        assert_eq!(hit.matches[0].rule_id, "aws");
+        // One char short of the 20-char invariant: the regex \b bound
+        // can't extend it to a valid key, so the structural validator
+        // never sees a 20-char candidate → no false positive.
+        let miss = c.classify(
+            DlpChannel::BrowserUpload,
+            b"id=AKIAIOSFODNN7EXAMPL ok",
+            &ContentMetadata::default(),
+        );
+        assert!(!miss.is_match());
+    }
+
+    #[test]
+    fn jwt_matches_only_with_decodable_alg_header() {
+        let c = ContentClassifier::compile(&[rule(
+            "jwt",
+            PatternType::Regex,
+            "jwt",
+            RuleAction::Block,
+        )])
+        .expect("compile");
+        // Header decodes to JSON carrying "alg" → real JWT.
+        let real = c.classify(
+            DlpChannel::BrowserUpload,
+            b"Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92",
+            &ContentMetadata::default(),
+        );
+        assert!(real.is_match());
+        // Three dotted base64url-ish runs whose first segment has no
+        // "alg" → structural validator rejects, suppressing the FP.
+        let fake = c.classify(
+            DlpChannel::BrowserUpload,
+            b"token eyJ0eXAiOiJKV1QifQ.eyJzdWIiOiIxMjMifQ.signaturevalue1 end",
+            &ContentMetadata::default(),
+        );
+        assert!(!fake.is_match());
+    }
+
+    #[test]
+    fn private_key_block_matches_pem_armor() {
+        let c = ContentClassifier::compile(&[rule(
+            "pk",
+            PatternType::Regex,
+            "private_key_block",
+            RuleAction::Block,
+        )])
+        .expect("compile");
+        let body = "MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQ".repeat(2);
+        let pem = format!("-----BEGIN PRIVATE KEY-----\n{body}\n-----END PRIVATE KEY-----");
+        let hit = c.classify(
+            DlpChannel::FileWrite,
+            pem.as_bytes(),
+            &ContentMetadata::default(),
+        );
+        assert!(hit.is_match());
+        assert_eq!(hit.matches[0].rule_id, "pk");
+    }
+
+    #[test]
     fn keyword_dictionary_is_case_insensitive_single_pass() {
         let c = ContentClassifier::compile(&[rule(
             "secret-kw",
