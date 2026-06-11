@@ -41,6 +41,7 @@ import (
 	sngotel "github.com/kennguy3n/visible-fishbone/internal/otel"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
+	"github.com/kennguy3n/visible-fishbone/internal/service/activity"
 	aisvc "github.com/kennguy3n/visible-fishbone/internal/service/ai"
 	"github.com/kennguy3n/visible-fishbone/internal/service/alert"
 	"github.com/kennguy3n/visible-fishbone/internal/service/apikey"
@@ -528,7 +529,26 @@ func run() error {
 			slog.Duration("interval", cfg.MobileAuth.DirectorySyncInterval))
 	}
 
-	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer, rc.SampleRateResolver)
+	// Start the per-tenant activity recorder's async drain loop before
+	// telemetry comes up, so the data-plane observer wired below has a
+	// running worker behind it. Like the shadow-IT discoverer it is
+	// deliberately NOT bound to rootCtx: the telemetry consumer feeds
+	// Observe on its own background context and is drained by telShutdown
+	// *after* rootCtx is cancelled, so binding Run to rootCtx would make
+	// it stop draining while observations are still arriving. The loop's
+	// lifetime is controlled by Stop, called explicitly after telShutdown
+	// in the graceful-shutdown block below; the deferred Stop here is the
+	// idempotent safety net for early-return paths (it runs before the
+	// deferred pool.Close, defers being LIFO, so the final drain lands
+	// against a live pool).
+	if rc.ActivityRecorder != nil {
+		go rc.ActivityRecorder.Run()
+		defer rc.ActivityRecorder.Stop()
+		logger.Info("sng-control: per-tenant activity tracking enabled",
+			slog.Duration("min_interval", cfg.Activity.MinInterval))
+	}
+
+	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer, rc.SampleRateResolver, rc.ActivityRecorder)
 	if err != nil {
 		return fmt.Errorf("start telemetry: %w", err)
 	}
@@ -710,6 +730,14 @@ func run() error {
 	// (registered at line 134) so the upserts complete against a live
 	// pool, and makes the deferred Stop a no-op (idempotent).
 	shadowDiscoverer.Stop()
+	// Same ordering rationale for the activity recorder: telShutdown has
+	// now drained the telemetry consumer that feeds Observe, so stopping
+	// the recorder here drains its trailing queue before pool.Close and
+	// without dropping the shutdown-window touches. Idempotent with the
+	// deferred Stop registered at startup.
+	if rc.ActivityRecorder != nil {
+		rc.ActivityRecorder.Stop()
+	}
 
 	logger.Info("sng-control: stopped")
 	return nil
@@ -759,6 +787,13 @@ type routerComponents struct {
 	// unless cfg.MobileAuth.DirectorySyncEnabled, in which case main()
 	// runs it via elector.RunIfLeader on cfg.MobileAuth.DirectorySyncInterval.
 	IDPSyncService *identity.SyncService
+	// ActivityRecorder is the per-tenant activity writer feeding
+	// tenants.last_active_at for the dormancy planner. Nil when
+	// ACTIVITY_TRACKING_ENABLED=false. main() starts its async drain
+	// loop (Run) and hands it to startTelemetry as the data-plane
+	// activity observer; the control-plane signal is wired into the
+	// router here in buildRouter.
+	ActivityRecorder *activity.Recorder
 }
 
 // buildRouter wires every repository / service / handler against
@@ -785,6 +820,27 @@ func buildRouter(
 	store := postgres.NewStoreWithPool(pool)
 
 	tenantRepo := store.NewTenantRepository()
+
+	// Per-tenant activity recorder. This is the writer that makes the
+	// dormancy story real: it advances tenants.last_active_at from the
+	// data-plane telemetry hot path (WithActivityObserver, wired in
+	// startTelemetry) and the authenticated API chain (the RecordActivity
+	// middleware), so the dormancy planner has an accurate activity
+	// signal to tier on instead of treating every tenant as dormant.
+	// Debounced + async, so the hot-path cost is negligible. nil when
+	// ACTIVITY_TRACKING_ENABLED=false. The Run drain loop is started by
+	// main() (it must outlive buildRouter).
+	var activityRecorder *activity.Recorder
+	var activityObs middleware.ActivityObserver
+	if cfg.Activity.Enabled {
+		activityRecorder = activity.NewRecorder(tenantRepo,
+			activity.WithLogger(logger),
+			activity.WithMinInterval(cfg.Activity.MinInterval),
+			activity.WithQueueSize(cfg.Activity.QueueSize),
+		)
+		activityObs = activityRecorder
+	}
+
 	tenantMigrationRepo := store.NewTenantMigrationRepository()
 	siteRepo := store.NewSiteRepository()
 	// Short-TTL cache for the auth-middleware mobile device kill-switch.
@@ -938,6 +994,13 @@ func buildRouter(
 	// when cfg.CASB.NoOpsEnabled.
 	appNoOpsEngine := casb.NewAppNoOpsEngine(postgres.NewCASBNoOpsStore(store), casbAppRepo, tenantRepo, logger)
 	appNoOpsEngine.SetAuditLog(auditRepo)
+	// Activity-tiered reconcile cadence so the periodic sweep does not
+	// re-classify thousands of dormant trial tenants' inventories every
+	// interval. Active tenants are still visited every cycle; the planner
+	// only skips quiet tenants whose tier is not yet due. The status
+	// filter is unchanged. Same DefaultPlanner the IdP sync uses.
+	casbReconcilePlanner := tenancy.DefaultPlanner()
+	appNoOpsEngine.WithDormancyPlanner(&casbReconcilePlanner)
 	// Both gates, not just NoOpsAutoEnforce: the engine only acts at all
 	// when NoOpsEnabled (the discovery hook and reconcile loop in main()
 	// are both gated on it), so wiring the enforcer also requires
@@ -1754,6 +1817,7 @@ func buildRouter(
 		IAMCoreTenant:     iamCoreTenantResolver,
 		TenantRateLimiter: tenantRateLimiter,
 		AuthBruteForce:    authBruteForce,
+		ActivityRecorder:  activityObs,
 		Mobile:            handler.NewMobileHandler(identitySvc),
 		Metering:          meteringHandler,
 		PoP:               popHandler,
@@ -1803,6 +1867,7 @@ func buildRouter(
 		Recompiler:         recompiler,
 		SampleRateResolver: sampleRateResolver,
 		IDPSyncService:     idpSyncSvc,
+		ActivityRecorder:   activityRecorder,
 	}, nil
 }
 
@@ -2352,6 +2417,7 @@ func startTelemetry(
 	pub *sngnats.Publisher,
 	shadowObserver telemetry.ShadowITObserver,
 	sampleResolver *telemetry.MapSampleRateResolver,
+	activityObserver *activity.Recorder,
 ) (func(context.Context) error, handler.TelemetryClassQuerier, func() (policy.TelemetrySource, error), error) {
 	var hot telemetry.HotWriter
 	var cold telemetry.ColdWriter
@@ -2546,6 +2612,12 @@ func startTelemetry(
 	}
 	if shadowObserver != nil {
 		svc.WithShadowITObserver(shadowObserver)
+	}
+	// Feed the dormancy planner's activity signal from the data-plane
+	// hot path. nil-checked on the concrete pointer (not the interface)
+	// so a disabled recorder does not install a typed-nil observer.
+	if activityObserver != nil {
+		svc.WithActivityObserver(activityObserver)
 	}
 	if err := svc.Start(ctx); err != nil {
 		if hotStop != nil {

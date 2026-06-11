@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
+	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy"
 )
 
 // AppNoOpsEngine is the per-tenant NoOps pipeline. For each discovered
@@ -43,6 +45,19 @@ type AppNoOpsEngine struct {
 	// refineTimeout bounds a single AI-refinement call so a slow model
 	// never stalls the pipeline. Zero selects defaultRefineTimeout.
 	refineTimeout time.Duration
+
+	// planner, when set (via WithDormancyPlanner), makes the periodic
+	// Reconcile sweep activity-tiered: active tenants are re-evaluated
+	// every cycle, idle/dormant ones at a reduced cadence, instead of
+	// reconciling all ~5000 tenants' inventories every cycle. nil keeps
+	// the legacy "every active tenant every cycle" fan-out. Drift
+	// detection stays bounded because cycle 0 sweeps everyone and the
+	// planner caps how stale any tier's reconcile can get.
+	planner *tenancy.SweepPlanner
+	// cycle is the monotonic 0-based sweep counter the planner's cadence
+	// gate consumes. Atomic because the sweep loop drives it but tests
+	// may invoke Reconcile concurrently.
+	cycle atomic.Uint64
 }
 
 const defaultRefineTimeout = 3 * time.Second
@@ -87,6 +102,21 @@ func (e *AppNoOpsEngine) SetRefiner(r ClassificationRefiner) { e.refiner = r }
 // SetAuditLog wires the optional global audit-log sink so every NoOps
 // action is also recorded in the platform-wide audit trail.
 func (e *AppNoOpsEngine) SetAuditLog(a repository.AuditLogRepository) { e.audit = a }
+
+// WithDormancyPlanner makes the periodic Reconcile sweep activity-tiered
+// using the shared SweepPlanner: active tenants are re-evaluated every
+// cycle, idle ones at IdleEvery cadence, dormant ones at DormantEvery.
+// The status filter is unchanged — only active tenants are ever
+// reconciled — so this strictly removes redundant re-evaluation of
+// quiet tenants' inventories. A nil planner is a no-op (legacy
+// every-active-tenant fan-out retained), so wiring is fail-safe.
+// Returns the receiver for chaining at construction.
+func (e *AppNoOpsEngine) WithDormancyPlanner(planner *tenancy.SweepPlanner) *AppNoOpsEngine {
+	if planner != nil {
+		e.planner = planner
+	}
+	return e
+}
 
 // OnAppDiscovered implements AppDiscoveryHook: the shadow-IT flush
 // calls it once per persisted app. It runs the full classify ->
@@ -151,16 +181,28 @@ func (e *AppNoOpsEngine) ReconcileTenant(ctx context.Context, tenantID uuid.UUID
 	return firstErr
 }
 
-// Reconcile sweeps every active tenant's inventory once. Intended to be
+// Reconcile sweeps active tenants' inventories once. Intended to be
 // called on a schedule. Tenants are enumerated with the same bounded
 // pagination demotion.go uses.
+//
+// When a dormancy planner is configured (WithDormancyPlanner), the
+// sweep is activity-tiered: each active tenant is classified by its
+// last_active_at and skipped this cycle if its tier is not yet due,
+// collapsing the dominant avoidable cost of re-classifying thousands of
+// quiet trial tenants' inventories every interval. Cycle 0 (the first
+// sweep after start) visits every tenant, and the planner bounds how
+// stale any tier's reconcile can get, so drift detection is preserved.
 func (e *AppNoOpsEngine) Reconcile(ctx context.Context) error {
 	if e.tenants == nil {
 		return fmt.Errorf("casb: Reconcile requires a tenant repository")
 	}
+	// 0-based monotonic cycle: the first sweep is cycle 0 (full visit).
+	cycle := int64(e.cycle.Add(1) - 1)
+	now := e.nowFunc()
 	var (
-		firstErr error
-		page     repository.Page
+		firstErr        error
+		page            repository.Page
+		active, skipped int
 	)
 	for {
 		res, err := e.tenants.List(ctx, page)
@@ -171,6 +213,14 @@ func (e *AppNoOpsEngine) Reconcile(ctx context.Context) error {
 			if t.Status != repository.TenantStatusActive {
 				continue
 			}
+			active++
+			if e.planner != nil {
+				tier := e.planner.Classify(now, t.LastActiveAt)
+				if !e.planner.ShouldVisit(tier, cycle) {
+					skipped++
+					continue
+				}
+			}
 			if err := e.ReconcileTenant(ctx, t.ID); err != nil && firstErr == nil {
 				firstErr = err
 			}
@@ -179,6 +229,13 @@ func (e *AppNoOpsEngine) Reconcile(ctx context.Context) error {
 			break
 		}
 		page.After = res.NextCursor
+	}
+	if e.planner != nil && skipped > 0 {
+		e.logger.DebugContext(ctx, "casb: activity-tiered reconcile sweep",
+			slog.Int64("cycle", cycle),
+			slog.Int("active", active),
+			slog.Int("visited", active-skipped),
+			slog.Int("skipped", skipped))
 	}
 	return firstErr
 }
