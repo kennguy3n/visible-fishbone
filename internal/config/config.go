@@ -330,6 +330,18 @@ type MobileAuth struct {
 // APP_REGISTRY_SYNC_ENABLED=false to disable (useful for local
 // development, air-gapped clusters, and replicas that should not
 // duplicate the primary's outbound vendor fetches).
+type AppRegistry struct {
+	// SyncEnabled toggles the periodic vendor-endpoint sync loop
+	// in main(). When false, the admin-triggered
+	// `POST /admin/app-registry/sync` endpoint still works — only
+	// the background ticker is suppressed.
+	SyncEnabled bool
+	// SyncInterval is the cadence of the background sync loop.
+	// Defaults to 24h. Anything <= 0 is treated as the default by
+	// the Syncer; the strict parser still rejects un-parseable
+	// values so an operator typo doesn't silently revert.
+	SyncInterval time.Duration
+}
 
 // CASB carries the runtime knobs for the per-tenant shadow-IT NoOps
 // pipeline (migration 061): the discovery hook that classifies and
@@ -359,19 +371,6 @@ type CASB struct {
 	// Defaults to 1h. Anything <= 0 is treated as the default by the
 	// loop; the strict parser still rejects un-parseable values.
 	NoOpsReconcileInterval time.Duration
-}
-
-type AppRegistry struct {
-	// SyncEnabled toggles the periodic vendor-endpoint sync loop
-	// in main(). When false, the admin-triggered
-	// `POST /admin/app-registry/sync` endpoint still works — only
-	// the background ticker is suppressed.
-	SyncEnabled bool
-	// SyncInterval is the cadence of the background sync loop.
-	// Defaults to 24h. Anything <= 0 is treated as the default by
-	// the Syncer; the strict parser still rejects un-parseable
-	// values so an operator typo doesn't silently revert.
-	SyncInterval time.Duration
 }
 
 // AI carries runtime knobs for the AI assistant service

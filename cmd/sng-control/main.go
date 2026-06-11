@@ -2933,10 +2933,25 @@ func (h leaderGatedDiscoveryHook) OnAppDiscovered(ctx context.Context, tenantID 
 // newly risky, or a changed action policy) and rebuilds the per-tenant
 // digest. Both passes are best-effort: a failure is logged and the loop
 // continues so one tenant's error never stalls the fleet.
+//
+// Like runMigrationResume it sweeps once immediately on entry — invoked
+// through elector.RunIfLeader, so a leader that has just taken over a
+// crashed predecessor reconciles drift and rebuilds digests without
+// waiting a full interval — then re-sweeps every interval. Reconcile and
+// RunDigests are both idempotent, so the immediate pass is safe.
 func runCASBNoOps(ctx context.Context, engine *casb.AppNoOpsEngine, interval time.Duration, logger *slog.Logger) {
 	if interval <= 0 {
 		interval = time.Hour
 	}
+	sweep := func() {
+		if err := engine.Reconcile(ctx); err != nil && ctx.Err() == nil {
+			logger.Warn("casb: NoOps reconcile pass failed", slog.Any("error", err))
+		}
+		if err := engine.RunDigests(ctx); err != nil && ctx.Err() == nil {
+			logger.Warn("casb: NoOps digest pass failed", slog.Any("error", err))
+		}
+	}
+	sweep()
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -2944,12 +2959,7 @@ func runCASBNoOps(ctx context.Context, engine *casb.AppNoOpsEngine, interval tim
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			if err := engine.Reconcile(ctx); err != nil && ctx.Err() == nil {
-				logger.Warn("casb: NoOps reconcile pass failed", slog.Any("error", err))
-			}
-			if err := engine.RunDigests(ctx); err != nil && ctx.Err() == nil {
-				logger.Warn("casb: NoOps digest pass failed", slog.Any("error", err))
-			}
+			sweep()
 		}
 	}
 }
