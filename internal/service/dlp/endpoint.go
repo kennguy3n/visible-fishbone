@@ -2,6 +2,7 @@ package dlp
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -138,15 +139,23 @@ func DefaultEndpointChannelConfig() map[EndpointDLPChannel]EndpointChannelConfig
 }
 
 // EndpointRules compiles the tenant's enabled web/SaaS DLP policies
-// into the endpoint rule set. This is the read side of endpoint DLP
-// rule management: the same stored policies that drive inline
-// classification are projected onto the endpoint's rule vocabulary.
+// and registered document fingerprints into the endpoint rule set.
+// This is the read side of endpoint DLP rule management: the same
+// stored policies that drive inline classification are projected onto
+// the endpoint's rule vocabulary, joined with the tenant's registered
+// fingerprints so the agent's on-device near-duplicate detector sees
+// the same corpus the control plane matches against.
 func (s *Service) EndpointRules(ctx context.Context, tenantID uuid.UUID) ([]EndpointDLPRule, error) {
 	policies, err := s.policies.ListEnabled(ctx, tenantID)
 	if err != nil {
 		return nil, err
 	}
-	return compileEndpointRules(policies), nil
+	rules := compileEndpointRules(policies)
+	fpRules, err := s.fingerprintRules(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	return append(rules, fpRules...), nil
 }
 
 // CompileEndpointBundle compiles the tenant's enabled DLP policies
@@ -166,6 +175,11 @@ func (s *Service) CompileEndpointBundle(
 		channels = DefaultEndpointChannelConfig()
 	}
 	rules := compileEndpointRules(policies)
+	fpRules, err := s.fingerprintRules(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	rules = append(rules, fpRules...)
 	model, err := s.endpointModel(ctx, tenantID, rules)
 	if err != nil {
 		return nil, err
@@ -288,6 +302,70 @@ func compileEndpointRules(policies []repository.DLPPolicy) []EndpointDLPRule {
 		}
 	}
 	return rules
+}
+
+// endpointFingerprintIDPrefix namespaces endpoint rules synthesized
+// from registered document fingerprints, keeping their ids disjoint
+// from the policy-derived rule ids ("<policy-id>:<index>").
+const endpointFingerprintIDPrefix = "fingerprint:"
+
+// Registered document fingerprints carry no per-policy action, so the
+// endpoint rules synthesized from them default to a coach-first WARN at
+// HIGH severity. A >=0.8 SimHash similarity to a known sensitive
+// document is a strong signal, but it is a *fuzzy* near-duplicate match
+// (a quoted excerpt or a derived draft can clear the threshold), so the
+// default surfaces/coaches rather than hard-blocking egress — the same
+// low-false-positive stance as the coach-first AI-app detector, which
+// keeps the control from being switched off. A per-fingerprint action
+// override is a sensible follow-up once the fingerprint record carries
+// one.
+const (
+	endpointFingerprintSeverity = EndpointSeverityHigh
+	endpointFingerprintAction   = EndpointActionWarn
+)
+
+// fingerprintRules projects the tenant's registered document
+// fingerprints onto endpoint detection rules so on-device DLP can flag
+// near-duplicates of sensitive documents without the content ever
+// leaving the endpoint. Without this the registered corpus only
+// matched server-side (inline / SaaS), leaving endpoint agents blind to
+// the very documents an operator registered to protect.
+//
+// Each fingerprint's stored 64-bit SimHash is rendered as the 16-char
+// hex pattern_data sng-dlp's `scan_fingerprints` expects. The SimHash
+// is byte-identical across the Go control plane
+// (`engine.SimHash`) and the Rust edge (`classifier::simhash`), so a
+// fingerprint registered here matches there. A fingerprint whose stored
+// hash is shorter than 8 bytes (a corrupt row) is skipped rather than
+// emitted as a pattern_data that would fail the agent's whole-bundle
+// decode. A nil fingerprint repository (model-only test wiring) yields
+// no fingerprint rules.
+func (s *Service) fingerprintRules(ctx context.Context, tenantID uuid.UUID) ([]EndpointDLPRule, error) {
+	if s.fingerprints == nil {
+		return nil, nil
+	}
+	fps, err := s.fingerprints.ListAll(ctx, tenantID)
+	if err != nil {
+		return nil, err
+	}
+	rules := make([]EndpointDLPRule, 0, len(fps))
+	for _, fp := range fps {
+		if len(fp.Hash) < 8 {
+			continue
+		}
+		rules = append(rules, EndpointDLPRule{
+			ID:          endpointFingerprintIDPrefix + fp.ID.String(),
+			Name:        fp.Name,
+			PatternType: repository.DLPRuleTypeFingerprint,
+			PatternData: hex.EncodeToString(fp.Hash[:8]),
+			Severity:    endpointFingerprintSeverity,
+			Action:      endpointFingerprintAction,
+			// Registered fingerprints are not channel-scoped, so the
+			// rule applies to every endpoint channel (empty = all).
+			Channels: []EndpointDLPChannel{},
+		})
+	}
+	return rules, nil
 }
 
 // endpointMatch is one compiled match path: the `pattern_data` payload
