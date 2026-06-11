@@ -43,8 +43,8 @@ use crate::report::{MultiQueueScalePoint, MultiQueueStreamMeasurement};
 /// so the harness is driven identically from the binary and from tests.
 #[derive(Debug, Clone)]
 pub struct MultiQueueConfig {
-    /// Queue-fanout widths to measure. Normalised before use: each entry
-    /// is clamped to `>= 1`, the list is sorted and de-duplicated, and a
+    /// Queue-fanout widths to measure. Normalised before use: entries
+    /// below `1` are dropped, the list is sorted and de-duplicated, and a
     /// single-stream (`1`) point is always prepended so the floor — the
     /// efficiency baseline — is measured every run.
     pub queue_counts: Vec<usize>,
@@ -59,9 +59,9 @@ pub struct MultiQueueConfig {
 }
 
 impl MultiQueueConfig {
-    /// The fanout widths this config will measure, normalised: clamped to
-    /// `>= 1`, sorted ascending, de-duplicated, and with a single-stream
-    /// point guaranteed first.
+    /// The fanout widths this config will measure, normalised: entries
+    /// below `1` are dropped, sorted ascending, de-duplicated, and with a
+    /// single-stream point guaranteed first.
     #[must_use]
     pub fn normalized_queue_counts(&self) -> Vec<usize> {
         let mut counts: Vec<usize> = self
