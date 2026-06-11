@@ -91,6 +91,22 @@ type Recorder struct {
 	last map[uuid.UUID]time.Time // wall-clock of the last enqueued touch per tenant
 
 	enqueued, debounced, dropped, written, failed atomic.Uint64
+
+	// Lifecycle: Run drives the drain loop, Stop winds it down after a
+	// final drain of whatever is still queued. The loop terminates only
+	// when Stop closes stopCh (never on a process-scoped context), so
+	// the recorder outlives rootCtx and keeps draining while the
+	// telemetry consumer — which feeds Observe on its own background
+	// context — is still emitting during the graceful-shutdown window.
+	// doneCh is closed when Run returns so Stop can block until the
+	// final drain has persisted, keeping those writes from racing
+	// pool.Close(). This mirrors casb.ShadowITDiscoverer, which has the
+	// identical "outlive rootCtx, drain after the consumer stops"
+	// requirement.
+	stopOnce sync.Once
+	started  atomic.Bool
+	stopCh   chan struct{}
+	doneCh   chan struct{}
 }
 
 type touch struct {
@@ -162,6 +178,8 @@ func NewRecorder(repo TenantToucher, opts ...Option) *Recorder {
 		now:          time.Now,
 		logger:       slog.New(slog.NewTextHandler(noopWriter{}, nil)),
 		last:         make(map[uuid.UUID]time.Time),
+		stopCh:       make(chan struct{}),
+		doneCh:       make(chan struct{}),
 	}
 	for _, o := range opts {
 		o(r)
@@ -215,31 +233,72 @@ func (r *Recorder) Observe(tenantID uuid.UUID, seen time.Time) {
 	}
 }
 
-// Run drains queued touches until ctx is cancelled, persisting each
-// through the repository. It blocks, so callers run it in a goroutine.
-// Per-touch failures are logged (never propagated) so one bad write
-// cannot stall the worker. On cancellation it returns promptly without
-// draining the backlog — the dropped touches are immaterial (a
-// forward-only timestamp the next boot re-establishes on first
-// activity).
-func (r *Recorder) Run(ctx context.Context) {
+// Run drains queued touches until Stop is called, persisting each
+// through the repository, then performs a final drain of whatever is
+// still buffered so the last window's activity is not lost. It blocks,
+// so callers run it in a goroutine and pair it with Stop. Per-touch
+// failures are logged (never propagated) so one bad write cannot stall
+// the worker.
+//
+// The loop is driven solely by Stop (an internal channel), deliberately
+// NOT by any process-scoped context: the telemetry consumer that feeds
+// Observe runs on its own background context and is drained during
+// graceful shutdown *after* rootCtx is cancelled, so binding Run to
+// rootCtx would make it stop draining while observations are still
+// arriving — silently dropping that last window. Run is idempotent on
+// re-entry guards via started; call it once.
+func (r *Recorder) Run() {
+	r.started.Store(true)
+	defer close(r.doneCh)
 	for {
 		select {
-		case <-ctx.Done():
+		case <-r.stopCh:
+			r.drain()
 			return
 		case t := <-r.queue:
-			r.write(ctx, t)
+			r.write(t)
 		}
 	}
 }
 
-func (r *Recorder) write(ctx context.Context, t touch) {
-	wctx, cancel := context.WithTimeout(ctx, r.writeTimeout)
+// Stop winds the drain loop down and blocks until its final drain has
+// persisted, so queued touches finish before the caller proceeds to
+// close the DB pool. Stop is idempotent and safe to call when Run was
+// never started.
+func (r *Recorder) Stop() {
+	if r == nil {
+		return
+	}
+	r.stopOnce.Do(func() { close(r.stopCh) })
+	if r.started.Load() {
+		<-r.doneCh
+	}
+}
+
+// drain persists every touch currently buffered (a bounded amount, at
+// most the queue capacity) without blocking on new arrivals, then
+// returns. Called once from Run after Stop so the trailing window lands
+// before shutdown completes.
+func (r *Recorder) drain() {
+	for {
+		select {
+		case t := <-r.queue:
+			r.write(t)
+		default:
+			return
+		}
+	}
+}
+
+// write persists one touch on a bounded, detached deadline. Detaching
+// from any process-scoped context is what lets the final drain keep
+// succeeding during the shutdown window (between rootCtx cancel and the
+// telemetry consumer's drain); the writeTimeout still caps a stalled
+// write so the worker cannot wedge.
+func (r *Recorder) write(t touch) {
+	wctx, cancel := context.WithTimeout(context.Background(), r.writeTimeout)
 	defer cancel()
 	if err := r.repo.TouchLastActive(wctx, t.tenantID, t.seen); err != nil {
-		if ctx.Err() != nil {
-			return // shutting down; not a real failure
-		}
 		r.failed.Add(1)
 		// A touch for a tenant that has since been deleted, or any
 		// transient store error, is benign here: the activity signal

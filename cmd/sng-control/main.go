@@ -531,9 +531,19 @@ func run() error {
 
 	// Start the per-tenant activity recorder's async drain loop before
 	// telemetry comes up, so the data-plane observer wired below has a
-	// running worker behind it. Bound to rootCtx; returns on shutdown.
+	// running worker behind it. Like the shadow-IT discoverer it is
+	// deliberately NOT bound to rootCtx: the telemetry consumer feeds
+	// Observe on its own background context and is drained by telShutdown
+	// *after* rootCtx is cancelled, so binding Run to rootCtx would make
+	// it stop draining while observations are still arriving. The loop's
+	// lifetime is controlled by Stop, called explicitly after telShutdown
+	// in the graceful-shutdown block below; the deferred Stop here is the
+	// idempotent safety net for early-return paths (it runs before the
+	// deferred pool.Close, defers being LIFO, so the final drain lands
+	// against a live pool).
 	if rc.ActivityRecorder != nil {
-		go rc.ActivityRecorder.Run(rootCtx)
+		go rc.ActivityRecorder.Run()
+		defer rc.ActivityRecorder.Stop()
 		logger.Info("sng-control: per-tenant activity tracking enabled",
 			slog.Duration("min_interval", cfg.Activity.MinInterval))
 	}
@@ -720,6 +730,14 @@ func run() error {
 	// (registered at line 134) so the upserts complete against a live
 	// pool, and makes the deferred Stop a no-op (idempotent).
 	shadowDiscoverer.Stop()
+	// Same ordering rationale for the activity recorder: telShutdown has
+	// now drained the telemetry consumer that feeds Observe, so stopping
+	// the recorder here drains its trailing queue before pool.Close and
+	// without dropping the shutdown-window touches. Idempotent with the
+	// deferred Stop registered at startup.
+	if rc.ActivityRecorder != nil {
+		rc.ActivityRecorder.Stop()
+	}
 
 	logger.Info("sng-control: stopped")
 	return nil

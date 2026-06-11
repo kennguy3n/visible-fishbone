@@ -68,9 +68,8 @@ func drainUntil(timeout time.Duration, cond func() bool) bool {
 func TestRecorder_PersistsObservedActivity(t *testing.T) {
 	f := &fakeToucher{}
 	r := NewRecorder(f, WithMinInterval(time.Hour))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go r.Run(ctx)
+	go r.Run()
+	defer r.Stop()
 
 	id := uuid.New()
 	seen := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
@@ -90,9 +89,8 @@ func TestRecorder_DebouncesWithinInterval(t *testing.T) {
 	now := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
 	clock := func() time.Time { return now }
 	r := NewRecorder(f, WithMinInterval(5*time.Minute), WithClock(clock))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go r.Run(ctx)
+	go r.Run()
+	defer r.Stop()
 
 	id := uuid.New()
 	r.Observe(id, now)
@@ -123,9 +121,8 @@ func TestRecorder_DistinctTenantsNotDebouncedTogether(t *testing.T) {
 	f := &fakeToucher{}
 	now := time.Now()
 	r := NewRecorder(f, WithMinInterval(time.Hour), WithClock(func() time.Time { return now }))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go r.Run(ctx)
+	go r.Run()
+	defer r.Stop()
 
 	a, b := uuid.New(), uuid.New()
 	r.Observe(a, now)
@@ -145,9 +142,8 @@ func TestRecorder_NilAndZeroAreSafe(t *testing.T) {
 	f := &fakeToucher{}
 	now := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
 	r2 := NewRecorder(f, WithClock(func() time.Time { return now }))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go r2.Run(ctx)
+	go r2.Run()
+	defer r2.Stop()
 
 	r2.Observe(uuid.Nil, now) // nil tenant: no-op
 	time.Sleep(20 * time.Millisecond)
@@ -172,9 +168,8 @@ func TestRecorder_DropsWhenQueueFull(t *testing.T) {
 	// Queue size 1 + a worker blocked on the first write means the
 	// second distinct enqueue fills the buffer and the third drops.
 	r := NewRecorder(f, WithMinInterval(time.Hour), WithQueueSize(1))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go r.Run(ctx)
+	go r.Run()
+	defer r.Stop()
 
 	// First touch is pulled by the worker and blocks there.
 	r.Observe(uuid.New(), time.Now())
@@ -198,9 +193,8 @@ func TestRecorder_DropDoesNotSilenceTenant(t *testing.T) {
 	now := time.Now()
 	clk := func() time.Time { return now }
 	r := NewRecorder(f, WithMinInterval(5*time.Minute), WithQueueSize(1), WithClock(clk))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go r.Run(ctx)
+	go r.Run()
+	defer r.Stop()
 
 	// A: worker pulls this and blocks inside the write, leaving the
 	// 1-slot buffer empty.
@@ -237,9 +231,8 @@ func TestRecorder_DropDoesNotSilenceTenant(t *testing.T) {
 func TestRecorder_WriteFailureCounted(t *testing.T) {
 	f := &fakeToucher{err: errors.New("boom")}
 	r := NewRecorder(f, WithMinInterval(time.Hour))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go r.Run(ctx)
+	go r.Run()
+	defer r.Stop()
 
 	r.Observe(uuid.New(), time.Now())
 	if !drainUntil(time.Second, func() bool { return r.Stats().Failed == 1 }) {
@@ -248,6 +241,54 @@ func TestRecorder_WriteFailureCounted(t *testing.T) {
 	if got := r.Stats().Written; got != 0 {
 		t.Fatalf("Written = %d on failure, want 0", got)
 	}
+}
+
+func TestRecorder_StopDrainsRemaining(t *testing.T) {
+	// A worker blocked on the first write leaves later touches buffered.
+	// Stop must drain those before returning — not discard them — so the
+	// trailing activity window survives graceful shutdown.
+	block := make(chan struct{})
+	f := &fakeToucher{block: block, started: make(chan uuid.UUID, 8)}
+	r := NewRecorder(f, WithMinInterval(time.Hour), WithQueueSize(8))
+	go r.Run()
+
+	a, b, c := uuid.New(), uuid.New(), uuid.New()
+	r.Observe(a, time.Now()) // pulled by worker, blocks inside write
+	select {
+	case <-f.started:
+	case <-time.After(time.Second):
+		t.Fatal("worker never started the first write")
+	}
+	r.Observe(b, time.Now()) // buffers behind the blocked worker
+	r.Observe(c, time.Now())
+	if !drainUntil(time.Second, func() bool { return r.Stats().Enqueued == 3 }) {
+		t.Fatalf("expected 3 enqueued, stats=%+v", r.Stats())
+	}
+
+	// Unblock writes, then Stop: its final drain must persist all three
+	// and block until they land.
+	close(block)
+	r.Stop()
+	if got := len(f.snapshot()); got != 3 {
+		t.Fatalf("Stop persisted %d touches, want 3", got)
+	}
+	if w := r.Stats().Written; w != 3 {
+		t.Fatalf("Written = %d after Stop, want 3", w)
+	}
+}
+
+func TestRecorder_StopBeforeRunIsSafe(t *testing.T) {
+	// Stop on a recorder whose Run never started must not block.
+	r := NewRecorder(&fakeToucher{})
+	done := make(chan struct{})
+	go func() { r.Stop(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Stop blocked when Run was never started")
+	}
+	// Idempotent: a second Stop is a no-op.
+	r.Stop()
 }
 
 func TestNewRecorder_NilRepoPanics(t *testing.T) {
