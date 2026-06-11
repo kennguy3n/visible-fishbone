@@ -32,7 +32,9 @@ type PolicyTemplateRepository struct {
 // NewPolicyTemplateRepository returns an empty in-memory repository.
 func NewPolicyTemplateRepository() *PolicyTemplateRepository {
 	return &PolicyTemplateRepository{
-		clock:   time.Now,
+		// UTC to match Store's clock, so timestamps stay consistent
+		// when both are used in the same test/harness.
+		clock:   func() time.Time { return time.Now().UTC() },
 		catalog: make(map[string]ptmodel.CatalogRow),
 		applied: make(map[uuid.UUID]ptmodel.AppliedTemplate),
 	}
