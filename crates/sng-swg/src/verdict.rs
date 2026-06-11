@@ -275,6 +275,199 @@ impl RequestContext {
     }
 }
 
+/// A deny policy over dotted category strings, supporting both exact-category
+/// rules and *group* (dotted-subtree) rules.
+///
+/// # The dotted-category vocabulary
+///
+/// Categories are dotted, hierarchical strings — `security.malware`,
+/// `adult.content`, `business.saas` — where each dot introduces a more
+/// specific child of its parent namespace (see [`crate::categorizer`] for the
+/// full vocabulary). This policy exploits that hierarchy:
+///
+/// * An **exact** rule `"adult.content"` denies *only* the category
+///   `adult.content` — not a parent (`adult`) and not a child
+///   (`adult.content.explicit`). This is the precise, no-surprises match the
+///   handler's pre-existing operator deny-list always had.
+/// * A **group** rule `"security"` denies the whole `security.*` subtree —
+///   `security.malware`, `security.phishing`, `security.botnet`, … — plus the
+///   bare `security` node itself.
+///
+/// Group matching is *dotted-segment* prefix matching: a rule `g` matches a
+/// category `c` when `c == g` or `c` starts with `g + "."`. The segment
+/// boundary matters — the group `"mal"` must **not** match `malware`, only a
+/// genuine `mal.*` child. This is what lets an SME write one short rule
+/// (`security`) and have every present and future safe-browsing threat
+/// category denied, without enumerating each leaf or risking an accidental
+/// substring match.
+///
+/// # Why both exact and group rules
+///
+/// The handler's pre-existing operator deny-list is *exact* match (an operator
+/// who denied `gambling` meant `gambling`, not everything containing it).
+/// Preserving that as the `exact` set keeps existing bundles
+/// behaving identically. Group rules are the additive, opt-in Goal-B surface:
+/// smart safe-browsing defaults and industry/topic groups an operator enables
+/// without hand-listing leaves.
+///
+/// # Performance
+///
+/// Exact rules are a sorted `Vec` probed with `binary_search` (O(log n) — the
+/// same structure the handler used before, chosen over a `HashSet` because the
+/// typical list is 50–200 entries and the sorted vec is more cache-friendly).
+/// Group rules are a small handful (safe-browsing defaults plus a few operator
+/// groups), scanned linearly; with the segment-boundary check this is a few
+/// `starts_with` comparisons over short strings — well under the cost of the
+/// `categorize` lookup that precedes it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CategoryDenyPolicy {
+    /// Sorted, deduped, lowercased exact-match categories.
+    exact: Vec<String>,
+    /// Sorted, deduped, lowercased group (subtree) prefixes.
+    groups: Vec<String>,
+}
+
+impl CategoryDenyPolicy {
+    /// Empty policy — denies nothing. Equivalent to [`Default::default`].
+    #[must_use]
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Build a policy from exact categories and group prefixes. Both are
+    /// lowercased, sorted, and deduped so lookups are canonical and O(log n)
+    /// on the exact set. Empty strings are dropped.
+    #[must_use]
+    pub fn new(
+        exact: impl IntoIterator<Item = String>,
+        groups: impl IntoIterator<Item = String>,
+    ) -> Self {
+        let mut p = Self::default();
+        p.add_exact(exact);
+        p.add_groups(groups);
+        p
+    }
+
+    /// The smart safe-browsing default: deny the entire `security.*` subtree
+    /// (malware, phishing, botnet, …). This is the SME-friendly baseline —
+    /// one group rule that blocks every present and future safe-browsing
+    /// threat category with zero per-leaf configuration. Compose with
+    /// operator rules via [`Self::with_groups`] / [`Self::with_exact`].
+    #[must_use]
+    pub fn safe_browsing_defaults() -> Self {
+        Self::new(
+            std::iter::empty(),
+            crate::categorizer::safe_browsing_deny_groups()
+                .into_iter()
+                .map(String::from),
+        )
+    }
+
+    /// Add exact-match categories (builder style).
+    #[must_use]
+    pub fn with_exact(mut self, exact: impl IntoIterator<Item = String>) -> Self {
+        self.add_exact(exact);
+        self
+    }
+
+    /// Add group (subtree) prefixes (builder style).
+    #[must_use]
+    pub fn with_groups(mut self, groups: impl IntoIterator<Item = String>) -> Self {
+        self.add_groups(groups);
+        self
+    }
+
+    fn add_exact(&mut self, exact: impl IntoIterator<Item = String>) {
+        for c in exact {
+            let c = c.trim().to_ascii_lowercase();
+            if !c.is_empty() {
+                self.exact.push(c);
+            }
+        }
+        self.exact.sort();
+        self.exact.dedup();
+    }
+
+    fn add_groups(&mut self, groups: impl IntoIterator<Item = String>) {
+        for g in groups {
+            // A group is stored without a trailing dot; matching adds the
+            // boundary. Strip any the caller supplied so `"security."` and
+            // `"security"` are equivalent.
+            let g = g.trim().trim_end_matches('.').to_ascii_lowercase();
+            if !g.is_empty() {
+                self.groups.push(g);
+            }
+        }
+        self.groups.sort();
+        self.groups.dedup();
+    }
+
+    /// Whether `category` is denied by this policy. The category is matched
+    /// case-insensitively (the handler already canonicalises to lowercase
+    /// before calling, so the common path does no extra allocation).
+    #[must_use]
+    pub fn is_denied(&self, category: &str) -> bool {
+        self.matched_rule(category).is_some()
+    }
+
+    /// The rule that denies `category`, or `None` if allowed. Exact matches
+    /// take precedence (more specific operator intent); otherwise the first
+    /// matching group. The returned `&str` borrows the matched rule from the
+    /// policy (not the input), so an operator can see *why* a category was
+    /// blocked (a specific leaf vs a group default) in telemetry.
+    #[must_use]
+    pub fn matched_rule(&self, category: &str) -> Option<&str> {
+        // Avoid an allocation when the input is already lowercase (the hot
+        // path); only fall back to owned-lowercase when it is not. Either way
+        // the returned borrow is tied to `&self`, not the temporary.
+        if category.bytes().any(|b| b.is_ascii_uppercase()) {
+            self.find_rule(&category.to_ascii_lowercase())
+        } else {
+            self.find_rule(category)
+        }
+    }
+
+    fn find_rule(&self, lower: &str) -> Option<&str> {
+        if let Ok(idx) = self.exact.binary_search_by(|c| c.as_str().cmp(lower)) {
+            return Some(self.exact[idx].as_str());
+        }
+        self.groups
+            .iter()
+            .find(|g| category_in_group(lower, g))
+            .map(String::as_str)
+    }
+
+    /// Whether the policy denies nothing.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.exact.is_empty() && self.groups.is_empty()
+    }
+
+    /// Number of exact rules. Exposed for the handler's `Debug` impl / tests.
+    #[must_use]
+    pub fn exact_len(&self) -> usize {
+        self.exact.len()
+    }
+
+    /// Number of group rules.
+    #[must_use]
+    pub fn group_len(&self) -> usize {
+        self.groups.len()
+    }
+}
+
+/// Dotted-segment subtree test: `category` is in `group` when it equals the
+/// group or is a dotted child of it. The segment boundary (`group + "."`)
+/// prevents `"mal"` from matching `"malware"`.
+fn category_in_group(category: &str, group: &str) -> bool {
+    if category == group {
+        return true;
+    }
+    category
+        .strip_prefix(group)
+        .is_some_and(|rest| rest.starts_with('.'))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,5 +670,106 @@ mod tests {
         let s = serde_json::to_string(&v).expect("serialise");
         let v2: Verdict = serde_json::from_str(&s).expect("deserialise");
         assert_eq!(v, v2);
+    }
+
+    // --- CategoryDenyPolicy ---------------------------------------------
+
+    #[test]
+    fn empty_policy_denies_nothing() {
+        let p = CategoryDenyPolicy::empty();
+        assert!(p.is_empty());
+        assert!(!p.is_denied("security.malware"));
+        assert!(!p.is_denied("anything"));
+    }
+
+    #[test]
+    fn exact_rule_matches_only_itself() {
+        let p = CategoryDenyPolicy::new(["adult.content".to_string()], std::iter::empty());
+        assert!(p.is_denied("adult.content"));
+        // Exact means exact: neither a deeper child, a sibling, nor a parent
+        // is denied by an exact rule. (Subtree denial is what group rules are
+        // for.)
+        assert!(!p.is_denied("adult.content.explicit"));
+        assert!(!p.is_denied("adult.dating"));
+        assert!(!p.is_denied("adult"));
+    }
+
+    #[test]
+    fn group_rule_matches_whole_subtree() {
+        let p = CategoryDenyPolicy::new(std::iter::empty(), ["security".to_string()]);
+        assert!(p.is_denied("security"), "bare group node is denied");
+        assert!(p.is_denied("security.malware"));
+        assert!(p.is_denied("security.phishing"));
+        assert!(p.is_denied("security.botnet.c2"));
+        // Segment boundary: a category that merely starts with the group
+        // string but is not a dotted child must NOT match.
+        assert!(!p.is_denied("securitywidgets"));
+        assert!(!p.is_denied("securitywidgets.shop"));
+    }
+
+    #[test]
+    fn safe_browsing_defaults_deny_security_subtree_only() {
+        let p = CategoryDenyPolicy::safe_browsing_defaults();
+        assert!(p.is_denied("security.malware"));
+        assert!(p.is_denied("security.phishing"));
+        // Smart default is conservative: it does not block productivity /
+        // business categories an SME relies on.
+        assert!(!p.is_denied("business.saas"));
+        assert!(!p.is_denied("social.media"));
+    }
+
+    #[test]
+    fn matched_rule_reports_why_and_prefers_exact() {
+        let p = CategoryDenyPolicy::new(
+            ["security.malware".to_string()],
+            ["security".to_string()],
+        );
+        // Exact wins over the overlapping group for the same category.
+        assert_eq!(p.matched_rule("security.malware"), Some("security.malware"));
+        // The group covers the rest of the subtree.
+        assert_eq!(p.matched_rule("security.phishing"), Some("security"));
+        assert_eq!(p.matched_rule("business.saas"), None);
+    }
+
+    #[test]
+    fn policy_is_case_insensitive_and_normalises_input() {
+        let p = CategoryDenyPolicy::new(
+            ["Adult.Content".to_string()],
+            ["Security".to_string()],
+        );
+        // Rules were lowercased on construction; lookups fold case too.
+        assert!(p.is_denied("adult.content"));
+        assert!(p.is_denied("ADULT.CONTENT"));
+        assert!(p.is_denied("Security.Malware"));
+    }
+
+    #[test]
+    fn group_trailing_dot_is_normalised() {
+        // `"security."` and `"security"` must be equivalent.
+        let p = CategoryDenyPolicy::new(std::iter::empty(), ["security.".to_string()]);
+        assert_eq!(p.group_len(), 1);
+        assert!(p.is_denied("security.malware"));
+    }
+
+    #[test]
+    fn builder_composes_defaults_with_operator_rules() {
+        let p = CategoryDenyPolicy::safe_browsing_defaults()
+            .with_groups(["adult".to_string()])
+            .with_exact(["gambling".to_string()]);
+        assert!(p.is_denied("security.phishing"), "default retained");
+        assert!(p.is_denied("adult.content"), "operator group added");
+        assert!(p.is_denied("gambling"), "operator exact added");
+        assert!(!p.is_denied("news"));
+    }
+
+    #[test]
+    fn empty_and_whitespace_rules_are_dropped() {
+        let p = CategoryDenyPolicy::new(
+            [String::new(), "  ".to_string(), "real".to_string()],
+            [String::new(), " ".to_string()],
+        );
+        assert_eq!(p.exact_len(), 1);
+        assert_eq!(p.group_len(), 0);
+        assert!(p.is_denied("real"));
     }
 }
