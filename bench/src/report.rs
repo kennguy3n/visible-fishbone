@@ -1331,11 +1331,17 @@ pub fn detect_multiqueue_regression_stats(
         }
 
         // A sample missing this width simply does not contribute, rather
-        // than poisoning the set.
+        // than poisoning the set. Non-finite efficiencies are filtered here
+        // too — `median`/`sample_stddev` ignore them internally, so keeping
+        // them out at collection makes `sample_vals.len()` the true count of
+        // finite samples that fed the statistics (matching the documented
+        // `StatMetric::samples` contract and the forwarding gate's
+        // finite-only collection).
         let sample_vals: Vec<f64> = samples
             .iter()
             .filter_map(|s| s.points.iter().find(|p| p.queues == point.queues))
             .map(|p| p.scaling_efficiency)
+            .filter(|e| e.is_finite())
             .collect();
         let Some(median_val) = median(&sample_vals) else {
             continue; // no current evidence for this width
@@ -2039,6 +2045,32 @@ mod tests {
         let mut wrong_schema = mq_report(&[(2, 0.9)]);
         wrong_schema.schema_version = MULTIQUEUE_SCHEMA_VERSION + 1;
         assert!(detect_multiqueue_regression_stats(&base, &[wrong_schema], 0.15, 2.0).is_err());
+    }
+
+    #[test]
+    fn multiqueue_gate_sample_count_excludes_non_finite() {
+        let base = mq_report(&[(8, 0.80)]);
+        // Two healthy samples and one with a non-finite efficiency (which
+        // the guards in multiqueue.rs prevent in practice, but the gate
+        // must not count it): the reported sample count must be the finite
+        // pair, not three.
+        let samples = [
+            mq_report(&[(8, 0.80)]),
+            mq_report(&[(8, f64::NAN)]),
+            mq_report(&[(8, 0.79)]),
+        ];
+        let rr = detect_multiqueue_regression_stats(&base, &samples, 0.15, 2.0).unwrap();
+        let q8 = rr
+            .metrics
+            .iter()
+            .find(|m| m.metric.contains("q=8"))
+            .expect("q=8 width is gated");
+        assert_eq!(
+            q8.samples, 2,
+            "non-finite sample must not inflate the count"
+        );
+        assert!(q8.median.is_finite());
+        assert!(!rr.has_regression());
     }
 
     #[test]
