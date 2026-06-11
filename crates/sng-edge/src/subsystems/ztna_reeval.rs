@@ -102,7 +102,20 @@ impl ZtnaReevalSubsystem {
     /// `cfg.reeval_enabled` is false the subsystem is inert.
     #[must_use]
     pub fn new(service: Arc<ZtnaService>, cfg: &ZtnaConfig) -> Self {
-        let tracker = Arc::new(SessionTracker::new());
+        Self::with_tracker(service, cfg, Arc::new(SessionTracker::new()))
+    }
+
+    /// Build over a caller-supplied `tracker` so the access-path
+    /// producer ([`super::ztna::ZtnaSubsystem::open_session`]) and the
+    /// loop sweep the *same* session store. The supervisor wires both
+    /// halves to one [`SessionTracker`] when `cfg.reeval_enabled` is
+    /// set; [`Self::new`] (and the unit tests) own a private tracker.
+    #[must_use]
+    pub fn with_tracker(
+        service: Arc<ZtnaService>,
+        cfg: &ZtnaConfig,
+        tracker: Arc<SessionTracker>,
+    ) -> Self {
         let (revoked_tx, revoked_rx) = mpsc::channel(REVOCATION_CHANNEL_CAPACITY);
         // The producer stamps wall-clock millis on its access
         // requests, so the loop measures freshness against the same
@@ -299,9 +312,15 @@ impl HealthCheck for ZtnaReevalSubsystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::subsystems::ztna::ZtnaSubsystem;
     use sng_core::ShutdownTrigger;
     use sng_telemetry::TelemetryEvent;
-    use sng_ztna::{AccessGrant, AccessRequest, ZtnaServiceBuilder};
+    use sng_ztna::{
+        AccessGrant, AccessRequest, App, DevicePosture, DeviceTrust, PostureRequirement,
+        RevocationProvider, StaticAppCatalog, StaticDeviceTrustProvider, StaticIdentityProvider,
+        StaticRevocationList, UserIdentity, ZtnaPolicy, ZtnaPolicyHolder, ZtnaServiceBuilder,
+    };
+    use std::collections::HashSet;
 
     const TENANT: &str = "t1";
     const NOW_MS: u64 = 1_000_000;
@@ -418,6 +437,134 @@ mod tests {
             swept,
             "enabled subsystem must drive the loop and revoke the session"
         );
+
+        trigger.fire();
+        handle.await.expect("join").expect("clean exit");
+    }
+
+    /// Wall-clock millis: the producer stamps its grant with this and
+    /// the system-clock loop measures freshness against the same base,
+    /// so a freshly-attested device stays valid across sweeps until a
+    /// verdict input (here: revocation) actually flips.
+    fn wall_now_ms() -> u64 {
+        u64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_millis(),
+        )
+        .expect("fits u64")
+    }
+
+    /// Service admitting `(wiki, dev-1, alice)` at `now`, with the
+    /// revocation list returned so the test can flip the verdict.
+    fn allow_service(now: u64) -> (Arc<ZtnaService>, Arc<StaticRevocationList>) {
+        let apps = Arc::new(StaticAppCatalog::new(vec![App {
+            app_id: "wiki".into(),
+            display_name: "wiki".into(),
+            host_patterns: vec![],
+            required_groups: HashSet::new(),
+            posture_requirement: PostureRequirement::new(0),
+            mfa_max_age_override_ms: None,
+            conditions: sng_ztna::AccessConditions::default(),
+            tags: std::collections::HashMap::new(),
+        }]));
+        let devices = Arc::new(StaticDeviceTrustProvider::new(vec![DeviceTrust {
+            device_id: "dev-1".into(),
+            tenant_id: TENANT.into(),
+            posture: DevicePosture::pristine(now),
+            tags: std::collections::HashMap::new(),
+        }]));
+        let identities = Arc::new(StaticIdentityProvider::new(vec![UserIdentity {
+            user_id: "alice".into(),
+            tenant_id: TENANT.into(),
+            groups: HashSet::new(),
+            mfa_at_ms: now,
+            tags: std::collections::HashMap::new(),
+        }]));
+        let revocation = Arc::new(StaticRevocationList::default());
+        let policy = Arc::new(ZtnaPolicyHolder::new(ZtnaPolicy {
+            tenant_id: TENANT.into(),
+            ..ZtnaPolicy::default()
+        }));
+        let revocation_dyn: Arc<dyn RevocationProvider> = revocation.clone();
+        let (tx, _rx) = mpsc::channel::<TelemetryEvent>(64);
+        let service = ZtnaServiceBuilder::new()
+            .with_policy(policy)
+            .with_app_catalog(apps)
+            .with_device_trust(devices)
+            .with_identity(identities)
+            .with_revocation(revocation_dyn)
+            .build(tx);
+        (Arc::new(service), revocation)
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn producer_session_is_reevaluated_and_revoked_end_to_end() {
+        // Full producer -> loop wiring over one shared tracker: the
+        // access path opens a real (allowed) session, the loop keeps it
+        // while the verdict holds, then revokes it the moment an input
+        // flips — exactly what the supervisor wires when
+        // `reeval_enabled` is set.
+        let now = wall_now_ms();
+        let (service, revocation) = allow_service(now);
+        let tracker = Arc::new(SessionTracker::new());
+
+        let cfg = ZtnaConfig {
+            reeval_enabled: true,
+            reeval_interval_ms: 100,
+            ..ZtnaConfig::default()
+        };
+        let reeval =
+            ZtnaReevalSubsystem::with_tracker(Arc::clone(&service), &cfg, Arc::clone(&tracker));
+        let producer =
+            ZtnaSubsystem::from_service(service).with_session_tracker(Arc::clone(&tracker));
+
+        // Producer opens an allowed session; it lands in the shared
+        // tracker the loop will sweep.
+        let decision = producer
+            .open_session(
+                "sess-1",
+                TENANT,
+                AccessRequest::new("wiki", "dev-1", "alice", now),
+            )
+            .expect("evaluate");
+        assert!(decision.allow, "pristine device must be allowed");
+        assert!(tracker.contains("sess-1"));
+
+        let (trigger, signal) = ShutdownTrigger::new();
+        let handle = reeval.start(signal).await.expect("start");
+
+        // While the verdict holds, several sweeps must KEEP the session.
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+            tokio::time::advance(Duration::from_millis(100)).await;
+            tokio::task::yield_now().await;
+            assert!(
+                tracker.contains("sess-1"),
+                "a still-valid session must survive re-evaluation"
+            );
+        }
+
+        // Flip an input: revoke the device. The next sweeps must tear
+        // the session down.
+        revocation.replace_devices(HashSet::from(["dev-1".to_owned()]));
+        let mut revoked = false;
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+            tokio::time::advance(Duration::from_millis(100)).await;
+            tokio::task::yield_now().await;
+            if !tracker.contains("sess-1") {
+                revoked = true;
+                break;
+            }
+        }
+        assert!(
+            revoked,
+            "the loop must revoke a session whose verdict flipped to deny"
+        );
+        // The producer's close is now a no-op: the loop already evicted.
+        assert!(producer.close_session("sess-1").is_none());
 
         trigger.fire();
         handle.await.expect("join").expect("clean exit");

@@ -67,7 +67,7 @@ use sng_core::{
     SupervisorRunError,
 };
 use sng_telemetry::TelemetryEvent;
-use sng_ztna::ZtnaServiceConfig;
+use sng_ztna::{SessionTracker, ZtnaServiceConfig};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -362,17 +362,35 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
     let ztna_cfg = ZtnaServiceConfig {
         max_sessions: cfg.ztna.max_inflight,
     };
-    let ztna = Arc::new(ZtnaSubsystem::new(ztna_cfg, telemetry_tx.clone()));
+    // Session store shared by the two halves of continuous-adaptive-
+    // trust: the access-path producer (`ZtnaSubsystem::open_session`)
+    // records a grant per allowed session, and the re-eval loop sweeps
+    // the same store. It is only wired when `ztna.reeval_enabled` is
+    // set — when off, the producer is handed no tracker, so it records
+    // nothing and the access path is byte-for-byte unchanged.
+    let ztna_sessions = Arc::new(SessionTracker::new());
+    let ztna = {
+        let ztna = ZtnaSubsystem::new(ztna_cfg, telemetry_tx.clone());
+        let ztna = if cfg.ztna.reeval_enabled {
+            ztna.with_session_tracker(Arc::clone(&ztna_sessions))
+        } else {
+            ztna
+        };
+        Arc::new(ztna)
+    };
 
     // 8b. ZTNA continuous re-evaluation. Shares the synchronous
     //     evaluator's `ZtnaService` so the loop re-uses the exact
-    //     access decision rather than re-implementing it. Default-
-    //     off (`ztna.reeval_enabled = false`): until an operator
-    //     opts in the subsystem idles, never spawning the sweep,
-    //     so an upgrade is behaviourally inert.
-    let ztna_reeval = Arc::new(ZtnaReevalSubsystem::new(
+    //     access decision rather than re-implementing it, and the
+    //     `ztna_sessions` tracker the producer above records into so it
+    //     re-evaluates exactly the live sessions. Default-off
+    //     (`ztna.reeval_enabled = false`): until an operator opts in the
+    //     subsystem idles, never spawning the sweep, and the producer is
+    //     handed no tracker, so an upgrade is behaviourally inert.
+    let ztna_reeval = Arc::new(ZtnaReevalSubsystem::with_tracker(
         Arc::clone(ztna.service()),
         &cfg.ztna,
+        ztna_sessions,
     ));
 
     // 9. SD-WAN.
