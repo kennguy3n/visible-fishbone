@@ -160,7 +160,7 @@ pub async fn run() -> FunctionReport {
             user: "alice",
         },
         ZCase {
-            desc: "insufficient posture (no disk encryption)",
+            desc: "insufficient posture (only disk encryption on, below Basic score floor)",
             bad: true,
             app: "crm",
             device: "dev-weak",

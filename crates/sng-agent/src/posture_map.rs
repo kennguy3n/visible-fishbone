@@ -27,6 +27,15 @@
 //! defaults), so it too projects to a maximally-pessimistic
 //! `DevicePosture` — a missing signal can never satisfy a gate.
 //!
+//! One projection is a deliberate proxy rather than a 1:1 match:
+//! the snapshot's `ScreenLockState::Locked` ("the session is
+//! locked *right now*") feeds `screen_lock_configured` ("a lock
+//! policy is in force"). PAL exposes only the live lock state, so
+//! the current state is used as a conservative stand-in; the
+//! fail-closed direction holds (anything but `Locked`, including
+//! the common `Unknown` from backends that can't observe it,
+//! denies), so the proxy can only ever be stricter, never looser.
+//!
 //! # The `base` parameter
 //!
 //! [`DevicePosture::os_patched`] is the one score signal with no
