@@ -58,7 +58,11 @@ PRINT_SHA_ONLY=0     # set by --print-sha (print digest and exit)
 die() { echo "error: $1" >&2; exit "${2:-1}"; }
 
 usage() {
-  sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+  # Print the leading comment block (every line after the shebang up to the
+  # first non-comment line), stripping the "# " prefix. Done dynamically so
+  # the help text can never drift out of sync with the header — a hardcoded
+  # line range previously truncated the exit-code 3 (tamper) documentation.
+  awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
   echo
   echo "Variants: ${!MANIFEST[*]}"
 }
