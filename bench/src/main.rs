@@ -590,11 +590,17 @@ fn run_multi_queue(args: &MultiQueueArgs) -> Result<std::process::ExitCode, Benc
     } else {
         profile.datapath.rule_count
     };
+    // Clamp to >= 1 here, at the single resolution point, so the value
+    // written to the report is exactly the one the measurement runs:
+    // `measure_scaling` also floors to 1 internally, and resolving the
+    // clamp up front keeps the report metadata and the runtime in lockstep
+    // even for a degenerate `sample_packets == 0` profile.
     let packets_per_queue = if args.packets_per_queue > 0 {
         args.packets_per_queue
     } else {
         profile.datapath.sample_packets
-    };
+    }
+    .max(1);
     let queue_counts = if args.queues.is_empty() {
         default_queue_curve(profile.effective_nic_queues(), parallelism)
     } else {

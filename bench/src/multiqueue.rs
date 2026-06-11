@@ -94,13 +94,12 @@ fn run_fanout(
     let queues = queues.max(1);
 
     // Build every per-queue harness up front, on this thread. Construction
-    // (engine install, inspector construction, flow-pool build) is untimed
-    // setup, so keeping it out of the worker threads costs the measurement
-    // nothing — and it removes a deadlock: a worker that panicked while
-    // constructing its harness would never reach `barrier.wait()`, leaving
-    // the surviving N−1 workers (and the join below) blocked forever. With
-    // construction here, any such failure aborts cleanly before the
-    // barrier-synchronised region is ever entered.
+    // (engine install, inspector construction) is untimed setup, so keeping
+    // it out of the worker threads costs the measurement nothing — and it
+    // removes a deadlock: a worker that panicked while constructing its
+    // harness would never reach `barrier.wait()`, leaving the surviving
+    // N−1 workers (and the join below) blocked forever. With construction
+    // here, any such failure aborts cleanly before any worker is spawned.
     let harnesses: Vec<ForwardingHarness> = (0..queues)
         .map(|_| ForwardingHarness::new(rule_count))
         .collect();
@@ -115,10 +114,14 @@ fn run_fanout(
             thread::Builder::new()
                 .name(format!("mq-queue-{q}"))
                 .spawn(move || {
-                    // Release every queue into its measured loop at once so
-                    // they contend for the host's cores for the whole run.
+                    // Build this queue's flow pool *before* the barrier so
+                    // it is untimed and every queue enters its measured loop
+                    // together — the barrier then gates only the timed pass,
+                    // and the streams genuinely contend for the host's cores
+                    // for the whole run (no per-queue pool-build skew).
+                    let stream = harness.prepare_stream(&mix, packets_per_queue);
                     barrier.wait();
-                    let r = harness.measure_stream(&mix, packets_per_queue, mode, backend);
+                    let r = stream.measure(mode, backend);
                     (q, r)
                 })
                 .expect("spawn multi-queue worker thread")
