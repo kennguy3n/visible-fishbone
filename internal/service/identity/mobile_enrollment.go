@@ -434,6 +434,24 @@ func validateMobilePosture(p repository.Posture, platform repository.DevicePlatf
 		return repository.Posture{}, fmt.Errorf("screen_lock is a desktop-only signal, not valid for %s: %w", platform, repository.ErrInvalidArgument)
 	case p.PatchLevel != "":
 		return repository.Posture{}, fmt.Errorf("patch_level is a desktop-only signal, not valid for %s: %w", platform, repository.ErrInvalidArgument)
+	// Expanded ZTNA signals (WS4). EDR sensor health, AV
+	// real-time-protection state + signature freshness, and OS patch
+	// recency are desktop endpoint-protection concepts with no mobile
+	// equivalent (mobile attests via passcode_set / biometric_ready /
+	// mdm_enrolled + jailbroken/root_detected). Reject them on mobile
+	// for the same fail-closed reason as the signals above: silently
+	// persisting them would let a mobile client populate a hard-gate
+	// input the platform can't legitimately measure. CertificateHealth
+	// is intentionally NOT rejected — the mTLS identity leaf exists on
+	// every enrolled device regardless of platform.
+	case p.EDRHealthy != nil:
+		return repository.Posture{}, fmt.Errorf("edr_healthy is a desktop-only signal, not valid for %s: %w", platform, repository.ErrInvalidArgument)
+	case p.AntivirusEnabled != nil:
+		return repository.Posture{}, fmt.Errorf("antivirus_enabled is a desktop-only signal, not valid for %s: %w", platform, repository.ErrInvalidArgument)
+	case p.AntivirusDefinitionsAgeHours != nil:
+		return repository.Posture{}, fmt.Errorf("antivirus_definitions_age_hours is a desktop-only signal, not valid for %s: %w", platform, repository.ErrInvalidArgument)
+	case p.OSPatchDaysSince != nil:
+		return repository.Posture{}, fmt.Errorf("os_patch_days_since is a desktop-only signal, not valid for %s: %w", platform, repository.ErrInvalidArgument)
 	}
 
 	if p.CollectedAt == nil {
