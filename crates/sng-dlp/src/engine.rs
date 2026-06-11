@@ -218,7 +218,7 @@ impl DlpEngine {
     /// # Errors
     /// Propagates [`crate::error::DlpError::RuleCompile`] if any
     /// rule in `policy` fails to compile. The engine is unchanged.
-    pub fn install(&self, policy: DlpPolicy) -> DlpResult<()> {
+    pub fn install(&self, mut policy: DlpPolicy) -> DlpResult<()> {
         let _guard = self.write_guard();
         let current = self.state.load();
         let max_scan_bytes = current.max_scan_bytes;
@@ -235,6 +235,12 @@ impl DlpEngine {
         // together via the atomic `install_with_ai_app`, so there is no
         // redundant detector rebuild there.
         let ai_app_policy = current.ai_app_policy.clone();
+        // The incoming policy carries its own `ai_app` field, but this
+        // rule-only rotation keeps the *current* detector — so normalise
+        // the stored struct's field to the authoritative `ai_app_policy`
+        // it is paired with. Without this, `current_policy().ai_app`
+        // could report a detector config the engine is not running.
+        policy.ai_app = ai_app_policy.clone();
         let ai_app = build_ai_app(ai_app_policy.as_ref(), max_scan_bytes, &model)?;
         self.state.store(Arc::new(EngineState {
             policy,
@@ -269,7 +275,7 @@ impl DlpEngine {
     /// engine is unchanged.
     pub fn install_with_ai_app(
         &self,
-        policy: DlpPolicy,
+        mut policy: DlpPolicy,
         ai_app_policy: Option<AiAppPolicy>,
     ) -> DlpResult<()> {
         let _guard = self.write_guard();
@@ -278,6 +284,12 @@ impl DlpEngine {
         let model = current.model.clone();
         let classifier =
             ContentClassifier::compile_with_model(policy.rules(), max_scan_bytes, model.clone())?;
+        // `ai_app_policy` is the authoritative detector config for this
+        // swap; keep the stored policy struct's field in lock-step so
+        // `current_policy().ai_app` and `ai_app_policy()` can never
+        // disagree (the caller already passes them consistent, but this
+        // makes the invariant hold structurally for any future caller).
+        policy.ai_app = ai_app_policy.clone();
         let ai_app = build_ai_app(ai_app_policy.as_ref(), max_scan_bytes, &model)?;
         self.state.store(Arc::new(EngineState {
             policy,
@@ -1258,12 +1270,24 @@ mod tests {
         e.set_ai_app_policy(Some(AiAppPolicy::default()))
             .expect("enable ai-app");
         // Rotate the channel policy; the AI-app config must persist.
+        // The incoming rule-only policy deliberately carries a *stale*
+        // `ai_app` field (None) that disagrees with the armed detector,
+        // to prove `install` normalises the stored struct rather than
+        // letting `current_policy().ai_app` drift from `ai_app_policy()`.
         e.install(DlpPolicy {
             rules: vec![rule("k2", "beta", RuleAction::Block, Severity::High)],
+            ai_app: None,
             ..DlpPolicy::default()
         })
         .expect("install");
         assert_eq!(e.ai_app_policy(), Some(AiAppPolicy::default()));
+        // Invariant: the stored policy's `ai_app` field always mirrors
+        // the authoritative detector config after any install.
+        assert_eq!(
+            e.current_policy().ai_app,
+            e.ai_app_policy(),
+            "current_policy().ai_app must mirror ai_app_policy() after a rule-only rotation"
+        );
         assert!(
             matches!(
                 e.evaluate(
