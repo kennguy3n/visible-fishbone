@@ -529,7 +529,10 @@ fn default_queue_curve(sku_queues: u32, parallelism: usize) -> Vec<usize> {
     let mut q = 1usize;
     while q < bound {
         curve.push(q);
-        q *= 2;
+        // Saturating so the loop is provably terminating even if `bound`
+        // approached `usize::MAX` on a 32-bit target: a saturated `q` is
+        // `>= bound` and exits.
+        q = q.saturating_mul(2);
     }
     // The host/SKU bound itself, then one power-of-two step past it. After
     // the loop `q` is the smallest power of two `>= bound`: when `bound` is
