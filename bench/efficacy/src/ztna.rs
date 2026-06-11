@@ -58,38 +58,23 @@ struct ZCase {
 
 pub async fn run() -> FunctionReport {
     let pristine = DevicePosture::pristine(NOW);
-    let stale_posture = DevicePosture {
-        attested_at_ms: NOW - H13_MS,
-        ..DevicePosture::pristine(NOW)
-    };
+    let stale_posture = DevicePosture::pristine(NOW).with_attested_at_ms(NOW - H13_MS);
     // Fresh attestation but fails the Basic floor (score 60): only
     // disk encryption on (25) — well below 60 under the weighted
     // risk_score model. Expanded signals stay healthy so this case
     // isolates the *score* floor.
-    let insufficient = DevicePosture {
-        disk_encrypted: true,
-        os_patched: false,
-        antimalware_running: false,
-        firewall_enabled: false,
-        screen_lock_configured: false,
-        attested_at_ms: NOW,
-        ..DevicePosture::pristine(NOW)
-    };
+    let insufficient = DevicePosture::pristine(NOW)
+        .with_os_patched(false)
+        .with_antimalware_running(false)
+        .with_firewall_enabled(false)
+        .with_screen_lock_configured(false)
+        .with_attested_at_ms(NOW);
     // Expanded-signal regressions. Each keeps a full score (every
     // original signal on) and a fresh attestation, so only the new
     // hard gate it targets can flip the verdict to deny.
-    let killed_edr = DevicePosture {
-        edr_healthy: false,
-        ..DevicePosture::pristine(NOW)
-    };
-    let stale_av = DevicePosture {
-        antivirus_definitions_age_hours: 72,
-        ..DevicePosture::pristine(NOW)
-    };
-    let out_of_date_patch = DevicePosture {
-        os_patch_days_since: 30,
-        ..DevicePosture::pristine(NOW)
-    };
+    let killed_edr = DevicePosture::pristine(NOW).with_edr_healthy(false);
+    let stale_av = DevicePosture::pristine(NOW).with_antivirus_definitions_age_hours(72);
+    let out_of_date_patch = DevicePosture::pristine(NOW).with_os_patch_days_since(30);
 
     let apps = vec![
         // High-value app: requires Basic posture + engineering group.

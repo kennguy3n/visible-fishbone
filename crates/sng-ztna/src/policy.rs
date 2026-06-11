@@ -81,6 +81,7 @@ use crate::request::NetworkType;
 /// `Eq`, so it is safe as a `BTreeMap`/`BTreeSet` key or
 /// for picking the strictest of a set via `max`.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct PostureRequirement {
     /// Minimum [`DevicePosture::risk_score`] (0–100) the
     /// device must reach to satisfy this requirement.
