@@ -33,6 +33,7 @@ export const NAV: NavGroup[] = [
       { label: "Policy editor", to: "/policy", icon: "policy" },
       { label: "Network policies", to: "/network-policies", icon: "network" },
       { label: "DLP", to: "/dlp", icon: "dlp" },
+      { label: "DLP review queue", to: "/dlp/review-queue", icon: "alerts" },
       { label: "CASB", to: "/casb", icon: "casb" },
       { label: "Browser protection", to: "/browser", icon: "browser" },
     ],
