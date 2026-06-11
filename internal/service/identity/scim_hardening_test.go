@@ -366,6 +366,42 @@ func TestBulkDuplicateBulkIDRejected(t *testing.T) {
 	}
 }
 
+// TestBulkDuplicateBulkIDRejectedAfterFailedFirstPost verifies the
+// uniqueness check is unconditional (RFC 7644 §3.7.2): a bulkId reused
+// after the first POST that declared it FAILED must still be rejected.
+// Otherwise the second POST would succeed and bind the bulkId to a
+// resource the request author never intended a later reference to
+// resolve to.
+func TestBulkDuplicateBulkIDRejectedAfterFailedFirstPost(t *testing.T) {
+	t.Parallel()
+	svc, tid := newSCIMService(t)
+
+	// First POST is invalid (missing userName) → CreateUser rejects it,
+	// so no resource and no bulkId->id mapping is produced.
+	first, _ := json.Marshal(SCIMUser{Active: boolPtr(true)})
+	second, _ := json.Marshal(SCIMUser{UserName: "reuse@example.com", Active: boolPtr(true)})
+
+	resp, err := svc.Bulk(context.Background(), tid, SCIMBulkRequest{
+		Schemas: []string{SCIMSchemaBulkRequest},
+		Operations: []SCIMBulkOperation{
+			{Method: "POST", Path: "/Users", BulkID: "dup", Data: first},
+			{Method: "POST", Path: "/Users", BulkID: "dup", Data: second},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Bulk: %v", err)
+	}
+	if resp.Operations[0].Status != "400" {
+		t.Fatalf("first POST status = %s, want 400 (invalid payload) (%+v)", resp.Operations[0].Status, resp.Operations[0].Response)
+	}
+	if resp.Operations[1].Status != "400" {
+		t.Fatalf("reused bulkId status = %s, want 400 (%+v)", resp.Operations[1].Status, resp.Operations[1].Response)
+	}
+	if resp.Operations[1].Response == nil || resp.Operations[1].Response.ScimType != "invalidValue" {
+		t.Errorf("reused bulkId scimType = %+v, want invalidValue", resp.Operations[1].Response)
+	}
+}
+
 // --- SCIM filter grammar: table-driven valid + malformed inputs -----------
 
 // TestParseFilterExprGrammar exercises the full RFC 7644 §3.4.2.2 filter
