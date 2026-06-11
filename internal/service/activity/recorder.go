@@ -54,6 +54,13 @@ const (
 	// DefaultWriteTimeout caps each Postgres touch so a stalled write
 	// cannot wedge the drain worker.
 	DefaultWriteTimeout = 5 * time.Second
+	// pruneFactor sets the eviction horizon as a multiple of
+	// minInterval: a tenant whose last touch is older than
+	// pruneFactor*minInterval is evicted from the debounce map. It is
+	// >1 so an entry is only dropped well after its debounce window
+	// elapsed — never one that could still suppress a write — giving a
+	// safety margin against evicting a tenant right at the boundary.
+	pruneFactor = 2
 )
 
 // Stats is a point-in-time snapshot of Recorder counters for
@@ -89,6 +96,14 @@ type Recorder struct {
 
 	mu   sync.Mutex
 	last map[uuid.UUID]time.Time // wall-clock of the last enqueued touch per tenant
+
+	// pruneInterval is how often Run sweeps `last` to evict tenants not
+	// seen within the eviction horizon (pruneFactor * minInterval),
+	// bounding the map to the recently-active working set rather than
+	// the all-time set of tenants. An evicted entry is one whose
+	// debounce window has long elapsed, so dropping it is behaviourally
+	// invisible: the next Observe re-enqueues and re-arms it.
+	pruneInterval time.Duration
 
 	enqueued, debounced, dropped, written, failed atomic.Uint64
 
@@ -187,6 +202,9 @@ func NewRecorder(repo TenantToucher, opts ...Option) *Recorder {
 	if r.queue == nil {
 		r.queue = make(chan touch, DefaultQueueSize)
 	}
+	// Sweep the debounce map once per debounce window; entries older
+	// than pruneFactor windows are evicted on each sweep.
+	r.pruneInterval = r.minInterval
 	return r
 }
 
@@ -255,6 +273,8 @@ func (r *Recorder) Run() {
 		return
 	}
 	defer close(r.doneCh)
+	prune := time.NewTicker(r.pruneInterval)
+	defer prune.Stop()
 	for {
 		select {
 		case <-r.stopCh:
@@ -262,8 +282,27 @@ func (r *Recorder) Run() {
 			return
 		case t := <-r.queue:
 			r.write(t)
+		case <-prune.C:
+			r.prune(r.now())
 		}
 	}
+}
+
+// prune evicts debounce-map entries for tenants not seen within the
+// eviction horizon (pruneFactor * minInterval), keeping the map sized
+// to the recently-active working set instead of the all-time tenant
+// set. Evicting a stale entry is behaviourally invisible: its debounce
+// window has already elapsed, so the next Observe for that tenant would
+// pass the gate and re-enqueue regardless.
+func (r *Recorder) prune(now time.Time) {
+	horizon := time.Duration(pruneFactor) * r.minInterval
+	r.mu.Lock()
+	for id, ts := range r.last {
+		if now.Sub(ts) >= horizon {
+			delete(r.last, id)
+		}
+	}
+	r.mu.Unlock()
 }
 
 // Stop winds the drain loop down and blocks until its final drain has

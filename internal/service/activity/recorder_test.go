@@ -309,6 +309,42 @@ func TestRecorder_SecondRunIsNoOp(t *testing.T) {
 	r.Stop()
 }
 
+func TestRecorder_PruneEvictsStaleTenants(t *testing.T) {
+	t.Parallel()
+	// minInterval 5m => eviction horizon pruneFactor*5m = 10m.
+	f := &fakeToucher{}
+	r := NewRecorder(f, WithMinInterval(5*time.Minute))
+	base := time.Now()
+	fresh := uuid.New() // 0m old  -> retained
+	mid := uuid.New()   // 5m old  -> within 10m horizon, retained
+	stale := uuid.New() // 30m old -> past horizon, evicted
+
+	r.mu.Lock()
+	r.last[fresh] = base
+	r.last[mid] = base.Add(-5 * time.Minute)
+	r.last[stale] = base.Add(-30 * time.Minute)
+	r.mu.Unlock()
+
+	r.prune(base)
+
+	r.mu.Lock()
+	_, freshOK := r.last[fresh]
+	_, midOK := r.last[mid]
+	_, staleOK := r.last[stale]
+	n := len(r.last)
+	r.mu.Unlock()
+
+	if !freshOK || !midOK {
+		t.Fatalf("entry within horizon evicted: fresh=%v mid=%v", freshOK, midOK)
+	}
+	if staleOK {
+		t.Fatal("stale entry past horizon not evicted")
+	}
+	if n != 2 {
+		t.Fatalf("last map size = %d, want 2", n)
+	}
+}
+
 func TestNewRecorder_NilRepoPanics(t *testing.T) {
 	defer func() {
 		if recover() == nil {
