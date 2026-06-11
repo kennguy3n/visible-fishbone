@@ -47,7 +47,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -253,11 +253,12 @@ impl ScanOutcome {
 struct Pool {
     endpoint: ClamdEndpoint,
     /// Warm connections available for reuse, ordered oldest-return (front) to
-    /// newest-return (back) — each entry is stamped with the [`Instant`] it was
-    /// returned. The ordering is preserved by only ever pushing to the back
+    /// newest-return (back) — each entry is stamped with the clock time
+    /// ([`Duration`] since the pool clock's epoch) at which it was returned.
+    /// The ordering is preserved by only ever pushing to the back
     /// ([`Pool::put_back`]) and popping from either end ([`Pool::take_idle`]),
     /// so a front-to-back scan sees non-decreasing idle ages.
-    idle: Mutex<VecDeque<(Instant, Connection)>>,
+    idle: Mutex<VecDeque<(Duration, Connection)>>,
     sem: Semaphore,
     /// Permit count the semaphore was built with — the ceiling on *total* live
     /// connections (idle + in_use). Kept so the idle-list bound below can be
@@ -266,10 +267,16 @@ struct Pool {
     /// Idle connections older than this are dropped on checkout rather than
     /// reused (see [`ClamdConfig::pool_idle_ttl`]).
     idle_ttl: Duration,
+    /// Time source for the idle-TTL check. Production uses [`SystemClock`]
+    /// (real monotonic wall-clock, so the TTL tracks clamd's server-side
+    /// `IdleTimeout` reaping); tests inject a [`crate::rate_limit::TestClock`]
+    /// so idle aging can be driven deterministically without wall-clock
+    /// sleeps — the same injectable [`Clock`] the verdict cache uses.
+    clock: Arc<dyn Clock>,
 }
 
 impl Pool {
-    fn new(endpoint: ClamdEndpoint, max: usize, idle_ttl: Duration) -> Self {
+    fn new(endpoint: ClamdEndpoint, max: usize, idle_ttl: Duration, clock: Arc<dyn Clock>) -> Self {
         let max = max.max(1);
         Self {
             endpoint,
@@ -277,6 +284,7 @@ impl Pool {
             sem: Semaphore::new(max),
             max,
             idle_ttl,
+            clock,
         }
     }
 
@@ -306,10 +314,10 @@ impl Pool {
     /// `scan_once` remains the safety net for the sub-TTL race where clamd
     /// reaps a connection we are about to reuse.
     fn take_idle(&self) -> Option<Connection> {
-        let now = Instant::now();
+        let now = self.clock.now();
         let mut idle = self.idle.lock();
         while let Some((since, _)) = idle.front() {
-            if now.duration_since(*since) >= self.idle_ttl {
+            if now.saturating_sub(*since) >= self.idle_ttl {
                 idle.pop_front();
             } else {
                 break;
@@ -338,7 +346,7 @@ impl Pool {
             idle.len(),
             self.max,
         );
-        idle.push_back((Instant::now(), conn));
+        idle.push_back((self.clock.now(), conn));
     }
 }
 
@@ -382,8 +390,11 @@ impl ClamdScanner {
     /// [`Clock`]. Production wiring uses [`Self::new`] (a [`SystemClock`]);
     /// injecting a [`crate::rate_limit::TestClock`] lets tests cross the cache
     /// TTL boundary deterministically by advancing the clock instead of
-    /// sleeping. The clock governs only cache freshness — the per-scan timeout
-    /// and pool idle TTL remain on the runtime/OS timers they bound.
+    /// sleeping. The same clock also drives the connection pool's idle-TTL
+    /// pruning, so both time-based behaviours in the scanner are deterministic
+    /// under test. The per-scan timeout still rides the Tokio runtime timer it
+    /// bounds (it caps real wall-clock latency inside Envoy's ext-authz
+    /// deadline, which a logical clock must not distort).
     #[must_use]
     pub fn with_clock(config: ClamdConfig, clock: Arc<dyn Clock>) -> Self {
         Self {
@@ -392,6 +403,7 @@ impl ClamdScanner {
                     config.endpoint,
                     config.pool_max_connections,
                     config.pool_idle_ttl,
+                    Arc::clone(&clock),
                 ),
                 cache: ContentVerdictCache::with_ttl_and_clock(
                     config.cache_capacity,
@@ -1113,10 +1125,12 @@ mod tests {
         // certainly reaped by clamd; `take_idle` must drop it (and any older
         // siblings) rather than hand it out, so a low-load lull does not turn
         // every first scan into a guaranteed transport-death + reconnect.
+        let clock = TestClock::new();
         let pool = Pool::new(
             ClamdEndpoint::Tcp("127.0.0.1:1".into()),
             4,
             Duration::from_millis(20),
+            Arc::new(clock.clone()),
         );
         let (stream, _peer) = tokio::io::duplex(64);
         pool.put_back(Connection {
@@ -1134,7 +1148,7 @@ mod tests {
             stream: Box::new(stream),
             session_started: true,
         });
-        tokio::time::sleep(Duration::from_millis(40)).await;
+        clock.advance(Duration::from_millis(40));
         assert!(
             pool.take_idle().is_none(),
             "an idle connection older than the TTL must be pruned, not reused"
@@ -1151,10 +1165,12 @@ mod tests {
         // The idle deque is ordered oldest-front -> newest-back. A stale entry
         // at the front must be pruned while a still-fresh entry behind it is
         // returned for reuse (the hottest socket stays in play).
+        let clock = TestClock::new();
         let pool = Pool::new(
             ClamdEndpoint::Tcp("127.0.0.1:1".into()),
             4,
             Duration::from_millis(30),
+            Arc::new(clock.clone()),
         );
         let (stale, _p1) = tokio::io::duplex(64);
         pool.put_back(Connection {
@@ -1162,7 +1178,7 @@ mod tests {
             session_started: true,
         });
         // Let the first connection age past the TTL, then return a fresh one.
-        tokio::time::sleep(Duration::from_millis(45)).await;
+        clock.advance(Duration::from_millis(45));
         let (fresh, _p2) = tokio::io::duplex(64);
         pool.put_back(Connection {
             stream: Box::new(fresh),
