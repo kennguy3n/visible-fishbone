@@ -291,6 +291,24 @@ func TestRecorder_StopBeforeRunIsSafe(t *testing.T) {
 	r.Stop()
 }
 
+func TestRecorder_SecondRunIsNoOp(t *testing.T) {
+	// A repeat Run must not start a second loop (which would panic on
+	// the double close(doneCh)). The guard admits exactly one.
+	f := &fakeToucher{}
+	r := NewRecorder(f, WithMinInterval(time.Hour))
+	go r.Run()
+	// Drive one touch through so the first loop has definitely won the
+	// started CAS before we re-enter Run.
+	r.Observe(uuid.New(), time.Now())
+	if !drainUntil(time.Second, func() bool { return r.Stats().Written == 1 }) {
+		t.Fatalf("first loop never ran, stats=%+v", r.Stats())
+	}
+	// started is now true, so this second Run is guaranteed the loser:
+	// it must return immediately (not block, not panic on double close).
+	r.Run()
+	r.Stop()
+}
+
 func TestNewRecorder_NilRepoPanics(t *testing.T) {
 	defer func() {
 		if recover() == nil {

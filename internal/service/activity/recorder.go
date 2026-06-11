@@ -245,10 +245,15 @@ func (r *Recorder) Observe(tenantID uuid.UUID, seen time.Time) {
 // Observe runs on its own background context and is drained during
 // graceful shutdown *after* rootCtx is cancelled, so binding Run to
 // rootCtx would make it stop draining while observations are still
-// arriving — silently dropping that last window. Run is idempotent on
-// re-entry guards via started; call it once.
+// arriving — silently dropping that last window.
+//
+// A second concurrent or repeat Run is a no-op: the started CAS admits
+// exactly one drain loop, so the owner of doneCh is unambiguous and the
+// deferred close can never run twice (a double close would panic).
 func (r *Recorder) Run() {
-	r.started.Store(true)
+	if !r.started.CompareAndSwap(false, true) {
+		return
+	}
 	defer close(r.doneCh)
 	for {
 		select {
