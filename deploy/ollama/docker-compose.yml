@@ -63,13 +63,18 @@ services:
         SNG_LLM_VARIANT: "${SNG_LLM_VARIANT:-Q2_0}"
     image: sng-bonsai-q2:local
     container_name: sng-bonsai-q2
+    # Single source of truth for the port: the container binds it (the
+    # entrypoint reads SNG_LLM_PORT), the publish maps it, and the
+    # healthcheck probes it — override SNG_LLM_PORT once to move all three.
+    environment:
+      SNG_LLM_PORT: "${SNG_LLM_PORT:-8081}"
     ports:
-      - "127.0.0.1:8081:8081"
+      - "127.0.0.1:${SNG_LLM_PORT:-8081}:${SNG_LLM_PORT:-8081}"
     # Q2 8B fits comfortably under 4 GiB resident on a commodity CPU box;
     # cap it so a runaway never starves co-located services.
     mem_limit: 4g
     healthcheck:
-      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8081; printf \"GET /health HTTP/1.0\\r\\n\\r\\n\" >&3; grep -q \"200 OK\" <&3'"]
+      test: ["CMD-SHELL", "curl -fsS \"http://127.0.0.1:${SNG_LLM_PORT:-8081}/health\" || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 10

@@ -39,9 +39,12 @@ declare -A MANIFEST=(
 VARIANT="Q2_0"
 OUT_DIR="./models"
 RESUME=1
-PRINT_SHA=""
+PRINT_SHA=""        # explicit variant to print, if any
+PRINT_SHA_ONLY=0     # set by --print-sha (print digest and exit)
 
-die() { echo "error: $*" >&2; exit "${2:-1}"; }
+# $1: message, $2: optional exit code (default 1). Only $1 is printed so a
+# caller-supplied exit code never leaks into the message.
+die() { echo "error: $1" >&2; exit "${2:-1}"; }
 
 usage() {
   sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
@@ -53,7 +56,17 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --variant)   VARIANT="${2:?--variant needs a value}"; shift 2 ;;
     --out-dir)   OUT_DIR="${2:?--out-dir needs a value}"; shift 2 ;;
-    --print-sha) PRINT_SHA="${2:-$VARIANT}"; shift 2 || shift ;;
+    --print-sha)
+      # Optional value: consume $2 only if it's a real value, not the next
+      # flag (so `--print-sha --variant X` doesn't swallow `--variant`).
+      # Without an explicit value it falls back to --variant, resolved
+      # after parsing so flag order doesn't matter.
+      PRINT_SHA_ONLY=1
+      if [ -n "${2:-}" ] && [ "${2#-}" = "$2" ]; then
+        PRINT_SHA="$2"; shift 2
+      else
+        shift
+      fi ;;
     --no-resume) RESUME=0; shift ;;
     -h|--help)   usage; exit 0 ;;
     *)           die "unknown argument: $1 (try --help)" ;;
@@ -64,7 +77,8 @@ done
 
 read -r FILENAME EXPECT_SHA EXPECT_SIZE <<<"${MANIFEST[$VARIANT]}"
 
-if [ -n "$PRINT_SHA" ]; then
+if [ "$PRINT_SHA_ONLY" = 1 ]; then
+  PRINT_SHA="${PRINT_SHA:-$VARIANT}"
   [ -n "${MANIFEST[$PRINT_SHA]:-}" ] || die "unknown variant '$PRINT_SHA'"
   read -r _f _s _z <<<"${MANIFEST[$PRINT_SHA]}"
   echo "$_s  $_f"
@@ -85,17 +99,29 @@ mkdir -p "$OUT_DIR"
 DEST="$OUT_DIR/$FILENAME"
 URL="https://huggingface.co/$HF_REPO/resolve/$HF_REVISION/$FILENAME"
 
+# verify [--quiet]: returns 0 iff $DEST matches the pinned size + sha256.
+# --quiet suppresses mismatch diagnostics, used for the pre-download
+# idempotency probe where a missing/partial file is an expected, non-error
+# state. The post-download call runs verbose so real corruption is loud.
 verify() {
+  local quiet=""; [ "${1:-}" = "--quiet" ] && quiet=1
   [ -f "$DEST" ] || return 1
   local sz; sz="$(size_of "$DEST")"
-  [ "$sz" = "$EXPECT_SIZE" ] || { echo "size mismatch: got $sz want $EXPECT_SIZE" >&2; return 1; }
+  if [ "$sz" != "$EXPECT_SIZE" ]; then
+    [ -n "$quiet" ] || echo "size mismatch: got $sz want $EXPECT_SIZE" >&2
+    return 1
+  fi
   local got; got="$(sha256_of "$DEST")"
-  [ "$got" = "$EXPECT_SHA" ] || { echo "sha256 mismatch: got $got want $EXPECT_SHA" >&2; return 1; }
+  if [ "$got" != "$EXPECT_SHA" ]; then
+    [ -n "$quiet" ] || echo "sha256 mismatch: got $got want $EXPECT_SHA" >&2
+    return 1
+  fi
   return 0
 }
 
-# Idempotent: a previously verified file is reused untouched.
-if verify; then
+# Idempotent: a previously verified file is reused untouched (quiet probe —
+# a partial leftover from an aborted run is expected, not an error).
+if verify --quiet; then
   echo "ok: $DEST already present and verified (sha256=$EXPECT_SHA)"
   exit 0
 fi

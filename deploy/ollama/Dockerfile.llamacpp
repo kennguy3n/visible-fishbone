@@ -63,7 +63,7 @@ RUN chmod +x /usr/local/bin/fetch-bonsai-gguf.sh \
 FROM debian:bookworm-slim AS runtime
 ARG SNG_LLM_VARIANT=Q2_0
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      libgomp1 libcurl4 ca-certificates \
+      libgomp1 libcurl4 ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin bonsai
 COPY --from=build /usr/local/bin/llama-server /usr/local/bin/llama-server
@@ -78,10 +78,11 @@ ENV SNG_LLM_ALIAS=Ternary-Bonsai-8B \
 USER 10001
 EXPOSE 8081
 
-# llama-server exposes /health and an OpenAI-compatible /v1.
+# llama-server exposes /health (200 only once the model is loaded) and an
+# OpenAI-compatible /v1. Probe with curl (already installed) rather than a
+# bash /dev/tcp bashism, so the check has no implicit shell dependency.
 HEALTHCHECK --interval=15s --timeout=5s --start-period=40s --retries=10 \
-  CMD bash -c 'exec 3<>/dev/tcp/127.0.0.1/${SNG_LLM_PORT}; \
-    printf "GET /health HTTP/1.0\r\n\r\n" >&3; grep -q "200 OK" <&3' || exit 1
+  CMD curl -fsS "http://127.0.0.1:${SNG_LLM_PORT}/health" || exit 1
 
 # Bind 0.0.0.0 inside the container; publish to loopback on the host. -ngl 0
 # keeps it CPU-only. The GGUF carries its own Qwen3/ChatML chat template,
