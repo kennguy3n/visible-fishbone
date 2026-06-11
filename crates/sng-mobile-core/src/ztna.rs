@@ -71,6 +71,36 @@ pub struct AppAccessState {
     pub reason: String,
     /// When the decision was recorded.
     pub decided_at: DateTime<Utc>,
+    /// The originating access request, retained so the periodic
+    /// adaptive-trust sweep ([`MobileZtnaManager::reevaluate_active`])
+    /// can re-run the decision against freshly-collected posture
+    /// without the caller replaying it. The sweep clones this and
+    /// refreshes its `now_ms` per pass.
+    request: AccessRequest,
+}
+
+/// The side-effect-free outcome of evaluating one request, shared by
+/// the explicit-access path ([`MobileZtnaManager::evaluate`], which
+/// always records + emits) and the adaptive-trust sweep
+/// ([`MobileZtnaManager::reevaluate_active`], which records + emits
+/// only on a revocation). Computing the decision here, away from the
+/// recording, lets the two callers shape their telemetry differently
+/// without duplicating the pre-gate / policy / provider-miss branches.
+struct Classified {
+    /// Whether the request is allowed.
+    allow: bool,
+    /// Stable reason label stored in per-app state and on the wire.
+    reason: String,
+    /// Wire `posture_result` spelling.
+    posture_result: String,
+    /// The fail-closed pre-gate cause, when the local posture pre-gate
+    /// (not the shared policy) denied; `None` otherwise.
+    posture_detail: Option<String>,
+    /// Whether identity was verified (the shared policy ran).
+    identity_verified: bool,
+    /// The typed decision the explicit-access caller returns: `Ok` for
+    /// a pre-gate or policy decision, `Err` for a provider miss.
+    result: Result<ZtnaDecision, ZtnaError>,
 }
 
 /// Map a [`ZtnaError`] (the provider-miss short-circuits that
@@ -118,15 +148,76 @@ impl MobileZtnaManager {
         }
     }
 
-    fn record_state(&self, app_id: &str, allowed: bool, reason: &str, now: DateTime<Utc>) {
+    fn record_state(
+        &self,
+        request: &AccessRequest,
+        allowed: bool,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) {
         self.app_state.lock().insert(
-            app_id.to_owned(),
+            request.app_id.clone(),
             AppAccessState {
                 allowed,
                 reason: reason.to_owned(),
                 decided_at: now,
+                request: request.clone(),
             },
         );
+    }
+
+    /// Evaluate one request without recording any side effects: run
+    /// the fail-closed mobile posture pre-gate, then (if it passes)
+    /// the shared policy engine, collapsing all three outcomes
+    /// (pre-gate deny / policy decision / provider miss) into a
+    /// [`Classified`]. Both the explicit-access path and the sweep
+    /// build on this so their decision logic can never diverge.
+    fn classify(
+        &self,
+        request: &AccessRequest,
+        posture: Option<&MobilePostureSnapshot>,
+    ) -> Classified {
+        if let Some(gate_label) = posture_pre_gate(posture) {
+            let reason = ZtnaDecisionReason::DevicePostureInsufficient;
+            let decision = ZtnaDecision {
+                allow: false,
+                reason: reason.clone(),
+                posture_result: PostureResult::Fail,
+            };
+            return Classified {
+                allow: false,
+                reason: reason.as_str().to_owned(),
+                posture_result: decision.posture_result.as_str().to_owned(),
+                // The stable wire reason stays `device_posture_insufficient`
+                // (consistent with a policy-side posture deny); the gate
+                // label rides the additive `posture_detail` field so
+                // dashboards can break out the cause.
+                posture_detail: Some(gate_label.to_owned()),
+                identity_verified: false,
+                result: Ok(decision),
+            };
+        }
+        match self.service.evaluate(request) {
+            Ok(decision) => Classified {
+                allow: decision.allow,
+                reason: decision.reason.as_str().to_owned(),
+                posture_result: decision.posture_result.as_str().to_owned(),
+                // Shared-policy decisions carry no mobile pre-gate cause.
+                posture_detail: None,
+                identity_verified: true,
+                result: Ok(decision),
+            },
+            Err(err) => Classified {
+                allow: false,
+                reason: error_reason_label(&err).to_owned(),
+                // Provider-miss errors short-circuit before the posture
+                // check; no posture result was produced.
+                posture_result: "not_evaluated".to_owned(),
+                posture_detail: None,
+                identity_verified: false,
+                result: Err(err),
+            },
+        }
     }
 
     /// Evaluate one access request against the local policy bundle,
@@ -158,68 +249,100 @@ impl MobileZtnaManager {
         posture: Option<&MobilePostureSnapshot>,
         now: DateTime<Utc>,
     ) -> Result<ZtnaDecision, MobileError> {
-        if let Some(gate_label) = posture_pre_gate(posture) {
+        let c = self.classify(request, posture);
+        if let Some(gate_label) = c.posture_detail.as_deref() {
             warn!(
                 app_id = %request.app_id,
                 gate = gate_label,
                 "mobile posture pre-gate denied access (fail-closed)"
             );
-            let reason = ZtnaDecisionReason::DevicePostureInsufficient;
-            let decision = ZtnaDecision {
-                allow: false,
-                reason: reason.clone(),
-                posture_result: PostureResult::Fail,
-            };
+        }
+        let event = MobileTelemetryEvent::ZtnaAccess {
+            app_id: request.app_id.clone(),
+            allow: c.allow,
+            reason: c.reason.clone(),
+            posture_detail: c.posture_detail.clone(),
+            posture_result: c.posture_result.clone(),
+            identity_verified: c.identity_verified,
+        };
+        self.record_telemetry_best_effort(&event, now).await;
+        self.record_state(request, c.allow, &c.reason, now);
+        c.result.map_err(MobileError::Ztna)
+    }
+
+    /// Re-evaluate every currently-allowed app against freshly
+    /// collected `posture`, demoting any whose decision no longer
+    /// holds. This is the mobile adaptive-trust sweep: the agent's
+    /// periodic posture collector drives it, so a device whose posture
+    /// decays mid-session (screen lock disabled, jailbreak / root, or a
+    /// server-side device-trust downgrade folded into the next policy
+    /// pull) loses access on the next sweep instead of retaining it
+    /// until the user happens to re-request the app.
+    ///
+    /// Only allow→deny transitions are acted on: a demotion flips the
+    /// per-app state (dropping the app from [`Self::allowed_apps`],
+    /// which the agent's tunnel reconciler then tears down) and emits
+    /// exactly one revocation telemetry event. Apps that stay allowed
+    /// are left untouched and emit nothing, so a steady fleet does not
+    /// inflate telemetry every posture interval — important at
+    /// 5000-tenant scale. A denied app is never re-evaluated here:
+    /// re-granting happens only on an explicit user access request,
+    /// never silently by a sweep. The originating request is replayed
+    /// with its `now_ms` refreshed to `now_ms` so freshness-sensitive
+    /// gates judge against the sweep time, not the stale grant time.
+    ///
+    /// Returns the app IDs revoked this sweep (for the caller to log /
+    /// act on).
+    pub async fn reevaluate_active(
+        &self,
+        posture: Option<&MobilePostureSnapshot>,
+        now: DateTime<Utc>,
+        now_ms: u64,
+    ) -> Vec<String> {
+        // Snapshot the allowed apps' originating requests under the
+        // lock, then release it before evaluating — `classify` does not
+        // touch the lock but `record_state` / `allowed_apps` do, and
+        // holding it across the await would serialise the egress.
+        let active: Vec<AccessRequest> = {
+            let state = self.app_state.lock();
+            state
+                .values()
+                .filter(|s| s.allowed)
+                .map(|s| {
+                    let mut req = s.request.clone();
+                    req.now_ms = now_ms;
+                    req
+                })
+                .collect()
+        };
+        let mut revoked = Vec::new();
+        for request in active {
+            let c = self.classify(&request, posture);
+            if c.allow {
+                // Still allowed: leave the per-app state and telemetry
+                // untouched so an unchanged fleet stays silent.
+                continue;
+            }
+            if let Some(gate_label) = c.posture_detail.as_deref() {
+                warn!(
+                    app_id = %request.app_id,
+                    gate = gate_label,
+                    "adaptive-trust sweep revoked access (fail-closed posture)"
+                );
+            }
             let event = MobileTelemetryEvent::ZtnaAccess {
                 app_id: request.app_id.clone(),
                 allow: false,
-                reason: reason.as_str().to_owned(),
-                // The stable wire reason stays `device_posture_insufficient`
-                // (consistent with a policy-side posture deny); the gate
-                // label rides the additive `posture_detail` field so
-                // dashboards can break out the cause.
-                posture_detail: Some(gate_label.to_owned()),
-                posture_result: decision.posture_result.as_str().to_owned(),
-                identity_verified: false,
+                reason: c.reason.clone(),
+                posture_detail: c.posture_detail.clone(),
+                posture_result: c.posture_result.clone(),
+                identity_verified: c.identity_verified,
             };
             self.record_telemetry_best_effort(&event, now).await;
-            self.record_state(&request.app_id, false, reason.as_str(), now);
-            return Ok(decision);
+            self.record_state(&request, false, &c.reason, now);
+            revoked.push(request.app_id);
         }
-        match self.service.evaluate(request) {
-            Ok(decision) => {
-                let reason = decision.reason.as_str();
-                let event = MobileTelemetryEvent::ZtnaAccess {
-                    app_id: request.app_id.clone(),
-                    allow: decision.allow,
-                    reason: reason.to_owned(),
-                    // Shared-policy decisions carry no mobile pre-gate
-                    // cause; the field stays unset.
-                    posture_detail: None,
-                    posture_result: decision.posture_result.as_str().to_owned(),
-                    identity_verified: true,
-                };
-                self.record_telemetry_best_effort(&event, now).await;
-                self.record_state(&request.app_id, decision.allow, reason, now);
-                Ok(decision)
-            }
-            Err(err) => {
-                let reason = error_reason_label(&err);
-                let event = MobileTelemetryEvent::ZtnaAccess {
-                    app_id: request.app_id.clone(),
-                    allow: false,
-                    reason: reason.to_owned(),
-                    // Provider-miss errors short-circuit before the
-                    // posture check; no pre-gate cause applies.
-                    posture_detail: None,
-                    posture_result: "not_evaluated".to_owned(),
-                    identity_verified: false,
-                };
-                self.record_telemetry_best_effort(&event, now).await;
-                self.record_state(&request.app_id, false, reason, now);
-                Err(MobileError::Ztna(err))
-            }
-        }
+        revoked
     }
 
     /// Spool a ZTNA telemetry event without letting a telemetry
@@ -276,6 +399,17 @@ mod tests {
     fn healthy_posture() -> MobilePostureSnapshot {
         MobilePostureSnapshot {
             passcode_set: Some(true),
+            jailbroken: Some(false),
+            root_detected: Some(false),
+            ..MobilePostureSnapshot::default()
+        }
+    }
+
+    /// A posture that decayed since the grant: the screen lock /
+    /// passcode is now off, which the fail-closed pre-gate denies.
+    fn screen_unlocked_posture() -> MobilePostureSnapshot {
+        MobilePostureSnapshot {
+            passcode_set: Some(false),
             jailbroken: Some(false),
             root_detected: Some(false),
             ..MobilePostureSnapshot::default()
@@ -374,6 +508,100 @@ mod tests {
         assert!(state.allowed);
         assert_eq!(state.reason, "allow");
         assert_eq!(mgr.allowed_apps(), vec!["wiki".to_owned()]);
+    }
+
+    // Build a manager that grants `wiki` to dev-1/alice in tenant t1,
+    // and record the initial allow so the adaptive-trust sweep has a
+    // tracked, allowed app to re-evaluate.
+    async fn manager_with_granted_wiki(now_ms: u64) -> MobileZtnaManager {
+        let pol = ZtnaPolicy {
+            tenant_id: "t1".into(),
+            ..ZtnaPolicy::default()
+        };
+        let mgr = manager_with(
+            vec![App::new("wiki", "Wiki")],
+            vec![device("dev-1", "t1")],
+            vec![user("alice", "t1", now_ms)],
+            pol,
+        );
+        let req = AccessRequest::new("wiki", "dev-1", "alice", now_ms);
+        let decision = mgr
+            .evaluate(&req, Some(&healthy_posture()), Utc::now())
+            .await
+            .unwrap();
+        assert!(decision.allow, "setup decision: {decision:?}");
+        assert_eq!(mgr.allowed_apps(), vec!["wiki".to_owned()]);
+        mgr
+    }
+
+    #[tokio::test]
+    async fn reeval_revokes_app_when_posture_decays() {
+        // The grant happened under a healthy posture; by the next sweep
+        // the screen lock is off. The sweep must demote the app — the
+        // adaptive-trust property: posture decay revokes access on the
+        // periodic cadence, not only on the user's next request.
+        let now_ms = 2_000;
+        let mgr = manager_with_granted_wiki(now_ms).await;
+        let revoked = mgr
+            .reevaluate_active(Some(&screen_unlocked_posture()), Utc::now(), now_ms + 1)
+            .await;
+        assert_eq!(revoked, vec!["wiki".to_owned()]);
+        let state = mgr.app_state("wiki").expect("state recorded");
+        assert!(!state.allowed);
+        assert_eq!(state.reason, "device_posture_insufficient");
+        assert!(
+            mgr.allowed_apps().is_empty(),
+            "a revoked app must drop out of allowed_apps so the tunnel reconciler tears it down"
+        );
+    }
+
+    #[tokio::test]
+    async fn reeval_keeps_app_when_posture_holds() {
+        // Posture still healthy at sweep time → no flip, no revocation,
+        // and (deliberately) no telemetry churn for a steady fleet.
+        let now_ms = 2_000;
+        let mgr = manager_with_granted_wiki(now_ms).await;
+        let revoked = mgr
+            .reevaluate_active(Some(&healthy_posture()), Utc::now(), now_ms + 1)
+            .await;
+        assert!(revoked.is_empty(), "a holding posture must revoke nothing");
+        let state = mgr.app_state("wiki").expect("state recorded");
+        assert!(state.allowed);
+        assert_eq!(state.reason, "allow");
+        assert_eq!(mgr.allowed_apps(), vec!["wiki".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn reeval_never_regrants_a_denied_app() {
+        // Cross-tenant deny: device in t1, identity in t2.
+        let pol = ZtnaPolicy {
+            tenant_id: "t1".into(),
+            ..ZtnaPolicy::default()
+        };
+        let mgr = manager_with(
+            vec![App::new("wiki", "Wiki")],
+            vec![device("dev-1", "t1")],
+            vec![user("alice", "t2", 2_000)],
+            pol,
+        );
+        let req = AccessRequest::new("wiki", "dev-1", "alice", 2_000);
+        assert!(
+            !mgr.evaluate(&req, Some(&healthy_posture()), Utc::now())
+                .await
+                .unwrap()
+                .allow
+        );
+        assert!(mgr.allowed_apps().is_empty());
+        // A healthy-posture sweep must never silently re-grant a denied
+        // app: the sweep only re-evaluates currently-allowed apps, so a
+        // re-grant can only come from an explicit user request.
+        let revoked = mgr
+            .reevaluate_active(Some(&healthy_posture()), Utc::now(), 3_000)
+            .await;
+        assert!(revoked.is_empty());
+        let state = mgr.app_state("wiki").expect("state recorded");
+        assert!(!state.allowed);
+        assert!(mgr.allowed_apps().is_empty());
     }
 
     #[tokio::test]

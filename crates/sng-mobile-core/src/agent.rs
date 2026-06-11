@@ -1033,7 +1033,28 @@ impl MobileAgent {
             }
             ScheduledTask::CollectPosture => {
                 let snapshot = self.collect_posture().await?;
-                *self.last_posture.lock() = Some(snapshot);
+                *self.last_posture.lock() = Some(snapshot.clone());
+                // Adaptive trust: drive a re-evaluation sweep on the
+                // freshly-collected posture so an app whose access no
+                // longer holds (posture decayed since the grant, or a
+                // device-trust downgrade arrived on the last policy
+                // pull) is revoked on the periodic cadence rather than
+                // only on the user's next explicit access request. The
+                // sweep demotes such apps in the ZTNA manager, which
+                // drops them from `allowed_apps()` and lets the tunnel
+                // reconciler tear the route down. Best-effort: it never
+                // fails posture collection.
+                if let Some(ztna) = self.ztna() {
+                    let now = Utc::now();
+                    let now_ms = u64::try_from(now.timestamp_millis()).unwrap_or(0);
+                    let revoked = ztna.reevaluate_active(Some(&snapshot), now, now_ms).await;
+                    if !revoked.is_empty() {
+                        warn!(
+                            ?revoked,
+                            "adaptive-trust sweep revoked apps after posture refresh"
+                        );
+                    }
+                }
             }
         }
         Ok(())
