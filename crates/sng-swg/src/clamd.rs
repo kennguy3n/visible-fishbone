@@ -348,7 +348,7 @@ impl ClamdScanner {
         stream.flush().await?;
 
         let reply = read_until_nul(stream, 4096).await?;
-        Ok(parse_reply(&reply))
+        parse_reply(&reply)
     }
 }
 
@@ -358,6 +358,24 @@ impl ContentScanner for ClamdScanner {
         if bytes.is_empty() {
             return ContentScanVerdict::Skipped {
                 reason: ScanSkip::Empty,
+            };
+        }
+
+        // Oversize check first, before hashing or touching the cache. The
+        // verdict is a pure function of the body length and the immutable
+        // `max_scan_bytes`, so it can never be served from the cache (the
+        // length check always fires before any lookup). Caching it would only
+        // burn an LRU slot and evict useful clean/malicious verdicts, and
+        // hashing an oversize body we are about to skip is wasted work.
+        if bytes.len() > self.inner.max_scan_bytes {
+            tracing::info!(
+                target: "sng_swg::clamd",
+                bytes = bytes.len(),
+                max = self.inner.max_scan_bytes,
+                "download exceeds max scan size; skipping content scan (passthrough)"
+            );
+            return ContentScanVerdict::Skipped {
+                reason: ScanSkip::Oversize,
             };
         }
 
@@ -373,29 +391,20 @@ impl ContentScanner for ClamdScanner {
             str::to_ascii_lowercase,
         );
 
-        if bytes.len() > self.inner.max_scan_bytes {
-            tracing::info!(
-                target: "sng_swg::clamd",
-                bytes = bytes.len(),
-                max = self.inner.max_scan_bytes,
-                "download exceeds max scan size; skipping content scan (passthrough)"
-            );
-            let verdict = ContentScanVerdict::Skipped {
-                reason: ScanSkip::Oversize,
-            };
-            self.inner.cache.put(&key, verdict.clone());
-            return verdict;
-        }
-
         if let Some(hit) = self.inner.cache.get(&key) {
             return hit;
         }
 
         match tokio::time::timeout(self.inner.scan_timeout, self.scan_once(bytes)).await {
             Ok(Ok(verdict)) => {
-                // Only real scan results are cached; fail-posture verdicts
-                // never reach this branch.
-                self.inner.cache.put(&key, verdict.clone());
+                // Only cache deterministic scan results. Fail-posture verdicts
+                // are produced by `fail()` in the error arms below and never
+                // reach here; gating on `is_cacheable()` is belt-and-braces so
+                // a transient verdict can never be pinned even if a future
+                // refactor routes one through this branch.
+                if verdict.is_cacheable() {
+                    self.inner.cache.put(&key, verdict.clone());
+                }
                 verdict
             }
             Ok(Err(e)) => self.fail(&format!("io error: {e}")),
@@ -434,12 +443,20 @@ async fn read_until_nul<R: AsyncRead + Unpin>(
 /// Parse a clamd INSTREAM reply into a verdict.
 ///
 /// Accepts both session (`<id>: stream: ...`) and one-shot (`stream: ...`)
-/// reply forms by anchoring on the `stream: ` token. A reply that contains
-/// neither `OK` nor `FOUND` (e.g. a clamd error string) is treated as a scan
-/// failure by mapping it to an [`std::io::Error`]-style outcome — but since
-/// this function is infallible we surface it as a fail-closed sentinel so an
-/// unexpected reply never silently allows.
-fn parse_reply(reply: &[u8]) -> ContentScanVerdict {
+/// reply forms by anchoring on the `stream: ` token. Only the two well-formed
+/// outcomes resolve to a verdict: `OK` -> [`ContentScanVerdict::Clean`] and
+/// `<Sig> FOUND` -> [`ContentScanVerdict::Malicious`].
+///
+/// Any other reply — a clamd error string (`INSTREAM size limit exceeded
+/// ERROR`), a truncated frame, garbage — is *not* a scan result and must not
+/// be turned into one here. Returning a verdict directly (clean **or** the
+/// fail-closed sentinel) would bypass the operator's configured fail posture:
+/// the caller routes such a value straight out, so a fail-open operator would
+/// still get a deny on a malformed reply. Instead we surface it as an
+/// [`std::io::Error`] so it flows through [`ClamdScanner::scan_once`] (which
+/// discards the possibly-desynced connection) into the scanner's `fail()`
+/// path, where the single source of fail-open/closed truth decides.
+fn parse_reply(reply: &[u8]) -> std::io::Result<ContentScanVerdict> {
     let text = String::from_utf8_lossy(reply);
     let text = text.trim().trim_end_matches('\0').trim();
     // Anchor on the part after the last "stream: " so the `<id>: ` session
@@ -447,7 +464,7 @@ fn parse_reply(reply: &[u8]) -> ContentScanVerdict {
     let payload = text.rsplit("stream: ").next().unwrap_or(text).trim();
 
     if payload == "OK" {
-        ContentScanVerdict::Clean
+        Ok(ContentScanVerdict::Clean)
     } else if let Some(sig) = payload.strip_suffix(" FOUND") {
         let signature = sig.trim();
         let signature = if signature.is_empty() {
@@ -455,17 +472,15 @@ fn parse_reply(reply: &[u8]) -> ContentScanVerdict {
         } else {
             signature.to_string()
         };
-        ContentScanVerdict::Malicious { signature }
+        Ok(ContentScanVerdict::Malicious { signature })
     } else {
-        // Unexpected reply (clamd error, truncated frame). Do not allow on an
-        // unparseable reply: treat as scanner unavailable so the request is
-        // denied under fail-closed and (under fail-open) is at least logged.
-        tracing::warn!(
-            target: "sng_swg::clamd",
-            reply = %text,
-            "unexpected clamd reply; treating as scanner-unavailable"
-        );
-        ContentScanVerdict::scanner_unavailable()
+        // Unexpected reply (clamd error, truncated frame, desynced session).
+        // Treat it as a scan failure so the connection is dropped and the
+        // configured fail posture — not this parser — decides allow vs deny.
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unexpected clamd reply: {text}"),
+        ))
     }
 }
 
@@ -494,6 +509,9 @@ mod tests {
         Normal,
         /// Accept and read the request but never reply (drives a timeout).
         Hang,
+        /// Reply with a clamd error string that is neither OK nor FOUND
+        /// (e.g. the body exceeded clamd's own `StreamMaxLength`).
+        Error,
     }
 
     /// A mock clamd server over a real loopback TCP listener. It speaks the
@@ -563,7 +581,9 @@ mod tests {
                 }
                 counter.fetch_add(1, Ordering::SeqCst);
                 let eicar = eicar_bytes();
-                let reply = if body
+                let reply = if matches!(behavior, MockBehavior::Error) {
+                    "1: INSTREAM size limit exceeded ERROR\0".to_string()
+                } else if body
                     .windows(eicar.len())
                     .any(|w| w == eicar.as_slice())
                 {
@@ -756,6 +776,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn unexpected_reply_applies_fail_posture() {
+        // A clamd error string (neither OK nor FOUND) is not a scan result.
+        // It must be resolved by the operator's fail posture, NOT silently
+        // turned into a deny — otherwise a body that exceeds clamd's own
+        // StreamMaxLength would block downloads even for a fail-open operator.
+        let mock = MockClamd::start(MockBehavior::Error).await;
+
+        let mut open = cfg(&mock.addr);
+        open.fail_open = true;
+        let scanner = ClamdScanner::new(open);
+        assert_eq!(
+            scanner.scan(b"some bytes", None).await,
+            ContentScanVerdict::Clean,
+            "fail-open must allow on an unparseable reply"
+        );
+        assert_eq!(
+            scanner.cache_len(),
+            0,
+            "a fail-posture verdict must never be cached"
+        );
+
+        let mut closed = cfg(&mock.addr);
+        closed.fail_open = false;
+        let scanner = ClamdScanner::new(closed);
+        let v = scanner.scan(b"some bytes", None).await;
+        assert_eq!(
+            v,
+            ContentScanVerdict::scanner_unavailable(),
+            "fail-closed must deny on an unparseable reply"
+        );
+        assert_eq!(scanner.cache_len(), 0);
+    }
+
+    #[tokio::test]
+    async fn unexpected_reply_discards_connection() {
+        // An unparseable reply leaves the session framing in an unknown
+        // state, so the connection must be dropped rather than pooled.
+        let mock = MockClamd::start(MockBehavior::Error).await;
+        let mut c = cfg(&mock.addr);
+        c.fail_open = true;
+        let scanner = ClamdScanner::new(c);
+        let _ = scanner.scan(b"some bytes", None).await;
+        assert_eq!(
+            scanner.inner.pool.idle.lock().len(),
+            0,
+            "a connection that produced an unparseable reply must not be pooled"
+        );
+    }
+
+    #[tokio::test]
     async fn connections_are_reused_across_scans() {
         // Two sequential scans on one scanner should reuse a single pooled
         // connection (the pool keeps it warm via IDSESSION). We assert the
@@ -772,21 +842,29 @@ mod tests {
 
     #[test]
     fn parse_reply_handles_session_and_oneshot_forms() {
-        assert_eq!(parse_reply(b"1: stream: OK\0"), ContentScanVerdict::Clean);
-        assert_eq!(parse_reply(b"stream: OK"), ContentScanVerdict::Clean);
         assert_eq!(
-            parse_reply(b"1: stream: Win.Test.EICAR_HDB-1 FOUND\0"),
+            parse_reply(b"1: stream: OK\0").unwrap(),
+            ContentScanVerdict::Clean
+        );
+        assert_eq!(
+            parse_reply(b"stream: OK").unwrap(),
+            ContentScanVerdict::Clean
+        );
+        assert_eq!(
+            parse_reply(b"1: stream: Win.Test.EICAR_HDB-1 FOUND\0").unwrap(),
             ContentScanVerdict::Malicious {
                 signature: "Win.Test.EICAR_HDB-1".to_string()
             }
         );
         assert_eq!(
-            parse_reply(b"stream: Some.Sig FOUND"),
+            parse_reply(b"stream: Some.Sig FOUND").unwrap(),
             ContentScanVerdict::Malicious {
                 signature: "Some.Sig".to_string()
             }
         );
-        // An unexpected reply must not be treated as clean.
-        assert!(parse_reply(b"1: INSTREAM size limit exceeded ERROR").is_malicious());
+        // An unexpected reply is not a scan result: it must surface as an
+        // error so the caller's fail posture decides, never a bare verdict.
+        let err = parse_reply(b"1: INSTREAM size limit exceeded ERROR").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
 }
