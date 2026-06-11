@@ -37,6 +37,7 @@ type RouterDeps struct {
 	Terraform        *TerraformHandler
 	AI               *AIHandler
 	DLP              *DLPHandler
+	DLPReview        *DLPReviewHandler
 	SCIM             *SCIMHandler
 	Compliance       *ComplianceHandler
 	Playbook         *PlaybookHandler
@@ -184,6 +185,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.DLP != nil {
 		deps.DLP.Register(apiMux)
+	}
+	if deps.DLPReview != nil {
+		deps.DLPReview.Register(apiMux)
 	}
 	if deps.SCIM != nil {
 		deps.SCIM.Register(apiMux)
