@@ -47,7 +47,6 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
@@ -344,10 +343,6 @@ struct ClamdInner {
     chunk_size: usize,
     scan_timeout: Duration,
     fail_open: bool,
-    /// Monotonic session command counter used to label INSTREAM commands; the
-    /// id is cosmetic for our single-command-per-checkout usage but keeps the
-    /// wire dialog well-formed for clamd's session mode.
-    seq: AtomicU64,
 }
 
 impl std::fmt::Debug for ClamdScanner {
@@ -380,7 +375,6 @@ impl ClamdScanner {
                 chunk_size: config.chunk_size.max(1),
                 scan_timeout: config.scan_timeout,
                 fail_open: config.fail_open,
-                seq: AtomicU64::new(0),
             }),
         }
     }
@@ -474,7 +468,6 @@ impl ClamdScanner {
             stream.write_all(b"zIDSESSION\0").await?;
             conn.session_started = true;
         }
-        let _id = self.inner.seq.fetch_add(1, Ordering::Relaxed) + 1;
         stream.write_all(b"zINSTREAM\0").await?;
         for chunk in bytes.chunks(self.inner.chunk_size) {
             let len = u32::try_from(chunk.len()).map_err(|_| {
@@ -673,7 +666,7 @@ fn parse_reply(reply: &[u8]) -> std::io::Result<ScanOutcome> {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
