@@ -61,8 +61,9 @@ RUN cmake -B build \
 FROM debian:bookworm-slim AS model
 ARG SNG_LLM_VARIANT=Q2_0
 # SNG_LLM_OFFLINE=1 bakes a GGUF pre-staged under deploy/ollama/models/ in the
-# build context and never reaches the network, so the build itself runs
-# air-gapped. Default 0 downloads + verifies from HuggingFace as before.
+# build context and verifies it without any HuggingFace download. Default 0
+# downloads + verifies from HuggingFace as before. (curl below is only used by
+# the default download path; the offline path needs just sha256sum + wc.)
 ARG SNG_LLM_OFFLINE=0
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl ca-certificates coreutils \
