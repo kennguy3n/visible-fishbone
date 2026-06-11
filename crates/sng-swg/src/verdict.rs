@@ -720,10 +720,7 @@ mod tests {
 
     #[test]
     fn matched_rule_reports_why_and_prefers_exact() {
-        let p = CategoryDenyPolicy::new(
-            ["security.malware".to_string()],
-            ["security".to_string()],
-        );
+        let p = CategoryDenyPolicy::new(["security.malware".to_string()], ["security".to_string()]);
         // Exact wins over the overlapping group for the same category.
         assert_eq!(p.matched_rule("security.malware"), Some("security.malware"));
         // The group covers the rest of the subtree.
@@ -733,10 +730,7 @@ mod tests {
 
     #[test]
     fn policy_is_case_insensitive_and_normalises_input() {
-        let p = CategoryDenyPolicy::new(
-            ["Adult.Content".to_string()],
-            ["Security".to_string()],
-        );
+        let p = CategoryDenyPolicy::new(["Adult.Content".to_string()], ["Security".to_string()]);
         // Rules were lowercased on construction; lookups fold case too.
         assert!(p.is_denied("adult.content"));
         assert!(p.is_denied("ADULT.CONTENT"));

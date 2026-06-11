@@ -602,10 +602,7 @@ mod tests {
                 let eicar = eicar_bytes();
                 let reply = if matches!(behavior, MockBehavior::Error) {
                     "1: INSTREAM size limit exceeded ERROR\0".to_string()
-                } else if body
-                    .windows(eicar.len())
-                    .any(|w| w == eicar.as_slice())
-                {
+                } else if body.windows(eicar.len()).any(|w| w == eicar.as_slice()) {
                     "1: stream: Eicar-Test-Signature FOUND\0".to_string()
                 } else {
                     "1: stream: OK\0".to_string()
@@ -757,16 +754,25 @@ mod tests {
         let hash = "d".repeat(64);
         let body = b"a file that was clean yesterday";
 
-        assert_eq!(scanner.scan(body, Some(&hash)).await, ContentScanVerdict::Clean);
+        assert_eq!(
+            scanner.scan(body, Some(&hash)).await,
+            ContentScanVerdict::Clean
+        );
         assert_eq!(mock.scans(), 1);
         // Within the TTL: still served from cache (no re-scan).
-        assert_eq!(scanner.scan(body, Some(&hash)).await, ContentScanVerdict::Clean);
+        assert_eq!(
+            scanner.scan(body, Some(&hash)).await,
+            ContentScanVerdict::Clean
+        );
         assert_eq!(mock.scans(), 1, "fresh entry must be served from cache");
 
         tokio::time::sleep(Duration::from_millis(60)).await;
 
         // Past the TTL: the stale entry is a miss and a fresh scan runs.
-        assert_eq!(scanner.scan(body, Some(&hash)).await, ContentScanVerdict::Clean);
+        assert_eq!(
+            scanner.scan(body, Some(&hash)).await,
+            ContentScanVerdict::Clean
+        );
         assert_eq!(mock.scans(), 2, "verdict past its TTL must be re-scanned");
     }
 
@@ -778,8 +784,15 @@ mod tests {
         c.fail_open = true;
         let scanner = ClamdScanner::new(c);
         // Fail-open => Clean (allow) on timeout, and not cached.
-        assert_eq!(scanner.scan(b"some bytes", None).await, ContentScanVerdict::Clean);
-        assert_eq!(scanner.cache_len(), 0, "fail-open verdict must not be cached");
+        assert_eq!(
+            scanner.scan(b"some bytes", None).await,
+            ContentScanVerdict::Clean
+        );
+        assert_eq!(
+            scanner.cache_len(),
+            0,
+            "fail-open verdict must not be cached"
+        );
     }
 
     #[tokio::test]
@@ -792,7 +805,11 @@ mod tests {
         let v = scanner.scan(b"some bytes", None).await;
         assert!(v.is_malicious(), "fail-closed must deny on timeout");
         assert_eq!(v, ContentScanVerdict::scanner_unavailable());
-        assert_eq!(scanner.cache_len(), 0, "fail-closed verdict must not be cached");
+        assert_eq!(
+            scanner.cache_len(),
+            0,
+            "fail-closed verdict must not be cached"
+        );
     }
 
     #[tokio::test]
@@ -878,8 +895,14 @@ mod tests {
         // session open and serves multiple INSTREAM commands per connection.
         let mock = MockClamd::start(MockBehavior::Normal).await;
         let scanner = ClamdScanner::new(cfg(&mock.addr));
-        assert_eq!(scanner.scan(b"first", None).await, ContentScanVerdict::Clean);
-        assert_eq!(scanner.scan(b"second", None).await, ContentScanVerdict::Clean);
+        assert_eq!(
+            scanner.scan(b"first", None).await,
+            ContentScanVerdict::Clean
+        );
+        assert_eq!(
+            scanner.scan(b"second", None).await,
+            ContentScanVerdict::Clean
+        );
         assert_eq!(mock.scans(), 2);
         // Exactly one connection should be sitting idle in the pool.
         assert_eq!(scanner.inner.pool.idle.lock().len(), 1);
