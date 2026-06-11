@@ -1423,7 +1423,10 @@ fn signal_to_verdict(
     secrets: &SecretScanner,
     confidential: &ConfidentialScanner,
 ) -> DlpVerdict {
-    if !signal.is_flagged() || signal.action == AiAppAction::Monitor && signal.findings.is_empty() {
+    // A non-flagged signal carries no enforceable verdict. `is_flagged`
+    // already means "action != Monitor or there are findings", so the
+    // negation covers the monitor-with-no-findings case on its own.
+    if !signal.is_flagged() {
         return DlpVerdict::Allow;
     }
     let action = signal.action.as_rule_action();
