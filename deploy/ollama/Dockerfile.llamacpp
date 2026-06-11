@@ -10,6 +10,17 @@
 # Build (context = repo root, so the verify script is in scope):
 #   docker build -f deploy/ollama/Dockerfile.llamacpp -t sng-bonsai-q2:local .
 #
+# Offline bake (no HuggingFace egress during build): pre-fetch the GGUF on a
+# connected host, stage it under deploy/ollama/models/, then build with
+# SNG_LLM_OFFLINE=1 (the build only verifies the staged file's SHA-256):
+#   ./scripts/fetch-bonsai-gguf.sh --variant Q2_0 --out-dir deploy/ollama/models
+#   docker build -f deploy/ollama/Dockerfile.llamacpp \
+#     --build-arg SNG_LLM_OFFLINE=1 -t sng-bonsai-q2:local .
+# This removes the multi-GB model download from the build. Stage 1 still
+# compiles llama-server from the pinned prism fork (a git fetch) and pulls the
+# debian base + apt packages, so a fully air-gapped build also needs those
+# layers cached/pre-built or sourced from an internal mirror.
+#
 # Run:
 #   docker run --rm -p 127.0.0.1:8081:8081 sng-bonsai-q2:local
 #   curl localhost:8081/v1/models
@@ -46,18 +57,34 @@ RUN cmake -B build \
     && cp build/bin/llama-server /usr/local/bin/llama-server \
     && strip /usr/local/bin/llama-server
 
-# --- Stage 2: fetch + SHA-256 verify the pinned GGUF ----------------------
+# --- Stage 2: fetch (or verify a pre-staged) + SHA-256 verify the GGUF -----
 FROM debian:bookworm-slim AS model
 ARG SNG_LLM_VARIANT=Q2_0
+# SNG_LLM_OFFLINE=1 bakes a GGUF pre-staged under deploy/ollama/models/ in the
+# build context and verifies it without any HuggingFace download. Default 0
+# downloads + verifies from HuggingFace as before. (curl below is only used by
+# the default download path; the offline path needs just sha256sum + wc.)
+ARG SNG_LLM_OFFLINE=0
 RUN apt-get update && apt-get install -y --no-install-recommends \
       curl ca-certificates coreutils \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /models
 COPY scripts/fetch-bonsai-gguf.sh /usr/local/bin/fetch-bonsai-gguf.sh
-# Verifies size + SHA-256 against the pinned manifest; build fails (exit 3)
-# on any mismatch, so a tampered/corrupt artifact never reaches the image.
+# Seed any pre-staged weights from the build context. The directory always
+# exists (tracked .keep); the large *.gguf are gitignored and supplied
+# out-of-band for the offline bake.
+COPY deploy/ollama/models/ /models/
+# Online (default): downloads + verifies size + SHA-256 against the pinned
+# manifest. Offline: verifies the pre-staged file only. Either way the build
+# fails on a bad artifact (exit 3 on mismatch, exit 2 if offline + missing),
+# so a tampered/corrupt/absent GGUF never reaches the image.
 RUN chmod +x /usr/local/bin/fetch-bonsai-gguf.sh \
-    && /usr/local/bin/fetch-bonsai-gguf.sh --variant "$SNG_LLM_VARIANT" --out-dir /models
+    && if [ "$SNG_LLM_OFFLINE" = "1" ]; then \
+         /usr/local/bin/fetch-bonsai-gguf.sh --variant "$SNG_LLM_VARIANT" --out-dir /models --offline; \
+       else \
+         /usr/local/bin/fetch-bonsai-gguf.sh --variant "$SNG_LLM_VARIANT" --out-dir /models; \
+       fi \
+    && rm -f /models/.keep   # drop the git placeholder so only the GGUF ships
 
 # --- Stage 3: minimal runtime --------------------------------------------
 FROM debian:bookworm-slim AS runtime

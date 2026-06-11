@@ -1,0 +1,5 @@
+# Placeholder so deploy/ollama/models/ exists on a clean checkout.
+# Dockerfile.llamacpp does `COPY deploy/ollama/models/ /models/`; the large
+# *.gguf weights are gitignored and supplied out-of-band (downloaded by
+# scripts/fetch-bonsai-gguf.sh, or pre-staged here for an offline bake).
+# Do not commit model weights to git.

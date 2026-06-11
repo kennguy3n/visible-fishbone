@@ -16,8 +16,15 @@
 #   scripts/fetch-bonsai-gguf.sh --variant Q2_0_g64
 #   scripts/fetch-bonsai-gguf.sh --out-dir deploy/ollama/models
 #   scripts/fetch-bonsai-gguf.sh --print-sha Q2_0   # print pinned digest
+#   scripts/fetch-bonsai-gguf.sh --offline --out-dir deploy/ollama/models
+#                                            # verify a pre-staged GGUF only
 #
-# Exit codes: 0 ok/verified, 1 usage error, 2 download failure,
+# --offline never touches the network: it verifies a GGUF already present in
+# --out-dir (e.g. fetched on a connected host and copied into the build
+# context) so the image bake itself can run air-gapped. It exits 2 if the
+# file is absent and 3 if it is present but fails verification.
+#
+# Exit codes: 0 ok/verified, 1 usage error, 2 download failure / not present,
 # 3 checksum/size mismatch (treat as tamper / corruption — do NOT use).
 set -euo pipefail
 
@@ -50,6 +57,7 @@ declare -A MANIFEST=(
 VARIANT="Q2_0"
 OUT_DIR="./models"
 RESUME=1
+OFFLINE=0           # --offline: verify a pre-staged GGUF, never download
 PRINT_SHA=""        # explicit variant to print, if any
 PRINT_SHA_ONLY=0     # set by --print-sha (print digest and exit)
 
@@ -83,6 +91,7 @@ while [ $# -gt 0 ]; do
         shift
       fi ;;
     --no-resume) RESUME=0; shift ;;
+    --offline)   OFFLINE=1; shift ;;
     -h|--help)   usage; exit 0 ;;
     *)           die "unknown argument: $1 (try --help)" ;;
   esac
@@ -111,7 +120,9 @@ sha256_of() {
 }
 size_of() { wc -c <"$1" | tr -d ' '; }
 
-command -v curl >/dev/null 2>&1 || die "curl is required"
+# Note: curl is only required for the download path; the --offline branch needs
+# just sha256sum/shasum + wc, so its presence is checked later (below), not
+# here — air-gapped build hosts using --offline often have no curl installed.
 
 mkdir -p "$OUT_DIR"
 DEST="$OUT_DIR/$FILENAME"
@@ -144,6 +155,17 @@ if verify --quiet; then
   exit 0
 fi
 
+# Offline bake: never touch the network. The GGUF must be pre-staged in
+# OUT_DIR (fetch it on a connected host, then copy it into the build context).
+# The quiet probe above already exited 0 when present+valid, so reaching here
+# in offline mode means the file is missing or fails verification — both fatal.
+if [ "$OFFLINE" = "1" ]; then
+  [ -f "$DEST" ] || die "offline: $DEST not found. Pre-fetch on a connected host (scripts/fetch-bonsai-gguf.sh --variant $VARIANT --out-dir <dir>) and stage it before building." 2
+  verify || die "offline: $DEST is present but failed verification (see mismatch above); refusing to bake unverified weights." 3
+  echo "verified (offline, no download): $DEST"
+  exit 0
+fi
+
 # Self-healing resume guard. The pre-check above failed, so any existing file
 # is unusable. With --continue-at -, a leftover that is already at/over the
 # pinned length is treated by curl as "complete": the server answers 416 and
@@ -159,6 +181,9 @@ if [ "$RESUME" = "1" ] && [ -f "$DEST" ]; then
     rm -f "$DEST"
   fi
 fi
+
+# Only the download path needs curl (the --offline branch already exited).
+command -v curl >/dev/null 2>&1 || die "curl is required for the download path (use --offline to verify a pre-staged GGUF instead)"
 
 echo "Fetching $FILENAME ($VARIANT) from $URL"
 echo "  expecting $EXPECT_SIZE bytes, sha256=$EXPECT_SHA"

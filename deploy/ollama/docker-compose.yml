@@ -61,6 +61,10 @@ services:
       dockerfile: deploy/ollama/Dockerfile.llamacpp
       args:
         SNG_LLM_VARIANT: "${SNG_LLM_VARIANT:-Q2_0}"
+        # SNG_LLM_OFFLINE=1 verifies a GGUF pre-staged under ./models instead
+        # of downloading, so the build runs air-gapped. Pre-fetch first:
+        #   ./scripts/fetch-bonsai-gguf.sh --out-dir deploy/ollama/models
+        SNG_LLM_OFFLINE: "${SNG_LLM_OFFLINE:-0}"
     image: sng-bonsai-q2:local
     container_name: sng-bonsai-q2
     # Single source of truth for the port: the container binds it (the
