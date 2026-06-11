@@ -1,0 +1,93 @@
+# Air-gapped, OpenAI-compatible server for the SPECIFIC 2-bit (Q2_0)
+# Ternary-Bonsai-8B GGUF, built on llama.cpp's llama-server.
+#
+# Why llama.cpp and not Ollama for Q2_0: the Q2_0 (ternary) format is not
+# in mainline llama.cpp / Ollama yet. It is provided by the prism fork
+# (PrismML-Eng/llama.cpp). This image pins that fork to a commit and bakes
+# the checksum-verified GGUF into the final layer, so a fresh container
+# serves the exact weights with zero runtime egress.
+#
+# Build (context = repo root, so the verify script is in scope):
+#   docker build -f deploy/ollama/Dockerfile.llamacpp -t sng-bonsai-q2:local .
+#
+# Run:
+#   docker run --rm -p 127.0.0.1:8081:8081 sng-bonsai-q2:local
+#   curl localhost:8081/v1/models
+#
+# Point the control plane at it:
+#   AI_LLM_ENDPOINT=http://localhost:8081/v1/chat/completions
+#   AI_LLM_MODEL=Ternary-Bonsai-8B   # matches --alias below + ai.DefaultModel
+
+# --- Stage 1: build llama-server from the pinned prism fork ---------------
+FROM debian:bookworm-slim AS build
+ARG LLAMACPP_REPO=https://github.com/PrismML-Eng/llama.cpp.git
+# prism branch HEAD; bump deliberately and re-test when adopting new kernels.
+ARG LLAMACPP_COMMIT=9b98ac8a421c556a111d9cc3e4010bc65fc08113
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      git build-essential cmake ca-certificates libcurl4-openssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+RUN git init -q && git remote add origin "$LLAMACPP_REPO" \
+    && git fetch --depth 1 origin "$LLAMACPP_COMMIT" \
+    && git checkout -q FETCH_HEAD
+# CPU-only, portable build (GGML_NATIVE=OFF avoids baking host-specific
+# AVX flags into a redistributable image). Static libs => self-contained
+# binary, so the runtime stage stays tiny.
+RUN cmake -B build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_SHARED_LIBS=OFF \
+      -DGGML_NATIVE=OFF \
+      -DLLAMA_CURL=ON \
+      -DLLAMA_BUILD_TESTS=OFF \
+      -DLLAMA_BUILD_EXAMPLES=OFF \
+      -DLLAMA_BUILD_TOOLS=ON \
+      -DLLAMA_BUILD_SERVER=ON \
+    && cmake --build build --target llama-server -j "$(nproc)" \
+    && cp build/bin/llama-server /usr/local/bin/llama-server \
+    && strip /usr/local/bin/llama-server
+
+# --- Stage 2: fetch + SHA-256 verify the pinned GGUF ----------------------
+FROM debian:bookworm-slim AS model
+ARG SNG_LLM_VARIANT=Q2_0
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      curl ca-certificates coreutils \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /models
+COPY scripts/fetch-bonsai-gguf.sh /usr/local/bin/fetch-bonsai-gguf.sh
+# Verifies size + SHA-256 against the pinned manifest; build fails (exit 3)
+# on any mismatch, so a tampered/corrupt artifact never reaches the image.
+RUN chmod +x /usr/local/bin/fetch-bonsai-gguf.sh \
+    && /usr/local/bin/fetch-bonsai-gguf.sh --variant "$SNG_LLM_VARIANT" --out-dir /models
+
+# --- Stage 3: minimal runtime --------------------------------------------
+FROM debian:bookworm-slim AS runtime
+ARG SNG_LLM_VARIANT=Q2_0
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      libgomp1 libcurl4 ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin bonsai
+COPY --from=build /usr/local/bin/llama-server /usr/local/bin/llama-server
+COPY --from=model /models /models
+RUN chown -R 10001:10001 /models
+
+# Served model name == ai.DefaultModel, so AI_LLM_MODEL works unchanged.
+ENV SNG_LLM_ALIAS=Ternary-Bonsai-8B \
+    SNG_LLM_VARIANT=${SNG_LLM_VARIANT} \
+    SNG_LLM_CTX=4096 \
+    SNG_LLM_PORT=8081
+USER 10001
+EXPOSE 8081
+
+# llama-server exposes /health and an OpenAI-compatible /v1.
+HEALTHCHECK --interval=15s --timeout=5s --start-period=40s --retries=10 \
+  CMD bash -c 'exec 3<>/dev/tcp/127.0.0.1/${SNG_LLM_PORT}; \
+    printf "GET /health HTTP/1.0\r\n\r\n" >&3; grep -q "200 OK" <&3' || exit 1
+
+# Bind 0.0.0.0 inside the container; publish to loopback on the host. -ngl 0
+# keeps it CPU-only. The GGUF carries its own Qwen3/ChatML chat template,
+# which llama-server applies for /v1/chat/completions.
+ENTRYPOINT ["/bin/sh","-c","exec llama-server \
+  -m /models/Ternary-Bonsai-8B-${SNG_LLM_VARIANT}.gguf \
+  --alias \"${SNG_LLM_ALIAS}\" \
+  --host 0.0.0.0 --port ${SNG_LLM_PORT} \
+  -c ${SNG_LLM_CTX} -ngl 0 --no-webui"]

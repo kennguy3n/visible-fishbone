@@ -40,5 +40,41 @@ services:
       - 'ollama pull "$$SNG_LLM_MODEL"'
     restart: "no"
 
+  # Pinned 2-bit (Q2_0) Ternary-Bonsai-8B served by llama.cpp's
+  # llama-server. This is the supported path for the Q2_0 (ternary)
+  # format, which mainline Ollama cannot load yet. The image builds the
+  # prism fork and bakes the checksum-verified GGUF (see
+  # Dockerfile.llamacpp) for an air-gapped, reproducible deployment.
+  #
+  # Opt-in (does not run with a bare `up`, so the default Ollama path is
+  # unaffected):
+  #   docker compose -f deploy/ollama/docker-compose.yml --profile q2 up -d bonsai-q2
+  #
+  # Then point the control plane at it (these are the bundled defaults):
+  #   AI_LLM_ENDPOINT=http://localhost:8081/v1/chat/completions
+  #   AI_LLM_MODEL=Ternary-Bonsai-8B   # == --alias and ai.DefaultModel
+  bonsai-q2:
+    profiles: ["q2"]
+    build:
+      # Context is the repo root so the verify script (scripts/) is in scope.
+      context: ../..
+      dockerfile: deploy/ollama/Dockerfile.llamacpp
+      args:
+        SNG_LLM_VARIANT: "${SNG_LLM_VARIANT:-Q2_0}"
+    image: sng-bonsai-q2:local
+    container_name: sng-bonsai-q2
+    ports:
+      - "127.0.0.1:8081:8081"
+    # Q2 8B fits comfortably under 4 GiB resident on a commodity CPU box;
+    # cap it so a runaway never starves co-located services.
+    mem_limit: 4g
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8081; printf \"GET /health HTTP/1.0\\r\\n\\r\\n\" >&3; grep -q \"200 OK\" <&3'"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 40s
+    restart: unless-stopped
+
 volumes:
   sng-ollama-models:

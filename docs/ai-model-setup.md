@@ -25,18 +25,95 @@ LLM-polished prose. Security enforcement never depends on the LLM.
 
 ## Hardware sizing
 
-| Quantization | RAM (min / recommended) | Notes |
-|---|---|---|
-| Q4_K_M | 8 GB / 16 GB | Best size/quality trade-off; default. |
-| Q5_K_M | 12 GB / 24 GB | Slightly higher quality, more RAM. |
-| GPU (A10G / 24 GB) | — | ~10× CPU throughput; for high concurrency. |
+| Quantization | Disk | RAM (min / recommended) | Notes |
+|---|---|---|---|
+| **Q2_0 (2-bit, ternary)** | **2.03 GiB** | **3 GB / 6 GB** | **Recommended for commodity CPU / SME edge.** {-1,0,+1} ternary weights, g128. Needs the prism llama.cpp fork (see below). |
+| Q2_0_g64 | 2.15 GiB | 3 GB / 6 GB | Smaller group size (g64): marginally higher fidelity, slightly larger. |
+| Q4_K_M | ~4.9 GB | 8 GB / 16 GB | Mainline-Ollama-compatible; higher RAM. |
+| GPU (A10G / 24 GB) | — | — | ~10× CPU throughput; for high concurrency. |
+
+The RAM figures are resident set (model + KV-cache at `-c 4096`); add
+headroom for concurrency. Q2_0 at ~3 GB resident is what makes a
+single-node, **per-tenant-isolated** deployment economical across 5K SME
+tenants without GPUs.
 
 **Expected inference latency:** ~2–5s for a 512-token response on a
-4-core CPU; sub-second on a single A10G. This is why the client default
-timeout (`AI_LLM_TIMEOUT`) is **15s**, higher than a typical hosted-API
-client. Completions default to **512 tokens** (`max_tokens`), which keeps
-an 8B-class model in its high-quality regime; callers that need longer
-structured output (e.g. policy-graph JSON) request more explicitly.
+4-core CPU; sub-second on a single A10G. Reference throughput for Q2_0
+(llama.cpp, Apple M4 Pro): ~32 tok/s decode on 10 CPU threads, ~76 tok/s
+on Metal GPU. This is why the client default timeout (`AI_LLM_TIMEOUT`) is
+**15s**, higher than a typical hosted-API client. Completions default to
+**512 tokens** (`max_tokens`), which keeps an 8B-class model in its
+high-quality regime; callers that need longer structured output (e.g.
+policy-graph JSON) request more explicitly.
+
+## Recommended: pinned Q2_0 bundle
+
+The owner-recommended artifact is the **2-bit Q2_0** GGUF
+[`Ternary-Bonsai-8B-Q2_0.gguf`](https://huggingface.co/prism-ml/Ternary-Bonsai-8B-gguf/blob/main/Ternary-Bonsai-8B-Q2_0.gguf).
+[`deploy/ollama/`](../deploy/ollama/) ships a turnkey, reproducible,
+air-gap-friendly deployment for it.
+
+> **Kernel note:** Q2_0 is a Prism ternary format **not in mainline
+> llama.cpp / Ollama** yet, so a stock `ollama/ollama` image cannot load
+> it. The supported server is llama.cpp's `llama-server` built from the
+> prism fork (`PrismML-Eng/llama.cpp`, pinned in
+> [`deploy/ollama/Dockerfile.llamacpp`](../deploy/ollama/Dockerfile.llamacpp)).
+
+**1. Download + verify (SHA-256 pinned, tamper-evident):**
+
+```bash
+scripts/fetch-bonsai-gguf.sh --out-dir deploy/ollama/models
+# verified sha256 3c8d70470a5d97e5a2b9410ddd899cb740116591462626c60cb2fead6448f60b
+```
+
+**2a. Image-bake (air-gapped):** builds the prism fork + bakes the verified
+GGUF into the image layer (the build re-verifies the checksum, failing the
+build on any mismatch):
+
+```bash
+docker build -f deploy/ollama/Dockerfile.llamacpp -t sng-bonsai-q2:local .
+docker run --rm -p 127.0.0.1:8081:8081 sng-bonsai-q2:local
+```
+
+**2b. Runtime-pull:** fetch + serve on the host (no image build):
+
+```bash
+scripts/fetch-bonsai-gguf.sh --out-dir ./models
+llama-server -m ./models/Ternary-Bonsai-8B-Q2_0.gguf \
+  --alias Ternary-Bonsai-8B --host 0.0.0.0 --port 8081 -c 4096 -ngl 0
+```
+
+Either way the served model name is `Ternary-Bonsai-8B` (the `--alias`),
+matching `ai.DefaultModel`, so:
+
+```bash
+AI_LLM_ENDPOINT=http://localhost:8081/v1/chat/completions
+AI_LLM_MODEL=Ternary-Bonsai-8B
+AI_LLM_MODEL_FAMILY=ternary-bonsai
+AI_LLM_TIMEOUT=15s
+```
+
+### Switching quantizations
+
+[`scripts/fetch-bonsai-gguf.sh`](../scripts/fetch-bonsai-gguf.sh) carries a
+pinned manifest (filename + SHA-256 + byte size) for every published
+variant. Switch with `--variant`:
+
+| `--variant` | File | Size | When to use |
+|---|---|---|---|
+| `Q2_0` (default) | `Ternary-Bonsai-8B-Q2_0.gguf` | 2.03 GiB | Commodity CPU; best size/quality. |
+| `Q2_0_g64` | `Ternary-Bonsai-8B-Q2_0_g64.gguf` | 2.15 GiB | Slightly higher fidelity. |
+| `PQ2_0` | `Ternary-Bonsai-8B-PQ2_0.gguf` | 2.03 GiB | Packed Q2_0 layout. |
+| `F16` | `Ternary-Bonsai-8B-F16.gguf` | 16.4 GB | Baseline / re-quantization source. |
+
+```bash
+scripts/fetch-bonsai-gguf.sh --variant Q2_0_g64 --out-dir deploy/ollama/models
+docker build -f deploy/ollama/Dockerfile.llamacpp \
+  --build-arg SNG_LLM_VARIANT=Q2_0_g64 -t sng-bonsai-q2g64:local .
+```
+
+Print a pinned digest without downloading: `scripts/fetch-bonsai-gguf.sh
+--print-sha Q2_0`.
 
 ## Option A — Ollama (easiest)
 
@@ -57,10 +134,18 @@ air-gapped image build live in [`deploy/ollama/`](../deploy/ollama/).
 
 ## Option B — llama.cpp (`llama-server`)
 
+This is the supported server for the pinned **Q2_0** variant. Q2_0 needs
+the prism fork (`PrismML-Eng/llama.cpp`); build it once, then:
+
 ```bash
-# Download the GGUF (Q4_K_M) from the HuggingFace repo, then:
-llama-server -m Ternary-Bonsai-8B.Q4_K_M.gguf --port 8081 --ctx-size 8192
+# Verified download (see "Switching quantizations" above):
+scripts/fetch-bonsai-gguf.sh --out-dir ./models
+llama-server -m ./models/Ternary-Bonsai-8B-Q2_0.gguf \
+  --alias Ternary-Bonsai-8B --port 8081 --ctx-size 4096 -ngl 0
 ```
+
+The bundled [`deploy/ollama/Dockerfile.llamacpp`](../deploy/ollama/Dockerfile.llamacpp)
+does this for you (pinned fork + baked, verified GGUF).
 
 ```bash
 AI_LLM_ENDPOINT=http://localhost:8081/v1/chat/completions

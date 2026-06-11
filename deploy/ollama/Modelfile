@@ -1,0 +1,47 @@
+# Ollama Modelfile pinning the SPECIFIC 2-bit (Q2_0) Ternary-Bonsai-8B GGUF.
+#
+# Build the served model from a *local, checksum-verified* GGUF rather than
+# pulling a floating registry tag, so the served weights are reproducible
+# and air-gap friendly:
+#
+#   scripts/fetch-bonsai-gguf.sh --out-dir deploy/ollama/models   # verifies SHA-256
+#   cd deploy/ollama && ollama create Ternary-Bonsai-8B -f Modelfile
+#
+# The created model name (`Ternary-Bonsai-8B`) matches ai.DefaultModel in
+# internal/service/ai/provider.go, so the control-plane default
+# AI_LLM_MODEL works unchanged.
+#
+# IMPORTANT — Q2_0 kernel support: the Q2_0 (ternary) format is NOT in
+# mainline llama.cpp yet, so a stock `ollama/ollama` image cannot load this
+# GGUF. Use this Modelfile only with an Ollama built against the prism
+# Q2_0 kernels (PrismML-Eng/llama.cpp, `prism` branch). The supported,
+# turnkey Q2_0 server today is llama.cpp llama-server — see
+# deploy/ollama/Dockerfile.llamacpp and docs/ai-model-setup.md.
+FROM ./models/Ternary-Bonsai-8B-Q2_0.gguf
+
+# Base model is Qwen3-8B, which uses the ChatML conversation format.
+TEMPLATE """{{ if .System }}<|im_start|>system
+{{ .System }}<|im_end|>
+{{ end }}{{ if .Prompt }}<|im_start|>user
+{{ .Prompt }}<|im_end|>
+{{ end }}<|im_start|>assistant
+{{ .Response }}<|im_end|>
+"""
+
+# ChatML turn delimiters. Stopping on these prevents the model from
+# hallucinating the next turn.
+PARAMETER stop "<|im_start|>"
+PARAMETER stop "<|im_end|>"
+
+# Context window. 4096 keeps the KV-cache small (~commodity-CPU friendly);
+# the base model supports up to 65536 if you have the RAM. Keep this in
+# sync with the llama-server `-c` flag in Dockerfile.llamacpp.
+PARAMETER num_ctx 4096
+
+# Factual, low-variance decoding for a security analyst assistant. The AI
+# client caps completions at 512 tokens by default (provider.go).
+PARAMETER temperature 0.3
+PARAMETER top_p 0.9
+PARAMETER top_k 20
+PARAMETER repeat_penalty 1.05
+PARAMETER num_predict 512
