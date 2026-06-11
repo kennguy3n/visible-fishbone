@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"sort"
 	"strconv"
@@ -99,6 +100,7 @@ type NLQueryEngine struct {
 	graphs     PolicyGraphSource
 	factory    policy.EvaluatorFactory
 	identities IdentityResolver
+	logger     *slog.Logger
 }
 
 // NLQueryOption customises a NLQueryEngine.
@@ -120,6 +122,15 @@ func WithPolicyGraphSource(src PolicyGraphSource) NLQueryOption {
 // evaluated.
 func WithIdentityResolver(r IdentityResolver) NLQueryOption {
 	return func(e *NLQueryEngine) { e.identities = r }
+}
+
+// WithQueryLogger attaches a logger used to surface identity-resolution
+// faults. A directory-backend failure degrades the query to
+// app/device-only evaluation (never fails it); logging lets operators
+// distinguish that fault from a clean "user not found" so a persistent
+// outage isn't invisible behind partial-confidence verdicts.
+func WithQueryLogger(logger *slog.Logger) NLQueryOption {
+	return func(e *NLQueryEngine) { e.logger = logger }
 }
 
 // NewNLQueryEngine constructs a NLQueryEngine. llm may be nil
@@ -796,7 +807,24 @@ func (e *NLQueryEngine) evaluateAgainstBundle(ctx context.Context, tenantID uuid
 	var principal *policy.Principal
 	var identity *ResolvedIdentity
 	if intent.UserRef != "" && e.identities != nil {
-		if id, rerr := e.identities.ResolveUser(ctx, tenantID, intent.UserRef); rerr == nil && id != nil {
+		id, rerr := e.identities.ResolveUser(ctx, tenantID, intent.UserRef)
+		switch {
+		case rerr != nil:
+			// A directory-backend failure (not a clean "user not found",
+			// which the resolver reports as nil/nil). Degrade to
+			// app/device-only evaluation rather than failing the query,
+			// but surface the fault so a persistent outage isn't invisible
+			// behind partial-confidence verdicts.
+			if e.logger != nil {
+				e.logger.WarnContext(ctx, "ai/nl_query: identity resolution failed; degrading to app/device-only evaluation",
+					slog.String("tenant_id", tenantID.String()),
+					slog.String("error", rerr.Error()))
+			}
+		case id != nil && id.Principal != nil:
+			// Only treat the user as resolved when a usable principal came
+			// back: principal and identity move together so the explanation
+			// and confidence can never claim a user-subject evaluation that
+			// didn't actually run.
 			principal = id.Principal
 			identity = id
 		}

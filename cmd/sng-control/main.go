@@ -2000,6 +2000,12 @@ func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRe
 		// policy graph is wired.
 		nlOpts = append(nlOpts, aisvc.WithIdentityResolver(
 			aisvc.NewDirectoryIdentityResolver(userRepo, roleRepo)))
+		// Surface directory-backend faults during identity resolution so
+		// a persistent outage isn't invisible behind partial-confidence
+		// verdicts (the query degrades to app/device-only either way).
+		if logger != nil {
+			nlOpts = append(nlOpts, aisvc.WithQueryLogger(logger))
+		}
 	}
 	nlQuery := aisvc.NewNLQueryEngine(effectiveLLM, nlOpts...)
 	reports := aisvc.NewReportEngine(effectiveLLM)
