@@ -1,4 +1,4 @@
--- 059_tenant_last_active (down)
+-- 063_tenant_last_active (down)
 --
 -- Restore the generic updated_at trigger on tenants and drop the
 -- activity column + index. last_active_at is a derived signal,
