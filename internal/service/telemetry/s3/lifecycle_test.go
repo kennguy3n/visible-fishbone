@@ -59,9 +59,11 @@ func TestBuildLifecycleConfiguration_Defaults(t *testing.T) {
 	if deref(r.ID) != DefaultLifecycleRuleID {
 		t.Errorf("rule ID = %q, want %q", deref(r.ID), DefaultLifecycleRuleID)
 	}
-	// Prefix-scoped via Filter, never the deprecated top-level Prefix.
-	if r.Prefix != nil {
-		t.Errorf("deprecated top-level Prefix should be nil, got %q", deref(r.Prefix))
+	// Prefix-scoped via Filter, never the deprecated top-level Prefix. We
+	// read the deprecated field on purpose to assert it stays unset.
+	deprecatedPrefix := r.Prefix //nolint:staticcheck // SA1019: intentionally asserting the deprecated top-level Prefix is unset; scoping is via Filter
+	if deprecatedPrefix != nil {
+		t.Errorf("deprecated top-level Prefix should be nil, got %q", deref(deprecatedPrefix))
 	}
 	// The filter is anchored to the archive subtree ("telemetry/"), not the
 	// bare prefix, so it can't sweep a sibling prefix like "telemetry-backup/".

@@ -2,29 +2,29 @@
 // run cannot create for itself, so `go run ./blog/harness/seed` is
 // fully reproducible against a freshly-migrated database.
 //
-// 1. Platform RBAC grant. The seed and capture harnesses act as a
-//    global platform operator (a JWT with roles:["platform_admin"] and
-//    no tenant_id claim). The control plane authorises the
-//    platform-scoped routes — POST/GET /api/v1/msps, the admin
-//    cost-report, the global audit log — via the *database-backed* RBAC
-//    store (rbac.Service.AuthorizePlatform reads user_roles), NOT the
-//    JWT roles claim. A fresh database has no role grants, so those
-//    routes return 403 platform_forbidden and the MSP onboarding step
-//    (S1 evidence) fails. This is a genuine bootstrap chicken-and-egg:
-//    you cannot grant yourself platform authority through an API that
-//    already requires it. We therefore seed the operator user and its
-//    platform_admin grant directly. RBAC enforcement is unchanged — the
-//    operator is authorised through the same real grant a production
-//    deployment would provision for its first platform admin.
+//  1. Platform RBAC grant. The seed and capture harnesses act as a
+//     global platform operator (a JWT with roles:["platform_admin"] and
+//     no tenant_id claim). The control plane authorises the
+//     platform-scoped routes — POST/GET /api/v1/msps, the admin
+//     cost-report, the global audit log — via the *database-backed* RBAC
+//     store (rbac.Service.AuthorizePlatform reads user_roles), NOT the
+//     JWT roles claim. A fresh database has no role grants, so those
+//     routes return 403 platform_forbidden and the MSP onboarding step
+//     (S1 evidence) fails. This is a genuine bootstrap chicken-and-egg:
+//     you cannot grant yourself platform authority through an API that
+//     already requires it. We therefore seed the operator user and its
+//     platform_admin grant directly. RBAC enforcement is unchanged — the
+//     operator is authorised through the same real grant a production
+//     deployment would provision for its first platform admin.
 //
-// 2. Canonical fixture identities. The tenant create API deliberately
-//    does not accept a client-supplied id (server-assigned UUIDs only),
-//    but the capture/usage/anomalies harnesses, the committed payloads,
-//    and the blog posts all reference four stable tenant UUIDs (and the
-//    MSP UUID). Seeding those identity rows here keeps the whole
-//    pipeline deterministic across reruns and fresh databases; every
-//    business sub-resource (sites, devices, policies, DLP, …) is still
-//    created through the real operator API by the rest of the harness.
+//  2. Canonical fixture identities. The tenant create API deliberately
+//     does not accept a client-supplied id (server-assigned UUIDs only),
+//     but the capture/usage/anomalies harnesses, the committed payloads,
+//     and the blog posts all reference four stable tenant UUIDs (and the
+//     MSP UUID). Seeding those identity rows here keeps the whole
+//     pipeline deterministic across reruns and fresh databases; every
+//     business sub-resource (sites, devices, policies, DLP, …) is still
+//     created through the real operator API by the rest of the harness.
 //
 // All inserts are idempotent (ON CONFLICT DO NOTHING) and run as the
 // owning login role with the RLS GUC set for the users insert, exactly

@@ -58,7 +58,7 @@ func TestClassifyApp_UnknownCategoryLowersConfidence(t *testing.T) {
 	tid := uuid.New()
 	known := classifyApp(tid, DiscoveredAppView{Name: "A", Category: "crm"}).Confidence
 	unknown := classifyApp(tid, DiscoveredAppView{Name: "B", Category: "nonsense"}).Confidence
-	if !(unknown < known) {
+	if unknown >= known {
 		t.Fatalf("unknown-category confidence %d should be < known %d", unknown, known)
 	}
 }
