@@ -27,31 +27,33 @@
 //! defaults), so it too projects to a maximally-pessimistic
 //! `DevicePosture` — a missing signal can never satisfy a gate.
 //!
-//! One projection is a deliberate proxy rather than a 1:1 match:
-//! the snapshot's `ScreenLockState::Locked` ("the session is
-//! locked *right now*") feeds `screen_lock_configured` ("a lock
-//! policy is in force"). PAL exposes only the live lock state, so
-//! the current state is used as a conservative stand-in; the
-//! fail-closed direction holds (anything but `Locked`, including
-//! the common `Unknown` from backends that can't observe it,
-//! denies), so the proxy can only ever be stricter, never looser.
-//!
 //! # The `base` parameter
 //!
-//! [`DevicePosture::os_patched`] is the one score signal with no
-//! counterpart in the snapshot: it means "the OS patch level
-//! meets the *tenant* minimum", a policy-relative judgement the
-//! agent cannot make at collection time (it has no
-//! [`sng_ztna::PostureRequirement`]). Rather than invent a value,
-//! the mapping is an **overlay**: it takes the device's current
-//! [`DevicePosture`] (e.g. the control-plane device record, or
-//! [`DevicePosture::unmanaged`] for a device with no prior
-//! record — itself fail-closed) and overrides only the fields the
-//! snapshot authoritatively observes, leaving `os_patched` (and
-//! any future non-observable field) to the base. The expanded
-//! patch *recency* signal the snapshot does carry is projected
-//! independently onto [`DevicePosture::os_patch_days_since`],
-//! which the broker gates via `PostureRequirement::min_patch_days`.
+//! Two score signals have no authoritative counterpart in the
+//! snapshot, so the mapping is an **overlay**: it takes the
+//! device's current [`DevicePosture`] (e.g. the control-plane
+//! device record, or [`DevicePosture::unmanaged`] for a device
+//! with no prior record — itself fail-closed) and overrides only
+//! the fields the snapshot can authoritatively observe, leaving
+//! the rest to the base.
+//!
+//! * [`DevicePosture::os_patched`] means "the OS patch level meets
+//!   the *tenant* minimum", a policy-relative judgement the agent
+//!   cannot make at collection time (it has no
+//!   [`sng_ztna::PostureRequirement`]). It is taken wholly from the
+//!   base. The patch *recency* the snapshot does carry is projected
+//!   independently onto [`DevicePosture::os_patch_days_since`],
+//!   which the broker gates via `PostureRequirement::min_patch_days`.
+//! * [`DevicePosture::screen_lock_configured`] means "a screen-lock
+//!   *policy* is configured to engage within the idle window". PAL
+//!   exposes only the live lock *state* (`Locked` / `Unlocked`),
+//!   never the policy — and a device reporting posture is normally
+//!   in use (unlocked), so deriving the signal from the live state
+//!   would wrongly deny almost every active device. The
+//!   configuration is therefore inherited from the base; a
+//!   currently-`Locked` session is irrefutable proof a lock exists
+//!   and engages, so it can only ever *confirm* the signal (set it
+//!   `true`), never clear it.
 
 use sng_pal::posture::{
     AntivirusStatus, CertificateHealth as PalCertificateHealth, DiskEncryptionState, EdrState,
@@ -80,7 +82,8 @@ const fn map_certificate_health(health: PalCertificateHealth) -> ZtnaCertificate
 /// broker evaluates.
 ///
 /// `base` supplies the fields the snapshot cannot determine
-/// (notably [`DevicePosture::os_patched`]); pass
+/// ([`DevicePosture::os_patched`] and
+/// [`DevicePosture::screen_lock_configured`]); pass
 /// [`DevicePosture::unmanaged`] when there is no prior record. The
 /// device's freshness ([`DevicePosture::attested_at_ms`]) is taken
 /// from the snapshot's `collected_at` so a re-collected snapshot
@@ -95,12 +98,21 @@ pub fn merge_posture_snapshot(base: DevicePosture, snapshot: &PostureSnapshot) -
     // wrapping into a huge u64 that would read as fresh.
     let attested_at_ms = u64::try_from(snapshot.collected_at.timestamp_millis()).unwrap_or(0);
 
+    // `screen_lock_configured` is a policy property the snapshot
+    // cannot observe (PAL only sees the live lock state). Inherit it
+    // from the base; a currently-locked session is proof a lock
+    // exists, so it can only confirm — never clear — the signal,
+    // avoiding a systematic false-deny of in-use (unlocked) devices.
+    // See the module docs.
+    let screen_lock_configured =
+        base.screen_lock_configured || matches!(snapshot.screen_lock, ScreenLockState::Locked);
+
     base.with_disk_encrypted(matches!(
         snapshot.disk_encryption,
         DiskEncryptionState::Enabled
     ))
     .with_firewall_enabled(matches!(snapshot.firewall, FirewallState::Enabled))
-    .with_screen_lock_configured(matches!(snapshot.screen_lock, ScreenLockState::Locked))
+    .with_screen_lock_configured(screen_lock_configured)
     .with_antimalware_running(matches!(snapshot.antivirus, AntivirusStatus::Enabled))
     .with_edr_healthy(matches!(snapshot.edr, EdrState::Healthy))
     .with_antivirus_enabled(matches!(snapshot.antivirus, AntivirusStatus::Enabled))
@@ -135,13 +147,19 @@ mod tests {
 
     #[test]
     fn healthy_snapshot_projects_all_signals_on() {
-        // os_patched comes from base; everything else from the snapshot.
+        // os_patched comes from base; screen_lock_configured is the
+        // base value OR a confirming `Locked` state (here the
+        // snapshot is locked, so it confirms `true` even though the
+        // unmanaged base is `false`); everything else is observed.
         let base = DevicePosture::unmanaged().with_os_patched(true);
         let p = merge_posture_snapshot(base, &healthy_snapshot());
 
         assert!(p.disk_encrypted);
         assert!(p.firewall_enabled);
-        assert!(p.screen_lock_configured);
+        assert!(
+            p.screen_lock_configured,
+            "a locked session confirms the lock even from an unmanaged base"
+        );
         assert!(p.antimalware_running);
         assert!(p.edr_healthy);
         assert!(p.antivirus_enabled);
@@ -165,7 +183,6 @@ mod tests {
 
         assert!(!p.disk_encrypted);
         assert!(!p.firewall_enabled);
-        assert!(!p.screen_lock_configured);
         assert!(!p.antimalware_running);
         assert!(!p.edr_healthy);
         assert!(!p.antivirus_enabled);
@@ -173,9 +190,11 @@ mod tests {
         assert_eq!(p.os_patch_days_since, u32::MAX);
         assert_eq!(p.os_patch_level, "");
         assert_eq!(p.certificate_health, ZtnaCertificateHealth::Unknown);
-        // os_patched is not observable from the snapshot, so the
-        // base's value survives the overlay.
+        // os_patched and screen_lock_configured are not observable
+        // from the snapshot (an `Unknown` lock state cannot confirm a
+        // lock), so the base's values survive the overlay.
         assert!(p.os_patched);
+        assert!(p.screen_lock_configured);
         assert_eq!(p.attested_at_ms, 42_000);
     }
 
@@ -198,7 +217,44 @@ mod tests {
             !p.antimalware_running && !p.antivirus_enabled,
             "AV with real-time protection off is not running"
         );
-        assert!(!p.screen_lock_configured, "an unlocked session denies");
+        assert!(
+            !p.screen_lock_configured,
+            "an unlocked session carries no positive proof, so the \
+             fail-closed unmanaged base (false) survives"
+        );
+    }
+
+    #[test]
+    fn screen_lock_configuration_is_inherited_not_derived_from_live_state() {
+        // Regression: a configuration property the snapshot cannot
+        // observe must not be cleared by the transient lock state.
+        // A device with a configured lock policy that is simply in
+        // use (unlocked) must keep `screen_lock_configured` — the
+        // earlier `Locked`-as-proxy mapping wrongly denied it.
+        let configured_base = DevicePosture::unmanaged().with_screen_lock_configured(true);
+
+        let mut in_use = healthy_snapshot();
+        in_use.screen_lock = ScreenLockState::Unlocked;
+        assert!(
+            merge_posture_snapshot(configured_base.clone(), &in_use).screen_lock_configured,
+            "an unlocked (in-use) device keeps its configured-lock base value"
+        );
+
+        let mut unobservable = healthy_snapshot();
+        unobservable.screen_lock = ScreenLockState::Unknown;
+        assert!(
+            merge_posture_snapshot(configured_base, &unobservable).screen_lock_configured,
+            "an unobservable lock state keeps the configured base value"
+        );
+
+        // And a `Locked` session positively confirms even when the
+        // base did not assert it (e.g. a freshly enrolled device).
+        let mut locked = healthy_snapshot();
+        locked.screen_lock = ScreenLockState::Locked;
+        assert!(
+            merge_posture_snapshot(DevicePosture::unmanaged(), &locked).screen_lock_configured,
+            "a locked session confirms a lock exists"
+        );
     }
 
     #[test]
