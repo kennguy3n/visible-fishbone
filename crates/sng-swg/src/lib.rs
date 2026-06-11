@@ -99,6 +99,7 @@ pub mod bypass;
 pub mod casb;
 pub mod casb_rules;
 pub mod categorizer;
+pub mod clamd;
 pub mod config;
 pub mod envoy_supervisor;
 pub mod error;
@@ -120,7 +121,10 @@ pub use casb::{
 pub use casb_rules::{
     CasbAction, CasbConditions, CasbDecision, CasbRequestMeta, CasbRule, CasbRuleSet, CasbVerdict,
 };
-pub use categorizer::{Category, CategoryEntry, LocalCategoryDb, UrlCategorizer};
+pub use categorizer::{
+    Category, CategoryEntry, LocalCategoryDb, UrlCategorizer, safe_browsing_deny_groups,
+};
+pub use clamd::{ClamdConfig, ClamdEndpoint, ClamdScanner};
 pub use config::{
     DEFAULT_ADMIN_PORT, DEFAULT_EXT_AUTHZ_TIMEOUT_MS, EnvoyConfig, ListenerConfig,
     render_envoy_yaml,
@@ -131,7 +135,10 @@ pub use envoy_supervisor::{
 };
 pub use error::SwgError;
 pub use health::{FailMode, HealthProbe, HealthReport, HealthState, ManagerHealth};
-pub use malware::{MalwareVerdict, MalwareVerdictProvider, StaticMalwareList};
+pub use malware::{
+    ContentScanVerdict, ContentScanner, ContentVerdictCache, MalwareVerdict,
+    MalwareVerdictProvider, ScanSkip, StaticMalwareList,
+};
 pub use manager::{SwgManager, SwgSnapshot};
 pub use process::{EnvoyProcess, MockEnvoy, ShellEnvoy};
 pub use rate_limit::{
@@ -144,7 +151,7 @@ pub use url_ml::{
     LocalLlmCategorizer, UrlMlClassifier, UrlModelBundle, UrlModelClaims, UrlModelSignature,
     UrlModelSigningKeyId, UrlModelVerifier,
 };
-pub use verdict::{Action, RequestContext, Verdict};
+pub use verdict::{Action, CategoryDenyPolicy, RequestContext, Verdict};
 pub use yara::{
     YaraEngine, YaraMatch, YaraRuleBundle, YaraRuleBundleClaims, YaraRuleSignature,
     YaraRuleVerifier, YaraSeverity, YaraSigningKeyId,

@@ -90,6 +90,79 @@ impl std::fmt::Display for Category {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Dotted-category vocabulary
+//
+// Categories are hierarchical, dot-separated strings. Each dot introduces a
+// more-specific child of its parent namespace, so a *group* (a top-level
+// segment) names an entire subtree the verdict layer can deny in one rule via
+// [`crate::verdict::CategoryDenyPolicy`]. The vocabulary below is the
+// canonical namespace shared across the SWG, DNS, and firewall L7 planes; a
+// feed (local bundle or remote provider) may emit any category, but these are
+// the well-known groups smart-default policy and dashboards are built around.
+//
+//   security.*    Safe-browsing threats. Always-deny smart default.
+//     security.malware       Hosts serving malware / drive-by downloads.
+//     security.phishing      Credential-harvesting / spoofed-brand pages.
+//     security.botnet        Botnet command-and-control endpoints.
+//     security.spam          Spam-advertised / spamvertised destinations.
+//     security.cryptomining  Drive-by / unauthorised in-browser miners.
+//     security.compromised    Legitimate sites known to be currently compromised.
+//
+//   adult.*       Adult / not-safe-for-work content.
+//     adult.content          Pornography and explicit material.
+//     adult.dating           Dating / hookup services.
+//
+//   gambling      Online betting / casinos (leaf; no children today).
+//
+//   business.*    Productivity and SaaS an SME relies on (never default-denied).
+//     business.saas          Sanctioned SaaS apps.
+//     business.finance       Banking / accounting portals.
+//
+//   social.*      Social platforms (social.media, social.messaging).
+//   news          General news / media (leaf).
+//
+// Country/industry-oriented groups follow the same shape (e.g. an operator
+// can define `industry.healthcare` or `region.eu.*` in their feed and deny the
+// whole subtree with a single group rule). The policy engine treats every
+// top-level (or intermediate) segment as a groupable subtree, so the vocabulary
+// is open-ended — these are the curated, documented defaults, not a closed set.
+// ---------------------------------------------------------------------------
+
+/// The top-level safe-browsing threat group. Denying this subtree blocks every
+/// `security.*` category (present and future) in one rule.
+pub const SECURITY_GROUP: &str = "security";
+
+/// Well-known safe-browsing leaf categories under [`SECURITY_GROUP`]. Listed
+/// for documentation, dashboards, and feed authors; the deny policy denies the
+/// whole subtree via the group rather than enumerating these.
+pub const SAFE_BROWSING_CATEGORIES: &[&str] = &[
+    "security.malware",
+    "security.phishing",
+    "security.botnet",
+    "security.spam",
+    "security.cryptomining",
+    "security.compromised",
+];
+
+/// The smart-default safe-browsing deny groups for an SME deployment.
+///
+/// Returns the minimal set of *group* prefixes whose subtrees should be denied
+/// out of the box: just [`SECURITY_GROUP`]. The single `security` group denies
+/// every present and future safe-browsing threat category
+/// ([`SAFE_BROWSING_CATEGORIES`] and any later additions) with zero per-leaf
+/// configuration — the "sane defaults, minimal config" Goal-B objective.
+///
+/// Deliberately conservative: it does **not** include `adult`, `gambling`, or
+/// other acceptable-use categories, because those are policy choices that vary
+/// by organisation, whereas malware/phishing are unambiguous threats every
+/// tenant wants blocked. Operators layer acceptable-use groups on top via
+/// [`crate::verdict::CategoryDenyPolicy::with_groups`].
+#[must_use]
+pub fn safe_browsing_deny_groups() -> Vec<&'static str> {
+    vec![SECURITY_GROUP]
+}
+
 /// One entry in the URL category feed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CategoryEntry {
@@ -725,5 +798,26 @@ mod tests {
             db.categorize_sync("example.com", "/"),
             Some(Category::new("social.media"))
         );
+    }
+
+    #[test]
+    fn safe_browsing_defaults_are_the_security_group() {
+        // The smart default is exactly one group: `security`. Keeping this
+        // locked so a future edit can't silently widen the default deny set
+        // (which would block SME productivity traffic) or narrow it below the
+        // safe-browsing baseline.
+        assert_eq!(safe_browsing_deny_groups(), vec![SECURITY_GROUP]);
+    }
+
+    #[test]
+    fn documented_safe_browsing_leaves_live_under_the_group() {
+        // Every documented leaf must be a dotted child of the group it is
+        // denied through, so the single group rule actually covers them.
+        for leaf in SAFE_BROWSING_CATEGORIES {
+            assert!(
+                leaf.starts_with(&format!("{SECURITY_GROUP}.")),
+                "{leaf} is not under {SECURITY_GROUP}.*"
+            );
+        }
     }
 }
