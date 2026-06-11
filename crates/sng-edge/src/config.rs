@@ -866,6 +866,17 @@ fn validate_swg(swg: &SwgConfig) -> Result<(), String> {
     if !(swg.ext_authz_enabled && swg.clamav_enabled) {
         return Ok(());
     }
+    // An empty endpoint is never a valid `clamd` target — guard it
+    // the same way `comms.endpoint` is guarded above. (A non-empty
+    // but unreachable / unparseable endpoint is intentionally left to
+    // surface as a fail-posture scan result with telemetry, per the
+    // `ClamdScanner` design, rather than a load-time error.)
+    if swg.clamav_endpoint.trim().is_empty() {
+        return Err(
+            "swg.clamav_endpoint must be non-empty when clamav_enabled (e.g. tcp://127.0.0.1:3310)"
+                .into(),
+        );
+    }
     if swg.clamav_max_bytes == 0 {
         return Err(
             "swg.clamav_max_bytes must be > 0 when clamav_enabled (0 scans nothing)".into(),
@@ -1588,6 +1599,42 @@ clamav_timeout = "0s"
         assert!(
             load_from_path(f.path()).is_ok(),
             "a zero clamav_timeout must be inert while the scanner is disabled"
+        );
+    }
+
+    /// An empty `clamav_endpoint` is rejected once the scanner is
+    /// enabled — it is never a valid `clamd` target, mirroring the
+    /// existing non-empty guard on `comms.endpoint`.
+    #[test]
+    fn validate_rejects_empty_clamav_endpoint_when_scanner_enabled() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+site_id   = "33333333-3333-3333-3333-333333333333"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[swg]
+ext_authz_enabled = true
+clamav_enabled    = true
+clamav_endpoint   = ""
+"#,
+        )
+        .unwrap();
+        let err = load_from_path(f.path()).unwrap_err();
+        let ConfigError::Invariant { message, .. } = err else {
+            panic!("expected Invariant error, got {err:?}");
+        };
+        assert!(
+            message.contains("swg.clamav_endpoint"),
+            "message did not name the bad field: {message}"
         );
     }
 
