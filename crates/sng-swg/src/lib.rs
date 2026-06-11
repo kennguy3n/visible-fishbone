@@ -151,7 +151,7 @@ pub use url_ml::{
     LocalLlmCategorizer, UrlMlClassifier, UrlModelBundle, UrlModelClaims, UrlModelSignature,
     UrlModelSigningKeyId, UrlModelVerifier,
 };
-pub use verdict::{Action, CategoryDenyPolicy, RequestContext, Verdict};
+pub use verdict::{Action, CategoryDenyConfig, CategoryDenyPolicy, RequestContext, Verdict};
 pub use yara::{
     YaraEngine, YaraMatch, YaraRuleBundle, YaraRuleBundleClaims, YaraRuleSignature,
     YaraRuleVerifier, YaraSeverity, YaraSigningKeyId,
