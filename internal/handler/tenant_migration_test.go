@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
@@ -85,6 +86,82 @@ func TestMigrateRegion_HappyPath(t *testing.T) {
 	}
 	if resp.DualRead {
 		t.Errorf("dual_read = true, want false on a completed migration")
+	}
+	got, err := tenantRepo.Get(context.Background(), seed.ID)
+	if err != nil {
+		t.Fatalf("get tenant: %v", err)
+	}
+	if got.Region != "eu-west-1" {
+		t.Errorf("tenant region = %q, want eu-west-1 (region must commit)", got.Region)
+	}
+}
+
+// TestMigrateRegion_AsyncDrive verifies the control-plane async posture
+// (EnableAsyncDrive): the POST returns 202 with a PENDING record
+// (dual_read armed, region not yet flipped) without blocking on the
+// pipeline, and once the background drive is drained the status endpoint
+// reports completion and the authoritative tenant region column has
+// flipped.
+func TestMigrateRegion_AsyncDrive(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	tenantRepo := memory.NewTenantRepository(store)
+	migRepo := memory.NewTenantMigrationRepository(store)
+	audit := memory.NewAuditLogRepository(store)
+	svc := tenant.New(tenantRepo, audit, nil)
+	seed, err := svc.Create(context.Background(), repository.Tenant{
+		Name:   "Acme",
+		Slug:   "acme-async",
+		Region: "us-east-1",
+		Tier:   repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	migrator, err := tenant.NewRegionMigrator(migRepo, tenantRepo, audit,
+		tenant.MigrationPlanes{Region: tenant.NewRegionColumnPlane(tenantRepo)}, nil)
+	if err != nil {
+		t.Fatalf("new migrator: %v", err)
+	}
+	migrator.EnableAsyncDrive()
+	h := NewTenantMigrationHandler(migrator)
+
+	rec := postMigrate(t, h, seed.ID.String(), `{"target_region":"eu-west-1"}`)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var resp MigrationResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// Async contract: the POST returns the pending record without waiting
+	// for the pipeline to run.
+	if resp.State != repository.MigrationStatePending {
+		t.Fatalf("async start state = %q, want pending", resp.State)
+	}
+	if !resp.DualRead {
+		t.Errorf("dual_read should be armed on the pending record")
+	}
+
+	// Drain the background drive (as graceful shutdown does), then the
+	// status endpoint reports the terminal completed record.
+	drainCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	migrator.Shutdown(drainCtx)
+
+	statusRec := getMigrationStatus(t, h, seed.ID.String())
+	if statusRec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", statusRec.Code, statusRec.Body.String())
+	}
+	var status MigrationResponse
+	if err := json.NewDecoder(statusRec.Body).Decode(&status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if status.State != repository.MigrationStateCompleted {
+		t.Fatalf("after drain state = %q, want completed", status.State)
+	}
+	if status.DualRead {
+		t.Errorf("dual_read should be cleared on completion")
 	}
 	got, err := tenantRepo.Get(context.Background(), seed.ID)
 	if err != nil {

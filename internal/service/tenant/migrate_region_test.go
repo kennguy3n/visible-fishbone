@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -234,6 +235,96 @@ func TestRegionMigration_HappyPath(t *testing.T) {
 		if cp.Steps[name].Status != "done" {
 			t.Errorf("step %q status = %q, want done", name, cp.Steps[name].Status)
 		}
+	}
+}
+
+// TestRegionMigration_AsyncDriveReturnsPendingThenCompletes asserts the
+// EnableAsyncDrive contract: Start returns the freshly-created PENDING
+// record without waiting for the pipeline, and draining the background
+// drive (as graceful shutdown does) leaves the migration completed.
+func TestRegionMigration_AsyncDriveReturnsPendingThenCompletes(t *testing.T) {
+	t.Parallel()
+	// Nil planes: every step is a logged no-op, so the background drive
+	// completes promptly once launched.
+	m, _, tenants := newMigrator(t, tenant.MigrationPlanes{})
+	m.EnableAsyncDrive()
+	tnt := seedTenant(t, tenants, "us-east-1")
+	ctx := context.Background()
+
+	got, err := m.Start(ctx, tnt.ID, "eu-central-1")
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got.State != repository.MigrationStatePending {
+		t.Fatalf("async Start returned state %q, want pending", got.State)
+	}
+	if !got.DualRead {
+		t.Errorf("dual_read should be armed on the pending record")
+	}
+	if got.CompletedAt != nil {
+		t.Errorf("completed_at should be unset on the pending record")
+	}
+
+	// Drain the in-flight background drive, then the migration is terminal.
+	drainCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	m.Shutdown(drainCtx)
+
+	final, err := m.MigrationStatus(ctx, tnt.ID)
+	if err != nil {
+		t.Fatalf("MigrationStatus: %v", err)
+	}
+	if final.State != repository.MigrationStateCompleted {
+		t.Fatalf("after drain state = %q, want completed", final.State)
+	}
+	if final.DualRead {
+		t.Errorf("dual_read should be cleared on completion")
+	}
+	if final.CompletedAt == nil {
+		t.Errorf("completed_at should be set on completion")
+	}
+}
+
+// TestRegionMigration_AsyncDriveRollsBackOnFailure asserts that in async
+// mode a forward-step failure does not surface to the Start caller (the
+// pipeline runs in the background); the migration rolls back to a
+// terminal state, observable once the background drive is drained.
+func TestRegionMigration_AsyncDriveRollsBackOnFailure(t *testing.T) {
+	t.Parallel()
+	rec := newRecordingPlane()
+	rec.failForward["copy_objects"] = errors.New("boom")
+	m, _, tenants := newMigrator(t, tenant.MigrationPlanes{
+		Keys:      rec,
+		Telemetry: rec,
+		Objects:   objectPlane{rec},
+		PoP:       popPlane{rec},
+		Region:    &regionPlane{r: rec},
+	})
+	m.EnableAsyncDrive()
+	tnt := seedTenant(t, tenants, "us-east-1")
+	ctx := context.Background()
+
+	got, err := m.Start(ctx, tnt.ID, "eu-central-1")
+	if err != nil {
+		t.Fatalf("async Start must not surface the forward-step cause: %v", err)
+	}
+	if got.State != repository.MigrationStatePending {
+		t.Fatalf("async Start returned state %q, want pending", got.State)
+	}
+
+	drainCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	m.Shutdown(drainCtx)
+
+	final, err := m.MigrationStatus(ctx, tnt.ID)
+	if err != nil {
+		t.Fatalf("MigrationStatus: %v", err)
+	}
+	if final.State != repository.MigrationStateRolledBack {
+		t.Fatalf("after drain state = %q, want rolled_back", final.State)
+	}
+	if final.DualRead {
+		t.Errorf("dual_read should be cleared on terminal rollback")
 	}
 }
 

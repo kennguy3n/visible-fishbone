@@ -176,6 +176,28 @@ func (s *CMKService) ReWrapDataKey(ctx context.Context, tenantID uuid.UUID, wrap
 		return WrappedDataKey{}, fmt.Errorf("residency: re-wrap data key (tenant %s, %s->%s): %w",
 			tenantID, wrapped.Kind, target.Kind, err)
 	}
+	// Audit trail for the trusted re-wrap. ReWrapDataKey deliberately
+	// skips enforceRegionBinding (during a migration the tenant's
+	// designated region is still the SOURCE until the final flip), so the
+	// migration orchestrator — not the CMKService — is the residency
+	// authority for this one step. Emitting a structured audit record of
+	// the source→target KEK makes that trusted hand-off observable: a
+	// compliance review can confirm which KEK/region a tenant's DEKs were
+	// re-sealed under, and a re-wrap onto an unexpected region/KEK is
+	// detectable after the fact even though it was not blocked inline.
+	// Only key references and regions are recorded — never the plaintext
+	// or wrapped key bytes (the KeyURI is length-bounded by Validate so it
+	// is safe to log). Emitted on the central log pipeline, mirroring how
+	// the residency enforcement Service records its decisions.
+	s.logger.InfoContext(ctx, "residency: re-wrapped tenant DEK",
+		"audit", "cmk.rewrap",
+		"tenant_id", tenantID,
+		"source_kind", wrapped.Kind,
+		"source_key_uri", wrapped.KeyURI,
+		"target_kind", target.Kind,
+		"target_region", target.Region,
+		"target_key_uri", target.KeyURI,
+	)
 	return rewrapped, nil
 }
 
