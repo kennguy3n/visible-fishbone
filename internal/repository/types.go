@@ -224,6 +224,43 @@ const (
 	DeviceStatusDeleted   DeviceStatus = "deleted"
 )
 
+// CertificateHealth describes the health of a device's locally-held
+// mTLS identity certificate (the leaf the agent enrolled with). The
+// string values mirror the ZTNA evaluator's wire contract exactly
+// (`crates/sng-ztna/src/device.rs`, `serde(rename_all = "snake_case")`)
+// so a posture record round-trips between the control plane and the
+// evaluator without a translation table.
+type CertificateHealth string
+
+const (
+	// CertificateHealthHealthy: present and well within its
+	// validity window.
+	CertificateHealthHealthy CertificateHealth = "healthy"
+	// CertificateHealthExpiring: still valid but inside the renewal
+	// window (expiring soon).
+	CertificateHealthExpiring CertificateHealth = "expiring"
+	// CertificateHealthExpired: past notAfter (or before notBefore);
+	// the device can no longer present a valid identity.
+	CertificateHealthExpired CertificateHealth = "expired"
+	// CertificateHealthUnknown is the fail-closed default: not
+	// reported, unreadable, or reported by an agent that predates
+	// the signal. Treated as a degraded signal by the evaluator.
+	CertificateHealthUnknown CertificateHealth = "unknown"
+)
+
+// Normalized returns a recognized CertificateHealth, collapsing the
+// empty string (older agent / unset) and any unrecognized value to
+// the fail-closed [CertificateHealthUnknown]. A missing or garbled
+// signal can therefore never read as Healthy.
+func (c CertificateHealth) Normalized() CertificateHealth {
+	switch c {
+	case CertificateHealthHealthy, CertificateHealthExpiring, CertificateHealthExpired:
+		return c
+	default:
+		return CertificateHealthUnknown
+	}
+}
+
 // Posture is a structured device-health snapshot covering both
 // desktop and mobile signals. Stored as JSON on devices.posture.
 // Fields are deliberately optional (`omitempty`) so older agents
@@ -241,6 +278,27 @@ type Posture struct {
 	ScreenLock      *bool  `json:"screen_lock,omitempty"`
 	PatchLevel      string `json:"patch_level,omitempty"`
 
+	// Expanded ZTNA posture signals (WS4). These mirror the
+	// evaluator's DevicePosture hard-gate inputs
+	// (`crates/sng-ztna/src/device.rs`): EDR sensor health, OS patch
+	// recency, AV real-time-protection state + signature freshness,
+	// and identity-certificate health. They were previously dropped
+	// at this ingestion boundary — `encoding/json` discards keys
+	// with no matching field — so an agent that collected them via
+	// the PAL collectors could not persist them to the device
+	// record the evaluator reads. Carried here as pointers / typed
+	// strings so an older agent that omits them serializes cleanly,
+	// and so a *missing* signal is distinguishable from a reported
+	// negative one. The evaluator applies the fail-closed defaults
+	// (a missing signal denies, never satisfies, a posture floor);
+	// see [Posture.OSPatchDaysSinceOrStale] and friends for the
+	// control-plane-side fail-closed reads.
+	EDRHealthy                   *bool             `json:"edr_healthy,omitempty"`
+	OSPatchDaysSince             *uint32           `json:"os_patch_days_since,omitempty"`
+	AntivirusEnabled             *bool             `json:"antivirus_enabled,omitempty"`
+	AntivirusDefinitionsAgeHours *uint32           `json:"antivirus_definitions_age_hours,omitempty"`
+	CertificateHealth            CertificateHealth `json:"certificate_health,omitempty"`
+
 	// Mobile-specific signals (only meaningful on ios/android).
 	PasscodeSet    *bool `json:"passcode_set,omitempty"`
 	Jailbroken     *bool `json:"jailbroken,omitempty"`    // iOS
@@ -252,6 +310,45 @@ type Posture struct {
 	// open so agents can report new posture facts without a
 	// migration round-trip.
 	Extra json.RawMessage `json:"extra,omitempty"`
+}
+
+// staleAgeSentinel is the fail-closed value the expanded
+// "age"/"days-since" posture signals collapse to when a snapshot does
+// not report them: the maximum uint32, i.e. "maximally stale". It
+// mirrors the evaluator's `default_stale_u32` (`u32::MAX`) so a
+// missing recency signal fails any freshness floor instead of reading
+// as freshly updated. Exported reads below use it.
+const staleAgeSentinel uint32 = ^uint32(0)
+
+// EDRHealthyOrFailClosed reports whether the device's EDR sensor is
+// healthy, treating an unreported signal (nil) as unhealthy. Mirrors
+// the evaluator's `edr_healthy: #[serde(default)] => false`.
+func (p Posture) EDRHealthyOrFailClosed() bool { return p.EDRHealthy != nil && *p.EDRHealthy }
+
+// AntivirusEnabledOrFailClosed reports whether AV real-time protection
+// is enabled, treating an unreported signal (nil) as disabled.
+func (p Posture) AntivirusEnabledOrFailClosed() bool {
+	return p.AntivirusEnabled != nil && *p.AntivirusEnabled
+}
+
+// OSPatchDaysSinceOrStale returns the days since the last OS patch,
+// collapsing an unreported signal to [staleAgeSentinel] so it fails
+// any `min_patch_days` floor rather than reading as freshly patched.
+func (p Posture) OSPatchDaysSinceOrStale() uint32 {
+	if p.OSPatchDaysSince == nil {
+		return staleAgeSentinel
+	}
+	return *p.OSPatchDaysSince
+}
+
+// AntivirusDefinitionsAgeHoursOrStale returns the AV signature age in
+// hours, collapsing an unreported signal to [staleAgeSentinel] so it
+// fails any `max_av_definition_age_hours` floor.
+func (p Posture) AntivirusDefinitionsAgeHoursOrStale() uint32 {
+	if p.AntivirusDefinitionsAgeHours == nil {
+		return staleAgeSentinel
+	}
+	return *p.AntivirusDefinitionsAgeHours
 }
 
 // Device is an enrolled endpoint.

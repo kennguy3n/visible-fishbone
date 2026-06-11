@@ -257,6 +257,89 @@ mod tests {
         );
     }
 
+    /// Reverse of [`map_certificate_health`]: broker variant → PAL
+    /// variant. **Test-only and deliberately exhaustive** — it exists
+    /// purely as the second half of the lockstep guard. The forward
+    /// map is exhaustive over the *PAL* enum, so adding a PAL variant
+    /// is a compile error there; this reverse map is exhaustive over
+    /// the *ZTNA* enum, so adding a broker variant is a compile error
+    /// here. Together they make it impossible to grow one
+    /// `CertificateHealth` without growing the other, which is the
+    /// invariant `map_certificate_health` relies on (and the one the
+    /// `sng_pal::CertificateHealth` doc-comment promises).
+    const fn map_certificate_health_rev(health: ZtnaCertificateHealth) -> PalCertificateHealth {
+        match health {
+            ZtnaCertificateHealth::Healthy => PalCertificateHealth::Healthy,
+            ZtnaCertificateHealth::Expiring => PalCertificateHealth::Expiring,
+            ZtnaCertificateHealth::Expired => PalCertificateHealth::Expired,
+            ZtnaCertificateHealth::Unknown => PalCertificateHealth::Unknown,
+        }
+    }
+
+    /// Every PAL `CertificateHealth` variant. The literal length means
+    /// adding a variant without updating this guard fails the
+    /// count-parity assertion below (in addition to the compile errors
+    /// the exhaustive maps raise).
+    const PAL_CERT_VARIANTS: [PalCertificateHealth; 4] = [
+        PalCertificateHealth::Healthy,
+        PalCertificateHealth::Expiring,
+        PalCertificateHealth::Expired,
+        PalCertificateHealth::Unknown,
+    ];
+
+    /// Every broker `CertificateHealth` variant.
+    const ZTNA_CERT_VARIANTS: [ZtnaCertificateHealth; 4] = [
+        ZtnaCertificateHealth::Healthy,
+        ZtnaCertificateHealth::Expiring,
+        ZtnaCertificateHealth::Expired,
+        ZtnaCertificateHealth::Unknown,
+    ];
+
+    /// Lockstep guard for the two `CertificateHealth` enums. They live
+    /// in separate crates (PAL must not depend on the broker) but must
+    /// stay mirror images: same cardinality, a forward/reverse
+    /// bijection, and — because both cross the wire as the
+    /// `certificate_health` posture field — byte-identical serde
+    /// representations. A divergence (a renamed variant, a missing one,
+    /// a `serde(rename)` on one side only) fails here rather than
+    /// silently mapping a real cert state onto the fail-closed
+    /// `Unknown` in production.
+    #[test]
+    fn certificate_health_enums_in_lockstep() {
+        assert_eq!(
+            PAL_CERT_VARIANTS.len(),
+            ZTNA_CERT_VARIANTS.len(),
+            "PAL and ZTNA CertificateHealth must have the same variant count"
+        );
+
+        // Forward then reverse is the identity over PAL, and the serde
+        // wire strings of corresponding variants are identical.
+        for pal in PAL_CERT_VARIANTS {
+            let ztna = map_certificate_health(pal);
+            assert_eq!(
+                map_certificate_health_rev(ztna),
+                pal,
+                "forward+reverse must round-trip PAL variant {pal:?}"
+            );
+            assert_eq!(
+                serde_json::to_string(&pal).unwrap(),
+                serde_json::to_string(&ztna).unwrap(),
+                "PAL/ZTNA wire form diverged for {pal:?}"
+            );
+        }
+
+        // Reverse then forward is the identity over ZTNA, so every
+        // broker variant has exactly one PAL pre-image (surjective +
+        // injective ⇒ bijective).
+        for ztna in ZTNA_CERT_VARIANTS {
+            assert_eq!(
+                map_certificate_health(map_certificate_health_rev(ztna)),
+                ztna,
+                "reverse+forward must round-trip ZTNA variant {ztna:?}"
+            );
+        }
+    }
+
     #[test]
     fn certificate_health_round_trips_every_variant() {
         for (pal, want) in [

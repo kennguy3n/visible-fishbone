@@ -451,3 +451,71 @@ func TestPosturePushIntegrationWithService(t *testing.T) {
 			got.Posture.DiskEncrypted != nil && *got.Posture.DiskEncrypted
 	})
 }
+
+func ptrU32(v uint32) *uint32 { return &v }
+
+// TestPosturePushCarriesExpandedPostureSignals is the WS4 follow-on
+// regression: the expanded ZTNA posture signals (EDR health, OS patch
+// recency, AV state + signature age, certificate health) must survive
+// the control-plane ingestion hop — publish → events stream → consumer
+// → device record — so the evaluator's hard gates actually bite.
+//
+// Before `repository.Posture` carried these fields, `encoding/json`
+// dropped the unknown keys on the way in, so a device that reported a
+// killed EDR sensor or stale AV definitions persisted as if it had
+// reported nothing. This drives the real wire path and asserts every
+// signal round-trips onto the persisted record.
+func TestPosturePushCarriesExpandedPostureSignals(t *testing.T) {
+	t.Parallel()
+	_, js := startEmbeddedNATS(t)
+	pub := setupEventsStream(t, js)
+
+	store := memory.NewStore()
+	tenant, err := memory.NewTenantRepository(store).Create(context.Background(), repository.Tenant{
+		Name: "T", Slug: "t", Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	devices := memory.NewDeviceRepository(store)
+	dev, err := devices.Create(context.Background(), tenant.ID, repository.Device{
+		Name: "laptop", Platform: repository.DevicePlatformWindows, PublicKeyEd25519: "k",
+	})
+	if err != nil {
+		t.Fatalf("create device: %v", err)
+	}
+
+	svc := identity.New(devices, memory.NewClaimTokenRepository(store), memory.NewAuditLogRepository(store), nil)
+	c := identity.NewPosturePushConsumer(js, svc, pub, testStreamPrefix, nil,
+		identity.WithPosturePushFetch(16, 200*time.Millisecond))
+	runConsumer(t, c)
+
+	// A device whose EDR sensor was killed, AV definitions are 240h
+	// stale, OS last patched 45 days ago, and identity cert is past
+	// expiry — every expanded signal on its *deny* side.
+	publishPostureUpdate(t, pub, identity.PostureUpdate{
+		TenantID: tenant.ID,
+		DeviceID: dev.ID,
+		Posture: repository.Posture{
+			OSVersion:                    "Win 11 23H2",
+			EDRHealthy:                   ptrBool(false),
+			OSPatchDaysSince:             ptrU32(45),
+			AntivirusEnabled:             ptrBool(true),
+			AntivirusDefinitionsAgeHours: ptrU32(240),
+			CertificateHealth:            repository.CertificateHealthExpired,
+		},
+	}, tenant.ID.String())
+
+	waitFor(t, "expanded posture signals persisted", func() bool {
+		got, err := devices.Get(context.Background(), tenant.ID, dev.ID)
+		if err != nil || got.Posture.EDRHealthy == nil {
+			return false
+		}
+		p := got.Posture
+		return !*p.EDRHealthy &&
+			p.OSPatchDaysSince != nil && *p.OSPatchDaysSince == 45 &&
+			p.AntivirusEnabled != nil && *p.AntivirusEnabled &&
+			p.AntivirusDefinitionsAgeHours != nil && *p.AntivirusDefinitionsAgeHours == 240 &&
+			p.CertificateHealth == repository.CertificateHealthExpired
+	})
+}
