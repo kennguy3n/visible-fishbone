@@ -103,6 +103,25 @@ struct Classified {
     result: Result<ZtnaDecision, ZtnaError>,
 }
 
+/// Which observability path [`MobileZtnaManager::classify`] drives the
+/// shared evaluator through. The verdict is identical either way (same
+/// evaluator, so a tracked grant can never outlive a fresh access
+/// request); only the service-side bookkeeping differs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EvalPath {
+    /// An explicit user access request: emit the access-path telemetry
+    /// event and bump the access decision counters
+    /// ([`ZtnaService::evaluate`]).
+    Access,
+    /// The periodic adaptive-trust sweep: re-run the evaluator quietly
+    /// ([`ZtnaService::evaluate_for_reeval`]). A sweep touches every
+    /// live session across ~5000 tenants each cycle, so routing it
+    /// through the access path would drown the producer's telemetry
+    /// channel and double-count sweep verdicts into access counters.
+    /// The sweep owns its own revocation telemetry instead.
+    Reeval,
+}
+
 /// Map a [`ZtnaError`] (the provider-miss short-circuits that
 /// `ZtnaService::evaluate` returns as `Err`) to the same stable
 /// reason label the allow/deny telemetry uses, so dashboards bucket
@@ -166,6 +185,47 @@ impl MobileZtnaManager {
         );
     }
 
+    /// Apply a sweep-driven revocation only if the app's state has not
+    /// changed since the sweep snapshotted it, returning whether the
+    /// deny was written.
+    ///
+    /// The sweep snapshots the allowed apps under the lock, releases it
+    /// to run `classify` (which must not hold the lock across the
+    /// service call), then re-acquires it here to record a demotion.
+    /// That gap is a TOCTOU window: a concurrent explicit
+    /// [`Self::evaluate`] could re-decide the same app — typically a
+    /// user re-requesting it against a *fresher* posture than the sweep
+    /// saw — and a blind write would clobber that newer grant with the
+    /// stale sweep deny. Guarding on `decided_at` (a monotonic
+    /// per-decision version stamp) makes the revocation a compare-and-
+    /// set: if the entry was re-decided under us (different
+    /// `decided_at`) or already revoked, the fresher decision wins and
+    /// the sweep drops its stale deny.
+    fn revoke_if_unchanged(
+        &self,
+        request: &AccessRequest,
+        reason: &str,
+        now: DateTime<Utc>,
+        snapshot_decided_at: DateTime<Utc>,
+    ) -> bool {
+        let mut state = self.app_state.lock();
+        match state.get(&request.app_id) {
+            Some(s) if s.allowed && s.decided_at == snapshot_decided_at => {
+                state.insert(
+                    request.app_id.clone(),
+                    AppAccessState {
+                        allowed: false,
+                        reason: reason.to_owned(),
+                        decided_at: now,
+                        request: request.clone(),
+                    },
+                );
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Evaluate one request without recording any side effects: run
     /// the fail-closed mobile posture pre-gate, then (if it passes)
     /// the shared policy engine, collapsing all three outcomes
@@ -176,6 +236,7 @@ impl MobileZtnaManager {
         &self,
         request: &AccessRequest,
         posture: Option<&MobilePostureSnapshot>,
+        path: EvalPath,
     ) -> Classified {
         if let Some(gate_label) = posture_pre_gate(posture) {
             let reason = ZtnaDecisionReason::DevicePostureInsufficient;
@@ -197,7 +258,13 @@ impl MobileZtnaManager {
                 result: Ok(decision),
             };
         }
-        match self.service.evaluate(request) {
+        // Same verdict on both paths; `Reeval` stays off the
+        // access-path counters and telemetry channel (see [`EvalPath`]).
+        let result = match path {
+            EvalPath::Access => self.service.evaluate(request),
+            EvalPath::Reeval => self.service.evaluate_for_reeval(request),
+        };
+        match result {
             Ok(decision) => Classified {
                 allow: decision.allow,
                 reason: decision.reason.as_str().to_owned(),
@@ -249,7 +316,7 @@ impl MobileZtnaManager {
         posture: Option<&MobilePostureSnapshot>,
         now: DateTime<Utc>,
     ) -> Result<ZtnaDecision, MobileError> {
-        let c = self.classify(request, posture);
+        let c = self.classify(request, posture, EvalPath::Access);
         if let Some(gate_label) = c.posture_detail.as_deref() {
             warn!(
                 app_id = %request.app_id,
@@ -299,11 +366,13 @@ impl MobileZtnaManager {
         now: DateTime<Utc>,
         now_ms: u64,
     ) -> Vec<String> {
-        // Snapshot the allowed apps' originating requests under the
-        // lock, then release it before evaluating — `classify` does not
-        // touch the lock but `record_state` / `allowed_apps` do, and
-        // holding it across the await would serialise the egress.
-        let active: Vec<AccessRequest> = {
+        // Snapshot the allowed apps' originating requests (with the
+        // `decided_at` version stamp that `revoke_if_unchanged` guards
+        // on) under the lock, then release it before evaluating —
+        // `classify` does not touch the lock but `record_state` /
+        // `allowed_apps` do, and holding it across the await would
+        // serialise the egress.
+        let active: Vec<(AccessRequest, DateTime<Utc>)> = {
             let state = self.app_state.lock();
             state
                 .values()
@@ -311,16 +380,24 @@ impl MobileZtnaManager {
                 .map(|s| {
                     let mut req = s.request.clone();
                     req.now_ms = now_ms;
-                    req
+                    (req, s.decided_at)
                 })
                 .collect()
         };
         let mut revoked = Vec::new();
-        for request in active {
-            let c = self.classify(&request, posture);
+        for (request, snapshot_decided_at) in active {
+            let c = self.classify(&request, posture, EvalPath::Reeval);
             if c.allow {
                 // Still allowed: leave the per-app state and telemetry
                 // untouched so an unchanged fleet stays silent.
+                continue;
+            }
+            // Compare-and-set the demotion against the snapshot stamp. If
+            // a concurrent explicit access re-decided the app under us,
+            // that fresher decision wins and we emit nothing — keeping
+            // the revocation telemetry in lock-step with the state we
+            // actually changed.
+            if !self.revoke_if_unchanged(&request, &c.reason, now, snapshot_decided_at) {
                 continue;
             }
             if let Some(gate_label) = c.posture_detail.as_deref() {
@@ -339,7 +416,6 @@ impl MobileZtnaManager {
                 identity_verified: c.identity_verified,
             };
             self.record_telemetry_best_effort(&event, now).await;
-            self.record_state(&request, false, &c.reason, now);
             revoked.push(request.app_id);
         }
         revoked
@@ -602,6 +678,53 @@ mod tests {
         let state = mgr.app_state("wiki").expect("state recorded");
         assert!(!state.allowed);
         assert!(mgr.allowed_apps().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reeval_does_not_clobber_a_concurrent_regrant() {
+        // TOCTOU guard: the sweep snapshots an app as allowed, releases
+        // the lock to classify it, and decides to revoke. If an explicit
+        // access re-decided that app against a *fresher* posture in the
+        // gap, the sweep's stale deny must not overwrite the newer grant.
+        let now_ms = 2_000;
+        let mgr = manager_with_granted_wiki(now_ms).await;
+        let req = AccessRequest::new("wiki", "dev-1", "alice", now_ms);
+
+        // The version stamp the sweep would have snapshotted at grant time.
+        let snapshot_stamp = mgr.app_state("wiki").expect("granted").decided_at;
+
+        // A concurrent explicit re-grant lands with a newer decided_at.
+        let regrant_at = snapshot_stamp + chrono::Duration::seconds(1);
+        mgr.evaluate(&req, Some(&healthy_posture()), regrant_at)
+            .await
+            .unwrap();
+
+        // The sweep now tries to revoke against its *stale* snapshot stamp.
+        let applied = mgr.revoke_if_unchanged(
+            &req,
+            "device_posture_insufficient",
+            regrant_at + chrono::Duration::seconds(1),
+            snapshot_stamp,
+        );
+        assert!(
+            !applied,
+            "a stale sweep deny must not clobber a newer grant"
+        );
+        let state = mgr.app_state("wiki").expect("state recorded");
+        assert!(state.allowed, "the concurrent re-grant must survive");
+        assert_eq!(state.decided_at, regrant_at);
+        assert_eq!(mgr.allowed_apps(), vec!["wiki".to_owned()]);
+
+        // With the up-to-date stamp the same revocation does apply, so the
+        // guard only suppresses *stale* writes, never legitimate ones.
+        let applied = mgr.revoke_if_unchanged(
+            &req,
+            "device_posture_insufficient",
+            regrant_at + chrono::Duration::seconds(2),
+            regrant_at,
+        );
+        assert!(applied, "an unchanged entry must still revoke");
+        assert!(!mgr.app_state("wiki").expect("state recorded").allowed);
     }
 
     #[tokio::test]
