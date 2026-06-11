@@ -1,4 +1,8 @@
 # Locally fetched model weights (multi-GB) — never commit these.
-# scripts/fetch-bonsai-gguf.sh downloads + verifies them on demand.
-models/
+# scripts/fetch-bonsai-gguf.sh downloads + verifies them on demand, and the
+# offline image bake stages a pre-fetched GGUF here. Keep the directory itself
+# (via .keep) so Dockerfile.llamacpp's `COPY deploy/ollama/models/` works on a
+# clean checkout, but never commit the weights.
+models/*
+!models/.keep
 *.gguf

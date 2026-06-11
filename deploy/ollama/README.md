@@ -79,6 +79,21 @@ Or via compose (opt-in `q2` profile, leaves the Ollama path untouched):
 docker compose -f deploy/ollama/docker-compose.yml --profile q2 up -d bonsai-q2
 ```
 
+**Offline bake (build host has no egress):** pre-fetch on a connected host,
+stage the GGUF under `models/`, then build with `SNG_LLM_OFFLINE=1` — the
+build verifies the staged file's SHA-256 only and never touches the network
+(exit 2 if missing, exit 3 if it fails verification):
+
+```bash
+scripts/fetch-bonsai-gguf.sh --out-dir deploy/ollama/models   # connected host
+docker build -f deploy/ollama/Dockerfile.llamacpp \
+  --build-arg SNG_LLM_OFFLINE=1 -t sng-bonsai-q2:local .       # air-gapped build
+# compose: SNG_LLM_OFFLINE=1 docker compose -f deploy/ollama/docker-compose.yml build bonsai-q2
+```
+
+Staged `*.gguf` are gitignored (a tracked `.keep` preserves the directory);
+never commit the weights.
+
 ### 2b. Runtime-pull (llama-server, model fetched at start)
 
 ```bash
