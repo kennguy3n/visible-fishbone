@@ -236,15 +236,22 @@ rule html_smuggling_base64_blob {
         $mssave = "msSaveOrOpenBlob" nocase
         $mssave2 = "msSaveBlob" nocase
         $download_attr = /\.download\s*=/ nocase
-        $click = ".click()" nocase
     condition:
-        // Script + a long base64 blob + a decode step + a
-        // file-reconstruction/forced-download step. A page that merely
-        // embeds a base64 data-URI image (long blob, no decode-to-Blob)
-        // never satisfies the third clause.
-        $script and $b64blob and
-        ($atob or $b64decode) and
-        ($blob or $createurl or $mssave or $mssave2 or $download_attr or $click)
+        // A large in-page base64 blob (the smuggled bytes) that is BOTH
+        // decoded AND reconstituted into a file the browser saves to disk:
+        //   (a) an atob() decode feeding Blob()/createObjectURL()/msSave*, or
+        //   (b) a base64 data: URI wired to an anchor `download` attribute.
+        // The earlier formulation also accepted a lone `.click()` or a bare
+        // `base64,`, so a benign page that embeds a base64 data-URI <img>
+        // and calls `.click()` on any element (e.g. an auto-advancing
+        // carousel) matched. Requiring the decode->reconstruction/forced-
+        // download chain removes that false positive: a data-URI <img> has
+        // no atob()->Blob() chain and no `download=` attribute, so it
+        // satisfies neither inner clause.
+        $script and $b64blob and (
+            ($atob and ($blob or $createurl or $mssave or $mssave2)) or
+            ($b64decode and $download_attr)
+        )
 }
 
 rule pdf_active_javascript {
@@ -281,7 +288,10 @@ rule vba_macro_obfuscation {
         description = "VBA macro source: auto-exec hook paired with process spawn / heavy obfuscation"
     strings:
         $sub_auto = /Sub\s+(Auto_Open|AutoOpen|Auto_Close|AutoClose|Auto_Exec|Workbook_Open|Workbook_Activate|Workbook_BeforeClose|Document_Open|Document_Close)\b/ nocase
-        $shell = /\bShell\s*\(/ nocase
+        // Both VBA spawn forms: the function call `Shell("…")` and the
+        // statement form `Shell "cmd", vbHide` (no parentheses), which is at
+        // least as common in malicious macros.
+        $shell = /\bShell\s*["(]/ nocase
         $createobj = "CreateObject" nocase
         $wscript = "WScript.Shell" nocase
         $winmgmts = "winmgmts:" nocase
@@ -333,24 +343,41 @@ rule archive_smuggled_executable {
         family = "archive_smuggling"
         description = "ZIP whose member filename is a double-extension or dangerous executable"
     strings:
-        // ZIP local-file-header filenames are stored in plaintext even
-        // when the member's *content* is deflated, so the dropped
-        // payload's name is visible to a byte scanner without unpacking.
+        // ZIP local-file-header *and* central-directory records store each
+        // member filename in plaintext even when the member body is
+        // deflated, so the dropped payload's name is visible to a byte
+        // scanner without unpacking.
         //
-        // Document-then-executable double extension (invoice.pdf.exe):
-        // never legitimate, so no trailing boundary is needed. `js` is
-        // deliberately excluded from this list: it is a proper prefix of
-        // common benign extensions (`.json`, `.jsx`) and build artifacts
-        // (`index.html.js`), and a flat byte scan of a ZIP cannot see where
-        // the member name ends (the local-header copy is followed by the
-        // deflate stream and the central-directory copy by `PK\x01\x02`, so
-        // a trailing-boundary anchor would be unreliable). Malicious script
-        // *content* is still caught by the `javascript_*` rules, and the
-        // evasive encoded-JScript form keeps its dedicated `jse` token.
-        $double = /\.(pdf|docx?|xlsx?|pptx?|rtf|jpe?g|png|gif|txt|csv|html?|zip)\.(exe|scr|pif|com|bat|cmd|vbs|vbe|jse|wsf|wsh|hta|ps1|jar|lnk|msi|dll)/ nocase
-        // A bare highly-dangerous extension whose name is essentially
-        // never a legitimate substring prefix (so no lookahead needed).
-        $bare = /\.(exe|scr|pif|vbe|jse|wsf|hta|lnk|msi)/ nocase
+        // Every extension is anchored on a trailing, case-sensitive `PK`
+        // (`50 4b`): in the central directory a member name is immediately
+        // followed by that entry's extra field + comment and then the next
+        // record signature (`PK\x01\x02` for a further entry, `PK\x05\x06`
+        // for end-of-central-directory). With no per-entry extra field or
+        // comment — the case for essentially every archive a dropper ships
+        // in — the filename's final extension therefore sits directly
+        // before `PK`. Anchoring here asserts the matched extension is the
+        // *terminal* extension of the name rather than a substring of a
+        // longer one, which eliminates the `.js`-in-`.json`/`.jsx` and
+        // `.hta`-in-`.htaccess` / `.scr`-in-`.script` false positives
+        // without having to guess where the (binary, unpredictable) deflate
+        // stream after the local-header copy begins. `PK` is matched
+        // case-sensitively because it is a binary record signature, never a
+        // filename character; the extension alternations stay case-
+        // insensitive via inline `(?i:...)`.
+        //
+        // Document-then-executable double extension (invoice.pdf.exe).
+        // `js` is excluded from the executable alternation: unlike the
+        // `.js`-in-`.json` substring case (which the `PK` anchor already
+        // rejects), a member can legitimately *terminate* in `.js` behind a
+        // document token — e.g. the common build artifact `index.html.js`
+        // (`.html` + `.js`) — so a name-based `.html.js` match would be a
+        // true false positive that the anchor cannot distinguish. Malicious
+        // `.js` payloads are caught by content (`javascript_*` rules), and
+        // the evasive encoded-JScript form keeps its dedicated `jse` token.
+        $double = /\.(?i:pdf|docx?|xlsx?|pptx?|rtf|jpe?g|png|gif|txt|csv|html?|zip)\.(?i:exe|scr|pif|com|bat|cmd|vbs|vbe|jse|wsf|wsh|hta|ps1|jar|lnk|msi|dll)PK/
+        // A bare highly-dangerous executable/script extension as the
+        // member's terminal extension (launch.hta, run.vbe).
+        $bare = /\.(?i:exe|scr|pif|vbe|jse|wsf|hta|lnk|msi)PK/
     condition:
         uint32(0) == 0x04034B50 and ($double or $bare)
 }
@@ -898,23 +925,38 @@ mod tests {
     }
 
     #[test]
-    fn archive_smuggling_does_not_flag_json_or_jsx_members() {
-        // `data.txt.json` / `app.html.jsx` / `index.html.js` are benign
-        // double-component names whose tail begins with the `js` token; they
-        // must not be misread as `.<doc>.js` double-extension droppers.
+    fn archive_smuggling_anchors_extensions_on_zip_record_terminus() {
+        // `data.txt.json` / `app.html.jsx` / `index.html.js` (the `.js`
+        // token sits inside a longer extension) and `.htaccess` / `.script`
+        // (a dangerous token is a prefix of the real extension) are benign.
+        // None has its dangerous token immediately before a `PK` record
+        // signature, so none may match.
         let engine = YaraEngine::with_builtin_rules().unwrap();
-        let mut zip = vec![0x50, 0x4B, 0x03, 0x04];
-        zip.extend_from_slice(b"data.txt.json....app.html.jsx....index.html.js....");
+        let mut benign = vec![0x50, 0x4B, 0x03, 0x04];
+        benign.extend_from_slice(b"data.txt.json\x50\x4b\x01\x02app.html.jsx\x50\x4b");
+        benign.extend_from_slice(b"index.html.js\x50\x4b.htaccess\x50\x4b.script\x50\x4b\x05\x06");
         assert!(
-            engine.scan(&zip).is_empty(),
-            "benign .json/.jsx/.html.js ZIP members must not match archive_smuggled_executable"
+            engine.scan(&benign).is_empty(),
+            ".json/.jsx/.html.js/.htaccess/.script members must not match archive_smuggled_executable"
         );
 
-        // A genuine document->executable double extension still fires.
-        let mut bad = vec![0x50, 0x4B, 0x03, 0x04];
-        bad.extend_from_slice(b"Invoice_2024.pdf.exe\x00\x00deflated-body");
-        let m = engine.worst_match(&bad).expect("double-extension match");
-        assert_eq!(m.rule, "archive_smuggled_executable");
+        // A genuine terminal dangerous extension — as it appears in a ZIP
+        // central-directory record, immediately before the next record's
+        // `PK` signature — still fires, for both the bare and the
+        // document-prefixed forms.
+        for name in [
+            &b"run.vbe"[..],
+            &b"launch.hta"[..],
+            &b"Invoice_2024.pdf.exe"[..],
+        ] {
+            let mut bad = vec![0x50, 0x4B, 0x03, 0x04];
+            bad.extend_from_slice(name);
+            bad.extend_from_slice(b"\x50\x4b\x05\x06"); // central-dir / EOCD terminus
+            let m = engine
+                .worst_match(&bad)
+                .unwrap_or_else(|| panic!("expected match for {:?}", std::str::from_utf8(name)));
+            assert_eq!(m.rule, "archive_smuggled_executable");
+        }
     }
 
     #[test]
