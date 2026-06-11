@@ -13,8 +13,14 @@
 //!
 //! ```text
 //!   [client ns] cli --- rtrc [router ns] rtrs --- srv [sink ns]
-//!     10.0.0.5/24        10.0.0.1  10.1.0.1       10.1.0.2/24
+//!     10.0.0.5/32     10.0.0.1/32  10.1.0.1/24    10.1.0.2/24
 //! ```
+//!
+//! The client and its router leg are /32s (no connected subnet on the
+//! client) so every probe destination — including the east-west corpus
+//! flows in 10.0.0.0/24 — leaves via the `onlink` default route and is
+//! forwarded by the router through the `forward` hook, rather than being
+//! resolved on-link and bypassing enforcement.
 //!
 //! The router enables forwarding and loads two nftables tables on the
 //! `forward` hook:
@@ -187,14 +193,22 @@ async fn build_topology(t: &Topology) -> Result<(), String> {
     ])
     .await?;
 
-    // Addressing + link state.
+    // Addressing + link state. The client and its router leg are addressed
+    // as /32 host routes (not a shared /24) on purpose: a connected /24 on
+    // `cli` would make any corpus destination inside it (the east-west
+    // telnet/SMB/RDP flows at 10.0.0.x) on-link, so the client would ARP for
+    // them directly and they would never reach the router's `forward` hook
+    // where the SNG ruleset lives — silently leaving those flows unenforced.
+    // With /32s the client has no connected subnet, every non-self packet
+    // takes the `onlink` default route to the router, and the router (owning
+    // no 10.0.0.0/24) forwards them all out the sink leg through the hook.
     sudo(&[
         "ip",
         "-n",
         &t.cli,
         "addr",
         "add",
-        "10.0.0.5/24",
+        "10.0.0.5/32",
         "dev",
         "cli",
     ])
@@ -205,7 +219,7 @@ async fn build_topology(t: &Topology) -> Result<(), String> {
         &t.rtr,
         "addr",
         "add",
-        "10.0.0.1/24",
+        "10.0.0.1/32",
         "dev",
         "rtrc",
     ])
@@ -247,9 +261,10 @@ async fn build_topology(t: &Topology) -> Result<(), String> {
     // Routing: client default via router; router forwards every probe
     // destination out the sink leg; the sink is a pure packet sink (no
     // route back, forwarding off) so an accepted packet is counted exactly
-    // once and never loops.
+    // once and never loops. `onlink` is required because the client's /32
+    // address leaves the 10.0.0.1 next-hop off any connected subnet.
     sudo(&[
-        "ip", "-n", &t.cli, "route", "add", "default", "via", "10.0.0.1",
+        "ip", "-n", &t.cli, "route", "add", "default", "via", "10.0.0.1", "dev", "cli", "onlink",
     ])
     .await?;
     sudo(&[
@@ -689,6 +704,25 @@ pub fn send_raw(src: Ipv4Addr, dst: Ipv4Addr, dport: u16, proto: Protocol) -> st
         }
     }
     Ok(())
+}
+
+/// Non-Linux stub: the raw-socket sender is Linux-only (it relies on
+/// `IPPROTO_RAW` and the `libc` dependency, which is target-gated in
+/// `Cargo.toml`). The driver never reaches this path off Linux — `run()`'s
+/// preflight reports UNTESTED when `ip`/`nft` are absent — but providing
+/// the symbol keeps the crate compiling on macOS/Windows for local work on
+/// the other (platform-independent) efficacy drivers.
+#[cfg(not(target_os = "linux"))]
+pub fn send_raw(
+    _src: Ipv4Addr,
+    _dst: Ipv4Addr,
+    _dport: u16,
+    _proto: Protocol,
+) -> std::io::Result<()> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "raw-socket probe injection is only supported on Linux",
+    ))
 }
 
 /// Standard one's-complement IPv4 header checksum.
