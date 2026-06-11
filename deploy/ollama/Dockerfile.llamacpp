@@ -78,7 +78,8 @@ RUN chmod +x /usr/local/bin/fetch-bonsai-gguf.sh \
          /usr/local/bin/fetch-bonsai-gguf.sh --variant "$SNG_LLM_VARIANT" --out-dir /models --offline; \
        else \
          /usr/local/bin/fetch-bonsai-gguf.sh --variant "$SNG_LLM_VARIANT" --out-dir /models; \
-       fi
+       fi \
+    && rm -f /models/.keep   # drop the git placeholder so only the GGUF ships
 
 # --- Stage 3: minimal runtime --------------------------------------------
 FROM debian:bookworm-slim AS runtime

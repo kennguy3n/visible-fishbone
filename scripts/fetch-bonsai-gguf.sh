@@ -120,7 +120,9 @@ sha256_of() {
 }
 size_of() { wc -c <"$1" | tr -d ' '; }
 
-command -v curl >/dev/null 2>&1 || die "curl is required"
+# Note: curl is only required for the download path; the --offline branch needs
+# just sha256sum/shasum + wc, so its presence is checked later (below), not
+# here — air-gapped build hosts using --offline often have no curl installed.
 
 mkdir -p "$OUT_DIR"
 DEST="$OUT_DIR/$FILENAME"
@@ -179,6 +181,9 @@ if [ "$RESUME" = "1" ] && [ -f "$DEST" ]; then
     rm -f "$DEST"
   fi
 fi
+
+# Only the download path needs curl (the --offline branch already exited).
+command -v curl >/dev/null 2>&1 || die "curl is required for the download path (use --offline to verify a pre-staged GGUF instead)"
 
 echo "Fetching $FILENAME ($VARIANT) from $URL"
 echo "  expecting $EXPECT_SIZE bytes, sha256=$EXPECT_SHA"
