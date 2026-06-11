@@ -7,9 +7,12 @@ use crate::validators::digits;
 ///
 /// The nine digits are weighted `9, 8, 7, 6, 5, 4, 3, 2, -1` (the
 /// trailing check digit carries weight `-1`); a number is valid when
-/// the weighted sum is a non-zero multiple of 11. The all-zero string
-/// passes the modulus but is never issued, so it is rejected outright.
-/// Spaces / separators the pattern allows are stripped first.
+/// the weighted sum is a *non-zero* multiple of 11. Requiring the sum
+/// to be non-zero rejects both the all-zero string and the handful of
+/// other low-value digit runs whose weighted sum lands exactly on 0 —
+/// none of which are ever issued — keeping the detector
+/// false-positive averse. Spaces / separators the pattern allows are
+/// stripped first.
 #[must_use]
 pub fn netherlands_bsn(s: &str) -> bool {
     const WEIGHTS: [i32; 9] = [9, 8, 7, 6, 5, 4, 3, 2, -1];
@@ -18,12 +21,11 @@ pub fn netherlands_bsn(s: &str) -> bool {
     if d.len() != 9 {
         return false;
     }
-    // The all-zero number satisfies the modulus but is never allocated.
-    if d.iter().all(|&x| x == 0) {
-        return false;
-    }
     let sum: i32 = d.iter().zip(WEIGHTS).map(|(&x, w)| i32::from(x) * w).sum();
-    sum % 11 == 0
+    // A zero weighted sum is divisible by 11 but is never an issued BSN
+    // (this also rejects the all-zero string); excluding it suppresses
+    // false positives on low-value digit runs.
+    sum != 0 && sum % 11 == 0
 }
 
 #[cfg(test)]
@@ -47,6 +49,7 @@ mod tests {
 
     #[test]
     fn bsn_accepts_and_rejects() {
+        const W8: [i32; 8] = [9, 8, 7, 6, 5, 4, 3, 2];
         let mut valid = 0;
         let mut invalid = 0;
         for seed in 1u32..60 {
@@ -60,6 +63,12 @@ mod tests {
             let Some(check) = bsn_check(&base) else {
                 continue;
             };
+            // The validator rejects a zero weighted sum (never issued),
+            // so skip the rare generated base that lands there.
+            let prefix: i32 = base.iter().zip(W8).map(|(&x, w)| i32::from(x) * w).sum();
+            if prefix - i32::from(check) == 0 {
+                continue;
+            }
             let good: String = base
                 .iter()
                 .chain(std::iter::once(&check))
@@ -85,10 +94,14 @@ mod tests {
         }
         // Structural + known rejects.
         assert!(!netherlands_bsn("000000000"), "all zeros never issued");
+        assert!(
+            !netherlands_bsn("000000012"),
+            "zero weighted sum never issued"
+        );
         assert!(!netherlands_bsn("12345678"), "8 digits");
         assert!(!netherlands_bsn("1234567890"), "10 digits");
         assert!(!netherlands_bsn("111222334"), "wrong check digit");
-        invalid += 4;
+        invalid += 5;
         assert!(valid >= 30, "only {valid} valid BSN vectors");
         assert!(invalid >= 20, "only {invalid} invalid BSN vectors");
     }
