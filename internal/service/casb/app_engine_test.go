@@ -12,6 +12,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
 	"github.com/kennguy3n/visible-fishbone/internal/service/casb"
+	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy"
 )
 
 // The memory and postgres backends must satisfy the service-owned
@@ -309,6 +310,50 @@ func TestReconcile_SkipsInactiveTenants(t *testing.T) {
 	cls, _ := fx.store.ListClassifications(ctx, active)
 	if len(cls) != 1 {
 		t.Fatalf("active tenant classifications = %d, want 1", len(cls))
+	}
+}
+
+func TestReconcile_ActivityTieredSkipsDormant(t *testing.T) {
+	fx := newEngineFixture(t)
+	p := tenancy.DefaultPlanner()
+	fx.engine.WithDormancyPlanner(&p)
+	ctx := context.Background()
+	devices := 9
+
+	// Active tenant: last_active = now, so it classifies TierActive and
+	// is visited every cycle.
+	active := fx.newTenant(t)
+	if err := fx.tenants.TouchLastActive(ctx, active, fx.clock); err != nil {
+		t.Fatalf("touch: %v", err)
+	}
+	if _, err := fx.apps.Upsert(ctx, active, repository.CASBDiscoveredApp{Name: "WeTransfer", Category: "file_transfer", ActiveDeviceCount: &devices}); err != nil {
+		t.Fatalf("seed active: %v", err)
+	}
+
+	// Cycle 0 is a full sweep: the active tenant is classified.
+	if err := fx.engine.Reconcile(ctx); err != nil {
+		t.Fatalf("reconcile cycle 0: %v", err)
+	}
+	if cls, _ := fx.store.ListClassifications(ctx, active); len(cls) != 1 {
+		t.Fatalf("active classifications after cycle 0 = %d, want 1", len(cls))
+	}
+
+	// A dormant tenant (never active) seeded after cycle 0. On cycle 1
+	// the dormant tier (DormantEvery=100) is not due, so it is skipped
+	// and never classified.
+	dormant := fx.newTenant(t)
+	if _, err := fx.apps.Upsert(ctx, dormant, repository.CASBDiscoveredApp{Name: "Telegram", Category: "messaging", ActiveDeviceCount: &devices}); err != nil {
+		t.Fatalf("seed dormant: %v", err)
+	}
+	if err := fx.engine.Reconcile(ctx); err != nil {
+		t.Fatalf("reconcile cycle 1: %v", err)
+	}
+	if cls, _ := fx.store.ListClassifications(ctx, dormant); len(cls) != 0 {
+		t.Fatalf("dormant tenant should be skipped on cycle 1, got %d classifications", len(cls))
+	}
+	// The active tenant is still re-evaluated every cycle.
+	if cls, _ := fx.store.ListClassifications(ctx, active); len(cls) != 1 {
+		t.Fatalf("active classifications after cycle 1 = %d, want 1", len(cls))
 	}
 }
 

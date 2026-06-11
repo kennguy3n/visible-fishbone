@@ -286,6 +286,15 @@ type Service struct {
 	// WithDLPReviewObserver.
 	dlpObserver DLPReviewObserver
 
+	// activity receives the tenant + timestamp of each event durably
+	// written to the hot store, so the dormancy planner
+	// (internal/service/tenancy) has a real data-plane activity signal
+	// to bucket on. nil disables the signal (the prior behaviour). The
+	// hook is called inline on the dispatch hot path, so the wired
+	// implementation (activity.Recorder) debounces per tenant and
+	// persists asynchronously. Set via WithActivityObserver.
+	activity ActivityObserver
+
 	mu     sync.Mutex
 	cancel context.CancelFunc
 	done   chan struct{}
@@ -309,6 +318,7 @@ type worker struct {
 	rowLimiter        RowWriteLimiter
 	shadowObserver    ShadowITObserver
 	dlpObserver       DLPReviewObserver
+	activity          ActivityObserver
 	dedup             *dedupRing
 }
 
@@ -352,6 +362,19 @@ type ShadowITObserver interface {
 // async work should not retain it past the call.
 type DLPReviewObserver interface {
 	ObserveDLP(ctx context.Context, tenantID, deviceID uuid.UUID, ev schema.DLPEvent, ts time.Time)
+}
+
+// ActivityObserver receives the tenant and timestamp of each event
+// durably written to the hot store — the data-plane "this tenant is
+// active" signal that tenants.last_active_at records for the dormancy
+// planner. Like ShadowITObserver it is called inline on the dispatch
+// hot path, so implementations MUST be cheap, non-blocking, and safe
+// for concurrent use (activity.Recorder debounces and writes
+// asynchronously). Declared here rather than importing the activity
+// package so the telemetry consumer depends only on the narrow
+// capability it needs and the dependency arrow points inward.
+type ActivityObserver interface {
+	Observe(tenantID uuid.UUID, seen time.Time)
 }
 
 // WithPerTenantLimiter wires a PerTenantLimiter onto the
@@ -450,6 +473,20 @@ func (s *Service) WithDLPReviewObserver(o DLPReviewObserver) *Service {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.dlpObserver = o
+	return s
+}
+
+// WithActivityObserver wires a per-tenant activity observer onto the
+// service. Once set, dispatch reports the tenant + event timestamp of
+// every envelope durably written to the hot store, giving the dormancy
+// planner a real data-plane activity signal (tenants.last_active_at).
+// Pass nil to remove it. Additive and optional — paths that pre-date
+// the activity signal keep their prior behaviour. Returns the receiver
+// for fluent wiring.
+func (s *Service) WithActivityObserver(o ActivityObserver) *Service {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.activity = o
 	return s
 }
 
@@ -584,6 +621,7 @@ func (s *Service) buildWorkers(ctx context.Context, partitioner *sngnats.TenantP
 			rowLimiter:        s.rowLimiter,
 			shadowObserver:    s.shadowObserver,
 			dlpObserver:       s.dlpObserver,
+			activity:          s.activity,
 			dedup:             s.dedup,
 		}}, nil
 	}
@@ -629,6 +667,7 @@ func (s *Service) buildWorkers(ctx context.Context, partitioner *sngnats.TenantP
 			rowLimiter:     s.rowLimiter,
 			shadowObserver: s.shadowObserver,
 			dlpObserver:    s.dlpObserver,
+			activity:       s.activity,
 			dedup:          newDedupRing(s.cfg.DedupRingSize),
 		})
 	}
@@ -972,6 +1011,13 @@ func (s *Service) dispatch(ctx context.Context, w *worker, msg jetstream.Msg) {
 	// runs once per unique event (after dedup) and must not block the
 	// hot path — the observer hands off to a bounded async enqueuer.
 	observeDLP(ctx, w.dlpObserver, env)
+	// Record the tenant as active from the same durably-written
+	// exhaust. Like shadow-IT it runs after the hot write + dedup so
+	// the dormancy planner's activity signal counts exactly the events
+	// that reached the hot store (sampled-out / duplicate events do not
+	// keep a tenant artificially "active"). The observer is debounced
+	// and writes asynchronously, so this stays cheap on the hot path.
+	observeActivity(w.activity, env)
 	s.metrics.Enriched.Add(1)
 	if err := msg.Ack(); err != nil {
 		s.logger.Warn("telemetry: ack failed", slog.Any("error", err))
@@ -1040,6 +1086,19 @@ func observeDLP(ctx context.Context, obs DLPReviewObserver, env schema.Envelope)
 		return
 	}
 	obs.ObserveDLP(ctx, env.TenantID, env.DeviceID, d, env.Timestamp)
+}
+
+// observeActivity reports the envelope's tenant + timestamp to the
+// activity observer (the dormancy planner's data-plane signal). A nil
+// observer or nil tenant is a no-op. Unlike shadow-IT it is
+// event-class-agnostic: any durably-written event of any class is
+// evidence the tenant is active. The observer (activity.Recorder)
+// debounces and persists asynchronously, so this stays cheap.
+func observeActivity(obs ActivityObserver, env schema.Envelope) {
+	if obs == nil || env.TenantID == uuid.Nil {
+		return
+	}
+	obs.Observe(env.TenantID, env.Timestamp)
 }
 
 // deliveryExhausted reports whether the message has reached the
