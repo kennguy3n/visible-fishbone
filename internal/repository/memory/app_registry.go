@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"net/netip"
+	"sort"
 	"strings"
 	"time"
 
@@ -188,6 +189,13 @@ func (r *AppRegistryRepository) ListAll(ctx context.Context) ([]repository.AppRe
 	for _, app := range r.s.appRegistry {
 		out = append(out, cloneAppRegistry(app))
 	}
+	// Match the postgres ListAll ordering (ORDER BY name). The map
+	// iteration above is non-deterministic; sorting by name keeps the
+	// two backends consistent. Names are unique (Create rejects
+	// case-insensitive duplicates), so this is a total order.
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name < out[j].Name
+	})
 	return out, nil
 }
 

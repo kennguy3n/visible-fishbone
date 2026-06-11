@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -74,6 +75,49 @@ func TestAppRegistryOverride_ListAll_OrdersCreatedAtDescIDDesc(t *testing.T) {
 	if got[len(got)-1].CustomDomains[0] != "oldest.example.com" {
 		t.Errorf("last = %v, want oldest.example.com", got[len(got)-1].CustomDomains)
 	}
+}
+
+// AppRegistryRepository.ListAll must return apps ordered by name to
+// match the postgres backend (ORDER BY name); the backing map iteration
+// is otherwise non-deterministic.
+func TestAppRegistry_ListAll_OrdersByName(t *testing.T) {
+	ctx := context.Background()
+	s := NewStore()
+	repo := NewAppRegistryRepository(s)
+
+	// Insert deliberately out of name order.
+	for _, name := range []string{"Slack", "GitHub", "Zoom", "Asana", "Notion"} {
+		if _, err := repo.Create(ctx, repository.AppRegistry{
+			Name:         name,
+			TrafficClass: repository.TrafficClassInspectFull,
+			Scope:        repository.AppRegistryScopeGlobal,
+			Domains:      []string{strings.ToLower(name) + ".com"},
+		}); err != nil {
+			t.Fatalf("create app %q: %v", name, err)
+		}
+	}
+
+	got, err := repo.ListAll(ctx)
+	if err != nil {
+		t.Fatalf("ListAll: %v", err)
+	}
+	want := []string{"Asana", "GitHub", "Notion", "Slack", "Zoom"}
+	if len(got) != len(want) {
+		t.Fatalf("ListAll returned %d apps, want %d", len(got), len(want))
+	}
+	for i, w := range want {
+		if got[i].Name != w {
+			t.Fatalf("ListAll[%d] = %q, want %q (full order %v)", i, got[i].Name, w, names(got))
+		}
+	}
+}
+
+func names(apps []repository.AppRegistry) []string {
+	out := make([]string, len(apps))
+	for i, a := range apps {
+		out[i] = a.Name
+	}
+	return out
 }
 
 // ListAll must scope strictly to the requested tenant.
