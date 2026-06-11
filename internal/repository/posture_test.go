@@ -47,6 +47,7 @@ func TestPostureExpandedSignalsJSONRoundTrip(t *testing.T) {
 	}
 	if back.EDRHealthy == nil || !*back.EDRHealthy ||
 		back.OSPatchDaysSince == nil || *back.OSPatchDaysSince != 3 ||
+		back.AntivirusEnabled == nil || !*back.AntivirusEnabled ||
 		back.AntivirusDefinitionsAgeHours == nil || *back.AntivirusDefinitionsAgeHours != 12 ||
 		back.CertificateHealth != CertificateHealthExpiring {
 		t.Fatalf("round-trip lost data: %+v", back)
