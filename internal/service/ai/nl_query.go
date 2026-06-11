@@ -154,9 +154,10 @@ type NLQueryResponse struct {
 // ParsedIntent is the structured interpretation of a natural
 // language query. Kind, Window and CompareVersions are derived
 // deterministically and are never taken from raw LLM output; the LLM
-// may only augment the free-form entity references (UserRef, AppRef,
-// DeviceRef, Action) when the deterministic tokenizer leaves them
-// empty.
+// may only fill the free-form entity references (UserRef, AppRef,
+// DeviceRef, Action) the deterministic tokenizer left empty, or extend
+// an anchored single-token reference to a multi-word name (see
+// mergeEntityRef). It can never swap a reference or alter routing.
 type ParsedIntent struct {
 	// Kind is the deterministically classified query family. An empty
 	// value is treated as IntentPolicyVerdict.
@@ -315,21 +316,15 @@ func (e *NLQueryEngine) ParseIntent(ctx context.Context, question string) (Inten
 }
 
 // mergeIntent augments the authoritative deterministic intent with the
-// LLM's entity references, but only where the deterministic tokenizer
-// found nothing. The deterministic Kind, Window and CompareVersions
-// are preserved verbatim so the LLM can never change the
-// classification or the verdict routing.
+// LLM's entity references. The deterministic Kind, Window and
+// CompareVersions are preserved verbatim so the LLM can never change
+// the classification or the verdict routing; the model may only fill or
+// extend the free-form entity references per mergeEntityRef.
 func mergeIntent(det, llm ParsedIntent) ParsedIntent {
 	merged := det
-	if merged.UserRef == "" {
-		merged.UserRef = cleanEntityRef(llm.UserRef)
-	}
-	if merged.AppRef == "" {
-		merged.AppRef = cleanEntityRef(llm.AppRef)
-	}
-	if merged.DeviceRef == "" {
-		merged.DeviceRef = cleanEntityRef(llm.DeviceRef)
-	}
+	merged.UserRef = mergeEntityRef(merged.UserRef, llm.UserRef)
+	merged.AppRef = mergeEntityRef(merged.AppRef, llm.AppRef)
+	merged.DeviceRef = mergeEntityRef(merged.DeviceRef, llm.DeviceRef)
 	// Action is enforcement-only state; never let the LLM attach one to
 	// a read-only analytics intent even if the deterministic pass left
 	// it empty.
@@ -337,6 +332,46 @@ func mergeIntent(det, llm ParsedIntent) ParsedIntent {
 		merged.Action = normalizeAction(llm.Action)
 	}
 	return merged
+}
+
+// mergeEntityRef reconciles the deterministic entity reference with the
+// model's. The deterministic tokenizer is single-token: it anchors a
+// reference on the word following a "user"/"app"/"device" keyword but
+// cannot span a multi-word name ("google drive", "john smith"). The
+// model is the component that knows where a name ends, so it is allowed
+// to do exactly two things here, and only these:
+//
+//   - when the tokenizer found nothing, supply the reference outright;
+//   - when the tokenizer anchored a single token, EXTEND it to the
+//     model's longer phrase — but only when that phrase begins with the
+//     anchored token as a whole word (case-insensitive). The model can
+//     lengthen a reference the deterministic pass already committed to;
+//     it can never swap it for an unrelated entity.
+//
+// Routing fields (Kind/Window/CompareVersions) are never sourced from
+// the model, so even a mis-extended reference can only change which
+// subject a question is about, never how it is classified or how the
+// verdict is computed — the compiled-bundle evaluator re-derives that
+// from the resolved entity. The accepted reference is lowercased to
+// preserve the all-lowercase invariant the deterministic tokenizer
+// establishes (it lowercases the whole question), so downstream host
+// and identity matching behaves identically whether or not the model
+// extended the reference.
+func mergeEntityRef(det, llmRaw string) string {
+	llmRef := cleanEntityRef(llmRaw)
+	if det == "" {
+		return strings.ToLower(llmRef)
+	}
+	if llmRef == "" {
+		return det
+	}
+	// Accept the model's reference only when it extends the anchored
+	// token: a multi-word phrase whose first word equals the token.
+	fields := strings.Fields(llmRef)
+	if len(fields) > 1 && strings.EqualFold(fields[0], det) {
+		return strings.ToLower(llmRef)
+	}
+	return det
 }
 
 // normalizeAction maps a free-form LLM action token onto the bounded
@@ -413,9 +448,12 @@ func (e *NLQueryEngine) parseWithLLM(ctx context.Context, question string) (Pars
 const entityRefCutset = "?!.,;:\"'`()[]{}<>"
 
 // cleanEntityRef strips surrounding punctuation and whitespace from a
-// token extracted as an entity reference.
+// token extracted as an entity reference. Whitespace is trimmed too so
+// a model reference like " salesforce " collapses to "salesforce";
+// interior spaces are preserved so multi-word names ("google drive")
+// survive intact.
 func cleanEntityRef(s string) string {
-	return strings.Trim(s, entityRefCutset)
+	return strings.TrimSpace(strings.Trim(strings.TrimSpace(s), entityRefCutset))
 }
 
 func (e *NLQueryEngine) parseStructured(question string) ParsedIntent {

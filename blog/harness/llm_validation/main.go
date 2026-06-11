@@ -404,7 +404,14 @@ func detIntentEntities(i *aisvc.ParsedIntent) int {
 
 // rawExtractionAgrees unmarshals the model's raw JSON and checks that,
 // for every entity the deterministic tokenizer extracted, the model
-// produced the same value (case-insensitive, punctuation-trimmed).
+// agrees with it. Agreement mirrors the engine's mergeEntityRef
+// contract: the model's value must either equal the deterministic
+// token (case-insensitive, punctuation-trimmed) or EXTEND it — a
+// multi-word phrase whose first word is that token (e.g. the model
+// returns "google drive" where the single-token tokenizer anchored
+// "google"). A reference that neither equals nor extends the anchored
+// token is a genuine disagreement (the model swapped the entity) and
+// is reported as such.
 func rawExtractionAgrees(raw string, det *aisvc.ParsedIntent) bool {
 	if det == nil {
 		return true
@@ -422,11 +429,25 @@ func rawExtractionAgrees(raw string, det *aisvc.ParsedIntent) bool {
 		if pair[0] == "" {
 			continue
 		}
-		if !strings.EqualFold(strings.Trim(pair[1], "?!.,;:\"'`()[]{}<> "), pair[0]) {
+		if !refAgreesOrExtends(pair[1], pair[0]) {
 			return false
 		}
 	}
 	return true
+}
+
+// refAgreesOrExtends reports whether the model reference modelRef
+// agrees with the deterministic anchor token, either by equality or by
+// extending it (a multi-word phrase whose first word equals the token).
+// Both are compared case-insensitively after trimming the same
+// surrounding punctuation the engine's cleanEntityRef strips.
+func refAgreesOrExtends(modelRef, anchor string) bool {
+	cleaned := strings.Trim(modelRef, "?!.,;:\"'`()[]{}<> ")
+	if strings.EqualFold(cleaned, anchor) {
+		return true
+	}
+	fields := strings.Fields(cleaned)
+	return len(fields) > 1 && strings.EqualFold(fields[0], anchor)
 }
 
 // extractJSONObject returns the substring from the first '{' to the
