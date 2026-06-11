@@ -1,6 +1,10 @@
 package engine
 
-import "unicode"
+import (
+	"encoding/json"
+	"strings"
+	"unicode"
+)
 
 // National-ID check-digit validators.
 //
@@ -75,6 +79,23 @@ func validatorFor(name string) func(string) bool {
 		return philippinesUMID
 	case "indonesia_nik":
 		return indonesiaNIK
+	// Secret / credential detectors — twins in validators.rs.
+	case "private_key_block":
+		return privateKeyBlock
+	case "aws_access_key_id":
+		return awsAccessKeyID
+	case "google_api_key":
+		return googleAPIKey
+	case "github_token":
+		return githubToken
+	case "github_pat":
+		return githubFineGrainedPAT
+	case "slack_token":
+		return slackToken
+	case "stripe_secret_key":
+		return stripeSecretKey
+	case "jwt":
+		return jwtToken
 	default:
 		return nil
 	}
@@ -502,4 +523,247 @@ func verhoeffValid(d []int) bool {
 		c = mul[c][perm[i%8][digit]]
 	}
 	return c == 0
+}
+
+// --- Secret / credential validators ---
+//
+// These confirm a regex hit on a high-entropy credential is the real
+// artifact (exact prefix + charset + length, or a decodable inner
+// structure) rather than same-shaped noise — the false-positive
+// suppressor role the national-ID check digits play above. Each has a
+// byte-identical twin in crates/sng-dlp/src/validators.rs so a
+// secrets-credentials rule decides identically on the endpoint and in
+// the control plane.
+
+// allASCIIAlnum reports whether s is non-empty and every byte is an
+// ASCII alphanumeric. Mirrors `all_ascii_alnum`.
+func allASCIIAlnum(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+			return false
+		}
+	}
+	return true
+}
+
+// isASCIIWhitespace matches Rust's u8::is_ascii_whitespace exactly:
+// space, tab, newline, carriage return, and form feed.
+func isASCIIWhitespace(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r' || b == '\f'
+}
+
+// awsAccessKeyID validates an AWS access key ID: AKIA (long-term) or
+// ASIA (temporary STS) followed by exactly 16 uppercase-base32
+// characters (A-Z, 0-9), 20 total. Mirrors `aws_access_key_id`.
+func awsAccessKeyID(s string) bool {
+	if len(s) != 20 {
+		return false
+	}
+	if !strings.HasPrefix(s, "AKIA") && !strings.HasPrefix(s, "ASIA") {
+		return false
+	}
+	body := s[4:]
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		if !((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+			return false
+		}
+	}
+	return true
+}
+
+// googleAPIKey validates a Google API key: AIza followed by 35
+// url-safe-base64 characters (A-Z, a-z, 0-9, -, _), 39 total. Mirrors
+// `google_api_key`.
+func googleAPIKey(s string) bool {
+	if !strings.HasPrefix(s, "AIza") {
+		return false
+	}
+	body := s[4:]
+	if len(body) != 35 {
+		return false
+	}
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '-' || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// githubToken validates a GitHub token: a ghp_/gho_/ghu_/ghs_/ghr_
+// prefix followed by 36 alphanumerics. Mirrors `github_token`.
+func githubToken(s string) bool {
+	i := strings.IndexByte(s, '_')
+	if i < 0 {
+		return false
+	}
+	prefix, body := s[:i], s[i+1:]
+	switch prefix {
+	case "ghp", "gho", "ghu", "ghs", "ghr":
+	default:
+		return false
+	}
+	return len(body) == 36 && allASCIIAlnum(body)
+}
+
+// githubFineGrainedPAT validates a GitHub fine-grained PAT:
+// github_pat_ followed by 82 characters of [A-Za-z0-9_]. Mirrors
+// `github_fine_grained_pat`.
+func githubFineGrainedPAT(s string) bool {
+	const prefix = "github_pat_"
+	if !strings.HasPrefix(s, prefix) {
+		return false
+	}
+	body := s[len(prefix):]
+	if len(body) != 82 {
+		return false
+	}
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_') {
+			return false
+		}
+	}
+	return true
+}
+
+// slackToken validates a Slack token: an xoxb-/xoxa-/xoxp-/xoxr-/xoxs-
+// prefix followed by a hyphen-separated alphanumeric body of at least
+// 10 characters. Mirrors `slack_token`.
+func slackToken(s string) bool {
+	var body string
+	switch {
+	case strings.HasPrefix(s, "xoxb-"),
+		strings.HasPrefix(s, "xoxa-"),
+		strings.HasPrefix(s, "xoxp-"),
+		strings.HasPrefix(s, "xoxr-"),
+		strings.HasPrefix(s, "xoxs-"):
+		body = s[5:]
+	default:
+		return false
+	}
+	if len(body) < 10 {
+		return false
+	}
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '-') {
+			return false
+		}
+	}
+	return true
+}
+
+// stripeSecretKey validates a Stripe secret/restricted key: sk_live_
+// or rk_live_ followed by at least 16 alphanumerics. Only live keys
+// are matched — sk_test_ keys are not production credentials. Mirrors
+// `stripe_secret_key`.
+func stripeSecretKey(s string) bool {
+	var body string
+	switch {
+	case strings.HasPrefix(s, "sk_live_"), strings.HasPrefix(s, "rk_live_"):
+		body = s[8:]
+	default:
+		return false
+	}
+	return len(body) >= 16 && allASCIIAlnum(body)
+}
+
+// privateKeyBlock confirms the matched span carries both the
+// BEGIN/END PRIVATE KEY armor and a non-trivial body (>= 64
+// non-whitespace bytes) between them, so an empty/truncated
+// placeholder block is not flagged as a live key. Mirrors
+// `private_key_block`.
+func privateKeyBlock(s string) bool {
+	const marker = "PRIVATE KEY-----"
+	begin := strings.Index(s, marker)
+	if begin < 0 {
+		return false
+	}
+	rest := s[begin+len(marker):]
+	endRel := strings.Index(rest, "-----END")
+	if endRel < 0 {
+		return false
+	}
+	body := rest[:endRel]
+	count := 0
+	for i := 0; i < len(body); i++ {
+		if !isASCIIWhitespace(body[i]) {
+			count++
+		}
+	}
+	return count >= 64
+}
+
+// base64urlDecode decodes a base64url segment (RFC 4648 §5, no
+// padding) into bytes, returning ok=false on any invalid character or
+// trailing-bit remainder. Hand-rolled to stay byte-identical to the
+// Rust `base64url_decode`, which mirrors this `RawURLEncoding`
+// behaviour so the JWT header check decides the same on both sides.
+func base64urlDecode(seg string) ([]byte, bool) {
+	val := func(b byte) (byte, bool) {
+		switch {
+		case b >= 'A' && b <= 'Z':
+			return b - 'A', true
+		case b >= 'a' && b <= 'z':
+			return b - 'a' + 26, true
+		case b >= '0' && b <= '9':
+			return b - '0' + 52, true
+		case b == '-':
+			return 62, true
+		case b == '_':
+			return 63, true
+		default:
+			return 0, false
+		}
+	}
+	if len(seg)%4 == 1 {
+		return nil, false
+	}
+	out := make([]byte, 0, len(seg)*3/4)
+	var acc uint32
+	var bits uint32
+	for i := 0; i < len(seg); i++ {
+		v, ok := val(seg[i])
+		if !ok {
+			return nil, false
+		}
+		acc = (acc << 6) | uint32(v)
+		bits += 6
+		if bits >= 8 {
+			bits -= 8
+			out = append(out, byte((acc>>bits)&0xFF))
+		}
+	}
+	if acc&((1<<bits)-1) != 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+// jwtToken validates a JSON Web Token: three base64url segments joined
+// by '.'. The header (segment 0) must decode to a JSON object carrying
+// the mandatory "alg" field — which separates a real JWT from any
+// other dotted base64url run. Mirrors `jwt`.
+func jwtToken(s string) bool {
+	parts := strings.Split(s, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	header, ok := base64urlDecode(parts[0])
+	if !ok {
+		return false
+	}
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(header, &obj); err != nil {
+		return false
+	}
+	_, has := obj["alg"]
+	return has
 }
