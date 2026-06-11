@@ -666,3 +666,44 @@ func TestNATSRevocationPublisherNilBrokerIsNoop(t *testing.T) {
 		t.Fatalf("nil-broker publisher should be a no-op, got %v", err)
 	}
 }
+
+// TestDeleteUserRevokesBeforeFailingBridgeDelete asserts a SCIM DELETE
+// cuts the user's live sessions BEFORE the optional iam-core bridge
+// delete, mirroring the PATCH/PUT path: a bridge outage must not strand
+// a deleted user with active sessions. The bridge delete is forced to
+// fail, and the revocation must already have been published.
+func TestDeleteUserRevokesBeforeFailingBridgeDelete(t *testing.T) {
+	t.Parallel()
+	s := memory.NewStore()
+	tn, err := memory.NewTenantRepository(s).Create(context.Background(), repository.Tenant{
+		Name: "Delete Order", Slug: "delete-order", Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	prov := newFakeProvisioner()
+	prov.failDelete = true
+	pub := newCapturePublisher()
+	svc := NewSCIMService(
+		memory.NewUserRepository(s),
+		memory.NewRoleRepository(s),
+		memory.NewAuditLogRepository(s),
+		WithIAMCoreBridge(prov, &fakeTenantMapper{iamTenant: "iam-tenant-1"}),
+		WithRevocationPublisher(pub),
+	)
+
+	created, err := svc.CreateUser(context.Background(), tn.ID, SCIMUser{
+		UserName: "del@example.com", Active: boolPtr(true),
+	})
+	if err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	uid := uuidFromString(created.ID)
+
+	if err := svc.DeleteUser(context.Background(), tn.ID, uid); err == nil {
+		t.Fatalf("DeleteUser: expected the forced bridge-delete failure to surface")
+	}
+	if got := pub.count(uid); got != 1 {
+		t.Fatalf("revocations for %s = %d, want 1 (must publish before the failing bridge delete)", uid, got)
+	}
+}

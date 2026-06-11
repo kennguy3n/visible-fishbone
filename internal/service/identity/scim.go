@@ -47,13 +47,13 @@ func WithRevocationPublisher(r RevocationPublisher) SCIMOption {
 }
 
 // revokeOnDeactivation publishes a ZTNA revocation when a SCIM mutation
-// de-provisions a user (sets active=false), so the enforcement plane
-// drops the user's live sessions immediately rather than waiting for
-// token expiry. This is the PATCH/PUT counterpart to the revocation
-// DeleteUser already emits: Okta and Microsoft Entra de-provision by
-// setting active=false (a PATCH or PUT), not by issuing a SCIM DELETE,
-// so without this a deactivated user keeps every live session and grant
-// until its tokens expire.
+// de-provisions a user, so the enforcement plane drops the user's live
+// sessions immediately rather than waiting for token expiry. It backs
+// all three de-provisioning paths — the active=false PATCH/PUT that Okta
+// and Microsoft Entra actually send (they de-provision this way, not by
+// issuing a SCIM DELETE) and DeleteUser — each calling it before its
+// optional iam-core bridge step. Without it a de-provisioned user keeps
+// every live session and grant until its tokens expire.
 //
 // The decision is driven by the operation's *requested* state, never by
 // the prior persisted state. That keeps it retry-safe: if a later step
@@ -331,18 +331,17 @@ func (s *SCIMService) DeleteUser(ctx context.Context, tenantID uuid.UUID, userID
 	}); err != nil {
 		return err
 	}
+	// Cut the de-provisioned user's live ZTNA sessions before the
+	// optional, failable iam-core bridge delete, mirroring UpdateUser /
+	// PatchUser: a bridge failure must not strand a deleted user with
+	// active sessions. Retry-safe — a retried DELETE re-publishes and the
+	// downstream revocation is idempotent, so a duplicate is harmless.
+	if rerr := s.revokeOnDeactivation(ctx, tenantID, userID, true, "scim_user_deleted"); rerr != nil {
+		return rerr
+	}
 	if s.bridge != nil {
 		if derr := s.bridge.deleteUpstream(ctx, tenantID, iamUserID); derr != nil {
 			return fmt.Errorf("iam-core delete failed: %w", derr)
-		}
-	}
-	// Cut the de-provisioned user's live ZTNA sessions immediately
-	// instead of waiting for token expiry. Best-effort: a publish
-	// failure must not undo the (already durable) soft-delete, so it is
-	// surfaced as an error only when no other failure occurred.
-	if s.revoker != nil {
-		if rerr := s.revoker.PublishRevocation(ctx, tenantID, userID, "scim_user_deleted"); rerr != nil {
-			return fmt.Errorf("revocation publish failed: %w", rerr)
 		}
 	}
 	return nil

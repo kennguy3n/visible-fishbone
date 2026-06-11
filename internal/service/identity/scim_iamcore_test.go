@@ -25,6 +25,7 @@ type fakeProvisioner struct {
 	deleted    []string
 	failCreate bool
 	failFind   bool
+	failDelete bool
 }
 
 func newFakeProvisioner() *fakeProvisioner {
@@ -82,6 +83,9 @@ func (f *fakeProvisioner) UnblockUser(_ context.Context, iamTenantID, userID str
 }
 
 func (f *fakeProvisioner) DeleteUser(_ context.Context, iamTenantID, userID string) error {
+	if f.failDelete {
+		return &iamcore.APIError{Op: "delete", StatusCode: http.StatusBadGateway}
+	}
 	delete(f.users, userID)
 	f.deleted = append(f.deleted, userID)
 	return nil
