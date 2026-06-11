@@ -38,8 +38,13 @@ func NewPolicyTemplateRepository() *PolicyTemplateRepository {
 	}
 }
 
-// SetClock overrides the wall-clock source for deterministic tests.
+// SetClock overrides the wall-clock source for deterministic tests. A
+// nil fn is ignored (mirroring Store.SetClock) so the clock can never
+// be cleared into a nil that would panic on the next call.
 func (r *PolicyTemplateRepository) SetClock(fn func() time.Time) {
+	if fn == nil {
+		return
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.clock = fn
