@@ -80,7 +80,7 @@ func (r *CASBNoOpsStore) GetClassification(ctx context.Context, tenantID uuid.UU
 			SELECT tenant_id, app_name, category, risk_score, sanction,
 			       confidence, source, rationale, classified_at
 			FROM casb_app_classifications
-			WHERE app_name = $1`, appName,
+			WHERE tenant_id = $1 AND app_name = $2`, tenantID, appName,
 		).Scan(
 			&out.TenantID, &out.AppName, &out.Category, &out.RiskScore, &out.Sanction,
 			&out.Confidence, &out.Source, &out.Rationale, &out.ClassifiedAt,
@@ -105,7 +105,8 @@ func (r *CASBNoOpsStore) ListClassifications(ctx context.Context, tenantID uuid.
 			SELECT tenant_id, app_name, category, risk_score, sanction,
 			       confidence, source, rationale, classified_at
 			FROM casb_app_classifications
-			ORDER BY app_name`)
+			WHERE tenant_id = $1
+			ORDER BY app_name`, tenantID)
 		if err != nil {
 			return err
 		}
@@ -221,8 +222,8 @@ func (r *CASBNoOpsStore) ListActionsSince(ctx context.Context, tenantID uuid.UUI
 			SELECT id, tenant_id, app_name, category, enforcement, traffic_class,
 			       mode, risk_score, confidence, sanction, applied, reason, created_at
 			FROM casb_app_actions
-			WHERE created_at > $1
-			ORDER BY created_at ASC, id ASC`, since)
+			WHERE tenant_id = $1 AND created_at > $2
+			ORDER BY created_at ASC, id ASC`, tenantID, since)
 		if err != nil {
 			return err
 		}
@@ -248,8 +249,9 @@ func (r *CASBNoOpsStore) ListActions(ctx context.Context, tenantID uuid.UUID, li
 			SELECT id, tenant_id, app_name, category, enforcement, traffic_class,
 			       mode, risk_score, confidence, sanction, applied, reason, created_at
 			FROM casb_app_actions
+			WHERE tenant_id = $1
 			ORDER BY created_at DESC, id DESC
-			LIMIT $1`, limit)
+			LIMIT $2`, tenantID, limit)
 		if err != nil {
 			return err
 		}
