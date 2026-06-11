@@ -305,7 +305,16 @@ func (r *AppRegistryOverrideRepository) ListAll(ctx context.Context, tenantID uu
 		}
 		out = append(out, cloneAppOverride(ov))
 	}
-	return out, nil
+	// Match the postgres ListAll ordering (created_at DESC, id DESC).
+	// The map iteration above is non-deterministic, and callers such as
+	// resolveTrafficClass pick the first matching override, so an
+	// unordered result would make override precedence differ between the
+	// memory and postgres backends.
+	return sortByCreatedAtDesc(out,
+		func(o repository.AppRegistryOverride) time.Time { return o.CreatedAt },
+		func(o repository.AppRegistryOverride) uuid.UUID { return o.ID },
+		repository.SortDesc,
+	), nil
 }
 
 func (r *AppRegistryOverrideRepository) DeleteExpired(ctx context.Context, now time.Time) (int, error) {
