@@ -15,6 +15,22 @@ fn real_month(field: u32) -> Option<u32> {
     Some(m)
 }
 
+/// Whether `day` is plausible for `month` (`1..=12`), independent of the
+/// (ambiguous) birth century. Month `0` and day `0` mark an unknown date
+/// and accept any in-range day. February allows 29 because the century —
+/// and therefore leap-year status — is not resolved here; the MOD-97
+/// checksum suppresses the residual "29 Feb in a common year" case.
+fn plausible_day(month: u32, day: u32) -> bool {
+    let max = match month {
+        // 0 marks an unknown month, so only bound the day field to 31.
+        0 | 1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => 29,
+        _ => return false, // real_month already bounds month to 0..=12
+    };
+    day <= max
+}
+
 /// Belgium National Register Number: eleven digits — `YYMMDD`, a
 /// 3-digit serial, and a 2-digit checksum.
 ///
@@ -30,14 +46,16 @@ pub fn belgium_national_number(s: &str) -> bool {
     if d.len() != 11 {
         return false;
     }
-    // Plausible birth date (month allows the bis offsets; day 0..=31,
-    // with 0 reserved for an unknown date).
+    // Plausible birth date: the month (after any "bis" offset) must be
+    // 0..=12 and the day must fit that month. 0 marks an unknown
+    // month/day, so impossible dates like 31 February are rejected
+    // while genuine unknown-date records still validate.
     let month_field = u32::from(d[2]) * 10 + u32::from(d[3]);
-    if real_month(month_field).is_none() {
+    let Some(month) = real_month(month_field) else {
         return false;
-    }
+    };
     let day = u32::from(d[4]) * 10 + u32::from(d[5]);
-    if day > 31 {
+    if !plausible_day(month, day) {
         return false;
     }
 
@@ -101,6 +119,26 @@ mod tests {
         assert!(!belgium_national_number("90130100123"), "month 13 invalid");
         assert!(!belgium_national_number("90014000123"), "day 40 invalid");
         invalid += 3;
+
+        // Impossible calendar dates must be rejected even when the
+        // checksum itself is correct, so the date check (not the
+        // checksum) is what does the rejecting.
+        for (mm, dd) in [(2u32, 31u32), (4, 31), (6, 31)] {
+            let body = body_of(90, mm, dd, 1);
+            let cc = check(body, false);
+            let s = format!("90{mm:02}{dd:02}001{cc:02}");
+            assert!(
+                !belgium_national_number(&s),
+                "impossible date {mm:02}/{dd:02} with valid checksum must be rejected: {s}"
+            );
+            invalid += 1;
+        }
+        // ... and the same body with a real day for that month validates,
+        // confirming only the day was at fault.
+        let body = body_of(90, 2, 28, 1);
+        let cc = check(body, false);
+        assert!(belgium_national_number(&format!("900228001{cc:02}")));
+
         assert!(valid >= 30, "only {valid} valid NN vectors");
         assert!(invalid >= 30, "only {invalid} invalid NN vectors");
     }
