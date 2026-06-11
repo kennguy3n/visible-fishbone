@@ -248,7 +248,7 @@ async fn serve_connection(
         let content_length = match parse_body_length(&buf[..headers_end]) {
             Ok(cl) => cl,
             Err(reason) => {
-                let _ = write_verdict(&mut stream, &deny_json(400, &reason)).await;
+                let _ = write_verdict(&mut stream, &deny_json(400, reason)).await;
                 return;
             }
         };
@@ -317,9 +317,9 @@ async fn read_more(stream: &mut UnixStream, buf: &mut Vec<u8>, read_timeout: Dur
 /// chunked` is refused: Envoy's ext-authz client sends a
 /// `Content-Length`, and supporting chunked de-framing here would add
 /// parser surface for a shape we never receive.
-fn parse_body_length(header_bytes: &[u8]) -> Result<usize, String> {
-    let header_str = std::str::from_utf8(header_bytes)
-        .map_err(|_| "request headers are not valid UTF-8".to_string())?;
+fn parse_body_length(header_bytes: &[u8]) -> Result<usize, &'static str> {
+    let header_str =
+        std::str::from_utf8(header_bytes).map_err(|_| "request headers are not valid UTF-8")?;
     let mut content_length: Option<usize> = None;
     // Skip the request line; iterate the header lines.
     for line in header_str.split("\r\n").skip(1) {
@@ -334,12 +334,12 @@ fn parse_body_length(header_bytes: &[u8]) -> Result<usize, String> {
         if name.eq_ignore_ascii_case("transfer-encoding")
             && value.to_ascii_lowercase().contains("chunked")
         {
-            return Err("chunked transfer-encoding is not supported".to_string());
+            return Err("chunked transfer-encoding is not supported");
         }
         if name.eq_ignore_ascii_case("content-length") {
             let parsed = value
                 .parse::<usize>()
-                .map_err(|_| "invalid Content-Length header".to_string())?;
+                .map_err(|_| "invalid Content-Length header")?;
             content_length = Some(parsed);
         }
     }
@@ -363,10 +363,15 @@ async fn write_verdict(stream: &mut UnixStream, body: &[u8]) -> std::io::Result<
 /// (a request we could not frame). Mirrors the JSON shape
 /// [`crate::auth::ExtAuthzResponse`] serialises (the `action`,
 /// `status`, and `reason` fields), so Envoy reads it through the same
-/// path as a handler-produced verdict. The reason strings are all
-/// listener-internal literals (no caller-supplied text), so the
-/// hand-built JSON needs no escaping.
-fn deny_json(status: u16, reason: &str) -> Vec<u8> {
+/// path as a handler-produced verdict.
+///
+/// `reason` is `&'static str` by contract: every rejection reason is a
+/// listener-internal literal (no caller- or peer-supplied text), so
+/// the hand-built JSON needs no escaping. The `'static` bound enforces
+/// that invariant at the type level — a future caller cannot smuggle
+/// dynamic text (which could contain `"` / `\`) through this path
+/// without the compiler stopping them.
+fn deny_json(status: u16, reason: &'static str) -> Vec<u8> {
     format!(r#"{{"action":"deny","status":{status},"reason":"{reason}"}}"#).into_bytes()
 }
 
