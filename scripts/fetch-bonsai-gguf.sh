@@ -21,6 +21,17 @@
 # 3 checksum/size mismatch (treat as tamper / corruption — do NOT use).
 set -euo pipefail
 
+# The pinned manifest below uses an associative array (declare -A), a bash 4+
+# feature. The Docker build (debian bash 5.2) and Linux CI are unaffected;
+# macOS ships bash 3.2 by default, where declare -A errors out cryptically.
+# Fail fast here with an actionable message instead. This guard must precede
+# the declare -A so bash 3.2 hits it first.
+if [ "${BASH_VERSINFO:-0}" -lt 4 ]; then
+  echo "error: bash 4+ required (found ${BASH_VERSION:-unknown}). On macOS:" \
+       "'brew install bash' and re-run, or use the Docker build." >&2
+  exit 1
+fi
+
 # --- Pinned manifest -------------------------------------------------------
 # Digests captured from the LFS pointers at prism-ml/Ternary-Bonsai-8B-gguf.
 # To rotate: update both the SHA-256 and the byte size together. The size
@@ -73,17 +84,20 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-[ -n "${MANIFEST[$VARIANT]:-}" ] || die "unknown variant '$VARIANT' (have: ${!MANIFEST[*]})"
-
-read -r FILENAME EXPECT_SHA EXPECT_SIZE <<<"${MANIFEST[$VARIANT]}"
-
+# --print-sha resolves and validates its own variant (explicit value, or the
+# --variant fallback) and exits, so it never depends on VARIANT being a valid
+# fetch target. Handle it before validating VARIANT for the download path.
 if [ "$PRINT_SHA_ONLY" = 1 ]; then
   PRINT_SHA="${PRINT_SHA:-$VARIANT}"
-  [ -n "${MANIFEST[$PRINT_SHA]:-}" ] || die "unknown variant '$PRINT_SHA'"
+  [ -n "${MANIFEST[$PRINT_SHA]:-}" ] || die "unknown variant '$PRINT_SHA' (have: ${!MANIFEST[*]})"
   read -r _f _s _z <<<"${MANIFEST[$PRINT_SHA]}"
   echo "$_s  $_f"
   exit 0
 fi
+
+[ -n "${MANIFEST[$VARIANT]:-}" ] || die "unknown variant '$VARIANT' (have: ${!MANIFEST[*]})"
+
+read -r FILENAME EXPECT_SHA EXPECT_SIZE <<<"${MANIFEST[$VARIANT]}"
 
 # --- Tool resolution (portable across distros / macOS) ---------------------
 sha256_of() {

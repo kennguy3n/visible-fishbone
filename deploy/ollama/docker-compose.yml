@@ -68,11 +68,15 @@ services:
     # healthcheck probes it — override SNG_LLM_PORT once to move all three.
     environment:
       SNG_LLM_PORT: "${SNG_LLM_PORT:-8081}"
+      # Context window the server allocates KV cache for; see mem_limit below.
+      SNG_LLM_CTX: "${SNG_LLM_CTX:-4096}"
     ports:
       - "127.0.0.1:${SNG_LLM_PORT:-8081}:${SNG_LLM_PORT:-8081}"
-    # Q2 8B fits comfortably under 4 GiB resident on a commodity CPU box;
-    # cap it so a runaway never starves co-located services.
-    mem_limit: 4g
+    # Q2 8B is ~3 GB resident at the default -c 4096, so 4 GiB caps a runaway
+    # without starving co-located services. The KV cache grows with context,
+    # so if you raise SNG_LLM_CTX (or enable parallel slots) bump this in
+    # lockstep, e.g. SNG_LLM_CTX=8192 SNG_LLM_MEM_LIMIT=6g docker compose ...
+    mem_limit: "${SNG_LLM_MEM_LIMIT:-4g}"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS \"http://127.0.0.1:${SNG_LLM_PORT:-8081}/health\" || exit 1"]
       interval: 15s

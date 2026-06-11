@@ -37,6 +37,13 @@ headroom for concurrency. Q2_0 at ~3 GB resident is what makes a
 single-node, **per-tenant-isolated** deployment economical across 5K SME
 tenants without GPUs.
 
+The compose `q2` profile caps the container at `${SNG_LLM_MEM_LIMIT:-4g}`,
+which leaves ~1 GB headroom over the ~3 GB default footprint. KV-cache scales
+with context length, so raise the context and the memory cap **together** —
+e.g. `SNG_LLM_CTX=8192 SNG_LLM_MEM_LIMIT=6g docker compose -f
+deploy/ollama/docker-compose.yml --profile q2 up -d bonsai-q2` — otherwise a
+larger context can OOM-kill the container with no obvious diagnostic.
+
 **Expected inference latency:** ~2–5s for a 512-token response on a
 4-core CPU; sub-second on a single A10G. Reference throughput for Q2_0
 (llama.cpp, Apple M4 Pro): ~32 tok/s decode on 10 CPU threads, ~76 tok/s
