@@ -62,6 +62,8 @@ func TestMergeEntityRef(t *testing.T) {
 		{"fill empty multiword", "", "Google Drive", "google drive"},
 		{"fill empty trims punctuation+space", "", "  salesforce? ", "salesforce"},
 		{"extend anchored token", "google", "Google Drive", "google drive"},
+		{"extend collapses interior whitespace", "google", "Google   Drive", "google drive"},
+		{"fill empty collapses interior whitespace", "", "Google   Drive", "google drive"},
 		{"extend case-insensitive", "john", "John Smith", "john smith"},
 		{"keep det when llm empty", "alice", "", "alice"},
 		{"keep det when same single token", "salesforce", "salesforce", "salesforce"},

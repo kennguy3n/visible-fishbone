@@ -360,7 +360,7 @@ func mergeIntent(det, llm ParsedIntent) ParsedIntent {
 func mergeEntityRef(det, llmRaw string) string {
 	llmRef := cleanEntityRef(llmRaw)
 	if det == "" {
-		return strings.ToLower(llmRef)
+		return normalizeEntityRef(llmRef)
 	}
 	if llmRef == "" {
 		return det
@@ -369,9 +369,19 @@ func mergeEntityRef(det, llmRaw string) string {
 	// token: a multi-word phrase whose first word equals the token.
 	fields := strings.Fields(llmRef)
 	if len(fields) > 1 && strings.EqualFold(fields[0], det) {
-		return strings.ToLower(llmRef)
+		return normalizeEntityRef(llmRef)
 	}
 	return det
+}
+
+// normalizeEntityRef canonicalises a reference adopted from the model:
+// lowercased (to match the all-lowercase deterministic tokenizer) and
+// with interior whitespace runs collapsed to single spaces, so an
+// irregularly spaced model value like "Google  Drive" becomes the
+// stable "google drive" rather than carrying the double space into
+// downstream host/identity matching.
+func normalizeEntityRef(s string) string {
+	return strings.ToLower(strings.Join(strings.Fields(s), " "))
 }
 
 // normalizeAction maps a free-form LLM action token onto the bounded

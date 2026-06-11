@@ -439,10 +439,12 @@ func rawExtractionAgrees(raw string, det *aisvc.ParsedIntent) bool {
 // refAgreesOrExtends reports whether the model reference modelRef
 // agrees with the deterministic anchor token, either by equality or by
 // extending it (a multi-word phrase whose first word equals the token).
-// Both are compared case-insensitively after trimming the same
-// surrounding punctuation the engine's cleanEntityRef strips.
+// Both are compared case-insensitively after stripping the same
+// surrounding punctuation and whitespace the engine's cleanEntityRef
+// strips (TrimSpace covers tabs/newlines, not just the literal space),
+// so the harness's agreement check matches production cleaning exactly.
 func refAgreesOrExtends(modelRef, anchor string) bool {
-	cleaned := strings.Trim(modelRef, "?!.,;:\"'`()[]{}<> ")
+	cleaned := strings.TrimSpace(strings.Trim(strings.TrimSpace(modelRef), "?!.,;:\"'`()[]{}<>"))
 	if strings.EqualFold(cleaned, anchor) {
 		return true
 	}
