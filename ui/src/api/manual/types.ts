@@ -33,6 +33,30 @@ export interface CasbConnectorCreate {
   secret?: unknown;
 }
 
+// CasbAppActionView is the latest shadow-IT NoOps action the engine
+// decided for an app: what it would do (or did, when auto-applied).
+export interface CasbAppActionView {
+  enforcement: string;
+  mode: string; // auto | recommend
+  traffic_class?: string;
+  applied: boolean;
+  reason?: string;
+  decided_at: string;
+}
+
+// CasbAppVerdict is the per-app shadow-IT decision: the classification
+// the engine computed plus the most recent action it decided. Present
+// only once the NoOps pipeline has classified the app.
+export interface CasbAppVerdict {
+  sanction: string; // sanctioned | tolerated | unsanctioned
+  risk_score: number;
+  confidence: number;
+  source: string; // heuristic | ai_refined
+  rationale: string;
+  classified_at: string;
+  action?: CasbAppActionView;
+}
+
 export interface CasbApp {
   id: string;
   tenant_id: string;
@@ -44,6 +68,7 @@ export interface CasbApp {
   active_device_count: number;
   first_seen: string;
   last_seen: string;
+  verdict?: CasbAppVerdict;
 }
 
 // --- DLP -------------------------------------------------------------------
