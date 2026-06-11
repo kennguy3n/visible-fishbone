@@ -899,7 +899,13 @@ func buildRouter(
 	// when cfg.CASB.NoOpsEnabled.
 	appNoOpsEngine := casb.NewAppNoOpsEngine(postgres.NewCASBNoOpsStore(store), casbAppRepo, tenantRepo, logger)
 	appNoOpsEngine.SetAuditLog(auditRepo)
-	if cfg.CASB.NoOpsAutoEnforce {
+	// Both gates, not just NoOpsAutoEnforce: the engine only acts at all
+	// when NoOpsEnabled (the discovery hook and reconcile loop in main()
+	// are both gated on it), so wiring the enforcer also requires
+	// NoOpsEnabled. Stating both here keeps the "never enforce unless
+	// explicitly enabled" intent self-documenting at the wiring site
+	// rather than relying on the distant main() guards.
+	if cfg.CASB.NoOpsEnabled && cfg.CASB.NoOpsAutoEnforce {
 		appNoOpsEngine.SetEnforcer(appSvc)
 	}
 	// Inline-CASB service is constructed before the policy service
@@ -2887,10 +2893,6 @@ func subscribePoPHealth(nc *nats.Conn, svc *pop.Service, logger *slog.Logger) (*
 	})
 }
 
-// runPoPRebalance drives the leader-only capacity rebalancer until ctx
-// is cancelled. It is invoked through elector.RunIfLeader, so it both
-// starts on leadership acquisition and returns (stopping the ticker)
-// when leadership is lost or the process shuts down.
 // runCASBNoOps drives the leader-only shadow-IT NoOps maintenance sweep:
 // each tick it reconciles every active tenant's discovered-app inventory
 // (catching drift the per-discovery hook missed — e.g. an app that became
@@ -2918,6 +2920,10 @@ func runCASBNoOps(ctx context.Context, engine *casb.AppNoOpsEngine, interval tim
 	}
 }
 
+// runPoPRebalance drives the leader-only capacity rebalancer until ctx
+// is cancelled. It is invoked through elector.RunIfLeader, so it both
+// starts on leadership acquisition and returns (stopping the ticker)
+// when leadership is lost or the process shuts down.
 func runPoPRebalance(ctx context.Context, svc *pop.Service, interval time.Duration, logger *slog.Logger) {
 	if interval <= 0 {
 		interval = time.Minute

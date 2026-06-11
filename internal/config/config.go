@@ -330,6 +330,7 @@ type MobileAuth struct {
 // APP_REGISTRY_SYNC_ENABLED=false to disable (useful for local
 // development, air-gapped clusters, and replicas that should not
 // duplicate the primary's outbound vendor fetches).
+
 // CASB carries the runtime knobs for the per-tenant shadow-IT NoOps
 // pipeline (migration 061): the discovery hook that classifies and
 // acts on each newly discovered app, and the leader-only periodic
