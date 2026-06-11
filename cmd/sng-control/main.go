@@ -1743,8 +1743,15 @@ func buildRouter(
 			// Surface the shadow-IT NoOps verdict (classification +
 			// decided action) inline on the discovered-apps listing and
 			// expose the action timeline. The store is read-only here;
-			// the engine remains the sole writer.
-			h.SetNoOpsReader(casbNoOpsStore)
+			// the engine remains the sole writer. Gated on NoOpsEnabled
+			// to match the engine's discovery-hook / reconcile / enforcer
+			// wiring above: when the pipeline is off the engine writes
+			// nothing, so attaching the reader would only add two empty
+			// per-request store reads to every GET /casb/apps and mount a
+			// timeline route that returns nothing.
+			if cfg.CASB.NoOpsEnabled {
+				h.SetNoOpsReader(casbNoOpsStore)
+			}
 			return h
 		}(),
 		PolicyTemplates:   handler.NewPolicyTemplateHandler(policyTemplateSvc),
