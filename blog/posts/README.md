@@ -21,6 +21,24 @@ every post ends with an honest "where we fall short."
 Scenario definitions and the evidence map live in
 [`../scenarios/00-scenario-catalog.md`](../scenarios/00-scenario-catalog.md).
 
+## The business series (companion)
+
+A five-post, **buyer-facing** companion lives in
+[`business/`](business/README.md). It walks the five capabilities shipped this
+cycle — activity-tiered dormancy, CASB shadow-IT NoOps, coach-first AI-app DLP,
+smart-default compliance templates, and self-hosted Bonsai-8B — as
+persona + jobs-to-be-done journeys, with live console screenshots, the real CASB
+classifier's output, and an honest competitive assessment for the SME/MSP buyer.
+
+| # | Post | Persona | Capability |
+| --- | --- | --- | --- |
+| B0 | [Business intro + evidence contract](business/00-business-series-intro.md) | — | — |
+| B1 | [The NoOps trial that costs almost nothing](business/08-noops-dormant-trials.md) | Mara (MSP) | Activity-tiered dormancy (#154) |
+| B2 | [Shadow-IT discovery without the noise](business/09-shadow-it-noops.md) | Sam (IT lead) | CASB NoOps (#159, #172) |
+| B3 | [PII at the AI edge: coach, don't block](business/10-ai-dlp-coaching.md) | Lena (analyst) | AI-app DLP + HITL (#158) |
+| B4 | [Compliance baselines in minutes](business/11-compliance-templates.md) | Mara (MSP) | Smart-default templates (#157) |
+| B5 | [Prove the spend, prove the posture](business/12-cost-and-competition.md) | Tom (CFO) | Self-hosted AI (#155) + metering + critique |
+
 ## Evidence sources (all in-repo)
 
 - **Screenshots:** [`../artifacts/screenshots/`](../artifacts/screenshots/) — 16

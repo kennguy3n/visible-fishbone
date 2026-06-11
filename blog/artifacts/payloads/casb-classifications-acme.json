@@ -1,0 +1,83 @@
+[
+    {
+        "app_name": "Pastebin",
+        "category": "code_paste",
+        "risk_score": 75,
+        "sanction": "tolerated",
+        "confidence": 30,
+        "source": "heuristic",
+        "rationale": "category=code_paste (unrecognised; treated as medium-high); risk=75; confidence=30; sanction=tolerated; active_devices=4"
+    },
+    {
+        "app_name": "WeTransfer",
+        "category": "file_transfer",
+        "risk_score": 70,
+        "sanction": "unsanctioned",
+        "confidence": 85,
+        "source": "heuristic",
+        "rationale": "category=file_transfer; risk=70; confidence=85; sanction=unsanctioned; active_devices=12"
+    },
+    {
+        "app_name": "ChatGPT",
+        "category": "ai_assistant",
+        "risk_score": 60,
+        "sanction": "tolerated",
+        "confidence": 35,
+        "source": "heuristic",
+        "rationale": "category=ai_assistant (unrecognised; treated as medium-high); risk=60; confidence=35; sanction=tolerated; active_devices=96"
+    },
+    {
+        "app_name": "Dropbox",
+        "category": "cloud_storage",
+        "risk_score": 55,
+        "sanction": "sanctioned",
+        "confidence": 100,
+        "source": "heuristic",
+        "rationale": "category=cloud_storage; risk=55; confidence=100; sanction=sanctioned; connector present; active_devices=42"
+    },
+    {
+        "app_name": "Grammarly",
+        "category": "ai_writing",
+        "risk_score": 47,
+        "sanction": "tolerated",
+        "confidence": 35,
+        "source": "heuristic",
+        "rationale": "category=ai_writing (unrecognised; treated as medium-high); risk=47; confidence=35; sanction=tolerated; active_devices=33"
+    },
+    {
+        "app_name": "DeepL",
+        "category": "ai_translation",
+        "risk_score": 44,
+        "sanction": "tolerated",
+        "confidence": 35,
+        "source": "heuristic",
+        "rationale": "category=ai_translation (unrecognised; treated as medium-high); risk=44; confidence=35; sanction=tolerated; active_devices=21"
+    },
+    {
+        "app_name": "Notion",
+        "category": "productivity",
+        "risk_score": 36,
+        "sanction": "tolerated",
+        "confidence": 85,
+        "source": "heuristic",
+        "rationale": "category=productivity; risk=36; confidence=85; sanction=tolerated; active_devices=58"
+    },
+    {
+        "app_name": "Microsoft 365",
+        "category": "productivity",
+        "risk_score": 24,
+        "sanction": "sanctioned",
+        "confidence": 100,
+        "source": "heuristic",
+        "rationale": "category=productivity; risk=24; confidence=100; sanction=sanctioned; connector present; active_devices=240"
+    },
+    {
+        "app_name": "Slack",
+        "category": "collaboration",
+        "risk_score": 23,
+        "sanction": "sanctioned",
+        "confidence": 100,
+        "source": "heuristic",
+        "rationale": "category=collaboration; risk=23; confidence=100; sanction=sanctioned; connector present; active_devices=180"
+    }
+]

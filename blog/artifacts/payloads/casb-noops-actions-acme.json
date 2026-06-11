@@ -1,0 +1,74 @@
+[
+    {
+        "mode": "recommend",
+        "reason": "high-risk code_paste app (risk 75): recommend blocking \u2014 auto-block withheld as destructive",
+        "applied": false,
+        "app_name": "Pastebin",
+        "category": "code_paste",
+        "sanction": "tolerated",
+        "confidence": 30,
+        "risk_score": 75,
+        "enforcement": "enforce",
+        "traffic_class": "block"
+    },
+    {
+        "mode": "recommend",
+        "reason": "high-risk file_transfer app (risk 70): recommend blocking \u2014 auto-block withheld as destructive",
+        "applied": false,
+        "app_name": "WeTransfer",
+        "category": "file_transfer",
+        "sanction": "unsanctioned",
+        "confidence": 85,
+        "risk_score": 70,
+        "enforcement": "enforce",
+        "traffic_class": "block"
+    },
+    {
+        "mode": "recommend",
+        "reason": "tolerated ai_assistant app (risk 60 / confidence 35): recommend inspect_full",
+        "applied": false,
+        "app_name": "ChatGPT",
+        "category": "ai_assistant",
+        "sanction": "tolerated",
+        "confidence": 35,
+        "risk_score": 60,
+        "enforcement": "protect",
+        "traffic_class": "inspect_full"
+    },
+    {
+        "mode": "recommend",
+        "reason": "tolerated ai_writing app (risk 47): recommend inspect_lite",
+        "applied": false,
+        "app_name": "Grammarly",
+        "category": "ai_writing",
+        "sanction": "tolerated",
+        "confidence": 35,
+        "risk_score": 47,
+        "enforcement": "throttle",
+        "traffic_class": "inspect_lite"
+    },
+    {
+        "mode": "recommend",
+        "reason": "tolerated ai_translation app (risk 44): recommend inspect_lite",
+        "applied": false,
+        "app_name": "DeepL",
+        "category": "ai_translation",
+        "sanction": "tolerated",
+        "confidence": 35,
+        "risk_score": 44,
+        "enforcement": "throttle",
+        "traffic_class": "inspect_lite"
+    },
+    {
+        "mode": "recommend",
+        "reason": "tolerated productivity app (risk 36): recommend inspect_lite",
+        "applied": false,
+        "app_name": "Notion",
+        "category": "productivity",
+        "sanction": "tolerated",
+        "confidence": 85,
+        "risk_score": 36,
+        "enforcement": "throttle",
+        "traffic_class": "inspect_lite"
+    }
+]
