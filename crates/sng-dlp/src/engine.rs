@@ -9,6 +9,7 @@
 //! swap — the same lock-free hot-swap discipline
 //! `sng_policy_eval::PolicyEngine` uses for bundle rotation.
 
+use crate::ai_app::{AiAppExfilDetector, AiAppPolicy, default_pii_rules};
 use crate::channels::{ContentEvent, DlpChannel};
 use crate::classifier::{ClassificationResult, ContentClassifier, ContentMetadata, RuleMatch};
 use crate::error::DlpResult;
@@ -118,6 +119,39 @@ struct EngineState {
     classifier: ContentClassifier,
     max_scan_bytes: usize,
     model: MlNerDetector,
+    /// The operator's AI-app exfil policy, if enabled. Kept alongside
+    /// the compiled detector so every recompile (policy or model
+    /// rotation) can rebuild the detector against the *current* model.
+    ai_app_policy: Option<AiAppPolicy>,
+    /// The compiled AI-app exfil detector, present iff `ai_app_policy`
+    /// is `Some`. It reuses the engine's live ML-NER model for its PII
+    /// pass (via [`AiAppExfilDetector::with_classifier`]) so a model
+    /// rotation lifts AI-upload detection too.
+    ai_app: Option<AiAppExfilDetector>,
+}
+
+/// Build the AI-app exfil detector for `ai_app_policy`, sharing the
+/// engine's live ML-NER `model` for its reused-PII classifier so the
+/// AI-upload path benefits from the same on-device model as the channel
+/// classifier. Returns `None` when no AI-app policy is configured.
+fn build_ai_app(
+    ai_app_policy: Option<AiAppPolicy>,
+    max_scan_bytes: usize,
+    model: &MlNerDetector,
+) -> DlpResult<Option<AiAppExfilDetector>> {
+    match ai_app_policy {
+        Some(policy) => {
+            let classifier = ContentClassifier::compile_with_model(
+                &default_pii_rules(),
+                max_scan_bytes,
+                model.clone(),
+            )?;
+            Ok(Some(AiAppExfilDetector::with_classifier(
+                classifier, policy,
+            )))
+        }
+        None => Ok(None),
+    }
 }
 
 /// The endpoint DLP engine.
@@ -168,6 +202,8 @@ impl DlpEngine {
                 classifier,
                 max_scan_bytes,
                 model,
+                ai_app_policy: None,
+                ai_app: None,
             }),
             write_lock: Mutex::new(()),
         })
@@ -188,11 +224,15 @@ impl DlpEngine {
         let model = current.model.clone();
         let classifier =
             ContentClassifier::compile_with_model(policy.rules(), max_scan_bytes, model.clone())?;
+        let ai_app_policy = current.ai_app_policy;
+        let ai_app = build_ai_app(ai_app_policy, max_scan_bytes, &model)?;
         self.state.store(Arc::new(EngineState {
             policy,
             classifier,
             max_scan_bytes,
             model,
+            ai_app_policy,
+            ai_app,
         }));
         Ok(())
     }
@@ -236,6 +276,59 @@ impl DlpEngine {
         self.state.load().model.has_model()
     }
 
+    /// Atomically enable (or reconfigure) the AI-app exfiltration
+    /// detector with `policy`, or disable it entirely with `None`.
+    ///
+    /// When enabled, [`Self::evaluate`] additionally consults the
+    /// detector for events on [`AiAppExfilDetector::channel`] that carry
+    /// a destination in [`ContentMetadata::source`], merging its
+    /// coach-first verdict with the channel-rule verdict (strictest
+    /// action wins). The detector reuses the engine's live ML-NER model,
+    /// so it benefits from any installed on-device model. The default
+    /// engine has no AI-app detector configured (a pure no-op), so this
+    /// must be called to opt a tenant in — consistent with the
+    /// false-positive-averse, coach-first posture of [`AiAppPolicy`].
+    ///
+    /// Serialised against the other rotation paths by
+    /// [`Self::write_guard`]; on a compile failure the engine is left
+    /// untouched (fail-safe).
+    ///
+    /// # Errors
+    /// Propagates [`crate::error::DlpError::RuleCompile`] if the builtin
+    /// AI-app PII rule set fails to compile (a catalog bug the unit
+    /// tests guard against).
+    pub fn set_ai_app_policy(&self, policy: Option<AiAppPolicy>) -> DlpResult<()> {
+        let _guard = self.write_guard();
+        let current = self.state.load();
+        let max_scan_bytes = current.max_scan_bytes;
+        let model = current.model.clone();
+        let ai_app = build_ai_app(policy, max_scan_bytes, &model)?;
+        // The channel classifier is immutable and not `Clone`, so the
+        // snapshot is rebuilt by recompiling the active policy against
+        // the same model — only the AI-app detector actually changes.
+        let classifier = ContentClassifier::compile_with_model(
+            current.policy.rules(),
+            max_scan_bytes,
+            model.clone(),
+        )?;
+        self.state.store(Arc::new(EngineState {
+            policy: current.policy.clone(),
+            classifier,
+            max_scan_bytes,
+            model,
+            ai_app_policy: policy,
+            ai_app,
+        }));
+        Ok(())
+    }
+
+    /// The active AI-app exfil policy, or `None` when the detector is
+    /// not configured for this engine.
+    #[must_use]
+    pub fn ai_app_policy(&self) -> Option<AiAppPolicy> {
+        self.state.load().ai_app_policy
+    }
+
     /// Recompile the active policy with `detector` and publish the new
     /// (policy + classifier + detector) snapshot in one atomic store.
     /// On a compile failure nothing is published, so a bad model can
@@ -252,11 +345,15 @@ impl DlpEngine {
         )?;
         let policy = current.policy.clone();
         let max_scan_bytes = current.max_scan_bytes;
+        let ai_app_policy = current.ai_app_policy;
+        let ai_app = build_ai_app(ai_app_policy, max_scan_bytes, &detector)?;
         self.state.store(Arc::new(EngineState {
             policy,
             classifier,
             max_scan_bytes,
             model: detector,
+            ai_app_policy,
+            ai_app,
         }));
         Ok(())
     }
@@ -287,6 +384,16 @@ impl DlpEngine {
     /// all matching rules is taken, escalated to at least the
     /// channel's configured action floor (if any), and mapped to a
     /// verdict variant.
+    ///
+    /// When an AI-app exfil policy is configured (see
+    /// [`Self::set_ai_app_policy`]) and the event is on
+    /// [`AiAppExfilDetector::channel`] with a destination recorded in
+    /// [`ContentMetadata::source`], the detector's coach-first verdict
+    /// is merged in: the strictest action and highest severity across
+    /// the channel rules and the AI-app signal win, and the two match
+    /// sets are concatenated. The AI-app signal is deliberately *not*
+    /// subject to the channel action floor — it applies its own
+    /// (false-positive-averse) escalation policy.
     #[must_use]
     pub fn evaluate(
         &self,
@@ -301,17 +408,47 @@ impl DlpEngine {
         }
 
         let result: ClassificationResult = state.classifier.classify(channel, content, metadata);
-        let Some(rule_action) = result.strictest_action() else {
-            return DlpVerdict::Allow;
-        };
 
-        // Apply the channel-wide action floor, if configured.
-        let action = match config.action_override {
-            Some(floor) => rule_action.max(floor),
-            None => rule_action,
-        };
-        let severity = result.max_severity().unwrap_or(Severity::Low);
-        DlpVerdict::from_action(action, channel, severity, result.matches)
+        // Channel-rule action, escalated to the channel floor when a
+        // rule actually fired (an unmatched channel never floors).
+        let channel_action = result
+            .strictest_action()
+            .map(|a| match config.action_override {
+                Some(floor) => a.max(floor),
+                None => a,
+            });
+
+        // AI-app exfil signal: consulted only on the upload channel,
+        // only when a destination is recorded, and only when a detector
+        // is configured. Kept off the hot path for all other traffic.
+        let ai_verdict = state
+            .ai_app
+            .as_ref()
+            .filter(|_| channel == AiAppExfilDetector::channel())
+            .and_then(|detector| {
+                metadata
+                    .source
+                    .as_deref()
+                    .map(|dest| detector.verdict(dest, content, metadata))
+            })
+            .filter(|verdict| !matches!(verdict, DlpVerdict::Allow));
+
+        // Fold the (optional) channel and AI-app contributions together.
+        let mut action = channel_action;
+        let mut severity = result.max_severity();
+        let mut matches = result.matches;
+        if let Some(details) = ai_verdict.as_ref().and_then(DlpVerdict::details) {
+            action = Some(action.map_or(details.action, |a| a.max(details.action)));
+            severity = Some(severity.map_or(details.severity, |s| s.max(details.severity)));
+            matches.extend(details.matches.iter().cloned());
+        }
+
+        match action {
+            Some(action) => {
+                DlpVerdict::from_action(action, channel, severity.unwrap_or(Severity::Low), matches)
+            }
+            None => DlpVerdict::Allow,
+        }
     }
 
     /// Convenience wrapper that evaluates a [`ContentEvent`]
@@ -687,6 +824,206 @@ mod tests {
             )
             .is_blocking(),
             "model must still detect after policy swap"
+        );
+    }
+
+    // --- AI-app exfil detector wiring -------------------------------
+
+    /// A high-entropy GitHub token the secret scanner reliably flags.
+    const SECRET_BODY: &[u8] = b"deploy key ghp_abcdefghijklmnopqrstuvwxyz0123456789 attached";
+
+    /// Browser-upload metadata bound for a *known* AI app (ChatGPT).
+    fn ai_upload_meta() -> ContentMetadata {
+        ContentMetadata {
+            source: Some("https://chat.openai.com/c/abc".to_owned()),
+            ..ContentMetadata::default()
+        }
+    }
+
+    #[test]
+    fn ai_app_detector_is_off_by_default() {
+        // No `set_ai_app_policy`: a secret bound for a known AI app on
+        // the upload channel is allowed (the channel has no rules and
+        // the detector is not wired).
+        let e = engine_with(vec![]);
+        assert!(e.ai_app_policy().is_none());
+        assert_eq!(
+            e.evaluate(
+                AiAppExfilDetector::channel(),
+                SECRET_BODY,
+                &ai_upload_meta()
+            ),
+            DlpVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn ai_app_coaches_on_secret_upload_to_known_app() {
+        let e = engine_with(vec![]);
+        e.set_ai_app_policy(Some(AiAppPolicy::default()))
+            .expect("enable ai-app");
+        assert_eq!(e.ai_app_policy(), Some(AiAppPolicy::default()));
+
+        let v = e.evaluate(
+            AiAppExfilDetector::channel(),
+            SECRET_BODY,
+            &ai_upload_meta(),
+        );
+        // Coach-first default: a secret always coaches (warns), never
+        // blocks until the operator opts in.
+        assert!(
+            matches!(v, DlpVerdict::WarnUser(_)),
+            "expected a coaching warn, got {v:?}"
+        );
+        let d = v.details().expect("details");
+        assert_eq!(d.action, RuleAction::Warn);
+        assert!(
+            d.matches
+                .iter()
+                .any(|m| m.rule_id.starts_with("ai_app.secret.")),
+            "expected a secret match, got {:?}",
+            d.matches.iter().map(|m| &m.rule_id).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn ai_app_not_consulted_off_the_upload_channel() {
+        let e = engine_with(vec![]);
+        e.set_ai_app_policy(Some(AiAppPolicy::default()))
+            .expect("enable ai-app");
+        // Same content + destination, but a non-upload channel: the
+        // detector must not run, so there is nothing to flag.
+        assert_eq!(
+            e.evaluate(DlpChannel::Clipboard, SECRET_BODY, &ai_upload_meta()),
+            DlpVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn ai_app_requires_a_destination() {
+        let e = engine_with(vec![]);
+        e.set_ai_app_policy(Some(AiAppPolicy::default()))
+            .expect("enable ai-app");
+        // Upload channel but no destination recorded: nothing to score.
+        assert_eq!(
+            e.evaluate(
+                AiAppExfilDetector::channel(),
+                SECRET_BODY,
+                &ContentMetadata::default()
+            ),
+            DlpVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn ai_app_non_ai_destination_is_allowed() {
+        let e = engine_with(vec![]);
+        e.set_ai_app_policy(Some(AiAppPolicy::default()))
+            .expect("enable ai-app");
+        // A secret bound for an ordinary site is the channel engine's
+        // business, not the AI-app detector's.
+        let meta = ContentMetadata {
+            source: Some("https://mail.example.com/compose".to_owned()),
+            ..ContentMetadata::default()
+        };
+        assert_eq!(
+            e.evaluate(AiAppExfilDetector::channel(), SECRET_BODY, &meta),
+            DlpVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn ai_app_blocks_a_secret_only_when_opted_in() {
+        let e = engine_with(vec![]);
+        e.set_ai_app_policy(Some(AiAppPolicy {
+            block_opt_in: true,
+            ..AiAppPolicy::default()
+        }))
+        .expect("enable ai-app");
+        let v = e.evaluate(
+            AiAppExfilDetector::channel(),
+            SECRET_BODY,
+            &ai_upload_meta(),
+        );
+        assert!(
+            v.is_blocking(),
+            "opted-in secret upload should block, got {v:?}"
+        );
+    }
+
+    #[test]
+    fn ai_app_merges_with_channel_rule_taking_strictest_action() {
+        // A channel keyword rule only logs; the AI-app secret signal
+        // coaches (warn). The merged verdict takes the stricter Warn and
+        // carries both match sets.
+        let e = engine_with(vec![rule("kw", "deploy", RuleAction::Log, Severity::Low)]);
+        e.set_ai_app_policy(Some(AiAppPolicy::default()))
+            .expect("enable ai-app");
+        let v = e.evaluate(
+            AiAppExfilDetector::channel(),
+            SECRET_BODY,
+            &ai_upload_meta(),
+        );
+        assert!(matches!(v, DlpVerdict::WarnUser(_)), "got {v:?}");
+        let d = v.details().expect("details");
+        assert!(
+            d.matches.iter().any(|m| m.rule_id == "kw"),
+            "channel match should survive the merge"
+        );
+        assert!(
+            d.matches.iter().any(|m| m.rule_id.starts_with("ai_app.")),
+            "ai-app match should be merged in"
+        );
+    }
+
+    #[test]
+    fn set_ai_app_policy_none_disables_the_detector() {
+        let e = engine_with(vec![]);
+        e.set_ai_app_policy(Some(AiAppPolicy::default()))
+            .expect("enable ai-app");
+        assert!(matches!(
+            e.evaluate(
+                AiAppExfilDetector::channel(),
+                SECRET_BODY,
+                &ai_upload_meta()
+            ),
+            DlpVerdict::WarnUser(_)
+        ));
+        // Turning it back off restores the pure-channel behaviour.
+        e.set_ai_app_policy(None).expect("disable ai-app");
+        assert!(e.ai_app_policy().is_none());
+        assert_eq!(
+            e.evaluate(
+                AiAppExfilDetector::channel(),
+                SECRET_BODY,
+                &ai_upload_meta()
+            ),
+            DlpVerdict::Allow
+        );
+    }
+
+    #[test]
+    fn ai_app_policy_survives_a_policy_rotation() {
+        let e = engine_with(vec![]);
+        e.set_ai_app_policy(Some(AiAppPolicy::default()))
+            .expect("enable ai-app");
+        // Rotate the channel policy; the AI-app config must persist.
+        e.install(DlpPolicy {
+            rules: vec![rule("k2", "beta", RuleAction::Block, Severity::High)],
+            ..DlpPolicy::default()
+        })
+        .expect("install");
+        assert_eq!(e.ai_app_policy(), Some(AiAppPolicy::default()));
+        assert!(
+            matches!(
+                e.evaluate(
+                    AiAppExfilDetector::channel(),
+                    SECRET_BODY,
+                    &ai_upload_meta()
+                ),
+                DlpVerdict::WarnUser(_)
+            ),
+            "ai-app detector must still fire after a policy rotation"
         );
     }
 }

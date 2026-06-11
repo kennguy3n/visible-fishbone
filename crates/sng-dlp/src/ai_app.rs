@@ -1237,6 +1237,15 @@ impl AiAppExfilDetector {
         &self.policy
     }
 
+    /// The egress channel AI-app uploads are observed on. The DLP
+    /// engine consults the detector only for events on this channel, so
+    /// the coupling between "AI upload" and the reused contextual scorer
+    /// is documented in exactly one place ([`AI_UPLOAD_CHANNEL`]).
+    #[must_use]
+    pub const fn channel() -> DlpChannel {
+        AI_UPLOAD_CHANNEL
+    }
+
     /// Inspect a request `body` bound for `destination`, returning the
     /// coach-first [`AiAppSignal`]. `metadata` is the same out-of-band
     /// context the engine threads through classification (device
