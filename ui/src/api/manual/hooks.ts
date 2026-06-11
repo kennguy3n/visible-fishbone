@@ -193,14 +193,18 @@ const REVIEW_QUEUE_POLL_MS = 30_000;
 export function useDlpReviewQueue(
   tenantId: string,
   state?: DlpReviewState,
+  limit?: number,
 ): UseQueryResult<ListEnvelope<DlpReviewEvent>> {
   return useQuery({
-    queryKey: [...reviewQueueKey(tenantId), "list", state ?? "all"],
+    queryKey: [...reviewQueueKey(tenantId), "list", state ?? "all", limit ?? 0],
     queryFn: ({ signal }) =>
       sngRequest<ListEnvelope<DlpReviewEvent>>({
         method: "GET",
         url: `${base(tenantId)}/dlp/review-queue`,
-        params: state ? { state } : undefined,
+        params: {
+          ...(state ? { state } : {}),
+          ...(limit ? { limit } : {}),
+        },
         signal,
       }),
     enabled: !!tenantId,

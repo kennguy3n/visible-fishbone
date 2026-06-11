@@ -46,6 +46,14 @@ const STATE_FILTERS: (DlpReviewState | "all")[] = [
   "dismissed",
 ];
 
+// The list endpoint returns the most recent events (created_at DESC) up to
+// this limit and exposes no pagination cursor, so we request an explicit page
+// size and warn the operator when the result fills it — otherwise pending
+// exposures past the cap would be silently invisible. 200 matches the
+// repository's MaxPageLimit; the state filters are the intended way to narrow
+// a backlog larger than this.
+const QUEUE_PAGE_LIMIT = 200;
+
 // Digest windows offered to the operator, expressed as Go durations the
 // backend's `?window=` parser understands (it caps anything above 90 days).
 const DIGEST_WINDOWS: { label: string; value: string }[] = [
@@ -105,6 +113,7 @@ function DlpReviewQueueInner({ tenantId }: { tenantId: string }) {
   const queue = useDlpReviewQueue(
     tenantId,
     stateFilter === "all" ? undefined : stateFilter,
+    QUEUE_PAGE_LIMIT,
   );
   const digest = useDlpReviewDigest(tenantId, digestWindow);
 
@@ -170,12 +179,20 @@ function DlpReviewQueueInner({ tenantId }: { tenantId: string }) {
           }
         >
           {(d) => (
-            <DataTable
-              columns={QUEUE_COLUMNS}
-              rows={d.items ?? []}
-              rowKey={(e) => e.id}
-              onRowClick={(e) => setSelectedId(e.id)}
-            />
+            <>
+              {(d.items?.length ?? 0) >= QUEUE_PAGE_LIMIT && (
+                <div className="muted" style={{ marginBottom: 8, fontSize: 12.5 }}>
+                  Showing the {QUEUE_PAGE_LIMIT} most recent events. Narrow by
+                  state to see the rest of the backlog.
+                </div>
+              )}
+              <DataTable
+                columns={QUEUE_COLUMNS}
+                rows={d.items ?? []}
+                rowKey={(e) => e.id}
+                onRowClick={(e) => setSelectedId(e.id)}
+              />
+            </>
           )}
         </AsyncBoundary>
       </Card>
