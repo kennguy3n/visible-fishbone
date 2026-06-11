@@ -976,6 +976,13 @@ func buildRouter(
 	// when cfg.CASB.NoOpsEnabled.
 	appNoOpsEngine := casb.NewAppNoOpsEngine(postgres.NewCASBNoOpsStore(store), casbAppRepo, tenantRepo, logger)
 	appNoOpsEngine.SetAuditLog(auditRepo)
+	// Activity-tiered reconcile cadence so the periodic sweep does not
+	// re-classify thousands of dormant trial tenants' inventories every
+	// interval. Active tenants are still visited every cycle; the planner
+	// only skips quiet tenants whose tier is not yet due. The status
+	// filter is unchanged. Same DefaultPlanner the IdP sync uses.
+	casbReconcilePlanner := tenancy.DefaultPlanner()
+	appNoOpsEngine.WithDormancyPlanner(&casbReconcilePlanner)
 	// Both gates, not just NoOpsAutoEnforce: the engine only acts at all
 	// when NoOpsEnabled (the discovery hook and reconcile loop in main()
 	// are both gated on it), so wiring the enforcer also requires
