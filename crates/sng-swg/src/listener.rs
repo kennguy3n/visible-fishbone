@@ -37,10 +37,12 @@
 //! verdict for every well-framed body.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
+use tokio::sync::Semaphore;
 use tokio::time::timeout;
 
 use crate::auth::ExtAuthzHandler;
@@ -75,6 +77,14 @@ pub struct ExtAuthzListenerConfig {
     /// idle pooled connection ties up a task; on expiry the
     /// connection is closed (Envoy reconnects on its next request).
     pub read_timeout: Duration,
+    /// Hard cap on concurrently-serviced connections. Each accepted
+    /// connection takes a permit for its lifetime; once the cap is
+    /// reached, further connections are dropped (closed) rather than
+    /// spawning unbounded tasks. Bounds task/memory blast radius if a
+    /// misbehaving client (or a local actor with socket access) opens
+    /// many connections. Envoy pools a handful of ext-authz
+    /// connections, so the default sits far above any healthy load.
+    pub max_connections: usize,
 }
 
 impl ExtAuthzListenerConfig {
@@ -89,6 +99,7 @@ impl ExtAuthzListenerConfig {
             socket_path: socket_path.into(),
             max_body_bytes: 64 * 1024 * 1024,
             read_timeout: Duration::from_secs(10),
+            max_connections: 1024,
         }
     }
 }
@@ -108,6 +119,7 @@ pub struct ExtAuthzListener {
     handler: ExtAuthzHandler,
     max_body_bytes: usize,
     read_timeout: Duration,
+    max_connections: usize,
 }
 
 impl ExtAuthzListener {
@@ -137,6 +149,11 @@ impl ExtAuthzListener {
             handler,
             max_body_bytes: cfg.max_body_bytes,
             read_timeout: cfg.read_timeout,
+            // A zero cap would wedge the listener (no connection could
+            // ever acquire a permit); clamp to at least one so a
+            // misconfigured `0` degrades to serial service instead of
+            // a silent deadlock.
+            max_connections: cfg.max_connections.max(1),
         })
     }
 
@@ -173,20 +190,45 @@ impl ExtAuthzListener {
     ///
     /// The handler is cheap to clone (an `Arc` inner), so each task
     /// gets its own clone rather than sharing a lock.
+    ///
+    /// Concurrent connections are bounded by a semaphore sized to
+    /// `max_connections`: a permit is taken before a connection task
+    /// is spawned and held for its lifetime. Acquiring before spawn
+    /// (rather than letting tasks pile up waiting) keeps the in-flight
+    /// task count hard-capped; at saturation the excess connection is
+    /// closed immediately so the accept loop stays responsive and a
+    /// connection flood cannot exhaust task/memory. A dropped
+    /// connection leaves Envoy's ext-authz failure policy to apply,
+    /// the same as when nothing serves the socket.
     pub async fn run<F>(self, shutdown: F)
     where
         F: std::future::Future<Output = ()>,
     {
         tokio::pin!(shutdown);
+        let conn_limit = Arc::new(Semaphore::new(self.max_connections));
         loop {
             tokio::select! {
                 accepted = self.listener.accept() => {
                     match accepted {
                         Ok((stream, _addr)) => {
+                            let Ok(permit) = Arc::clone(&conn_limit).try_acquire_owned() else {
+                                // At the connection cap: shed this one
+                                // rather than spawning an unbounded task.
+                                tracing::warn!(
+                                    target: "sng_swg::listener",
+                                    max_connections = self.max_connections,
+                                    "ext_authz at connection cap, shedding connection"
+                                );
+                                drop(stream);
+                                continue;
+                            };
                             let handler = self.handler.clone();
                             let max_body = self.max_body_bytes;
                             let read_timeout = self.read_timeout;
                             tokio::spawn(async move {
+                                // Permit is released when the task ends,
+                                // freeing the slot for the next connection.
+                                let _permit = permit;
                                 serve_connection(stream, handler, max_body, read_timeout).await;
                             });
                         }
@@ -340,6 +382,18 @@ fn parse_body_length(header_bytes: &[u8]) -> Result<usize, &'static str> {
             let parsed = value
                 .parse::<usize>()
                 .map_err(|_| "invalid Content-Length header")?;
+            // RFC 7230 §3.3.2: a message with multiple `Content-Length`
+            // values that disagree is a request-smuggling vector and
+            // must be rejected. Envoy's ext-authz client never sends
+            // conflicting lengths, so this only bites a malformed /
+            // hostile peer — fail closed rather than pick last-wins.
+            // (A comma-separated list in a single header fails the
+            // `parse::<usize>` above, so it is covered too.)
+            if let Some(prev) = content_length
+                && prev != parsed
+            {
+                return Err("conflicting Content-Length headers");
+            }
             content_length = Some(parsed);
         }
     }
@@ -537,6 +591,49 @@ mod tests {
         server.await.unwrap();
     }
 
+    /// With the connection cap at 1, a first connection that holds
+    /// its permit (its request never completes, so the serve task
+    /// stays alive) forces a second connection to be shed: the server
+    /// closes it without spawning a task, and the client observes a
+    /// prompt EOF rather than a hang.
+    #[tokio::test]
+    async fn connection_cap_sheds_excess_connections() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = cfg(dir.path());
+        c.max_connections = 1;
+        let listener = ExtAuthzListener::bind(&c, handler()).unwrap();
+        let path = listener.socket_path().to_path_buf();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            listener
+                .run(async move {
+                    let _ = rx.await;
+                })
+                .await;
+        });
+
+        // Connection 1 takes the only permit and keeps the serve task
+        // alive by sending a partial request frame (no header
+        // terminator), so its read loop blocks until the timeout.
+        let mut c1 = UnixStream::connect(&path).await.unwrap();
+        c1.write_all(b"POST /ext_authz HTTP/1.1\r\n").await.unwrap();
+        // Let the accept loop run far enough to take the permit.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Connection 2 is accepted but shed (no permit available), so
+        // the server drops it and the client reads EOF promptly.
+        let mut c2 = UnixStream::connect(&path).await.unwrap();
+        let mut tmp = [0u8; 16];
+        let n = tokio::time::timeout(Duration::from_secs(1), c2.read(&mut tmp))
+            .await
+            .expect("a shed connection must close promptly, not hang")
+            .unwrap();
+        assert_eq!(n, 0, "second connection should be shed (closed) at the cap");
+
+        tx.send(()).unwrap();
+        let _ = server.await;
+    }
+
     #[tokio::test]
     async fn oversize_body_is_denied_before_handler() {
         let dir = tempfile::tempdir().unwrap();
@@ -609,6 +706,21 @@ mod tests {
     fn parse_body_length_defaults_to_zero_when_absent() {
         let h = b"POST / HTTP/1.1\r\nHost: x\r\n\r\n";
         assert_eq!(parse_body_length(h).unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_body_length_rejects_conflicting_content_length() {
+        // Two disagreeing Content-Length headers (RFC 7230 §3.3.2
+        // smuggling vector) must be rejected, not resolved last-wins.
+        let h = b"POST / HTTP/1.1\r\nContent-Length: 10\r\nContent-Length: 20\r\n\r\n";
+        assert!(parse_body_length(h).is_err());
+    }
+
+    #[test]
+    fn parse_body_length_allows_duplicate_agreeing_content_length() {
+        // Identical repeats are unambiguous, so they are accepted.
+        let h = b"POST / HTTP/1.1\r\nContent-Length: 10\r\nContent-Length: 10\r\n\r\n";
+        assert_eq!(parse_body_length(h).unwrap(), 10);
     }
 
     #[tokio::test]

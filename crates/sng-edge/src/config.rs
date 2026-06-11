@@ -847,6 +847,41 @@ fn validate(cfg: &EdgeConfig) -> Result<(), String> {
         }
     }
     validate_ha(&cfg.ha)?;
+    validate_swg(&cfg.swg)?;
+    Ok(())
+}
+
+/// SWG content-scan invariants. Only enforced when the ext-authz
+/// listener *and* the ClamAV scanner are both enabled — the scanner
+/// is a stage inside the listener's handler, so its knobs are inert
+/// (and a defaulted/stray value must not fail an otherwise-valid
+/// config) until both master switches are on. The defaults are all
+/// non-zero, so these only bite an operator who explicitly zeroed a
+/// field. Mirrors the HA pattern: each zero here is well-defined
+/// downstream (chunk clamps to 1, max-bytes scans nothing, a zero
+/// timeout expires every scan into the fail posture) but silently
+/// neuters scanning, so we turn the typo into a load-time error
+/// rather than a scanner that quietly never inspects anything.
+fn validate_swg(swg: &SwgConfig) -> Result<(), String> {
+    if !(swg.ext_authz_enabled && swg.clamav_enabled) {
+        return Ok(());
+    }
+    if swg.clamav_max_bytes == 0 {
+        return Err(
+            "swg.clamav_max_bytes must be > 0 when clamav_enabled (0 scans nothing)".into(),
+        );
+    }
+    if swg.clamav_chunk_size == 0 {
+        return Err(
+            "swg.clamav_chunk_size must be > 0 when clamav_enabled (0 streams no bytes)".into(),
+        );
+    }
+    if swg.clamav_timeout.is_zero() {
+        return Err(
+            "swg.clamav_timeout must be > 0 when clamav_enabled (0 expires every scan immediately)"
+                .into(),
+        );
+    }
     Ok(())
 }
 
@@ -1486,6 +1521,73 @@ event_channel_capacity = 0
         assert!(
             message.contains("ips.event_channel_capacity"),
             "message did not name the bad field: {message}"
+        );
+    }
+
+    /// A zeroed ClamAV knob is rejected at load time once both the
+    /// listener and the scanner are enabled — otherwise the scanner
+    /// would silently never inspect anything (here `clamav_timeout =
+    /// 0` expires every scan into the fail posture).
+    #[test]
+    fn validate_rejects_zero_clamav_timeout_when_scanner_enabled() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+site_id   = "33333333-3333-3333-3333-333333333333"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[swg]
+ext_authz_enabled = true
+clamav_enabled    = true
+clamav_timeout    = "0s"
+"#,
+        )
+        .unwrap();
+        let err = load_from_path(f.path()).unwrap_err();
+        let ConfigError::Invariant { message, .. } = err else {
+            panic!("expected Invariant error, got {err:?}");
+        };
+        assert!(
+            message.contains("swg.clamav_timeout"),
+            "message did not name the bad field: {message}"
+        );
+    }
+
+    /// The same zeroed knob is inert (and so accepted) while the
+    /// scanner is off — the surface is opt-in, so a defaulted/stray
+    /// value must not fail an otherwise-valid config.
+    #[test]
+    fn validate_allows_zero_clamav_timeout_when_scanner_disabled() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+site_id   = "33333333-3333-3333-3333-333333333333"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[swg]
+clamav_timeout = "0s"
+"#,
+        )
+        .unwrap();
+        assert!(
+            load_from_path(f.path()).is_ok(),
+            "a zero clamav_timeout must be inert while the scanner is disabled"
         );
     }
 
