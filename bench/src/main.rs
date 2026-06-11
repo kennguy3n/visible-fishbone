@@ -531,9 +531,13 @@ fn default_queue_curve(sku_queues: u32, parallelism: usize) -> Vec<usize> {
         curve.push(q);
         q *= 2;
     }
-    // The host/SKU bound itself, then one power-of-two step past it.
+    // The host/SKU bound itself, then one power-of-two step past it. After
+    // the loop `q` is the smallest power of two `>= bound`: when `bound` is
+    // itself a power of two (`q == bound`) the next step up is `q * 2`;
+    // otherwise `q` already sits one power of two above `bound`.
     curve.push(bound);
-    curve.push(q.max(bound).saturating_mul(2).max(bound + 1));
+    let oversubscribed = if q > bound { q } else { q.saturating_mul(2) };
+    curve.push(oversubscribed);
     curve
 }
 
@@ -1580,6 +1584,25 @@ mod tests {
         assert_eq!(Inspection::NoInspect.label(), "no-inspect");
         assert_eq!(Inspection::UrlCat.label(), "url-cat");
         assert_eq!(Inspection::FullTls.label(), "full-tls");
+    }
+
+    #[test]
+    fn default_queue_curve_spans_floor_bound_and_one_step_past() {
+        // Power-of-two bound: doubling curve up to the bound, then one
+        // power-of-two step past it.
+        assert_eq!(default_queue_curve(8, 8), vec![1, 2, 4, 8, 16]);
+        // SKU fan-out larger than host parallelism wins the bound.
+        assert_eq!(default_queue_curve(16, 8), vec![1, 2, 4, 8, 16, 32]);
+        // Non-power-of-two bound: the oversubscription point is the next
+        // power of two strictly above the bound (8, not 16), so the curve
+        // never skips that step.
+        assert_eq!(default_queue_curve(5, 5), vec![1, 2, 4, 5, 8]);
+        // A single-core host still yields a usable curve.
+        assert_eq!(default_queue_curve(1, 1), vec![1, 2]);
+        // The bound is always present and the curve is strictly increasing.
+        let curve = default_queue_curve(6, 3);
+        assert!(curve.contains(&6));
+        assert!(curve.windows(2).all(|w| w[0] < w[1]), "curve must increase");
     }
 
     #[test]

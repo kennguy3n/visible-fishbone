@@ -45,7 +45,8 @@ multi-queue model on a VM, not an ASIC).
 
 A further subcommand, `compare`, diffs two JSON reports and exits non-zero
 on regression (see [Regression detection](#regression-detection)). Another,
-`business-report`, sweeps every profile across all three modes, packet
+`business-report`, sweeps every profile across the three wire-test modes
+(`throughput`, `latency`, `concurrent-flows`), packet
 sizes, and inspection depths and renders one consolidated RFP-response
 datasheet (see [Business report](#business-report)).
 

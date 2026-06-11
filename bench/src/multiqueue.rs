@@ -151,7 +151,7 @@ pub fn measure_scaling(
     let mut single_stream_pps = 0.0f64;
     let mut points = Vec::with_capacity(counts.len());
 
-    for (idx, &queues) in counts.iter().enumerate() {
+    for &queues in &counts {
         let raw = run_fanout(
             mix,
             queues,
@@ -181,10 +181,12 @@ pub fn measure_scaling(
             0.0
         };
 
-        // The first point is always `queues == 1` (normalised), so this
+        // `queues == 1` is always the first normalised point, so this
         // captures the single-stream baseline before any wider point uses
-        // it as the linear-scaling reference.
-        if idx == 0 {
+        // it as the linear-scaling reference. Keying on the value (not a
+        // loop index) keeps this correct independent of how the queue
+        // counts are normalised or ordered.
+        if queues == 1 {
             single_stream_pps = aggregate_pps;
         }
         let scaling_efficiency = if single_stream_pps > 0.0 && queues > 0 {
