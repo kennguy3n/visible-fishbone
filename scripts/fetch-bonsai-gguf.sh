@@ -1,0 +1,188 @@
+#!/usr/bin/env bash
+# Fetch and cryptographically verify a pinned Ternary-Bonsai-8B GGUF
+# artifact from the prism-ml HuggingFace repo.
+#
+# The ShieldNet AI assistant (internal/service/ai) serves this model over
+# an OpenAI-compatible /v1 endpoint. We pin the *exact* GGUF by SHA-256 so
+# the air-gapped image bake (deploy/ollama/Dockerfile.llamacpp) and any
+# runtime pull are byte-for-byte reproducible and tamper-evident — a
+# supply-chain requirement for a security product serving 5K SME tenants.
+#
+# Default variant is Q2_0, the recommended 2-bit (ternary) quantization:
+# 2.03 GiB on disk, ~3 GB resident, runs on a commodity 4-core CPU.
+#
+# Usage:
+#   scripts/fetch-bonsai-gguf.sh                 # Q2_0 -> ./models
+#   scripts/fetch-bonsai-gguf.sh --variant Q2_0_g64
+#   scripts/fetch-bonsai-gguf.sh --out-dir deploy/ollama/models
+#   scripts/fetch-bonsai-gguf.sh --print-sha Q2_0   # print pinned digest
+#
+# Exit codes: 0 ok/verified, 1 usage error, 2 download failure,
+# 3 checksum/size mismatch (treat as tamper / corruption — do NOT use).
+set -euo pipefail
+
+# The pinned manifest below uses an associative array (declare -A), a bash 4+
+# feature. The Docker build (debian bash 5.2) and Linux CI are unaffected;
+# macOS ships bash 3.2 by default, where declare -A errors out cryptically.
+# Fail fast here with an actionable message instead. This guard must precede
+# the declare -A so bash 3.2 hits it first.
+if [ "${BASH_VERSINFO:-0}" -lt 4 ]; then
+  echo "error: bash 4+ required (found ${BASH_VERSION:-unknown}). On macOS:" \
+       "'brew install bash' and re-run, or use the Docker build." >&2
+  exit 1
+fi
+
+# --- Pinned manifest -------------------------------------------------------
+# Digests captured from the LFS pointers at prism-ml/Ternary-Bonsai-8B-gguf.
+# To rotate: update both the SHA-256 and the byte size together. The size
+# check is a cheap fail-fast before hashing 2+ GiB.
+HF_REPO="${SNG_LLM_HF_REPO:-prism-ml/Ternary-Bonsai-8B-gguf}"
+HF_REVISION="${SNG_LLM_HF_REVISION:-main}"
+
+# variant -> "<filename> <sha256> <size_bytes>"
+declare -A MANIFEST=(
+  [Q2_0]="Ternary-Bonsai-8B-Q2_0.gguf 3c8d70470a5d97e5a2b9410ddd899cb740116591462626c60cb2fead6448f60b 2182184672"
+  [Q2_0_g64]="Ternary-Bonsai-8B-Q2_0_g64.gguf e17b298d84ee78797916ae5c2ecc8211469cc65cccfe3080cd9a9bb503fbc55e 2310125920"
+  [PQ2_0]="Ternary-Bonsai-8B-PQ2_0.gguf 1376f942aa90e60f7b570c1d81b3916fea1315ff85aa1c4d19006af68fb4b922 2182184672"
+  [F16]="Ternary-Bonsai-8B-F16.gguf a6abfaf896c1e36db825112fc0a18e49adea05eeca1c6b2fba4d785ca7e947ff 16383663200"
+)
+
+VARIANT="Q2_0"
+OUT_DIR="./models"
+RESUME=1
+PRINT_SHA=""        # explicit variant to print, if any
+PRINT_SHA_ONLY=0     # set by --print-sha (print digest and exit)
+
+# $1: message, $2: optional exit code (default 1). Only $1 is printed so a
+# caller-supplied exit code never leaks into the message.
+die() { echo "error: $1" >&2; exit "${2:-1}"; }
+
+usage() {
+  # Print the leading comment block (every line after the shebang up to the
+  # first non-comment line), stripping the "# " prefix. Done dynamically so
+  # the help text can never drift out of sync with the header — a hardcoded
+  # line range previously truncated the exit-code 3 (tamper) documentation.
+  awk 'NR==1{next} /^#/{sub(/^# ?/,"");print;next} {exit}' "$0"
+  echo
+  echo "Variants: ${!MANIFEST[*]}"
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --variant)   VARIANT="${2:?--variant needs a value}"; shift 2 ;;
+    --out-dir)   OUT_DIR="${2:?--out-dir needs a value}"; shift 2 ;;
+    --print-sha)
+      # Optional value: consume $2 only if it's a real value, not the next
+      # flag (so `--print-sha --variant X` doesn't swallow `--variant`).
+      # Without an explicit value it falls back to --variant, resolved
+      # after parsing so flag order doesn't matter.
+      PRINT_SHA_ONLY=1
+      if [ -n "${2:-}" ] && [ "${2#-}" = "$2" ]; then
+        PRINT_SHA="$2"; shift 2
+      else
+        shift
+      fi ;;
+    --no-resume) RESUME=0; shift ;;
+    -h|--help)   usage; exit 0 ;;
+    *)           die "unknown argument: $1 (try --help)" ;;
+  esac
+done
+
+# --print-sha resolves and validates its own variant (explicit value, or the
+# --variant fallback) and exits, so it never depends on VARIANT being a valid
+# fetch target. Handle it before validating VARIANT for the download path.
+if [ "$PRINT_SHA_ONLY" = 1 ]; then
+  PRINT_SHA="${PRINT_SHA:-$VARIANT}"
+  [ -n "${MANIFEST[$PRINT_SHA]:-}" ] || die "unknown variant '$PRINT_SHA' (have: ${!MANIFEST[*]})"
+  read -r _f _s _z <<<"${MANIFEST[$PRINT_SHA]}"
+  echo "$_s  $_f"
+  exit 0
+fi
+
+[ -n "${MANIFEST[$VARIANT]:-}" ] || die "unknown variant '$VARIANT' (have: ${!MANIFEST[*]})"
+
+read -r FILENAME EXPECT_SHA EXPECT_SIZE <<<"${MANIFEST[$VARIANT]}"
+
+# --- Tool resolution (portable across distros / macOS) ---------------------
+sha256_of() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | awk '{print $1}';
+  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | awk '{print $1}';
+  else die "need sha256sum or shasum to verify the download"; fi
+}
+size_of() { wc -c <"$1" | tr -d ' '; }
+
+command -v curl >/dev/null 2>&1 || die "curl is required"
+
+mkdir -p "$OUT_DIR"
+DEST="$OUT_DIR/$FILENAME"
+URL="https://huggingface.co/$HF_REPO/resolve/$HF_REVISION/$FILENAME"
+
+# verify [--quiet]: returns 0 iff $DEST matches the pinned size + sha256.
+# --quiet suppresses mismatch diagnostics, used for the pre-download
+# idempotency probe where a missing/partial file is an expected, non-error
+# state. The post-download call runs verbose so real corruption is loud.
+verify() {
+  local quiet=""; [ "${1:-}" = "--quiet" ] && quiet=1
+  [ -f "$DEST" ] || return 1
+  local sz; sz="$(size_of "$DEST")"
+  if [ "$sz" != "$EXPECT_SIZE" ]; then
+    [ -n "$quiet" ] || echo "size mismatch: got $sz want $EXPECT_SIZE" >&2
+    return 1
+  fi
+  local got; got="$(sha256_of "$DEST")"
+  if [ "$got" != "$EXPECT_SHA" ]; then
+    [ -n "$quiet" ] || echo "sha256 mismatch: got $got want $EXPECT_SHA" >&2
+    return 1
+  fi
+  return 0
+}
+
+# Idempotent: a previously verified file is reused untouched (quiet probe —
+# a partial leftover from an aborted run is expected, not an error).
+if verify --quiet; then
+  echo "ok: $DEST already present and verified (sha256=$EXPECT_SHA)"
+  exit 0
+fi
+
+# Self-healing resume guard. The pre-check above failed, so any existing file
+# is unusable. With --continue-at -, a leftover that is already at/over the
+# pinned length is treated by curl as "complete": the server answers 416 and
+# --fail aborts, so the bad file is never replaced and re-runs loop forever.
+# Drop such a file so curl re-fetches from byte 0. A genuinely short partial
+# (size < expected) is kept so resume can still finish it efficiently. This
+# only matters for --continue-at; --no-resume already truncates via -o.
+if [ "$RESUME" = "1" ] && [ -f "$DEST" ]; then
+  cur_size="$(size_of "$DEST")"
+  if [ "$cur_size" -ge "$EXPECT_SIZE" ]; then
+    echo "note: existing $DEST ($cur_size B) is complete-length but failed" \
+         "verification; removing it to re-download from scratch." >&2
+    rm -f "$DEST"
+  fi
+fi
+
+echo "Fetching $FILENAME ($VARIANT) from $URL"
+echo "  expecting $EXPECT_SIZE bytes, sha256=$EXPECT_SHA"
+
+CURL_OPTS=(--fail --location --retry 5 --retry-delay 5 --retry-connrefused -o "$DEST")
+[ "$RESUME" = "1" ] && CURL_OPTS+=(--continue-at -)
+# Optional auth for gated/rate-limited mirrors.
+[ -n "${HF_TOKEN:-}" ] && CURL_OPTS+=(--header "Authorization: Bearer ${HF_TOKEN}")
+
+if ! curl "${CURL_OPTS[@]}" "$URL"; then
+  die "download failed for $URL" 2
+fi
+
+if ! verify; then
+  echo "VERIFY FAILED — refusing to use a model that does not match the pin." >&2
+  echo "Deleting the suspect file; re-run to retry." >&2
+  rm -f "$DEST"
+  exit 3
+fi
+
+echo "verified: $DEST"
+echo
+echo "Next steps:"
+echo "  llama.cpp (Q2_0 needs the prism fork):"
+echo "    llama-server -m \"$DEST\" --alias Ternary-Bonsai-8B --host 0.0.0.0 --port 8081 -c 4096"
+echo "  air-gapped image bake (context = repo root):"
+echo "    docker build -f deploy/ollama/Dockerfile.llamacpp -t sng-bonsai-q2:local ."

@@ -9,6 +9,7 @@ mod adversarial;
 mod dlp;
 mod dns;
 mod firewall;
+mod firewall_kernel;
 mod ips;
 mod malware;
 mod report;
@@ -35,9 +36,12 @@ struct Cli {
     #[arg(long, env = "GIT_SHA", default_value = "unknown")]
     git_sha: String,
 
-    /// Run only the firewall driver.
+    /// Run only the firewall (userspace engine) driver.
     #[arg(long)]
     firewall: bool,
+    /// Run only the kernel nftables conformance driver.
+    #[arg(long = "firewall-kernel")]
+    firewall_kernel: bool,
     /// Run only the SWG driver.
     #[arg(long)]
     swg: bool,
@@ -59,12 +63,19 @@ struct Cli {
     /// Run only the adversarial corpus drivers (malware + IPS evasion).
     #[arg(long)]
     adversarial: bool,
+
+    /// Internal: emit one raw probe packet (`<src> <dst> <dport> <tcp|udp>`)
+    /// then exit. Re-executed as root inside a network namespace by the
+    /// kernel nftables conformance driver; not a user-facing mode.
+    #[arg(long = "send-raw", num_args = 4, value_names = ["SRC", "DST", "DPORT", "PROTO"], hide = true)]
+    send_raw: Option<Vec<String>>,
 }
 
 impl Cli {
     /// When no per-function flag is set, run every driver.
     fn selected(&self) -> Selected {
         if self.firewall
+            || self.firewall_kernel
             || self.swg
             || self.ztna
             || self.ips
@@ -75,6 +86,7 @@ impl Cli {
         {
             Selected {
                 firewall: self.firewall,
+                firewall_kernel: self.firewall_kernel,
                 swg: self.swg,
                 ztna: self.ztna,
                 ips: self.ips,
@@ -86,6 +98,7 @@ impl Cli {
         } else {
             Selected {
                 firewall: true,
+                firewall_kernel: true,
                 swg: true,
                 ztna: true,
                 ips: true,
@@ -110,6 +123,7 @@ fn host() -> String {
 /// Which drivers to run this invocation.
 struct Selected {
     firewall: bool,
+    firewall_kernel: bool,
     swg: bool,
     ztna: bool,
     ips: bool,
@@ -122,12 +136,24 @@ struct Selected {
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
+
+    // Hidden re-exec path: craft and send a single raw probe packet, then
+    // exit. Used by the kernel nftables conformance driver, which runs this
+    // binary as root inside a client network namespace.
+    if let Some(args) = cli.send_raw.as_ref() {
+        std::process::exit(run_send_raw(args));
+    }
+
     let sel = cli.selected();
 
     let mut functions: Vec<FunctionReport> = Vec::new();
     if sel.firewall {
         eprintln!("running firewall efficacy (sng-fw)...");
         functions.push(firewall::run().await);
+    }
+    if sel.firewall_kernel {
+        eprintln!("running kernel nftables conformance (sng-fw)...");
+        functions.push(firewall_kernel::run().await);
     }
     if sel.swg {
         eprintln!("running SWG efficacy (sng-swg)...");
@@ -251,5 +277,52 @@ fn kind_str(k: report::Kind) -> &'static str {
     match k {
         report::Kind::Enforcement => "block-rate",
         report::Kind::Detection => "detect-rate",
+    }
+}
+
+/// Hidden `--send-raw <src> <dst> <dport> <tcp|udp>` entrypoint: craft and
+/// emit a single raw IPv4 probe packet, returning a process exit code. The
+/// kernel nftables conformance driver re-executes this binary as root inside
+/// a client namespace to inject one packet per corpus flow.
+fn run_send_raw(args: &[String]) -> i32 {
+    let [src, dst, dport, proto] = args else {
+        eprintln!("--send-raw expects: <src> <dst> <dport> <tcp|udp>");
+        return 2;
+    };
+    let src: std::net::Ipv4Addr = match src.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("invalid src {src}: {e}");
+            return 2;
+        }
+    };
+    let dst: std::net::Ipv4Addr = match dst.parse() {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("invalid dst {dst}: {e}");
+            return 2;
+        }
+    };
+    let dport: u16 = match dport.parse() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("invalid dport {dport}: {e}");
+            return 2;
+        }
+    };
+    let proto = match proto.as_str() {
+        "tcp" => sng_fw::Protocol::Tcp,
+        "udp" => sng_fw::Protocol::Udp,
+        other => {
+            eprintln!("invalid proto {other}: expected tcp or udp");
+            return 2;
+        }
+    };
+    match firewall_kernel::send_raw(src, dst, dport, proto) {
+        Ok(()) => 0,
+        Err(e) => {
+            eprintln!("send_raw failed: {e}");
+            1
+        }
     }
 }

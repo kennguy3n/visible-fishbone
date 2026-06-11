@@ -1,0 +1,4 @@
+# Locally fetched model weights (multi-GB) — never commit these.
+# scripts/fetch-bonsai-gguf.sh downloads + verifies them on demand.
+models/
+*.gguf

@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"net/netip"
+	"sort"
 	"strings"
 	"time"
 
@@ -188,6 +189,19 @@ func (r *AppRegistryRepository) ListAll(ctx context.Context) ([]repository.AppRe
 	for _, app := range r.s.appRegistry {
 		out = append(out, cloneAppRegistry(app))
 	}
+	// Match the postgres ListAll ordering (ORDER BY name). The map
+	// iteration above is non-deterministic; sorting by name keeps the
+	// two backends consistent. Names are unique (Create rejects
+	// case-insensitive duplicates), so this is a total order.
+	//
+	// This is a byte-wise comparison, whereas postgres sorts under its
+	// column collation (often locale-aware, e.g. en_US.UTF-8). The two
+	// agree for the ASCII app names used in practice; they could only
+	// diverge for non-ASCII names, which the memory backend (a test
+	// approximation) does not attempt to replicate.
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Name < out[j].Name
+	})
 	return out, nil
 }
 
@@ -305,7 +319,16 @@ func (r *AppRegistryOverrideRepository) ListAll(ctx context.Context, tenantID uu
 		}
 		out = append(out, cloneAppOverride(ov))
 	}
-	return out, nil
+	// Match the postgres ListAll ordering (created_at DESC, id DESC).
+	// The map iteration above is non-deterministic, and callers such as
+	// resolveTrafficClass pick the first matching override, so an
+	// unordered result would make override precedence differ between the
+	// memory and postgres backends.
+	return sortByCreatedAtDesc(out,
+		func(o repository.AppRegistryOverride) time.Time { return o.CreatedAt },
+		func(o repository.AppRegistryOverride) uuid.UUID { return o.ID },
+		repository.SortDesc,
+	), nil
 }
 
 func (r *AppRegistryOverrideRepository) DeleteExpired(ctx context.Context, now time.Time) (int, error) {

@@ -63,6 +63,7 @@
 //! offset/length of a hit — so an emitted verdict can never leak
 //! the sensitive content that produced it.
 
+pub mod ai_app;
 pub mod channels;
 pub mod classifier;
 pub mod detectors;
@@ -74,6 +75,11 @@ pub mod policy;
 pub mod rules;
 pub mod validators;
 
+pub use ai_app::{
+    AiAppAction, AiAppCategory, AiAppDestination, AiAppExfilDetector, AiAppKind, AiAppPolicy,
+    AiAppSignal, ConfidentialScanner, FindingKind, FindingSummary, MarkerMatch, SecretKind,
+    SecretMatch, SecretScanner, classify_destination, default_pii_rules,
+};
 pub use channels::{
     ChannelConfig, ChannelError, ChannelInterceptor, ContentEvent, DlpChannel, InMemoryInterceptor,
 };

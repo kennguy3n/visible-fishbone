@@ -53,6 +53,17 @@ type shadowApp struct {
 	// surfaces) score higher because shadow use bypasses the
 	// tenant's DLP and posture controls.
 	Risk int
+	// Suffixes are every registrable host suffix that resolves to
+	// this app (e.g. "console.aws.amazon.com", "signin.aws.amazon.com").
+	// buildShadowCatalog fills it so the NoOps action engine can scope
+	// an enforcement override to all of the app's domains without
+	// re-deriving them. Treated as immutable after init.
+	Suffixes []string
+	// Connector is true for apps the platform ships a first-class CASB
+	// connector for — a strong signal the tenant deliberately adopted
+	// the app, so classification marks it sanctioned and the action
+	// engine never auto-enforces it.
+	Connector bool
 }
 
 // shadowCatalog maps a registrable host suffix to the SaaS app it
@@ -68,43 +79,43 @@ type shadowApp struct {
 // carries would be a fiction.
 var shadowCatalog = buildShadowCatalog(
 	// --- SaaS with first-class CASB connectors --------------------
-	entry(shadowApp{Name: "Box", Vendor: "Box", Category: "cloud_storage", Risk: 45},
+	entryC(shadowApp{Name: "Box", Vendor: "Box", Category: "cloud_storage", Risk: 45},
 		"box.com"),
-	entry(shadowApp{Name: "Dropbox", Vendor: "Dropbox", Category: "cloud_storage", Risk: 55},
+	entryC(shadowApp{Name: "Dropbox", Vendor: "Dropbox", Category: "cloud_storage", Risk: 55},
 		"dropbox.com"),
-	entry(shadowApp{Name: "GitHub", Vendor: "GitHub", Category: "code_repository", Risk: 60},
+	entryC(shadowApp{Name: "GitHub", Vendor: "GitHub", Category: "code_repository", Risk: 60},
 		"github.com"),
-	entry(shadowApp{Name: "GitLab", Vendor: "GitLab", Category: "code_repository", Risk: 60},
+	entryC(shadowApp{Name: "GitLab", Vendor: "GitLab", Category: "code_repository", Risk: 60},
 		"gitlab.com"),
-	entry(shadowApp{Name: "Atlassian Cloud", Vendor: "Atlassian", Category: "project_management", Risk: 35},
+	entryC(shadowApp{Name: "Atlassian Cloud", Vendor: "Atlassian", Category: "project_management", Risk: 35},
 		"atlassian.net"),
-	entry(shadowApp{Name: "ServiceNow", Vendor: "ServiceNow", Category: "itsm", Risk: 45},
+	entryC(shadowApp{Name: "ServiceNow", Vendor: "ServiceNow", Category: "itsm", Risk: 45},
 		"service-now.com"),
-	entry(shadowApp{Name: "Zendesk", Vendor: "Zendesk", Category: "support", Risk: 35},
+	entryC(shadowApp{Name: "Zendesk", Vendor: "Zendesk", Category: "support", Risk: 35},
 		"zendesk.com"),
-	entry(shadowApp{Name: "HubSpot", Vendor: "HubSpot", Category: "crm", Risk: 40},
+	entryC(shadowApp{Name: "HubSpot", Vendor: "HubSpot", Category: "crm", Risk: 40},
 		"hubspot.com"),
-	entry(shadowApp{Name: "Zoom", Vendor: "Zoom", Category: "conferencing", Risk: 30},
+	entryC(shadowApp{Name: "Zoom", Vendor: "Zoom", Category: "conferencing", Risk: 30},
 		"zoom.us"),
-	entry(shadowApp{Name: "Microsoft Teams", Vendor: "Microsoft", Category: "collaboration", Risk: 25},
+	entryC(shadowApp{Name: "Microsoft Teams", Vendor: "Microsoft", Category: "collaboration", Risk: 25},
 		"teams.microsoft.com", "teams.live.com"),
-	entry(shadowApp{Name: "Microsoft 365", Vendor: "Microsoft", Category: "collaboration", Risk: 35},
+	entryC(shadowApp{Name: "Microsoft 365", Vendor: "Microsoft", Category: "collaboration", Risk: 35},
 		"sharepoint.com", "outlook.office.com", "onedrive.live.com"),
-	entry(shadowApp{Name: "AWS Console", Vendor: "Amazon", Category: "cloud_iaas", Risk: 70},
+	entryC(shadowApp{Name: "AWS Console", Vendor: "Amazon", Category: "cloud_iaas", Risk: 70},
 		"console.aws.amazon.com", "signin.aws.amazon.com"),
-	entry(shadowApp{Name: "GCP Console", Vendor: "Google", Category: "cloud_iaas", Risk: 70},
+	entryC(shadowApp{Name: "GCP Console", Vendor: "Google", Category: "cloud_iaas", Risk: 70},
 		"console.cloud.google.com"),
-	entry(shadowApp{Name: "Azure Portal", Vendor: "Microsoft", Category: "cloud_iaas", Risk: 70},
+	entryC(shadowApp{Name: "Azure Portal", Vendor: "Microsoft", Category: "cloud_iaas", Risk: 70},
 		"portal.azure.com"),
-	entry(shadowApp{Name: "Okta", Vendor: "Okta", Category: "identity", Risk: 55},
+	entryC(shadowApp{Name: "Okta", Vendor: "Okta", Category: "identity", Risk: 55},
 		"okta.com", "oktapreview.com"),
-	entry(shadowApp{Name: "Workday", Vendor: "Workday", Category: "hcm", Risk: 45},
+	entryC(shadowApp{Name: "Workday", Vendor: "Workday", Category: "hcm", Risk: 45},
 		"workday.com", "myworkday.com"),
-	entry(shadowApp{Name: "Google Workspace", Vendor: "Google", Category: "collaboration", Risk: 45},
+	entryC(shadowApp{Name: "Google Workspace", Vendor: "Google", Category: "collaboration", Risk: 45},
 		"drive.google.com", "docs.google.com", "mail.google.com"),
-	entry(shadowApp{Name: "Slack", Vendor: "Slack", Category: "collaboration", Risk: 35},
+	entryC(shadowApp{Name: "Slack", Vendor: "Slack", Category: "collaboration", Risk: 35},
 		"slack.com"),
-	entry(shadowApp{Name: "Salesforce", Vendor: "Salesforce", Category: "crm", Risk: 45},
+	entryC(shadowApp{Name: "Salesforce", Vendor: "Salesforce", Category: "crm", Risk: 45},
 		"salesforce.com", "force.com"),
 
 	// --- Common unsanctioned SaaS (no connector) ------------------
@@ -141,22 +152,68 @@ var shadowCatalog = buildShadowCatalog(
 
 // catalogEntry pairs an app with the host suffixes that resolve to it.
 type catalogEntry struct {
-	app      shadowApp
-	suffixes []string
+	app       shadowApp
+	suffixes  []string
+	connector bool
 }
 
+// entry declares a catalog app with no first-class connector (the
+// classic shadow-IT case).
 func entry(app shadowApp, suffixes ...string) catalogEntry {
 	return catalogEntry{app: app, suffixes: suffixes}
 }
 
+// entryC declares a catalog app the platform ships a first-class CASB
+// connector for. Marks the app as connector-backed so classification
+// treats it as sanctioned.
+func entryC(app shadowApp, suffixes ...string) catalogEntry {
+	return catalogEntry{app: app, suffixes: suffixes, connector: true}
+}
+
+// shadowAppByName indexes the catalog by app name so the NoOps action
+// engine can recover an app's domains + connector flag during a
+// reconcile sweep (which works from persisted rows that carry only the
+// name). Derived from shadowCatalog by indexShadowAppsByName rather than
+// mutated as a side-effect of buildShadowCatalog, so the dependency is
+// explicit and the builder stays a pure function. Immutable after init.
+var shadowAppByName = indexShadowAppsByName(shadowCatalog)
+
 func buildShadowCatalog(entries ...catalogEntry) map[string]shadowApp {
 	m := make(map[string]shadowApp, len(entries)*2)
 	for _, e := range entries {
+		app := e.app
+		app.Suffixes = e.suffixes
+		app.Connector = e.connector
 		for _, s := range e.suffixes {
-			m[s] = e.app
+			m[s] = app
 		}
 	}
 	return m
+}
+
+// indexShadowAppsByName builds the name->app index from the
+// suffix-keyed catalog. Every suffix entry for an app carries that
+// app's full Suffixes slice (buildShadowCatalog sets it before
+// inserting), so collapsing by name loses nothing.
+func indexShadowAppsByName(catalog map[string]shadowApp) map[string]shadowApp {
+	byName := make(map[string]shadowApp, len(catalog))
+	for _, app := range catalog {
+		byName[app.Name] = app
+	}
+	return byName
+}
+
+// catalogMetaFor returns the host suffixes and connector flag for a
+// known catalog app, used by the reconcile path. Returns (nil, false)
+// for an app not in the catalog (e.g. a connector-synced app with no
+// shadow entry); the engine then classifies and recommends but cannot
+// scope an auto-enforcement override.
+func catalogMetaFor(name string) (domains []string, hasConnector bool) {
+	app, ok := shadowAppByName[name]
+	if !ok {
+		return nil, false
+	}
+	return app.Suffixes, app.Connector
 }
 
 // matchHost resolves a hostname to a catalog app, or (zero, false)
@@ -234,6 +291,26 @@ type shadowAggregator interface {
 	Upsert(ctx context.Context, tenantID uuid.UUID, app repository.CASBDiscoveredApp) (repository.CASBDiscoveredApp, error)
 }
 
+// AppDiscoveryMeta carries the catalog context for a flushed app that
+// the persisted casb_discovered_apps row does not hold: the app's host
+// suffixes (so the NoOps action engine can scope an enforcement
+// override) and whether the platform ships a connector for it (a
+// sanctioned signal).
+type AppDiscoveryMeta struct {
+	Domains      []string
+	HasConnector bool
+}
+
+// AppDiscoveryHook is the optional NoOps pipeline the discoverer
+// notifies after persisting each app in a flush. *AppNoOpsEngine
+// implements it. It is deliberately a narrow, fire-and-forget
+// notification: implementations must not return an error and must not
+// panic the flush (the discoverer isolates both), so the shadow-IT
+// inventory's persistence guarantees are unaffected by the pipeline.
+type AppDiscoveryHook interface {
+	OnAppDiscovered(ctx context.Context, tenantID uuid.UUID, app repository.CASBDiscoveredApp, meta AppDiscoveryMeta)
+}
+
 // shadowKey identifies a per-tenant, per-app aggregate.
 type shadowKey struct {
 	tenant uuid.UUID
@@ -267,6 +344,14 @@ type ShadowITDiscoverer struct {
 	apps    shadowAggregator
 	logger  *slog.Logger
 	nowFunc func() time.Time
+
+	// hook is the optional NoOps pipeline notified after each upsert in
+	// a flush. nil disables it, so shadow-IT discovery runs standalone
+	// exactly as before — there is no hard dependency on the pipeline.
+	// Read-mostly: set once via SetDiscoveryHook before Start; the load
+	// in Flush is unsynchronised because configuration completes before
+	// the flush loop runs.
+	hook AppDiscoveryHook
 
 	shards []*shadowShard
 	mask   uint64
@@ -307,6 +392,15 @@ func NewShadowITDiscoverer(apps shadowAggregator, logger *slog.Logger) *ShadowIT
 		stopCh:  make(chan struct{}),
 		doneCh:  make(chan struct{}),
 	}
+}
+
+// SetDiscoveryHook wires the optional NoOps pipeline that runs after
+// each app is persisted in a flush. Call it once before Start; a nil
+// hook leaves discovery standalone. Returns the discoverer for fluent
+// construction.
+func (d *ShadowITDiscoverer) SetDiscoveryHook(h AppDiscoveryHook) *ShadowITDiscoverer {
+	d.hook = h
+	return d
 }
 
 func (d *ShadowITDiscoverer) shardFor(tenantID uuid.UUID) *shadowShard {
@@ -393,6 +487,7 @@ func (d *ShadowITDiscoverer) Flush(ctx context.Context) error {
 	type pending struct {
 		tenant uuid.UUID
 		app    repository.CASBDiscoveredApp
+		meta   AppDiscoveryMeta
 	}
 	// Snapshot-and-reset under each shard lock, then upsert outside
 	// the lock so a slow database never blocks Observe.
@@ -433,6 +528,10 @@ func (d *ShadowITDiscoverer) Flush(ctx context.Context) error {
 					FirstSeen:         agg.firstSeen,
 					LastSeen:          agg.lastSeen,
 				},
+				meta: AppDiscoveryMeta{
+					Domains:      agg.app.Suffixes,
+					HasConnector: agg.app.Connector,
+				},
 			})
 		}
 		// Reset the window: drop the map so memory tracks only the
@@ -446,7 +545,8 @@ func (d *ShadowITDiscoverer) Flush(ctx context.Context) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if _, err := d.apps.Upsert(ctx, p.tenant, p.app); err != nil {
+		saved, err := d.apps.Upsert(ctx, p.tenant, p.app)
+		if err != nil {
 			d.logger.Warn("casb: shadow-it upsert failed",
 				slog.String("tenant_id", p.tenant.String()),
 				slog.String("app", p.app.Name),
@@ -454,9 +554,35 @@ func (d *ShadowITDiscoverer) Flush(ctx context.Context) error {
 			if firstErr == nil {
 				firstErr = err
 			}
+			continue
 		}
+		// Run the NoOps pipeline for the freshly-persisted app. It is
+		// strictly additive to discovery: invoked only after a
+		// successful upsert, isolated from panics, and never affects
+		// firstErr — a failing pipeline must not make Flush look like a
+		// persistence failure (which would trip the caller's retry/alert
+		// path) nor abort the remaining upserts.
+		d.notifyDiscovered(ctx, p.tenant, saved, p.meta)
 	}
 	return firstErr
+}
+
+// notifyDiscovered invokes the optional NoOps hook for one persisted
+// app, swallowing any panic so a pipeline bug can never crash the flush
+// loop (and with it the discoverer's shutdown-drain guarantees).
+func (d *ShadowITDiscoverer) notifyDiscovered(ctx context.Context, tenantID uuid.UUID, app repository.CASBDiscoveredApp, meta AppDiscoveryMeta) {
+	if d.hook == nil {
+		return
+	}
+	defer func() {
+		if r := recover(); r != nil {
+			d.logger.Error("casb: shadow-it discovery hook panicked",
+				slog.String("tenant_id", tenantID.String()),
+				slog.String("app", app.Name),
+				slog.Any("panic", r))
+		}
+	}()
+	d.hook.OnAppDiscovered(ctx, tenantID, app, meta)
 }
 
 // Start launches the flush loop in a background goroutine and returns
