@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"sort"
 	"strconv"
@@ -95,9 +96,11 @@ type PolicyGraphSource interface {
 // tenant's compiled policy graph (when a PolicyGraphSource is wired)
 // or a conservative heuristic default otherwise.
 type NLQueryEngine struct {
-	llm     LLMProvider
-	graphs  PolicyGraphSource
-	factory policy.EvaluatorFactory
+	llm        LLMProvider
+	graphs     PolicyGraphSource
+	factory    policy.EvaluatorFactory
+	identities IdentityResolver
+	logger     *slog.Logger
 }
 
 // NLQueryOption customises a NLQueryEngine.
@@ -108,6 +111,26 @@ type NLQueryOption func(*NLQueryEngine)
 // evaluator instead of the heuristic fallback.
 func WithPolicyGraphSource(src PolicyGraphSource) NLQueryOption {
 	return func(e *NLQueryEngine) { e.graphs = src }
+}
+
+// WithIdentityResolver wires a resolver that maps a query's named user
+// to a concrete tenant directory identity (user + role/group IDs), so
+// user-subject policy rules are actually evaluated in the compiled-
+// bundle path instead of being skipped. Without it, a question that
+// names a user still evaluates app/device + default-action rules but
+// reports partial confidence and says user-subject rules were not
+// evaluated.
+func WithIdentityResolver(r IdentityResolver) NLQueryOption {
+	return func(e *NLQueryEngine) { e.identities = r }
+}
+
+// WithQueryLogger attaches a logger used to surface identity-resolution
+// faults. A directory-backend failure degrades the query to
+// app/device-only evaluation (never fails it); logging lets operators
+// distinguish that fault from a clean "user not found" so a persistent
+// outage isn't invisible behind partial-confidence verdicts.
+func WithQueryLogger(logger *slog.Logger) NLQueryOption {
+	return func(e *NLQueryEngine) { e.logger = logger }
 }
 
 // NewNLQueryEngine constructs a NLQueryEngine. llm may be nil
@@ -235,7 +258,7 @@ func (e *NLQueryEngine) Query(ctx context.Context, req NLQueryRequest) (NLQueryR
 		return e.answerAnalytics(intent, aiGenerated, modelID), nil
 	}
 
-	verdict, matchedRules, explanation, mode := e.decide(ctx, req.TenantID, intent)
+	verdict, matchedRules, explanation, mode, userResolved := e.decide(ctx, req.TenantID, intent)
 
 	confidence := 0.5
 	if aiGenerated {
@@ -252,15 +275,17 @@ func (e *NLQueryEngine) Query(ctx context.Context, req NLQueryRequest) (NLQueryR
 	// carries high confidence.
 	if mode == evalModeCompiledBundle {
 		confidence = 0.95
-		// The synthesized access envelope cannot represent user
-		// identity (it lives in class-specific payloads, not the
-		// envelope), so user-subject policy rules are never evaluated.
-		// When the question named a user, the verdict only reflects
-		// app/device/default-action matching — report partial
+		// When the question named a user that we could resolve to a
+		// tenant directory identity, user-subject rules were evaluated
+		// against it (see evaluateAgainstBundle), so the verdict carries
+		// full authority. When the user could not be resolved (no
+		// directory wired, or unknown/ambiguous reference), user-subject
+		// rules can't be evaluated — the verdict reflects only
+		// app/device + default-action matching, so report partial
 		// confidence and say so rather than claiming full authority.
-		if intent.UserRef != "" {
+		if intent.UserRef != "" && !userResolved {
 			confidence = 0.7
-			explanation += " Note: user-subject rules were not evaluated — user identity is not represented in the synthesized access envelope, so this verdict reflects only app/device and default-action matching."
+			explanation += " Note: user-subject rules were not evaluated — the named user could not be resolved to a tenant directory identity, so this verdict reflects only app/device and default-action matching."
 		}
 	}
 
@@ -726,30 +751,30 @@ func formatVersions(vs []int) string {
 // tenant's live compiled policy graph when a source is wired and
 // falling back to a conservative heuristic otherwise. The returned
 // mode records which path produced the verdict.
-func (e *NLQueryEngine) decide(ctx context.Context, tenantID uuid.UUID, intent ParsedIntent) (verdict string, matchedRules []string, explanation, mode string) {
+func (e *NLQueryEngine) decide(ctx context.Context, tenantID uuid.UUID, intent ParsedIntent) (verdict string, matchedRules []string, explanation, mode string, userResolved bool) {
 	if intent.UserRef == "" && intent.AppRef == "" && intent.DeviceRef == "" {
-		return "unknown", nil, "No entity references could be extracted from the query.", ""
+		return "unknown", nil, "No entity references could be extracted from the query.", "", false
 	}
 
 	if e.graphs != nil {
-		v, rules, expl, err := e.evaluateAgainstBundle(ctx, tenantID, intent)
+		v, rules, expl, resolved, err := e.evaluateAgainstBundle(ctx, tenantID, intent)
 		switch {
 		case err == nil:
-			return v, rules, expl, evalModeCompiledBundle
+			return v, rules, expl, evalModeCompiledBundle, resolved
 		case errors.Is(err, repository.ErrNotFound):
 			// Source wired but the tenant has no live policy yet.
 			hv, hr, he := e.heuristicEvaluate(intent)
-			return hv, hr, he + " (no live policy graph; heuristic default applied)", evalModeNoPolicy
+			return hv, hr, he + " (no live policy graph; heuristic default applied)", evalModeNoPolicy, false
 		default:
 			// Unexpected evaluation failure: keep the endpoint
 			// available via the heuristic, but flag the degraded mode.
 			hv, hr, he := e.heuristicEvaluate(intent)
-			return hv, hr, he, evalModeDefaultHeuristic
+			return hv, hr, he, evalModeDefaultHeuristic, false
 		}
 	}
 
 	hv, hr, he := e.heuristicEvaluate(intent)
-	return hv, hr, he, evalModeDefaultHeuristic
+	return hv, hr, he, evalModeDefaultHeuristic, false
 }
 
 // evaluateAgainstBundle runs the parsed intent through the tenant's
@@ -762,25 +787,84 @@ func (e *NLQueryEngine) decide(ctx context.Context, tenantID uuid.UUID, intent P
 // plus the graph's DefaultAction — exactly what a real edge/endpoint
 // would. Returns repository.ErrNotFound when the tenant has no live
 // graph.
-func (e *NLQueryEngine) evaluateAgainstBundle(ctx context.Context, tenantID uuid.UUID, intent ParsedIntent) (verdict string, matchedRules []string, explanation string, err error) {
+func (e *NLQueryEngine) evaluateAgainstBundle(ctx context.Context, tenantID uuid.UUID, intent ParsedIntent) (verdict string, matchedRules []string, explanation string, userResolved bool, err error) {
 	g, err := e.graphs.GetCurrentGraph(ctx, tenantID)
 	if err != nil {
-		return "", nil, "", err
+		return "", nil, "", false, err
 	}
 	evaluator, err := e.factory.Build(ctx, g)
 	if err != nil {
-		return "", nil, "", fmt.Errorf("ai/nl_query: build evaluator: %w", err)
+		return "", nil, "", false, fmt.Errorf("ai/nl_query: build evaluator: %w", err)
 	}
 	env := intentToEnvelope(tenantID, intent)
-	v, err := evaluator.Evaluate(ctx, env)
-	if err != nil {
-		return "", nil, "", fmt.Errorf("ai/nl_query: evaluate: %w", err)
+
+	// Resolve the named user to a concrete tenant directory identity so
+	// user-subject rules evaluate against it. Resolution is best-effort:
+	// an unknown/ambiguous user (or no resolver wired) leaves principal
+	// nil and the verdict reflects only app/device + default-action
+	// matching, reported as partial confidence by the caller. A resolver
+	// error degrades the same way rather than failing the whole query.
+	var principal *policy.Principal
+	var identity *ResolvedIdentity
+	if intent.UserRef != "" && e.identities != nil {
+		id, rerr := e.identities.ResolveUser(ctx, tenantID, intent.UserRef)
+		switch {
+		case rerr != nil:
+			// A directory-backend failure (not a clean "user not found",
+			// which the resolver reports as nil/nil). Degrade to
+			// app/device-only evaluation rather than failing the query,
+			// but surface the fault so a persistent outage isn't invisible
+			// behind partial-confidence verdicts.
+			if e.logger != nil {
+				e.logger.WarnContext(ctx, "ai/nl_query: identity resolution failed; degrading to app/device-only evaluation",
+					slog.String("tenant_id", tenantID.String()),
+					slog.String("error", rerr.Error()))
+			}
+		case id != nil && id.Principal != nil:
+			// Only treat the user as resolved when a usable principal came
+			// back: principal and identity move together so the explanation
+			// and confidence can never claim a user-subject evaluation that
+			// didn't actually run.
+			principal = id.Principal
+			identity = id
+		}
 	}
+
+	var v schema.Verdict
+	if principal != nil {
+		if pe, ok := evaluator.(policy.PrincipalEvaluator); ok {
+			v, err = pe.EvaluateWithPrincipal(ctx, env, principal)
+		} else {
+			// Evaluator can't consume a principal (e.g. a stub factory):
+			// fall back to the principal-less path and report the user
+			// as unresolved so the explanation stays honest.
+			v, err = evaluator.Evaluate(ctx, env)
+			identity = nil
+		}
+	} else {
+		v, err = evaluator.Evaluate(ctx, env)
+	}
+	if err != nil {
+		return "", nil, "", false, fmt.Errorf("ai/nl_query: evaluate: %w", err)
+	}
+
 	verdict = mapVerdict(v)
 	matchedRules = []string{fmt.Sprintf("policy-graph:%s@v%d", g.ID, g.Version)}
 	explanation = fmt.Sprintf("Verdict %q from tenant policy graph %s (v%d) for %s.",
 		verdict, g.ID, g.Version, describeIntent(intent))
-	return verdict, matchedRules, explanation, nil
+	if identity != nil {
+		explanation += fmt.Sprintf(" User-subject rules were evaluated against the resolved identity %s (%d role%s).",
+			identity.Display, identity.RoleCount, plural(identity.RoleCount))
+	}
+	return verdict, matchedRules, explanation, identity != nil, nil
+}
+
+// plural renders the "s" suffix for a count (0/2+ → "s", 1 → "").
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // heuristicEvaluate is the conservative fallback used when no policy

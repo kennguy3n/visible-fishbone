@@ -1490,7 +1490,7 @@ func buildRouter(
 	meteringHandler := handler.NewMeteringHandler(meteringSvc, budgetEnforcer, meteringReports, meteringAnomalies, meteringReports, rbacSvc)
 
 	aiHandler, aiSvc := buildAIHandler(cfg, policySvc, store.NewAICorrelationRepository(), alertRepo, auditSvc, aiSuggestionRepo,
-		metering.NewGuardrailBudgetGate(budgetEnforcer), metering.NewGuardrailUsageRecorder(meteringSvc), iocStore, logger)
+		metering.NewGuardrailBudgetGate(budgetEnforcer), metering.NewGuardrailUsageRecorder(meteringSvc), iocStore, userRepo, roleRepo, logger)
 
 	// --- Operational automation wiring (Session 5) --------------------
 	// Bulk device operations reuse the existing device / claim-token /
@@ -2055,7 +2055,7 @@ func (a popControlAdapter) SetAssignment(ctx context.Context, tenantID, popID uu
 // buildAIHandler constructs the AI handler with an optional LLM
 // provider. When AI_LLM_ENDPOINT is not set, the service runs in
 // template-only mode and suggest-policy / troubleshoot return 503.
-func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRepo repository.AICorrelationRepository, alertRepo repository.AlertRepository, auditSvc *audit.Service, aiSuggestionRepo repository.AISuggestionRepository, budgetGate aisvc.BudgetGate, usageRecorder aisvc.UsageRecorder, iocFeed aisvc.ThreatFeedProvider, logger *slog.Logger) (*handler.AIHandler, *aisvc.Service) {
+func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRepo repository.AICorrelationRepository, alertRepo repository.AlertRepository, auditSvc *audit.Service, aiSuggestionRepo repository.AISuggestionRepository, budgetGate aisvc.BudgetGate, usageRecorder aisvc.UsageRecorder, iocFeed aisvc.ThreatFeedProvider, userRepo repository.UserRepository, roleRepo repository.RoleRepository, logger *slog.Logger) (*handler.AIHandler, *aisvc.Service) {
 	var llm aisvc.LLMProvider
 	if cfg.AI.Endpoint != "" {
 		// When an endpoint is set but no model is named, default to the
@@ -2141,6 +2141,19 @@ func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRe
 	var nlOpts []aisvc.NLQueryOption
 	if policySvc != nil {
 		nlOpts = append(nlOpts, aisvc.WithPolicyGraphSource(policySvc))
+		// Resolve a query's named user to a concrete tenant directory
+		// identity so user-subject policy rules actually evaluate in the
+		// compiled-bundle path (otherwise the verdict reflects only
+		// app/device + default-action matching). Only meaningful when the
+		// policy graph is wired.
+		nlOpts = append(nlOpts, aisvc.WithIdentityResolver(
+			aisvc.NewDirectoryIdentityResolver(userRepo, roleRepo)))
+		// Surface directory-backend faults during identity resolution so
+		// a persistent outage isn't invisible behind partial-confidence
+		// verdicts (the query degrades to app/device-only either way).
+		if logger != nil {
+			nlOpts = append(nlOpts, aisvc.WithQueryLogger(logger))
+		}
 	}
 	nlQuery := aisvc.NewNLQueryEngine(effectiveLLM, nlOpts...)
 	reports := aisvc.NewReportEngine(effectiveLLM)

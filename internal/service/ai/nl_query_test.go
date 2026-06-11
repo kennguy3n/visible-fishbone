@@ -3,12 +3,14 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
+	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
 )
 
 func TestNLQueryEngine_EmptyQuestion(t *testing.T) {
@@ -694,4 +696,146 @@ func (s *nlQueryStubLLM) Complete(_ context.Context, _ LLMRequest) (LLMResponse,
 		return LLMResponse{}, s.err
 	}
 	return LLMResponse{Text: s.text, ModelID: s.modelID, TokenCount: 30}, nil
+}
+
+type fakeIdentityResolver struct {
+	id  *ResolvedIdentity
+	err error
+}
+
+func (f fakeIdentityResolver) ResolveUser(_ context.Context, _ uuid.UUID, _ string) (*ResolvedIdentity, error) {
+	return f.id, f.err
+}
+
+func TestNLQueryEngine_CompiledBundleUserResolved_FullConfidence(t *testing.T) {
+	t.Parallel()
+	// A rule that denies a specific user (alice). The question names a
+	// DIFFERENT user (bob), resolved to a concrete identity. Because the
+	// resolved principal isn't alice, the user rule no longer applies, so
+	// the verdict is the default allow — and it carries full confidence
+	// with no "user rules not evaluated" caveat.
+	alice := uuid.New()
+	graph := `{"default_action":"allow","rules":[{"id":"deny-alice","domain":"dlp","verb":"deny","subjects":[{"name":"u","kind":"user","match":{"id":"` + alice.String() + `"}}]}]}`
+	src := &fakeGraphSource{graph: repository.PolicyGraph{ID: uuid.New(), Version: 9, Graph: json.RawMessage(graph)}}
+	resolver := fakeIdentityResolver{id: &ResolvedIdentity{
+		Principal: &policy.Principal{UserID: uuid.New(), RoleIDs: []uuid.UUID{uuid.New(), uuid.New()}},
+		Display:   "bob@corp",
+		RoleCount: 2,
+	}}
+	engine := NewNLQueryEngine(nil, WithPolicyGraphSource(src), WithIdentityResolver(resolver))
+
+	resp, err := engine.Query(context.Background(), NLQueryRequest{
+		Question: "Can user bob access app salesforce.com from device laptop1?",
+		TenantID: uuid.New(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.EvaluationMode != evalModeCompiledBundle {
+		t.Fatalf("expected mode %q, got %q", evalModeCompiledBundle, resp.EvaluationMode)
+	}
+	if resp.Verdict != "allow" {
+		t.Fatalf("bob is not alice, so the user deny rule must not apply; got %q", resp.Verdict)
+	}
+	if resp.Confidence != 0.95 {
+		t.Fatalf("a resolved user carries full confidence, got %f", resp.Confidence)
+	}
+	if strings.Contains(resp.Explanation, "could not be resolved") {
+		t.Fatalf("did not expect an unresolved caveat for a resolved user, got %q", resp.Explanation)
+	}
+	if !strings.Contains(resp.Explanation, "resolved identity bob@corp") {
+		t.Fatalf("expected explanation to cite the resolved identity, got %q", resp.Explanation)
+	}
+}
+
+func TestNLQueryEngine_CompiledBundleUserResolverMiss_PartialConfidence(t *testing.T) {
+	t.Parallel()
+	// The resolver is wired but the named user is unknown/ambiguous
+	// (returns nil). The verdict must degrade gracefully to partial
+	// confidence with the caveat, exactly like the no-resolver case —
+	// never failing the query.
+	alice := uuid.New()
+	graph := `{"default_action":"allow","rules":[{"id":"deny-alice","domain":"dlp","verb":"deny","subjects":[{"name":"u","kind":"user","match":{"id":"` + alice.String() + `"}}]}]}`
+	src := &fakeGraphSource{graph: repository.PolicyGraph{ID: uuid.New(), Version: 10, Graph: json.RawMessage(graph)}}
+	engine := NewNLQueryEngine(nil, WithPolicyGraphSource(src), WithIdentityResolver(fakeIdentityResolver{}))
+
+	resp, err := engine.Query(context.Background(), NLQueryRequest{
+		Question: "Can user mallory access app salesforce.com from device laptop1?",
+		TenantID: uuid.New(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.EvaluationMode != evalModeCompiledBundle {
+		t.Fatalf("expected mode %q, got %q", evalModeCompiledBundle, resp.EvaluationMode)
+	}
+	if resp.Confidence != 0.7 {
+		t.Fatalf("an unresolved user must report partial confidence, got %f", resp.Confidence)
+	}
+	if !strings.Contains(resp.Explanation, "could not be resolved to a tenant directory identity") {
+		t.Fatalf("expected the unresolved-user caveat, got %q", resp.Explanation)
+	}
+}
+
+func TestNLQueryEngine_CompiledBundleResolverError_DegradesGracefully(t *testing.T) {
+	t.Parallel()
+	// A directory-backend failure (the resolver returns an error) must
+	// degrade exactly like the clean miss — partial confidence, the
+	// caveat, and never failing the query — so a transient/persistent
+	// backend outage stays a soft degradation rather than a hard error.
+	alice := uuid.New()
+	graph := `{"default_action":"allow","rules":[{"id":"deny-alice","domain":"dlp","verb":"deny","subjects":[{"name":"u","kind":"user","match":{"id":"` + alice.String() + `"}}]}]}`
+	src := &fakeGraphSource{graph: repository.PolicyGraph{ID: uuid.New(), Version: 11, Graph: json.RawMessage(graph)}}
+	engine := NewNLQueryEngine(nil,
+		WithPolicyGraphSource(src),
+		WithIdentityResolver(fakeIdentityResolver{err: errors.New("directory backend unavailable")}))
+
+	resp, err := engine.Query(context.Background(), NLQueryRequest{
+		Question: "Can user mallory access app salesforce.com from device laptop1?",
+		TenantID: uuid.New(),
+	})
+	if err != nil {
+		t.Fatalf("a resolver error must not fail the query: %v", err)
+	}
+	if resp.EvaluationMode != evalModeCompiledBundle {
+		t.Fatalf("expected mode %q, got %q", evalModeCompiledBundle, resp.EvaluationMode)
+	}
+	if resp.Confidence != 0.7 {
+		t.Fatalf("a resolver error must report partial confidence, got %f", resp.Confidence)
+	}
+	if !strings.Contains(resp.Explanation, "could not be resolved to a tenant directory identity") {
+		t.Fatalf("expected the unresolved-user caveat, got %q", resp.Explanation)
+	}
+}
+
+func TestNLQueryEngine_CompiledBundleIdentityWithoutPrincipal_DegradesGracefully(t *testing.T) {
+	t.Parallel()
+	// Defensive contract: a resolver that returns a non-nil identity but
+	// a nil Principal must NOT be treated as resolved. Without the
+	// principal there is nothing to evaluate user-subject rules against,
+	// so the verdict must degrade to partial confidence and never claim
+	// a user-subject evaluation that didn't run.
+	alice := uuid.New()
+	graph := `{"default_action":"allow","rules":[{"id":"deny-alice","domain":"dlp","verb":"deny","subjects":[{"name":"u","kind":"user","match":{"id":"` + alice.String() + `"}}]}]}`
+	src := &fakeGraphSource{graph: repository.PolicyGraph{ID: uuid.New(), Version: 12, Graph: json.RawMessage(graph)}}
+	engine := NewNLQueryEngine(nil,
+		WithPolicyGraphSource(src),
+		WithIdentityResolver(fakeIdentityResolver{id: &ResolvedIdentity{Principal: nil, Display: "ghost", RoleCount: 0}}))
+
+	resp, err := engine.Query(context.Background(), NLQueryRequest{
+		Question: "Can user mallory access app salesforce.com from device laptop1?",
+		TenantID: uuid.New(),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if resp.Confidence != 0.7 {
+		t.Fatalf("a nil-principal identity must report partial confidence, got %f", resp.Confidence)
+	}
+	if !strings.Contains(resp.Explanation, "could not be resolved to a tenant directory identity") {
+		t.Fatalf("expected the unresolved-user caveat, got %q", resp.Explanation)
+	}
+	if strings.Contains(resp.Explanation, "evaluated against the resolved identity") {
+		t.Fatalf("must not claim a user-subject evaluation that didn't run: %q", resp.Explanation)
+	}
 }
