@@ -101,6 +101,21 @@ var builtinPatterns = map[string]*regexp.Regexp{
 	"philippines_umid": regexp.MustCompile(`\b\d{4}-?\d{7}-?\d\b`),
 	// Indonesia NIK (KTP): 16 digits.
 	"indonesia_nik": regexp.MustCompile(`\b\d{16}\b`),
+
+	// --- Secret / credential detectors (confirmed by validators.go) ---
+	// Distinctive vendor prefixes make these near-zero-FP; each
+	// resolves to a structural validator in validatorFor that
+	// re-asserts the exact prefix + charset + length (or, for the JWT,
+	// a decodable header). The shapes mirror `builtin_pattern` in
+	// crates/sng-dlp/src/classifier.rs.
+	"private_key_block": regexp.MustCompile(`(?s)-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----.*?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----`),
+	"aws_access_key_id": regexp.MustCompile(`\b(?:AKIA|ASIA)[A-Z0-9]{16}\b`),
+	"google_api_key":    regexp.MustCompile(`\bAIza[0-9A-Za-z_-]{35}\b`),
+	"github_token":      regexp.MustCompile(`\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b`),
+	"github_pat":        regexp.MustCompile(`\bgithub_pat_[A-Za-z0-9_]{82}\b`),
+	"slack_token":       regexp.MustCompile(`\bxox[abprs]-[0-9A-Za-z-]{10,}\b`),
+	"stripe_secret_key": regexp.MustCompile(`\b(?:sk|rk)_live_[0-9A-Za-z]{16,}\b`),
+	"jwt":               regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`),
 }
 
 // RegexEngine provides pre-compiled regex matching for PII patterns.

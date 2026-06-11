@@ -1,6 +1,9 @@
 package engine
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // digitsToString renders a digit slice (values 0..9) as its decimal
 // string, used to build deterministic valid identifiers in the same
@@ -222,5 +225,145 @@ func TestVerhoeffValid(t *testing.T) {
 	}
 	if verhoeffValid([]int{2, 3, 6, 4}) {
 		t.Error("expected 2364 to be Verhoeff-invalid")
+	}
+}
+
+// --- Secret / credential validators (twins of validators.rs tests) ---
+// These vectors are identical to the Rust `validators::tests` so the Go
+// control plane and the Rust edge accept/reject the same strings.
+
+func TestAWSAccessKeyID(t *testing.T) {
+	if !awsAccessKeyID("AKIAIOSFODNN7EXAMPLE") {
+		t.Error("AKIA + 16 base32 should be valid")
+	}
+	if !awsAccessKeyID("ASIAJ4EXAMPLE12345AB") {
+		t.Error("ASIA (STS) + 16 base32 should be valid")
+	}
+	if awsAccessKeyID("AKIAIOSFODNN7EXAMPL") {
+		t.Error("19 chars should fail")
+	}
+	if awsAccessKeyID("AKIAIOSFODNN7EXAMPLEX") {
+		t.Error("21 chars should fail")
+	}
+	if awsAccessKeyID("BKIAIOSFODNN7EXAMPLE") {
+		t.Error("wrong prefix should fail")
+	}
+	if awsAccessKeyID("AKIAiosfodnn7example") {
+		t.Error("lowercase body should fail")
+	}
+}
+
+func TestGoogleAPIKey(t *testing.T) {
+	if !googleAPIKey("AIza" + strings.Repeat("a", 35)) {
+		t.Error("AIza + 35 chars should be valid")
+	}
+	if googleAPIKey("AIza" + strings.Repeat("a", 34)) {
+		t.Error("34-char body should fail")
+	}
+	if googleAPIKey("BIza" + strings.Repeat("a", 35)) {
+		t.Error("wrong prefix should fail")
+	}
+}
+
+func TestGitHubToken(t *testing.T) {
+	if !githubToken("ghp_0123456789abcdefABCDEF0123456789abcd") {
+		t.Error("ghp_ + 36 alnum should be valid")
+	}
+	if !githubToken("ghs_0123456789abcdefABCDEF0123456789abcd") {
+		t.Error("ghs_ + 36 alnum should be valid")
+	}
+	if githubToken("ghx_0123456789abcdefABCDEF0123456789abcd") {
+		t.Error("bad prefix should fail")
+	}
+	if githubToken("ghp_0123456789abcdefABCDEF0123456789abc") {
+		t.Error("35-char body should fail")
+	}
+	if githubToken("ghp_0123456789abcdefABCDEF0123456789abc_") {
+		t.Error("non-alnum body should fail")
+	}
+}
+
+func TestGitHubFineGrainedPAT(t *testing.T) {
+	body := strings.Repeat("a", 82)
+	if !githubFineGrainedPAT("github_pat_" + body) {
+		t.Error("github_pat_ + 82 chars should be valid")
+	}
+	if githubFineGrainedPAT("github_pat_" + strings.Repeat("a", 81)) {
+		t.Error("81-char body should fail")
+	}
+	if githubFineGrainedPAT("ghp_" + body) {
+		t.Error("wrong prefix should fail")
+	}
+}
+
+func TestSlackToken(t *testing.T) {
+	if !slackToken("xoxb-1234567890-abcdefghij") {
+		t.Error("xoxb- + >=10 body should be valid")
+	}
+	if !slackToken("xoxp-0123456789ABCDEFghij") {
+		t.Error("xoxp- + >=10 body should be valid")
+	}
+	if slackToken("xoxz-1234567890-abcdefghij") {
+		t.Error("bad subtype should fail")
+	}
+	if slackToken("xoxb-short") {
+		t.Error("body < 10 should fail")
+	}
+}
+
+func TestStripeSecretKey(t *testing.T) {
+	if !stripeSecretKey("sk_live_0123456789abcdefABCDEF") {
+		t.Error("sk_live_ + >=16 body should be valid")
+	}
+	if !stripeSecretKey("rk_live_0123456789abcdefABCDEF") {
+		t.Error("rk_live_ + >=16 body should be valid")
+	}
+	if stripeSecretKey("sk_test_0123456789abcdefABCDEF") {
+		t.Error("test key should fail (live only)")
+	}
+	if stripeSecretKey("sk_live_short") {
+		t.Error("body < 16 should fail")
+	}
+}
+
+func TestPrivateKeyBlock(t *testing.T) {
+	body := strings.Repeat("A", 100)
+	pem := "-----BEGIN PRIVATE KEY-----\n" + body + "\n-----END PRIVATE KEY-----"
+	if !privateKeyBlock(pem) {
+		t.Error("PEM with a real body should be valid")
+	}
+	rsa := "-----BEGIN RSA PRIVATE KEY-----\n" + body + "\n-----END RSA PRIVATE KEY-----"
+	if !privateKeyBlock(rsa) {
+		t.Error("RSA PEM with a real body should be valid")
+	}
+	if privateKeyBlock("-----BEGIN PRIVATE KEY----------END PRIVATE KEY-----") {
+		t.Error("empty/placeholder armor should fail")
+	}
+}
+
+func TestBase64URLDecode(t *testing.T) {
+	got, ok := base64urlDecode("eyJhbGci")
+	if !ok || string(got) != `{"alg"` {
+		t.Errorf(`base64urlDecode("eyJhbGci") = %q, %v; want {"alg"}, true`, got, ok)
+	}
+	if _, ok := base64urlDecode("a"); ok {
+		t.Error("len % 4 == 1 should fail")
+	}
+	if _, ok := base64urlDecode("****"); ok {
+		t.Error("invalid chars should fail")
+	}
+}
+
+func TestJWTToken(t *testing.T) {
+	header := "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"
+	token := header + ".eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92"
+	if !jwtToken(token) {
+		t.Error("valid JWT with decodable alg header should be valid")
+	}
+	if jwtToken("eyJ0eXAiOiJKV1QifQ.eyJzdWIiOiIxMjMifQ.signaturevalue1") {
+		t.Error("header without alg should fail")
+	}
+	if jwtToken("eyJhbGciOiJIUzI1NiJ9.payloadsegment") {
+		t.Error("only two segments should fail")
 	}
 }

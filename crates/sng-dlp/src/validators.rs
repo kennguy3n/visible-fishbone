@@ -403,6 +403,188 @@ fn verhoeff_valid(d: &[u8]) -> bool {
     c == 0
 }
 
+// --- Secret / credential validators ---
+//
+// These confirm a regex hit on a high-entropy credential is structurally
+// the real artifact (exact prefix + charset + length, or a decodable
+// inner structure) rather than same-shaped noise — the same
+// false-positive-suppressor role the national-ID check digits play
+// above. Credentials are matched by distinctive vendor prefixes, so the
+// validator re-asserts the full invariant the scanning regex only
+// loosely bounds (word boundaries can over- or under-extend a run).
+// Each has a byte-identical twin in `validators.go`; both must accept
+// and reject the same inputs so a `secrets-credentials` rule decides
+// identically on the endpoint and in the control plane.
+
+/// True iff every byte of `s` is an ASCII alphanumeric.
+fn all_ascii_alnum(s: &str) -> bool {
+    !s.is_empty() && s.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// AWS access key ID: `AKIA` (long-term) or `ASIA` (temporary STS)
+/// followed by exactly 16 uppercase-base32 characters (`A`-`Z`, `0`-`9`),
+/// 20 total. The fixed prefix makes this near-zero-FP.
+#[must_use]
+pub fn aws_access_key_id(s: &str) -> bool {
+    if s.len() != 20 {
+        return false;
+    }
+    let Some(body) = s.strip_prefix("AKIA").or_else(|| s.strip_prefix("ASIA")) else {
+        return false;
+    };
+    body.len() == 16
+        && body
+            .bytes()
+            .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit())
+}
+
+/// Google API key: `AIza` followed by 35 url-safe-base64 characters
+/// (`A`-`Z`, `a`-`z`, `0`-`9`, `-`, `_`), 39 total.
+#[must_use]
+pub fn google_api_key(s: &str) -> bool {
+    let Some(body) = s.strip_prefix("AIza") else {
+        return false;
+    };
+    body.len() == 35
+        && body
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+/// GitHub token: a `ghp_`/`gho_`/`ghu_`/`ghs_`/`ghr_` prefix (personal,
+/// OAuth, user-to-server, server-to-server, refresh) followed by 36
+/// alphanumerics.
+#[must_use]
+pub fn github_token(s: &str) -> bool {
+    let Some((prefix, body)) = s.split_once('_') else {
+        return false;
+    };
+    matches!(prefix, "ghp" | "gho" | "ghu" | "ghs" | "ghr")
+        && body.len() == 36
+        && all_ascii_alnum(body)
+}
+
+/// GitHub fine-grained PAT: `github_pat_` followed by 82 characters of
+/// `[A-Za-z0-9_]`.
+#[must_use]
+pub fn github_fine_grained_pat(s: &str) -> bool {
+    let Some(body) = s.strip_prefix("github_pat_") else {
+        return false;
+    };
+    body.len() == 82 && body.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+}
+
+/// Slack token: `xoxb`/`xoxa`/`xoxp`/`xoxr`/`xoxs` followed by `-` and a
+/// hyphen-separated alphanumeric body.
+#[must_use]
+pub fn slack_token(s: &str) -> bool {
+    let Some(body) = s
+        .strip_prefix("xoxb-")
+        .or_else(|| s.strip_prefix("xoxa-"))
+        .or_else(|| s.strip_prefix("xoxp-"))
+        .or_else(|| s.strip_prefix("xoxr-"))
+        .or_else(|| s.strip_prefix("xoxs-"))
+    else {
+        return false;
+    };
+    body.len() >= 10 && body.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// Stripe secret/restricted key: `sk_live_` or `rk_live_` followed by at
+/// least 16 alphanumerics. Only *live* keys are matched — `sk_test_`
+/// keys are not production credentials.
+#[must_use]
+pub fn stripe_secret_key(s: &str) -> bool {
+    let Some(body) = s
+        .strip_prefix("sk_live_")
+        .or_else(|| s.strip_prefix("rk_live_"))
+    else {
+        return false;
+    };
+    body.len() >= 16 && all_ascii_alnum(body)
+}
+
+/// PEM private-key block: confirms the matched span carries both the
+/// `BEGIN`/`END` `PRIVATE KEY` armor and a non-trivial body between them,
+/// so an empty or truncated placeholder block (`-----BEGIN PRIVATE
+/// KEY----------END PRIVATE KEY-----`) is not flagged as a live key.
+#[must_use]
+pub fn private_key_block(s: &str) -> bool {
+    let Some(begin) = s.find("PRIVATE KEY-----") else {
+        return false;
+    };
+    let body_start = begin + "PRIVATE KEY-----".len();
+    let Some(end_rel) = s[body_start..].find("-----END") else {
+        return false;
+    };
+    s[body_start..body_start + end_rel]
+        .bytes()
+        .filter(|b| !b.is_ascii_whitespace())
+        .count()
+        >= 64
+}
+
+/// Decode a base64url segment (RFC 4648 §5, no padding) into bytes,
+/// or `None` on any invalid character or trailing-bit remainder. Kept
+/// dependency-free and byte-identical to Go's
+/// `base64.RawURLEncoding.DecodeString` so the JWT header check decides
+/// the same on both sides.
+fn base64url_decode(seg: &str) -> Option<Vec<u8>> {
+    fn val(b: u8) -> Option<u8> {
+        match b {
+            b'A'..=b'Z' => Some(b - b'A'),
+            b'a'..=b'z' => Some(b - b'a' + 26),
+            b'0'..=b'9' => Some(b - b'0' + 52),
+            b'-' => Some(62),
+            b'_' => Some(63),
+            _ => None,
+        }
+    }
+    if seg.len() % 4 == 1 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(seg.len() * 3 / 4);
+    let mut acc = 0u32;
+    let mut bits = 0u32;
+    for &b in seg.as_bytes() {
+        acc = (acc << 6) | u32::from(val(b)?);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            // Emit the next fully-assembled byte; mask to the low 8 bits
+            // explicitly so the narrowing is intentional, not a silent
+            // truncation.
+            out.push(u8::try_from((acc >> bits) & 0xFF).unwrap_or(0));
+        }
+    }
+    // Any non-zero leftover bits mean the encoding was malformed.
+    if acc & ((1 << bits) - 1) != 0 {
+        return None;
+    }
+    Some(out)
+}
+
+/// JSON Web Token: three base64url segments joined by `.`. Validated by
+/// decoding the header (segment 0) and confirming it is a JSON object
+/// carrying the mandatory `alg` field — which separates a real JWT from
+/// any other dotted base64url run.
+#[must_use]
+pub fn jwt(s: &str) -> bool {
+    let mut parts = s.split('.');
+    let (Some(header), Some(_), Some(_), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    let Some(bytes) = base64url_decode(header) else {
+        return false;
+    };
+    match serde_json::from_slice::<serde_json::Value>(&bytes) {
+        Ok(serde_json::Value::Object(map)) => map.contains_key("alg"),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,5 +779,92 @@ mod tests {
             c = MUL[c as usize][PERM[(i + 1) % 8][digit as usize] as usize];
         }
         INV[c as usize]
+    }
+
+    // --- Secret / credential validators ---
+
+    #[test]
+    fn aws_access_key_id_shape() {
+        assert!(aws_access_key_id("AKIAIOSFODNN7EXAMPLE"));
+        assert!(aws_access_key_id("ASIAJ4EXAMPLE12345AB"));
+        assert!(!aws_access_key_id("AKIAIOSFODNN7EXAMPL")); // 19 chars
+        assert!(!aws_access_key_id("AKIAIOSFODNN7EXAMPLEX")); // 21 chars
+        assert!(!aws_access_key_id("BKIAIOSFODNN7EXAMPLE")); // wrong prefix
+        assert!(!aws_access_key_id("AKIAiosfodnn7example")); // lowercase body
+    }
+
+    #[test]
+    fn google_api_key_shape() {
+        assert!(google_api_key(&format!("AIza{}", "a".repeat(35))));
+        assert!(!google_api_key(&format!("AIza{}", "a".repeat(34)))); // 34 body
+        assert!(!google_api_key(&format!("BIza{}", "a".repeat(35)))); // prefix
+    }
+
+    #[test]
+    fn github_token_prefixes_and_length() {
+        assert!(github_token("ghp_0123456789abcdefABCDEF0123456789abcd"));
+        assert!(github_token("ghs_0123456789abcdefABCDEF0123456789abcd"));
+        assert!(!github_token("ghx_0123456789abcdefABCDEF0123456789abcd")); // bad prefix
+        assert!(!github_token("ghp_0123456789abcdefABCDEF0123456789abc")); // 35 body
+        assert!(!github_token("ghp_0123456789abcdefABCDEF0123456789abc_")); // non-alnum
+    }
+
+    #[test]
+    fn github_fine_grained_pat_length() {
+        let body = "a".repeat(82);
+        assert!(github_fine_grained_pat(&format!("github_pat_{body}")));
+        let short = "a".repeat(81);
+        assert!(!github_fine_grained_pat(&format!("github_pat_{short}")));
+        assert!(!github_fine_grained_pat(&format!("ghp_{body}")));
+    }
+
+    #[test]
+    fn slack_token_prefixes() {
+        assert!(slack_token("xoxb-1234567890-abcdefghij"));
+        assert!(slack_token("xoxp-0123456789ABCDEFghij"));
+        assert!(!slack_token("xoxz-1234567890-abcdefghij")); // bad subtype
+        assert!(!slack_token("xoxb-short")); // body < 10
+    }
+
+    #[test]
+    fn stripe_secret_key_live_only() {
+        assert!(stripe_secret_key("sk_live_0123456789abcdefABCDEF"));
+        assert!(stripe_secret_key("rk_live_0123456789abcdefABCDEF"));
+        assert!(!stripe_secret_key("sk_test_0123456789abcdefABCDEF")); // test key
+        assert!(!stripe_secret_key("sk_live_short")); // body < 16
+    }
+
+    #[test]
+    fn private_key_block_requires_body() {
+        let body = "A".repeat(100);
+        let pem = format!("-----BEGIN PRIVATE KEY-----\n{body}\n-----END PRIVATE KEY-----");
+        assert!(private_key_block(&pem));
+        let rsa = format!("-----BEGIN RSA PRIVATE KEY-----\n{body}\n-----END RSA PRIVATE KEY-----");
+        assert!(private_key_block(&rsa));
+        // Empty/placeholder armor with no real body is not a live key.
+        assert!(!private_key_block(
+            "-----BEGIN PRIVATE KEY----------END PRIVATE KEY-----"
+        ));
+    }
+
+    #[test]
+    fn base64url_decode_basics() {
+        // "{\"alg\"" url-safe base64, no padding.
+        assert_eq!(base64url_decode("eyJhbGci").unwrap(), b"{\"alg\"");
+        assert!(base64url_decode("a").is_none()); // len % 4 == 1
+        assert!(base64url_decode("****").is_none()); // invalid chars
+    }
+
+    #[test]
+    fn jwt_requires_decodable_alg_header() {
+        // Header {"alg":"HS256","typ":"JWT"} base64url, plus two more segs.
+        let header = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9";
+        let token = format!("{header}.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92");
+        assert!(jwt(&token));
+        // Three base64url-looking segments but header has no "alg".
+        let no_alg = "eyJ0eXAiOiJKV1QifQ.eyJzdWIiOiIxMjMifQ.signaturevalue1";
+        assert!(!jwt(no_alg));
+        // Only two segments.
+        assert!(!jwt("eyJhbGciOiJIUzI1NiJ9.payloadsegment"));
     }
 }
