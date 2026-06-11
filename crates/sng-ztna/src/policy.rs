@@ -36,64 +36,151 @@ use crate::error::ZtnaError;
 use crate::identity::UserIdentity;
 use crate::request::NetworkType;
 
-/// Minimum device-posture requirement an app may declare,
-/// expressed as a numeric floor on
-/// [`DevicePosture::risk_score`] (0–100).
+/// Minimum device-posture requirement an app may declare.
 ///
-/// This replaces the prior three-bucket
-/// `None` / `Basic` / `Strict` enum: operators can now
-/// set a threshold at any granularity (e.g. "this app
-/// needs a 75") instead of being pinned to three points.
-/// The old buckets survive as the [`Self::NONE`],
+/// The primary axis is a numeric floor on
+/// [`DevicePosture::risk_score`] (0–100). This replaced the
+/// prior three-bucket `None` / `Basic` / `Strict` enum:
+/// operators can set a threshold at any granularity (e.g.
+/// "this app needs a 75") instead of being pinned to three
+/// points. The old buckets survive as the [`Self::NONE`],
 /// [`Self::BASIC`], and [`Self::STRICT`] sugar constants
 /// (mapping to scores 0 / 60 / 90) so existing catalog
 /// entries keep a readable spelling.
 ///
-/// `Ord` is derived on the single `min_score` field, so
-/// comparing two requirements still orders them
-/// least-to-most strict, matching the old enum's
-/// ordering contract.
+/// Alongside the score floor an app may declare **hard
+/// gates** on the expanded posture signals that the
+/// weighted score deliberately leaves out (see
+/// [`DevicePosture::risk_score`]):
+///
+/// * [`Self::require_edr`] — the device's EDR sensor must
+///   be healthy.
+/// * [`Self::min_patch_days`] — the OS must have been
+///   patched within this many days.
+/// * [`Self::max_av_definition_age_hours`] — antivirus must
+///   be enabled and its definitions no older than this.
+///
+/// Each gate is independent of the score: a device can have
+/// a 100 score and still be denied because its EDR sensor
+/// was killed or its AV definitions went stale. Gates are
+/// `Option` (and `false` for the bool) so an app that does
+/// not opt in keeps the pre-expansion behaviour.
+///
+/// `Ord` is derived field-by-field starting with
+/// `min_score`, so requirements still order
+/// least-to-most-strict by score first (matching the old
+/// enum's ordering contract), with the additional gates as
+/// deterministic tie-breakers (`None` / `false` — the
+/// looser setting — orders first).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct PostureRequirement {
     /// Minimum [`DevicePosture::risk_score`] (0–100) the
     /// device must reach to satisfy this requirement.
     pub min_score: u8,
+    /// When `true`, the device's EDR sensor must report
+    /// healthy ([`DevicePosture::edr_healthy`]). A killed or
+    /// non-reporting sensor fails the requirement regardless
+    /// of score.
+    #[serde(default)]
+    pub require_edr: bool,
+    /// Maximum number of days since the most recent OS patch
+    /// the device may report and still satisfy this
+    /// requirement — i.e. the device must have patched
+    /// within the last `min_patch_days` days
+    /// ([`DevicePosture::os_patch_days_since`] `<=`
+    /// `min_patch_days`). `None` imposes no patch-recency
+    /// gate. Named for the *minimum patch cadence* the
+    /// tenant requires.
+    #[serde(default)]
+    pub min_patch_days: Option<u32>,
+    /// Maximum age, in hours, of the antivirus signature
+    /// definitions. When set, the device must additionally
+    /// have antivirus enabled
+    /// ([`DevicePosture::antivirus_enabled`]) and its
+    /// definitions no older than this
+    /// ([`DevicePosture::antivirus_definitions_age_hours`]
+    /// `<=` this). `None` imposes no AV-freshness gate.
+    #[serde(default)]
+    pub max_av_definition_age_hours: Option<u32>,
 }
 
 impl PostureRequirement {
-    /// No posture floor (score 0). Every device — even a
-    /// fully un-attested one — satisfies it. The spelling
-    /// the catalog uses for low-risk apps open to any
-    /// authenticated user.
-    pub const NONE: Self = Self { min_score: 0 };
+    /// No posture floor (score 0) and no hard gates. Every
+    /// device — even a fully un-attested one — satisfies it.
+    /// The spelling the catalog uses for low-risk apps open
+    /// to any authenticated user.
+    pub const NONE: Self = Self::new(0);
     /// Basic posture floor (score 60). Roughly "disk
     /// encryption + OS patched plus one more signal" under
     /// the [`DevicePosture::risk_score`] weights — the
     /// floor for most internal-tooling apps.
-    pub const BASIC: Self = Self { min_score: 60 };
+    pub const BASIC: Self = Self::new(60);
     /// Strict posture floor (score 90). Requires nearly
     /// every posture signal on; the spelling for
     /// high-sensitivity apps.
-    pub const STRICT: Self = Self { min_score: 90 };
+    pub const STRICT: Self = Self::new(90);
 
     /// Construct a requirement with an explicit score
-    /// floor. Scores above 100 are clamped to 100 (the
-    /// maximum [`DevicePosture::risk_score`] can return),
-    /// so an out-of-range bundle value can never make the
-    /// requirement permanently unsatisfiable.
+    /// floor and no hard gates. Scores above 100 are clamped
+    /// to 100 (the maximum [`DevicePosture::risk_score`] can
+    /// return), so an out-of-range bundle value can never
+    /// make the requirement permanently unsatisfiable.
     #[must_use]
     pub const fn new(min_score: u8) -> Self {
         Self {
             min_score: if min_score > 100 { 100 } else { min_score },
+            require_edr: false,
+            min_patch_days: None,
+            max_av_definition_age_hours: None,
         }
     }
 
-    /// True iff `posture` meets this requirement, i.e. its
+    /// Builder: require a healthy EDR sensor.
+    #[must_use]
+    pub const fn with_require_edr(mut self, require: bool) -> Self {
+        self.require_edr = require;
+        self
+    }
+
+    /// Builder: require the OS to have been patched within
+    /// `days` days.
+    #[must_use]
+    pub const fn with_min_patch_days(mut self, days: u32) -> Self {
+        self.min_patch_days = Some(days);
+        self
+    }
+
+    /// Builder: require antivirus enabled with definitions
+    /// no older than `hours`.
+    #[must_use]
+    pub const fn with_max_av_definition_age_hours(mut self, hours: u32) -> Self {
+        self.max_av_definition_age_hours = Some(hours);
+        self
+    }
+
+    /// True iff `posture` meets this requirement: its
     /// [`DevicePosture::risk_score`] is at least
-    /// [`Self::min_score`].
+    /// [`Self::min_score`] **and** every declared hard gate
+    /// (EDR / patch recency / AV freshness) is satisfied.
     #[must_use]
     pub const fn satisfied_by(self, posture: &DevicePosture) -> bool {
-        posture.risk_score() >= self.min_score
+        if posture.risk_score() < self.min_score {
+            return false;
+        }
+        if self.require_edr && !posture.edr_healthy {
+            return false;
+        }
+        if let Some(max_days) = self.min_patch_days
+            && posture.os_patch_days_since > max_days
+        {
+            return false;
+        }
+        if let Some(max_age) = self.max_av_definition_age_hours
+            && (!posture.antivirus_enabled || posture.antivirus_definitions_age_hours > max_age)
+        {
+            return false;
+        }
+        true
     }
 }
 

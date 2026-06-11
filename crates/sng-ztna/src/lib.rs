@@ -133,7 +133,7 @@ pub mod stats;
 
 pub use app::{App, AppCatalogProvider, StaticAppCatalog};
 pub use device::{
-    ArcSwapDeviceTrustProvider, DevicePosture, DeviceTrust, DeviceTrustProvider,
+    ArcSwapDeviceTrustProvider, CertificateHealth, DevicePosture, DeviceTrust, DeviceTrustProvider,
     StaticDeviceTrustProvider,
 };
 pub use error::ZtnaError;
