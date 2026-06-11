@@ -17,6 +17,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
@@ -69,8 +70,16 @@ pub struct AppAccessState {
     pub allowed: bool,
     /// Stable reason label of the most recent decision.
     pub reason: String,
-    /// When the decision was recorded.
+    /// When the decision was recorded (informational / display).
     pub decided_at: DateTime<Utc>,
+    /// Strictly-monotonic per-decision version stamp, allocated from the
+    /// manager's [`AtomicU64`] counter. This — not `decided_at` — is the
+    /// compare-and-set token the adaptive-trust sweep guards on in
+    /// [`MobileZtnaManager::revoke_if_unchanged`]: a wall-clock timestamp
+    /// can repeat (sub-resolution) or run backwards (NTP step), either of
+    /// which could make a stale sweep deny falsely match a fresh grant. A
+    /// counter is unique and monotonic by construction.
+    pub version: u64,
     /// The originating access request, retained so the periodic
     /// adaptive-trust sweep ([`MobileZtnaManager::reevaluate_active`])
     /// can re-run the decision against freshly-collected posture
@@ -145,6 +154,9 @@ pub struct MobileZtnaManager {
     service: Arc<ZtnaService>,
     telemetry: Arc<MobileTelemetry>,
     app_state: Arc<Mutex<HashMap<String, AppAccessState>>>,
+    /// Monotonic decision-version source for the `revoke_if_unchanged`
+    /// compare-and-set (see [`AppAccessState::version`]).
+    decision_seq: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for MobileZtnaManager {
@@ -164,7 +176,17 @@ impl MobileZtnaManager {
             service,
             telemetry,
             app_state: Arc::new(Mutex::new(HashMap::new())),
+            decision_seq: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Allocate the next strictly-monotonic decision version. Backed by
+    /// an `AtomicU64` rather than the wall clock so the
+    /// `revoke_if_unchanged` compare-and-set can never collide
+    /// (sub-resolution timestamps) or run backwards (NTP step) — every
+    /// recorded decision gets a unique, increasing stamp.
+    fn next_version(&self) -> u64 {
+        self.decision_seq.fetch_add(1, Ordering::Relaxed)
     }
 
     fn record_state(
@@ -174,12 +196,14 @@ impl MobileZtnaManager {
         reason: &str,
         now: DateTime<Utc>,
     ) {
+        let version = self.next_version();
         self.app_state.lock().insert(
             request.app_id.clone(),
             AppAccessState {
                 allowed,
                 reason: reason.to_owned(),
                 decided_at: now,
+                version,
                 request: request.clone(),
             },
         );
@@ -196,27 +220,28 @@ impl MobileZtnaManager {
     /// [`Self::evaluate`] could re-decide the same app — typically a
     /// user re-requesting it against a *fresher* posture than the sweep
     /// saw — and a blind write would clobber that newer grant with the
-    /// stale sweep deny. Guarding on `decided_at` (a monotonic
-    /// per-decision version stamp) makes the revocation a compare-and-
-    /// set: if the entry was re-decided under us (different
-    /// `decided_at`) or already revoked, the fresher decision wins and
-    /// the sweep drops its stale deny.
+    /// stale sweep deny. Guarding on `version` (the strictly-monotonic
+    /// per-decision stamp from [`Self::next_version`]) makes the
+    /// revocation a compare-and-set: if the entry was re-decided under us
+    /// (different `version`) or already revoked, the fresher decision
+    /// wins and the sweep drops its stale deny.
     fn revoke_if_unchanged(
         &self,
         request: &AccessRequest,
         reason: &str,
         now: DateTime<Utc>,
-        snapshot_decided_at: DateTime<Utc>,
+        snapshot_version: u64,
     ) -> bool {
         let mut state = self.app_state.lock();
         match state.get(&request.app_id) {
-            Some(s) if s.allowed && s.decided_at == snapshot_decided_at => {
+            Some(s) if s.allowed && s.version == snapshot_version => {
                 state.insert(
                     request.app_id.clone(),
                     AppAccessState {
                         allowed: false,
                         reason: reason.to_owned(),
                         decided_at: now,
+                        version: self.next_version(),
                         request: request.clone(),
                     },
                 );
@@ -367,12 +392,11 @@ impl MobileZtnaManager {
         now_ms: u64,
     ) -> Vec<String> {
         // Snapshot the allowed apps' originating requests (with the
-        // `decided_at` version stamp that `revoke_if_unchanged` guards
-        // on) under the lock, then release it before evaluating —
-        // `classify` does not touch the lock but `record_state` /
-        // `allowed_apps` do, and holding it across the await would
-        // serialise the egress.
-        let active: Vec<(AccessRequest, DateTime<Utc>)> = {
+        // `version` stamp that `revoke_if_unchanged` guards on) under the
+        // lock, then release it before evaluating — `classify` does not
+        // touch the lock but `record_state` / `allowed_apps` do, and
+        // holding it across the await would serialise the egress.
+        let active: Vec<(AccessRequest, u64)> = {
             let state = self.app_state.lock();
             state
                 .values()
@@ -380,12 +404,12 @@ impl MobileZtnaManager {
                 .map(|s| {
                     let mut req = s.request.clone();
                     req.now_ms = now_ms;
-                    (req, s.decided_at)
+                    (req, s.version)
                 })
                 .collect()
         };
         let mut revoked = Vec::new();
-        for (request, snapshot_decided_at) in active {
+        for (request, snapshot_version) in active {
             let c = self.classify(&request, posture, EvalPath::Reeval);
             if c.allow {
                 // Still allowed: leave the per-app state and telemetry
@@ -397,7 +421,7 @@ impl MobileZtnaManager {
             // that fresher decision wins and we emit nothing — keeping
             // the revocation telemetry in lock-step with the state we
             // actually changed.
-            if !self.revoke_if_unchanged(&request, &c.reason, now, snapshot_decided_at) {
+            if !self.revoke_if_unchanged(&request, &c.reason, now, snapshot_version) {
                 continue;
             }
             if let Some(gate_label) = c.posture_detail.as_deref() {
@@ -691,20 +715,26 @@ mod tests {
         let req = AccessRequest::new("wiki", "dev-1", "alice", now_ms);
 
         // The version stamp the sweep would have snapshotted at grant time.
-        let snapshot_stamp = mgr.app_state("wiki").expect("granted").decided_at;
+        let snapshot_version = mgr.app_state("wiki").expect("granted").version;
 
-        // A concurrent explicit re-grant lands with a newer decided_at.
-        let regrant_at = snapshot_stamp + chrono::Duration::seconds(1);
+        // A concurrent explicit re-grant lands with a fresh version stamp.
+        let regrant_at =
+            mgr.app_state("wiki").expect("granted").decided_at + chrono::Duration::seconds(1);
         mgr.evaluate(&req, Some(&healthy_posture()), regrant_at)
             .await
             .unwrap();
+        let regrant_version = mgr.app_state("wiki").expect("regranted").version;
+        assert_ne!(
+            regrant_version, snapshot_version,
+            "the re-grant must advance the version stamp"
+        );
 
         // The sweep now tries to revoke against its *stale* snapshot stamp.
         let applied = mgr.revoke_if_unchanged(
             &req,
             "device_posture_insufficient",
             regrant_at + chrono::Duration::seconds(1),
-            snapshot_stamp,
+            snapshot_version,
         );
         assert!(
             !applied,
@@ -721,7 +751,7 @@ mod tests {
             &req,
             "device_posture_insufficient",
             regrant_at + chrono::Duration::seconds(2),
-            regrant_at,
+            regrant_version,
         );
         assert!(applied, "an unchanged entry must still revoke");
         assert!(!mgr.app_state("wiki").expect("state recorded").allowed);
