@@ -642,6 +642,113 @@ func TestPoPReassigner_ReplayDoesNotRestoreToTargetPoP(t *testing.T) {
 	}
 }
 
+// TestPoPReassigner_MatchesRegionCaseInsensitively guards the
+// region-normalization fix: the migrator's target region is normalized
+// (lower-cased) at Start, but the PoP registry stores regions verbatim.
+// A target-region PoP registered with different casing (e.g.
+// "EU-Central-1") must still match the normalized "eu-central-1" target,
+// otherwise reassignment silently skips and the tenant is stranded on a
+// source-region PoP.
+func TestPoPReassigner_MatchesRegionCaseInsensitively(t *testing.T) {
+	t.Parallel()
+	srcPoP := uuid.New()
+	tgtPoP := uuid.New()
+	tnt := uuid.New()
+	ctrl := &fakePoPControl{
+		pops: []tenant.PoPInfo{
+			{ID: srcPoP, Region: "us-east-1"},
+			// Registered with mixed case / surrounding space, as a raw
+			// registry value could be.
+			{ID: tgtPoP, Region: "  EU-Central-1 "},
+		},
+		assignment: map[uuid.UUID]uuid.UUID{tnt: srcPoP},
+	}
+	p := tenant.NewPoPReassigner(ctrl)
+
+	if _, err := p.Reassign(context.Background(), tnt, "eu-central-1"); err != nil {
+		t.Fatalf("Reassign: %v", err)
+	}
+	if ctrl.assignment[tnt] != tgtPoP {
+		t.Errorf("tenant pinned to %v, want target-region PoP %v (case/space-insensitive match)",
+			ctrl.assignment[tnt], tgtPoP)
+	}
+}
+
+// failTerminalPersistRepo wraps a TenantMigrationRepository and forces
+// the FINAL terminal Update (the write that flips the migration to a
+// terminal state) to fail, simulating a store/DB error at the migration's
+// commit point. Intermediate transitions (pending/rolling_back/...) still
+// succeed so the pipeline reaches the terminal write.
+type failTerminalPersistRepo struct {
+	repository.TenantMigrationRepository
+	err error
+}
+
+func (r *failTerminalPersistRepo) Update(ctx context.Context, tenantID uuid.UUID, m repository.TenantMigration) (repository.TenantMigration, error) {
+	if repository.IsTerminalMigrationState(m.State) {
+		return repository.TenantMigration{}, r.err
+	}
+	return r.TenantMigrationRepository.Update(ctx, tenantID, m)
+}
+
+// TestRegionMigration_TerminalPersistFailureKeepsNonTerminalState proves
+// the fix for the "misleading 200" handler bug at its root (the
+// migrator): when the FINAL persist of a terminal rollback state fails,
+// drive must NOT return a terminal-looking record. The store still has
+// the migration in rolling_back (dual_read on), so the returned record
+// must reflect that non-terminal reality and the error must propagate —
+// otherwise the HTTP handler would report a completed rollback (200)
+// while the tenant is actually stranded mid-unwind and ResumeAll is
+// bound to retry it.
+func TestRegionMigration_TerminalPersistFailureKeepsNonTerminalState(t *testing.T) {
+	t.Parallel()
+	rec := newRecordingPlane()
+	rec.failForward["copy_objects"] = errors.New("boom: s3 copy failed")
+
+	s := memory.NewStore()
+	tenants := memory.NewTenantRepository(s)
+	baseMigs := memory.NewTenantMigrationRepository(s)
+	migs := &failTerminalPersistRepo{
+		TenantMigrationRepository: baseMigs,
+		err:                       errors.New("db: connection reset"),
+	}
+	audit := memory.NewAuditLogRepository(s)
+	m, err := tenant.NewRegionMigrator(migs, tenants, audit, tenant.MigrationPlanes{
+		Keys:      rec,
+		Telemetry: rec,
+		Objects:   objectPlane{rec},
+		PoP:       popPlane{rec},
+		Region:    &regionPlane{r: rec},
+	}, nil)
+	if err != nil {
+		t.Fatalf("NewRegionMigrator: %v", err)
+	}
+	tnt := seedTenant(t, tenants, "us-east-1")
+	ctx := context.Background()
+
+	got, err := m.Start(ctx, tnt.ID, "eu-central-1")
+	// The terminal write failed, so Start must surface an error...
+	if err == nil {
+		t.Fatalf("Start err = nil, want the terminal-persist failure")
+	}
+	// ...and the returned record must NOT look terminal (the handler keys
+	// its 200-vs-5xx decision off this state).
+	if repository.IsTerminalMigrationState(got.State) {
+		t.Errorf("returned state = %q (terminal); want a non-terminal state since the terminal write did not persist", got.State)
+	}
+	if !got.DualRead {
+		t.Errorf("dual_read = false; want true — the in-flight window is NOT over when the terminal write failed")
+	}
+	// The durable record in the store is still non-terminal too.
+	stored, gerr := baseMigs.GetActive(ctx, tnt.ID)
+	if gerr != nil {
+		t.Fatalf("GetActive (migration should still be in-flight): %v", gerr)
+	}
+	if repository.IsTerminalMigrationState(stored.State) {
+		t.Errorf("stored state = %q (terminal); want still in-flight so ResumeAll retries it", stored.State)
+	}
+}
+
 // --- region column plane adapter -------------------------------------------
 
 func TestRegionColumnPlane_SetsRegion(t *testing.T) {

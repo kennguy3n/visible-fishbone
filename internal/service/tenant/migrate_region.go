@@ -557,21 +557,32 @@ func (m *RegionMigrator) rollback(ctx context.Context, mig repository.TenantMigr
 		mig = updated
 	}
 
+	// Build the terminal record in a copy and only adopt it once it is
+	// durably persisted. If the final write fails the migration is still
+	// rolling_back in the store (dual_read on), so we must return THAT
+	// non-terminal record — never the in-memory terminal copy — otherwise
+	// a caller (the HTTP handler) would see a terminal state and report a
+	// successful rollback while the store still has the tenant mid-unwind,
+	// leaving dual_read armed and ResumeAll bound to retry it.
 	now := m.clock()
-	mig.CompletedAt = &now
+	terminal := mig
+	terminal.CompletedAt = &now
 	// Dual-read is cleared on any terminal state — the in-flight window
 	// is over whether we reverted cleanly or wedged.
-	mig.DualRead = false
+	terminal.DualRead = false
 	if rollbackErr != nil {
-		mig.State = repository.MigrationStateFailed
-		mig.Detail = fmt.Sprintf("rollback failed: %v (original cause: %v)", rollbackErr, cause)
+		terminal.State = repository.MigrationStateFailed
+		terminal.Detail = fmt.Sprintf("rollback failed: %v (original cause: %v)", rollbackErr, cause)
 	} else {
-		mig.State = repository.MigrationStateRolledBack
-		mig.Detail = fmt.Sprintf("rolled back: %v", cause)
+		terminal.State = repository.MigrationStateRolledBack
+		terminal.Detail = fmt.Sprintf("rolled back: %v", cause)
 	}
-	final, perr := m.persist(ctx, mig, cp)
+	final, perr := m.persist(ctx, terminal, cp)
 	if perr != nil {
-		return mig, perr
+		// mig is unchanged (still rolling_back, dual_read on) — return it
+		// with the persist error so callers treat this as an
+		// infrastructure failure (5xx), not a completed rollback.
+		return mig, fmt.Errorf("tenant: persist terminal rollback state: %w", perr)
 	}
 	action := "tenant.migration.rolled_back"
 	if final.State == repository.MigrationStateFailed {
@@ -591,13 +602,19 @@ func (m *RegionMigrator) rollback(ctx context.Context, mig repository.TenantMigr
 // flipped by the final step, completed_at stamped.
 func (m *RegionMigrator) complete(ctx context.Context, mig repository.TenantMigration, cp checkpoint) (repository.TenantMigration, error) {
 	now := m.clock()
-	mig.State = repository.MigrationStateCompleted
-	mig.DualRead = false
-	mig.Detail = ""
-	mig.CompletedAt = &now
-	final, err := m.persist(ctx, mig, cp)
+	terminal := mig
+	terminal.State = repository.MigrationStateCompleted
+	terminal.DualRead = false
+	terminal.Detail = ""
+	terminal.CompletedAt = &now
+	final, err := m.persist(ctx, terminal, cp)
 	if err != nil {
-		return mig, err
+		// The completion could not be made durable: the store still has
+		// the migration in its last non-terminal step (dual_read on).
+		// Return that record (mig, unchanged) with the persist error so
+		// the caller does not mistake an un-persisted "completed" state
+		// for success and ResumeAll re-drives the final step.
+		return mig, fmt.Errorf("tenant: persist completed state: %w", err)
 	}
 	m.auditEvent(ctx, final.TenantID, "tenant.migration.completed", final.ID, map[string]string{
 		"source_region": final.SourceRegion,

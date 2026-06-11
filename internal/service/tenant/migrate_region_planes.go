@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
+	"github.com/kennguy3n/visible-fishbone/internal/service/residency"
 )
 
 // --- Region-update plane ---------------------------------------------------
@@ -185,13 +186,22 @@ func (p *PoPReassigner) Restore(ctx context.Context, tenantID uuid.UUID, raw jso
 // long as that PoP is still enabled. If it was disabled between runs the
 // already-pinned-to-target guard in Reassign still keeps the rollback
 // metadata correct.
+//
+// Region matching goes through residency.Normalize on BOTH sides: the
+// migrator's targetRegion is already normalized (lower-cased, trimmed) at
+// Start, but the PoP registry stores regions verbatim (e.g.
+// "EU-Central-1"), so a raw == comparison would silently fail to match a
+// perfectly good target-region PoP and strand the tenant on a
+// source-region PoP. Normalizing both sides is exactly how residency
+// enforcement compares regions elsewhere, so the two stay consistent.
 func pickPoPInRegion(pops []PoPInfo, targetRegion string) (uuid.UUID, bool) {
+	want := residency.Normalize(residency.Region(targetRegion))
 	var (
 		best  uuid.UUID
 		found bool
 	)
 	for _, p := range pops {
-		if p.Region != targetRegion {
+		if residency.Normalize(residency.Region(p.Region)) != want {
 			continue
 		}
 		if !found || p.ID.String() < best.String() {
