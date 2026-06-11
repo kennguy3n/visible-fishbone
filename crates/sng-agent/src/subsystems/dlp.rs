@@ -366,6 +366,9 @@ impl HealthCheck for DlpSubsystem {
         let warn = self.stats.verdict_warn.load(Ordering::Relaxed);
         let block = self.stats.verdict_block.load(Ordering::Relaxed);
         let stopped = self.stats.channels_stopped.load(Ordering::Relaxed);
+        let signals = self.stats.dlp_signals_emitted.load(Ordering::Relaxed);
+        let signal_drops_full = self.stats.dlp_signal_drops_full.load(Ordering::Relaxed);
+        let signal_drops_closed = self.stats.dlp_signal_drops_closed.load(Ordering::Relaxed);
         let total = self.interceptors.len() as u64;
 
         // Every channel stopping (e.g. all backends unavailable on a
@@ -385,7 +388,9 @@ impl HealthCheck for DlpSubsystem {
             status,
             detail: Some(format!(
                 "channels={total}, observed={observed}, allow={allow}, log={log}, \
-                 warn={warn}, block={block}, stopped={stopped}"
+                 warn={warn}, block={block}, stopped={stopped}, signals={signals}, \
+                 signal_drops_full={signal_drops_full}, \
+                 signal_drops_closed={signal_drops_closed}"
             )),
         }
     }
