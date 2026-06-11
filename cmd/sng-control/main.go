@@ -2921,7 +2921,7 @@ type leaderGatedDiscoveryHook struct {
 }
 
 func (h leaderGatedDiscoveryHook) OnAppDiscovered(ctx context.Context, tenantID uuid.UUID, app repository.CASBDiscoveredApp, meta casb.AppDiscoveryMeta) {
-	if h.leader == nil || !h.leader.IsLeader() {
+	if h.hook == nil || h.leader == nil || !h.leader.IsLeader() {
 		return
 	}
 	h.hook.OnAppDiscovered(ctx, tenantID, app, meta)
