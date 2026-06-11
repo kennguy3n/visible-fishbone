@@ -348,6 +348,15 @@ const (
 // `isHex16`/`parse_simhash_hex` accept — the rule is correct by
 // construction without a post-hoc `validEndpointPatternData` pass.
 //
+// This is intentionally stricter than the server-side
+// `engine.MatchFingerprints` (`len(fp.Hash) < 8`, which reads the
+// leading 8 bytes of an over-long hash): the projection emits a wire
+// `pattern_data` the agent decodes for the *whole* bundle, so silently
+// truncating a foreign digest would put a pattern that can't match
+// `simhash(content)` onto the wire. The registrar only ever writes
+// exactly 8 bytes, so both guards are defensive and the divergence is
+// unobservable in practice.
+//
 // `existing` is the already-compiled policy-derived rule set. A
 // registered fingerprint whose pattern_data collides with a
 // policy-derived fingerprint rule (or an earlier registered one) is
