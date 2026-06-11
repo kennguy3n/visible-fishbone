@@ -986,32 +986,6 @@ func (s *Service) dispatch(ctx context.Context, w *worker, msg jetstream.Msg) {
 // swallowed: the envelope already passed Unmarshal validation and a
 // malformed inner payload must never disturb the dispatch hot path
 // (it has, by this point, already been written to the hot store).
-// observeDLP decodes a DLP envelope and hands its coach-action events
-// to the review-queue observer. A nil observer or any non-DLP class is
-// a no-op. Only coach-action events are review candidates: monitor is
-// audit-only and a block was already refused at the edge (no pending
-// human decision), so both are skipped here while still being written
-// to the hot store as telemetry. Payload decode errors are swallowed
-// for the same reason as observeShadowIT — the envelope already passed
-// Unmarshal validation and a malformed inner payload must never
-// disturb the dispatch hot path.
-func observeDLP(ctx context.Context, obs DLPReviewObserver, env schema.Envelope) {
-	if obs == nil {
-		return
-	}
-	if env.EventClass != schema.EventClassDLP {
-		return
-	}
-	var d schema.DLPEvent
-	if err := schema.UnpackPayload(env.Payload, &d); err != nil {
-		return
-	}
-	if d.Action != schema.DLPActionCoach {
-		return
-	}
-	obs.ObserveDLP(ctx, env.TenantID, env.DeviceID, d, env.Timestamp)
-}
-
 func observeShadowIT(obs ShadowITObserver, env schema.Envelope) {
 	if obs == nil {
 		return
@@ -1040,6 +1014,32 @@ func observeShadowIT(obs ShadowITObserver, env schema.Envelope) {
 			obs.ObserveHost(env.TenantID, env.DeviceID, host, env.Timestamp)
 		}
 	}
+}
+
+// observeDLP decodes a DLP envelope and hands its coach-action events
+// to the review-queue observer. A nil observer or any non-DLP class is
+// a no-op. Only coach-action events are review candidates: monitor is
+// audit-only and a block was already refused at the edge (no pending
+// human decision), so both are skipped here while still being written
+// to the hot store as telemetry. Payload decode errors are swallowed
+// for the same reason as observeShadowIT — the envelope already passed
+// Unmarshal validation and a malformed inner payload must never
+// disturb the dispatch hot path.
+func observeDLP(ctx context.Context, obs DLPReviewObserver, env schema.Envelope) {
+	if obs == nil {
+		return
+	}
+	if env.EventClass != schema.EventClassDLP {
+		return
+	}
+	var d schema.DLPEvent
+	if err := schema.UnpackPayload(env.Payload, &d); err != nil {
+		return
+	}
+	if d.Action != schema.DLPActionCoach {
+		return
+	}
+	obs.ObserveDLP(ctx, env.TenantID, env.DeviceID, d, env.Timestamp)
 }
 
 // deliveryExhausted reports whether the message has reached the
