@@ -130,6 +130,15 @@ impl ZtnaReevalSubsystem {
     /// The re-evaluation loop. Exposed so the posture-push path can
     /// call [`ReevalLoop::reevaluate_device`] out of cycle without
     /// waiting for the next sweep.
+    ///
+    /// Only meaningful once [`Self::is_enabled`] is true. A disabled
+    /// subsystem is fully inert: its `start` consumes and drops the
+    /// revocation receiver, so the `SessionRevoked` channel is closed
+    /// for the process lifetime. Driving `reevaluate_device` against a
+    /// disabled loop would still remove the session from the tracker,
+    /// but the revocation event has nowhere to go (it is counted as a
+    /// drop in the sweep stats). Gate on [`Self::is_enabled`] before
+    /// using this accessor.
     #[must_use]
     pub fn reeval_loop(&self) -> &ReevalLoop {
         &self.reeval_loop
