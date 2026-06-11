@@ -2,6 +2,7 @@ package engine
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
@@ -182,5 +183,54 @@ func TestLuhnValid(t *testing.T) {
 		if got := luhnValid(tt.input); got != tt.valid {
 			t.Errorf("luhnValid(%q) = %v, want %v", tt.input, got, tt.valid)
 		}
+	}
+}
+
+// secretMatch reports whether the builtin pattern named by `pattern`
+// (resolved + validator-confirmed) fires on `content`.
+func secretMatch(t *testing.T, pattern, content string) bool {
+	t.Helper()
+	e := NewRegexEngine()
+	rules := []repository.DLPRule{{Type: repository.DLPRuleTypeRegex, Pattern: pattern}}
+	return len(e.Match([]byte(content), rules)) > 0
+}
+
+// Mirrors the Rust classifier secret-detector tests: the regex bounds
+// the candidate and the structural validator confirms it, so a real
+// credential fires and same-shaped noise is suppressed.
+func TestRegexEngine_SecretDetectors(t *testing.T) {
+	cases := []struct {
+		name    string
+		pattern string
+		content string
+		want    bool
+	}{
+		{"aws hit", "aws_access_key_id", "export AWS_ACCESS_KEY_ID=AKIAIOSFODNN7EXAMPLE", true},
+		{"aws one char short", "aws_access_key_id", "id=AKIAIOSFODNN7EXAMPL ok", false},
+		{"google hit", "google_api_key", "key=AIza" + strings.Repeat("a", 35), true},
+		{"github hit", "github_token", "token ghp_0123456789abcdefABCDEF0123456789abcd done", true},
+		{"github pat hit", "github_pat", "github_pat_" + strings.Repeat("a", 82), true},
+		{"slack hit", "slack_token", "slack=xoxb-1234567890-abcdefghij", true},
+		{"stripe live hit", "stripe_secret_key", "key sk_live_0123456789abcdefABCDEF here", true},
+		{"stripe test miss", "stripe_secret_key", "key sk_test_0123456789abcdefABCDEF here", false},
+		{"jwt hit", "jwt", "auth eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92 x", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := secretMatch(t, tc.pattern, tc.content); got != tc.want {
+				t.Errorf("%s: match=%v, want %v", tc.pattern, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRegexEngine_PrivateKeyBlockRequiresBody(t *testing.T) {
+	body := strings.Repeat("A", 100)
+	pem := "-----BEGIN PRIVATE KEY-----\n" + body + "\n-----END PRIVATE KEY-----"
+	if !secretMatch(t, "private_key_block", pem) {
+		t.Error("PEM with a real body should match")
+	}
+	if secretMatch(t, "private_key_block", "-----BEGIN PRIVATE KEY----------END PRIVATE KEY-----") {
+		t.Error("empty placeholder armor should not match")
 	}
 }
