@@ -141,7 +141,7 @@ type TenantRepository interface {
 	// forward-only: a `seen` at or before the stored value is a no-op
 	// (so out-of-order or duplicate activity pings never move the
 	// signal backwards). The write deliberately does NOT bump
-	// updated_at — a tenants-specific trigger (migration 059) masks
+	// updated_at — a tenants-specific trigger (migration 063) masks
 	// last_active_at-only changes — so the high-rate activity path
 	// cannot churn the config-change timestamp that caches/audit rely
 	// on. Callers SHOULD debounce (only call when the in-memory

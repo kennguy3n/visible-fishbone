@@ -509,7 +509,7 @@ func (r *TenantRepository) UpdateStatus(ctx context.Context, id uuid.UUID, statu
 // read-modify-write race. The WHERE filters soft-deleted tenants so a
 // stray ping cannot resurrect activity on a tombstoned row. updated_at
 // is intentionally left untouched: the tenants-specific trigger from
-// migration 059 detects a last_active_at-only change and skips the
+// migration 063 detects a last_active_at-only change and skips the
 // bump, so this high-rate path never churns the config timestamp.
 func (r *TenantRepository) TouchLastActive(ctx context.Context, id uuid.UUID, seen time.Time) error {
 	if id == uuid.Nil {

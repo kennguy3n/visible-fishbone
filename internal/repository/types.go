@@ -68,7 +68,7 @@ type Tenant struct {
 	// bump UpdatedAt (which tracks configuration/state changes). It
 	// is the first-class dormancy signal that lets activity-tiered
 	// sweep planning skip dormant trials on most cycles instead of
-	// fanning out across all tenants every time. See migration 059.
+	// fanning out across all tenants every time. See migration 063.
 	LastActiveAt *time.Time
 }
 

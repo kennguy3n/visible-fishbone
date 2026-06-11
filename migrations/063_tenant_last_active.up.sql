@@ -1,4 +1,4 @@
--- 059_tenant_last_active
+-- 063_tenant_last_active
 --
 -- Phase 1 dormancy: give the tenant catalog a first-class activity
 -- signal so periodic control-plane sweeps can visit dormant trials at
