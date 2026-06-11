@@ -144,6 +144,22 @@ if verify --quiet; then
   exit 0
 fi
 
+# Self-healing resume guard. The pre-check above failed, so any existing file
+# is unusable. With --continue-at -, a leftover that is already at/over the
+# pinned length is treated by curl as "complete": the server answers 416 and
+# --fail aborts, so the bad file is never replaced and re-runs loop forever.
+# Drop such a file so curl re-fetches from byte 0. A genuinely short partial
+# (size < expected) is kept so resume can still finish it efficiently. This
+# only matters for --continue-at; --no-resume already truncates via -o.
+if [ "$RESUME" = "1" ] && [ -f "$DEST" ]; then
+  cur_size="$(size_of "$DEST")"
+  if [ "$cur_size" -ge "$EXPECT_SIZE" ]; then
+    echo "note: existing $DEST ($cur_size B) is complete-length but failed" \
+         "verification; removing it to re-download from scratch." >&2
+    rm -f "$DEST"
+  fi
+fi
+
 echo "Fetching $FILENAME ($VARIANT) from $URL"
 echo "  expecting $EXPECT_SIZE bytes, sha256=$EXPECT_SHA"
 
