@@ -196,8 +196,18 @@ impl MobileZtnaManager {
         reason: &str,
         now: DateTime<Utc>,
     ) {
+        // Allocate the version *inside* the lock — matching
+        // `revoke_if_unchanged` — so the stored version is monotonic
+        // with respect to lock-acquisition order. Allocating before the
+        // lock would let a concurrent `revoke_if_unchanged` acquire the
+        // lock first, write a higher version, and then have this insert
+        // overwrite it with a lower one; the equality-based CAS stays
+        // correct either way, but ordering the allocation by the lock
+        // keeps the "stored version only ever increases" invariant easy
+        // to reason about.
+        let mut state = self.app_state.lock();
         let version = self.next_version();
-        self.app_state.lock().insert(
+        state.insert(
             request.app_id.clone(),
             AppAccessState {
                 allowed,
