@@ -107,6 +107,12 @@ pub struct ClamdConfig {
     pub pool_max_connections: usize,
     /// Capacity of the content-hash verdict cache.
     pub cache_capacity: usize,
+    /// Freshness window for a cached verdict. A verdict older than this is
+    /// treated as a miss and re-scanned, so a `Clean` produced against an
+    /// older signature database cannot outlive a `freshclam` update by more
+    /// than this window. Bounds cache staleness without giving up the
+    /// repeat-download dedup that motivates the cache.
+    pub cache_ttl: Duration,
     /// Fail posture on a scan error/timeout: `true` fails open (verdict
     /// [`ContentScanVerdict::Clean`], request allowed — the default so a
     /// scanner outage never blocks employees), `false` fails closed (verdict
@@ -150,6 +156,12 @@ impl ClamdConfig {
             // 8192 hot files cached; at multi-tenant scale the repeat-download
             // hit rate on shared content is high and each entry is tiny.
             cache_capacity: 8192,
+            // 1 h: clamd's freshclam typically updates the signature database
+            // hourly, so a one-hour ceiling keeps a cached verdict from
+            // outliving a database update by more than one refresh cycle
+            // while still absorbing the bursty repeat downloads (a popular
+            // installer fetched by many employees) the cache exists for.
+            cache_ttl: Duration::from_hours(1),
             // Default fail-open: a scanner outage must never block employees
             // from legitimate downloads. Regulated tenants opt into
             // fail-closed explicitly.
@@ -252,7 +264,7 @@ impl ClamdScanner {
         Self {
             inner: Arc::new(ClamdInner {
                 pool: Pool::new(config.endpoint, config.pool_max_connections),
-                cache: ContentVerdictCache::new(config.cache_capacity),
+                cache: ContentVerdictCache::with_ttl(config.cache_capacity, config.cache_ttl),
                 max_scan_bytes: config.max_scan_bytes,
                 chunk_size: config.chunk_size.max(1),
                 scan_timeout: config.scan_timeout,
@@ -395,6 +407,13 @@ impl ContentScanner for ClamdScanner {
             return hit;
         }
 
+        // Cancellation safety: on timeout, `timeout` drops the `scan_once`
+        // future, which drops its locals — the held semaphore permit and the
+        // checked-out `Connection` (its socket). The permit is released and the
+        // socket closed, so a timed-out scan leaks neither a pool slot nor a
+        // connection and the `idle + in_use <= pool_max_connections` invariant
+        // holds even under cancellation. The connection is intentionally *not*
+        // returned to the idle list (it may be mid-reply / desynced).
         match tokio::time::timeout(self.inner.scan_timeout, self.scan_once(bytes)).await {
             Ok(Ok(verdict)) => {
                 // Only cache deterministic scan results. Fail-posture verdicts
@@ -723,6 +742,32 @@ mod tests {
             "second download of identical content must be served from cache"
         );
         assert_eq!(scanner.cache_len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_cached_verdict_is_rescanned_after_ttl() {
+        // A verdict must not outlive a signature-database update indefinitely:
+        // once the configured cache TTL elapses, the same content is scanned
+        // again (against clamd's now-current database) rather than served from
+        // a possibly-stale cache entry.
+        let mock = MockClamd::start(MockBehavior::Normal).await;
+        let mut c = cfg(&mock.addr);
+        c.cache_ttl = Duration::from_millis(40);
+        let scanner = ClamdScanner::new(c);
+        let hash = "d".repeat(64);
+        let body = b"a file that was clean yesterday";
+
+        assert_eq!(scanner.scan(body, Some(&hash)).await, ContentScanVerdict::Clean);
+        assert_eq!(mock.scans(), 1);
+        // Within the TTL: still served from cache (no re-scan).
+        assert_eq!(scanner.scan(body, Some(&hash)).await, ContentScanVerdict::Clean);
+        assert_eq!(mock.scans(), 1, "fresh entry must be served from cache");
+
+        tokio::time::sleep(Duration::from_millis(60)).await;
+
+        // Past the TTL: the stale entry is a miss and a fresh scan runs.
+        assert_eq!(scanner.scan(body, Some(&hash)).await, ContentScanVerdict::Clean);
+        assert_eq!(mock.scans(), 2, "verdict past its TTL must be re-scanned");
     }
 
     #[tokio::test]
