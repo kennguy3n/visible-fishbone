@@ -20,6 +20,12 @@ type OIDCHandler struct {
 	configs      repository.IDPConfigRepository
 	oidc         *identity.OIDCService
 	maxProviders int
+	// dirCreds is the optional directory-credential vault. When set
+	// (WithDirectoryCredentials), the handler exposes the per-config
+	// directory-credential sub-resource that feeds the IdP SyncService.
+	// Nil when directory sync is not wired, in which case those routes
+	// are not registered at all.
+	dirCreds *identity.CredentialVault
 }
 
 // NewOIDCHandler returns a ready-to-use OIDC handler. maxProviders
@@ -27,6 +33,17 @@ type OIDCHandler struct {
 // unlimited).
 func NewOIDCHandler(configs repository.IDPConfigRepository, oidc *identity.OIDCService, maxProviders int) *OIDCHandler {
 	return &OIDCHandler{configs: configs, oidc: oidc, maxProviders: maxProviders}
+}
+
+// WithDirectoryCredentials attaches the directory-credential vault,
+// enabling the per-config directory-credential admin sub-resource. A
+// nil vault is a no-op (the routes stay unregistered), so wiring is
+// fail-safe. Returns the receiver for chaining.
+func (h *OIDCHandler) WithDirectoryCredentials(vault *identity.CredentialVault) *OIDCHandler {
+	if vault != nil {
+		h.dirCreds = vault
+	}
+	return h
 }
 
 // Register attaches the authenticated idp-configs CRUD routes. These
@@ -37,6 +54,15 @@ func (h *OIDCHandler) Register(mux *http.ServeMux) {
 	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/idp-configs/{id}", h.getConfig)
 	MountTenantScoped(mux, "PUT /api/v1/tenants/{tenant_id}/idp-configs/{id}", h.updateConfig)
 	MountTenantScoped(mux, "DELETE /api/v1/tenants/{tenant_id}/idp-configs/{id}", h.deleteConfig)
+
+	// Directory-credential sub-resource: the sealed per-provider
+	// secret the IdP SyncService unseals to call the directory API.
+	// Only mounted when a vault is wired (directory sync enabled).
+	if h.dirCreds != nil {
+		MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/idp-configs/{id}/directory-credential", h.getDirectoryCredential)
+		MountTenantScoped(mux, "PUT /api/v1/tenants/{tenant_id}/idp-configs/{id}/directory-credential", h.setDirectoryCredential)
+		MountTenantScoped(mux, "DELETE /api/v1/tenants/{tenant_id}/idp-configs/{id}/directory-credential", h.deleteDirectoryCredential)
+	}
 }
 
 // RegisterPublic attaches the unauthenticated mobile native-SSO
@@ -246,6 +272,102 @@ func (h *OIDCHandler) deleteConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := h.configs.Delete(r.Context(), tenantID, id); err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// --- directory-credential sub-resource -----------------------------------
+
+// DirectoryCredentialRequest is the JSON body for setting a provider's
+// directory-API credential. Token is the bearer secret; base_url and
+// subject are provider-specific (see identity.DirectoryCredential). The
+// credential is sealed at rest and never returned by any endpoint.
+type DirectoryCredentialRequest struct {
+	BaseURL string `json:"base_url,omitempty"`
+	Token   string `json:"token"`
+	Subject string `json:"subject,omitempty"`
+}
+
+// DirectoryCredentialStatusResponse reports whether a credential is
+// configured WITHOUT echoing any secret material.
+type DirectoryCredentialStatusResponse struct {
+	ConfigID   string `json:"config_id"`
+	Configured bool   `json:"configured"`
+}
+
+func (h *OIDCHandler) getDirectoryCredential(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	id, ok := PathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	// Confirm the config exists within the tenant first so an unknown
+	// id is a 404 rather than silently reporting configured:false.
+	if _, err := h.configs.Get(r.Context(), tenantID, id); err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	configured, err := h.dirCreds.Has(r.Context(), tenantID, id)
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, DirectoryCredentialStatusResponse{ConfigID: id.String(), Configured: configured})
+}
+
+func (h *OIDCHandler) setDirectoryCredential(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	id, ok := PathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	var req DirectoryCredentialRequest
+	if !DecodeJSON(w, r, &req) {
+		return
+	}
+	token := strings.TrimSpace(req.Token)
+	if token == "" {
+		WriteError(w, http.StatusBadRequest, "missing_field", "token is required")
+		return
+	}
+	// The config must exist within the tenant. This both yields a clean
+	// 404 for an unknown id and prevents seeding a credential against
+	// another tenant's config id (the store FK only checks existence,
+	// not ownership).
+	if _, err := h.configs.Get(r.Context(), tenantID, id); err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	err := h.dirCreds.Put(r.Context(), tenantID, id, identity.DirectoryCredential{
+		BaseURL: strings.TrimSpace(req.BaseURL),
+		Token:   token,
+		Subject: strings.TrimSpace(req.Subject),
+	})
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, DirectoryCredentialStatusResponse{ConfigID: id.String(), Configured: true})
+}
+
+func (h *OIDCHandler) deleteDirectoryCredential(w http.ResponseWriter, r *http.Request) {
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	id, ok := PathUUID(w, r, "id")
+	if !ok {
+		return
+	}
+	if err := h.dirCreds.Clear(r.Context(), tenantID, id); err != nil {
 		WriteRepositoryError(w, err)
 		return
 	}
