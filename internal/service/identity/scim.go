@@ -848,11 +848,15 @@ func applyUserReplace(u *repository.User, op SCIMPatchOp) {
 	}
 }
 
-func applyUserRemove(u *repository.User, op SCIMPatchOp) {
-	if canonicalAttr(op.Path) == "externalid" {
-		u.ExternalID = ""
-	}
-}
+// applyUserRemove applies a "remove" patch op on a single-valued user
+// attribute. externalId is deliberately NOT handled here: clearing it
+// requires the dedicated UpdateAndClearExternalID DB path (a plain
+// Update preserves the column via COALESCE/NULLIF, so zeroing it only
+// in memory would be silently dropped), so PatchUser gates externalId
+// removal separately and never routes it here. No other single-valued
+// user attribute is removable today; this remains the extension point
+// for ones that are clearable through a plain Update.
+func applyUserRemove(_ *repository.User, _ SCIMPatchOp) {}
 
 func extractMembers(val any) []SCIMGroupMember {
 	v, ok := val.([]any)
