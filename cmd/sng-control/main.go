@@ -361,27 +361,24 @@ func run() error {
 	// a previous control-plane instance (or this one before a leadership
 	// flap), so a crash/restart mid migration is picked up from the
 	// durable checkpoint rather than stranding the tenant in dual-read.
-	// RunIfLeader gates this to the elected leader and — crucially —
-	// (re)invokes it every time leadership is acquired, so an instance
-	// that becomes leader *after* the previous leader crashed mid
-	// migration still resumes the stranded work (a one-shot IsLeader()
-	// check would miss that transition). ResumeAll only drives
-	// non-terminal migrations and each step is idempotent, so running it
-	// once per leadership term is safe. It runs in the background so it
-	// never blocks readiness.
+	// Like the other leader-only singletons (app-registry sync, pop
+	// rebalance, compliance evidence) this is a blocking PERIODIC loop,
+	// not a one-shot: RunIfLeader (re)starts it on every leadership
+	// acquisition, and the loop re-scans on its own cadence until
+	// leadership is lost. The periodic re-scan matters because a
+	// migration is normally driven synchronously in the API handler's
+	// request goroutine — if that request context is cancelled (client
+	// timeout) mid-drive without a process crash, the migration is left
+	// non-terminal and a one-shot boot-time resume on a stable leader
+	// would never pick it up. ResumeAll only drives non-terminal
+	// migrations and every step is idempotent, so re-scanning is safe.
+	// It runs in the background so it never blocks readiness.
 	if rc.RegionMigrator != nil {
 		go elector.RunIfLeader(rootCtx, "ws11-migration-resume", func(ctx context.Context) {
-			n, rerr := rc.RegionMigrator.ResumeAll(ctx)
-			if rerr != nil {
-				logger.Warn("sng-control: ws11 resume in-flight migrations failed",
-					slog.Int("resumed", n), slog.Any("error", rerr))
-				return
-			}
-			if n > 0 {
-				logger.Info("sng-control: ws11 resumed in-flight migrations",
-					slog.Int("resumed", n))
-			}
+			runMigrationResume(ctx, rc.RegionMigrator, cfg.TenantMigration.ResumeInterval, logger)
 		})
+		logger.Info("sng-control: ws11 migration resume loop registered (runs on leader only)",
+			slog.Duration("interval", cfg.TenantMigration.ResumeInterval))
 	}
 	// WORKSTREAM 8 threat-intel aggregator: one warm-up refresh per
 	// configured feed on start, then scheduled (default hourly)
@@ -2834,6 +2831,45 @@ func runPoPRebalance(ctx context.Context, svc *pop.Service, interval time.Durati
 				logger.Info("pop: rebalance moved tenants off overloaded PoPs",
 					slog.Int("moved", moved))
 			}
+		}
+	}
+}
+
+// runMigrationResume drives the leader-only WS11 cross-region migration
+// resume loop until ctx is cancelled. It is invoked through
+// elector.RunIfLeader, so it starts on leadership acquisition and
+// returns (stopping the ticker) when leadership is lost or the process
+// shuts down. It scans once immediately on entry — so a leader that has
+// just taken over a crashed predecessor picks up stranded migrations
+// without waiting a full interval — then re-scans every interval to
+// catch migrations stranded by a cancelled request context on a stable
+// leader. ResumeAll only drives non-terminal migrations and every step
+// is idempotent, so repeated scans are safe.
+func runMigrationResume(ctx context.Context, migrator *tenant.RegionMigrator, interval time.Duration, logger *slog.Logger) {
+	if interval <= 0 {
+		interval = 5 * time.Minute
+	}
+	resume := func() {
+		n, rerr := migrator.ResumeAll(ctx)
+		if rerr != nil && ctx.Err() == nil {
+			logger.Warn("sng-control: ws11 resume in-flight migrations failed",
+				slog.Int("resumed", n), slog.Any("error", rerr))
+			return
+		}
+		if n > 0 {
+			logger.Info("sng-control: ws11 resumed in-flight migrations",
+				slog.Int("resumed", n))
+		}
+	}
+	resume()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			resume()
 		}
 	}
 }

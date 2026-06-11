@@ -65,6 +65,7 @@ func clearAll(t *testing.T) {
 		"POP_REGISTRY_REFRESH_INTERVAL", "POP_HEALTH_TTL", "POP_HIGH_WATER_FRACTION",
 		"POP_GEODNS_HOSTNAME", "POP_GEODNS_ROUTING_POLICY", "POP_GEODNS_TTL",
 		"POP_GEODNS_PUBLISH_INTERVAL", "POP_REBALANCE_ENABLED", "POP_REBALANCE_INTERVAL",
+		"WS11_MIGRATION_RESUME_INTERVAL",
 		"AI_LLM_ENDPOINT", "AI_LLM_API_KEY", "AI_LLM_MODEL", "AI_LLM_MODEL_FAMILY", "AI_LLM_TIMEOUT",
 		"AI_GUARDRAIL_MAX_REQUESTS_PER_MINUTE", "AI_GUARDRAIL_MAX_TOKENS_PER_DAY",
 	}
@@ -193,6 +194,10 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.Metrics.Namespace != "sng" {
 		t.Errorf("Metrics.Namespace = %q, want sng", cfg.Metrics.Namespace)
+	}
+	// WS11 migration resume cadence defaults to 5m.
+	if cfg.TenantMigration.ResumeInterval != 5*time.Minute {
+		t.Errorf("TenantMigration.ResumeInterval = %s, want 5m", cfg.TenantMigration.ResumeInterval)
 	}
 }
 

@@ -311,19 +311,80 @@ func TestRegionMigration_RollbackOnFailure(t *testing.T) {
 	if gp.lastSet != "" {
 		t.Errorf("region should not have been changed, got %q", gp.lastSet)
 	}
-	// Completed forward steps (keys, telemetry) rolled back in reverse;
-	// the failing step (copy_objects forward) is recorded but its
-	// forward failed so it is NOT rolled back.
+	// The failing step (copy_objects) may have written partial data to
+	// the target region before erroring, so its undo (Purge) MUST run
+	// during rollback — otherwise that partial cross-region data is
+	// orphaned. The completed forward steps (keys, telemetry) and the
+	// attempted-but-failed step are all unwound in reverse pipeline
+	// order.
 	seq := rec.sequence()
 	wantPrefix := []string{
 		"forward:rewrap_keys",
 		"forward:copy_telemetry",
-		"forward:copy_objects", // failed
+		"forward:copy_objects",  // failed mid-step
+		"rollback:copy_objects", // attempted step is purged, not orphaned
 		"rollback:copy_telemetry",
 		"rollback:rewrap_keys",
 	}
 	if !equalSeq(seq, wantPrefix) {
 		t.Errorf("call sequence = %v, want %v", seq, wantPrefix)
+	}
+}
+
+// TestRegionMigration_FailedStepPurgedAndCheckpointed proves that a
+// forward step which errors partway (and may have written partial data
+// to the target region) is both (a) undone during rollback so no
+// orphaned cross-region data is left behind, and (b) recorded durably in
+// the checkpoint — first as attempted, then rolled_back — so a crash
+// mid-rollback resumes with the failed step still in the rollback sweep.
+func TestRegionMigration_FailedStepPurgedAndCheckpointed(t *testing.T) {
+	t.Parallel()
+	rec := newRecordingPlane()
+	rec.failForward["copy_objects"] = errors.New("boom: s3 copy failed midway")
+	gp := &regionPlane{r: rec}
+	m, _, tenants := newMigrator(t, tenant.MigrationPlanes{
+		Keys:      rec,
+		Telemetry: rec,
+		Objects:   objectPlane{rec},
+		PoP:       popPlane{rec},
+		Region:    gp,
+	})
+	tnt := seedTenant(t, tenants, "us-east-1")
+
+	got, err := m.Start(context.Background(), tnt.ID, "eu-central-1")
+	if err == nil || err.Error() != "boom: s3 copy failed midway" {
+		t.Fatalf("Start err = %v, want original cause", err)
+	}
+	if got.State != repository.MigrationStateRolledBack {
+		t.Fatalf("final state = %q, want rolled_back", got.State)
+	}
+
+	// The failed step's Purge MUST have been invoked (partial side-effects
+	// cleaned up), not skipped.
+	purged := false
+	for _, c := range rec.sequence() {
+		if c == "rollback:copy_objects" {
+			purged = true
+		}
+	}
+	if !purged {
+		t.Errorf("failed step copy_objects was not purged on rollback; sequence = %v", rec.sequence())
+	}
+
+	// The durable checkpoint records the failed step as rolled_back (it
+	// passed through attempted on the way), alongside the completed steps.
+	var cp struct {
+		Steps map[string]struct {
+			Status string `json:"status"`
+		} `json:"steps"`
+	}
+	if err := json.Unmarshal(got.Checkpoint, &cp); err != nil {
+		t.Fatalf("decode checkpoint: %v", err)
+	}
+	for _, name := range []string{"rewrap_keys", "copy_telemetry", "copy_objects"} {
+		if cp.Steps[name].Status != "rolled_back" {
+			t.Errorf("step %q status = %q, want rolled_back", name, cp.Steps[name].Status)
+		}
 	}
 }
 

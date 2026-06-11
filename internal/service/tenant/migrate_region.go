@@ -36,12 +36,18 @@ var ErrSourceRegionUnset = errors.New("tenant: tenant has no source region (resi
 // was somehow lost, never to an API caller.
 var errResumedMidRollback = errors.New("tenant: migration resumed while rolling back")
 
-// stepStatusDone marks a forward step that completed; stepStatusRolledBack
-// marks one that was subsequently undone. Persisted inside the
-// migration checkpoint so a resumed run skips completed steps and a
-// rollback only touches steps that actually ran.
+// Step lifecycle statuses persisted inside the migration checkpoint.
+//   - stepStatusDone: the forward step completed; a resumed run skips it
+//     and a rollback undoes it.
+//   - stepStatusAttempted: the forward step started but errored partway,
+//     so it may have produced partial side-effects in the target region
+//     (e.g. some ClickHouse partitions or S3 objects copied). It is NOT
+//     "done", but rollback MUST still invoke its undo so those partial
+//     side-effects are purged rather than orphaned.
+//   - stepStatusRolledBack: the step (done or attempted) was undone.
 const (
 	stepStatusDone       = "done"
+	stepStatusAttempted  = "attempted"
 	stepStatusRolledBack = "rolled_back"
 )
 
@@ -512,6 +518,17 @@ func (m *RegionMigrator) drive(ctx context.Context, mig repository.TenantMigrati
 
 		meta, ferr := step.forward(ctx, mig)
 		if ferr != nil {
+			// The step errored partway, so it may have written partial
+			// side-effects to the target region (e.g. some telemetry
+			// partitions or S3 objects copied) before failing. Record it
+			// as attempted — distinct from done — so the rollback sweep
+			// below still invokes its undo (Purge/Restore) and no partial
+			// cross-region data is left orphaned. The record is persisted
+			// durably when rollback transitions to rolling_back, so even a
+			// crash mid-rollback resumes with the attempted step still in
+			// the sweep. Any metadata the forward produced before failing
+			// is preserved for the undo.
+			cp.set(step.name, stepRecord{Status: stepStatusAttempted, Meta: meta})
 			m.logger.ErrorContext(ctx, "tenant: migration step failed; rolling back",
 				"tenant_id", mig.TenantID, "migration_id", mig.ID, "step", step.name, "error", ferr)
 			return m.rollback(ctx, mig, cp, ferr)
@@ -525,9 +542,12 @@ func (m *RegionMigrator) drive(ctx context.Context, mig repository.TenantMigrati
 	return m.complete(ctx, mig, cp)
 }
 
-// rollback unwinds every step recorded done, in reverse pipeline order.
-// It ends the migration rolled_back when every undo succeeds, or failed
-// when any undo errors (the failure detail is preserved for operators).
+// rollback unwinds every step recorded done OR attempted, in reverse
+// pipeline order. Attempted steps (a forward step that errored partway)
+// are included so their partial target-region side-effects are purged,
+// not orphaned. It ends the migration rolled_back when every undo
+// succeeds, or failed when any undo errors (the failure detail is
+// preserved for operators).
 func (m *RegionMigrator) rollback(ctx context.Context, mig repository.TenantMigration, cp checkpoint, cause error) (repository.TenantMigration, error) {
 	updated, err := m.transition(ctx, mig, repository.MigrationStateRollingBack, cp, cause.Error())
 	if err != nil {
@@ -539,7 +559,7 @@ func (m *RegionMigrator) rollback(ctx context.Context, mig repository.TenantMigr
 	for i := len(m.steps) - 1; i >= 0; i-- {
 		step := m.steps[i]
 		rec, ok := cp.record(step.name)
-		if !ok || rec.Status != stepStatusDone {
+		if !ok || (rec.Status != stepStatusDone && rec.Status != stepStatusAttempted) {
 			continue
 		}
 		if rerr := step.rollback(ctx, mig, rec.Meta); rerr != nil {
