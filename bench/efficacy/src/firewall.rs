@@ -8,15 +8,15 @@ use std::sync::Arc;
 
 use ipnet::IpNet;
 use sng_fw::{
-    CompiledRuleSet, EvaluationContext, FirewallEngine, FirewallRule, FlowDirection, FlowKey,
-    MockNftables, NatTable, NftablesScript, PortRange, Protocol, RuleAction, RuleCompiler,
+    render_nftables, CompiledRuleSet, EvaluationContext, FirewallEngine, FirewallRule,
+    FlowDirection, FlowKey, MockNftables, NatTable, PortRange, Protocol, RuleAction, RuleCompiler,
     RuleMatch, ZoneTable,
 };
 use sng_policy_eval::bundle::LoadedBundle;
 
 use crate::report::{Case, FunctionReport, Kind, Targets};
 
-fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
+pub(crate) fn v4(a: u8, b: u8, c: u8, d: u8) -> IpAddr {
     IpAddr::V4(Ipv4Addr::new(a, b, c, d))
 }
 
@@ -82,45 +82,61 @@ fn allow_udp_port(id: &str, port: u16) -> FirewallRule {
 /// Realistic edge policy: explicit allowlist for web/DNS, explicit
 /// deny for legacy/admin services + a known-bad destination block,
 /// default-deny baseline (fail-closed).
-fn policy_ruleset() -> CompiledRuleSet {
+///
+/// Shared by the userspace driver ([`run`]) and the kernel-conformance
+/// driver ([`crate::firewall_kernel`]) so both exercise the *same* rule
+/// set: the in-memory engine and the rendered nftables script are two
+/// views of one source of truth.
+pub(crate) fn policy_ruleset() -> CompiledRuleSet {
+    let rules = vec![
+        // Block legacy / lateral-movement services first.
+        deny_port("deny-telnet", 23),
+        deny_port("deny-smb", 445),
+        deny_port("deny-rdp", 3389),
+        deny_port("deny-exfil", 9999),
+        // Block a known-bad destination network (threat-intel feed).
+        deny_cidr("deny-badnet", "203.0.113.0/24"),
+        // Allow sanctioned egress.
+        allow_port("allow-https", 443),
+        allow_port("allow-http", 80),
+        // DNS over both transports: UDP is the common path, TCP for
+        // zone transfers / large (>512B) responses. Protocol is matched
+        // exactly (only `Protocol::Any` wildcards), so each transport
+        // needs its own allow rule.
+        allow_udp_port("allow-dns-udp", 53),
+        allow_port("allow-dns-tcp", 53),
+    ];
+    let zones = ZoneTable::new();
+    let nat = NatTable::new();
+    let default_action = RuleAction::Deny; // fail-closed baseline
+                                           // Render the *real* nftables artifact the kernel apply path consumes
+                                           // (rather than a placeholder), so `CompiledRuleSet::script` is the same
+                                           // ruleset the kernel-conformance driver installs. The inputs are fixed
+                                           // and valid, so a render failure is a programming error, not a runtime
+                                           // condition.
+    let script = render_nftables(&rules, &zones, &nat, default_action)
+        .expect("render efficacy firewall ruleset");
     CompiledRuleSet {
-        rules: vec![
-            // Block legacy / lateral-movement services first.
-            deny_port("deny-telnet", 23),
-            deny_port("deny-smb", 445),
-            deny_port("deny-rdp", 3389),
-            deny_port("deny-exfil", 9999),
-            // Block a known-bad destination network (threat-intel feed).
-            deny_cidr("deny-badnet", "203.0.113.0/24"),
-            // Allow sanctioned egress.
-            allow_port("allow-https", 443),
-            allow_port("allow-http", 80),
-            // DNS over both transports: UDP is the common path, TCP for
-            // zone transfers / large (>512B) responses. Protocol is matched
-            // exactly (only `Protocol::Any` wildcards), so each transport
-            // needs its own allow rule.
-            allow_udp_port("allow-dns-udp", 53),
-            allow_port("allow-dns-tcp", 53),
-        ],
-        zones: ZoneTable::new(),
-        nat: NatTable::new(),
-        default_action: RuleAction::Deny, // fail-closed baseline
+        rules,
+        zones,
+        nat,
+        default_action,
         source_graph_id: "efficacy-fw".into(),
         source_graph_version: 1,
-        script: NftablesScript::new(b"add table inet sng_filter\n".to_vec()),
+        script,
     }
 }
 
-struct FlowCase {
-    desc: &'static str,
-    bad: bool,
-    src: IpAddr,
-    dst: IpAddr,
-    dport: u16,
-    proto: Protocol,
+pub(crate) struct FlowCase {
+    pub(crate) desc: &'static str,
+    pub(crate) bad: bool,
+    pub(crate) src: IpAddr,
+    pub(crate) dst: IpAddr,
+    pub(crate) dport: u16,
+    pub(crate) proto: Protocol,
 }
 
-fn corpus() -> Vec<FlowCase> {
+pub(crate) fn corpus() -> Vec<FlowCase> {
     vec![
         // --- known-bad: MUST be denied ---
         FlowCase {

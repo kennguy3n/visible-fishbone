@@ -365,6 +365,78 @@ jobs:
           echo "::error::wire throughput regression detected for ${{ matrix.profile }} (threshold ${BENCH_THROUGHPUT_DROP})"
           exit 1
 
+  firewall-kernel:
+    name: kernel nftables conformance
+    # The kernel-enforcement check installs an `sng-fw`-rendered nftables
+    # ruleset in a network namespace and forwards real packets through the
+    # kernel `forward` hook, so it needs root (netns + nft) and `nft`
+    # installed — exactly the privileged self-hosted runner WS1 provisioned
+    # for the wire sweep (`sng-bench-wire`). It never runs on push: no
+    # self-hosted exposure to untrusted PRs.
+    runs-on: [self-hosted, sng-bench-wire]
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        # `bench/efficacy` is its own standalone cargo workspace (like
+        # `bench`), so build/run from there.
+        working-directory: bench/efficacy
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: bench/efficacy
+          # Distinct key: the efficacy harness is a different workspace from
+          # the `bench` wire cache.
+          shared-key: bench-efficacy-kernel-${{ runner.os }}
+
+      - name: install nftables + iproute2
+        run: |
+          set -euo pipefail
+          # The conformance driver shells out to `nft` and `ip netns`;
+          # ensure both are present (idempotent on a warm runner).
+          if ! command -v nft >/dev/null 2>&1 || ! command -v ip >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends nftables iproute2
+          fi
+          nft --version
+          ip -V
+
+      - name: build efficacy harness (release)
+        run: cargo build --release --locked
+
+      - name: kernel nftables verdict conformance
+        run: |
+          set -euo pipefail
+          mkdir -p results/efficacy
+          # Installs the sng-fw-rendered ruleset in a throwaway network
+          # namespace, forwards one crafted packet per corpus flow through
+          # the kernel `forward` hook, and asserts each kernel verdict
+          # matches the userspace engine. Any kernel/userspace divergence is
+          # a renderer bug; that (or an environment that cannot run the
+          # check) yields a non-PASS verdict, a non-zero exit, and a failed
+          # job.
+          target/release/sng-efficacy \
+            --firewall-kernel \
+            --git-sha "${GITHUB_SHA}" \
+            --out results/efficacy/firewall-kernel.json
+
+      - name: upload kernel conformance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: efficacy-firewall-kernel-${{ github.run_id }}
+          path: bench/efficacy/results/efficacy/firewall-kernel.json
+          retention-days: 90
+
   wire-datasheet:
     name: regenerate dual datasheet (dry-run + wire)
     needs: wire
