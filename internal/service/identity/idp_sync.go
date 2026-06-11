@@ -112,6 +112,12 @@ type TenantActivitySource interface {
 type SyncReport struct {
 	TenantID         uuid.UUID
 	ConfigsProcessed int
+	// ConfigsSkipped counts enabled provider configs that have no
+	// directory credential stored. They are skipped (not synced and not
+	// errored): an idp_configs row enables mobile native-SSO token
+	// validation, which is independent of opting that provider into
+	// directory sync.
+	ConfigsSkipped   int
 	UsersSeen        int
 	UsersProvisioned int
 	UsersOffboarded  int
@@ -319,6 +325,12 @@ func (s *SyncService) SyncTenant(ctx context.Context, tenantID uuid.UUID) (SyncR
 // syncConfig reconciles one provider directory for a tenant.
 func (s *SyncService) syncConfig(ctx context.Context, tenantID uuid.UUID, cfg repository.IDPConfig, report *SyncReport) error {
 	cred, err := s.creds.Resolve(ctx, tenantID, cfg)
+	if errors.Is(err, ErrNoDirectoryCredential) {
+		// Provider is enabled for token validation but not opted into
+		// directory sync. Skip it quietly rather than erroring every cycle.
+		report.ConfigsSkipped++
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("resolve credentials: %w", err)
 	}

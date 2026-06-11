@@ -317,6 +317,21 @@ type MobileAuth struct {
 	// shape). Defaults to true. Set false to require users be
 	// pre-provisioned (e.g. via SCIM) before they can federate.
 	AutoProvisionUsers bool
+	// DirectorySyncEnabled gates the leader-only IdP directory-sync
+	// loop (internal/service/identity.SyncService) in main(). When
+	// false (the default) the loop never starts and the per-config
+	// directory-credential admin endpoints stay unmounted, so this is
+	// a strictly opt-in feature. When true, the loop reconciles each
+	// tenant's directory (Okta / Microsoft Graph / Google) on the
+	// DirectorySyncInterval cadence, off-boarding upstream-removed
+	// users and pushing ZTNA revocations. Only configs that have a
+	// stored directory credential are synced; the rest are skipped.
+	DirectorySyncEnabled bool
+	// DirectorySyncInterval is the cadence of the directory-sync loop
+	// (only consulted when DirectorySyncEnabled). Defaults to 1h. The
+	// activity-tiered dormancy planner further reduces how often idle
+	// and dormant tenants are reconciled within this cadence.
+	DirectorySyncInterval time.Duration
 }
 
 // AppRegistry carries the runtime knobs for the curated
@@ -1673,6 +1688,9 @@ func Load() (Config, error) {
 		// Mobile IdP-federation session + discovery-cache lifetimes.
 		{"MOBILE_AUTH_SESSION_TOKEN_TTL", time.Hour, &cfg.MobileAuth.SessionTokenTTL},
 		{"MOBILE_AUTH_DISCOVERY_CACHE_TTL", 24 * time.Hour, &cfg.MobileAuth.DiscoveryCacheTTL},
+		// IdP directory-sync loop cadence (only consulted when
+		// IDP_DIRECTORY_SYNC_ENABLED). Defaults to 1h.
+		{"IDP_DIRECTORY_SYNC_INTERVAL", time.Hour, &cfg.MobileAuth.DirectorySyncInterval},
 		// Cost-metering flush cadence. Defaults to 60s (matching the
 		// Session K spec and metering.DefaultFlushInterval). Parsed
 		// strictly so a typo can't silently skew cost accounting.
@@ -1741,6 +1759,7 @@ func Load() (Config, error) {
 		{"CASB_NOOPS_ENABLED", false, &cfg.CASB.NoOpsEnabled},
 		{"CASB_NOOPS_AUTO_ENFORCE", false, &cfg.CASB.NoOpsAutoEnforce},
 		{"MOBILE_AUTH_AUTO_PROVISION_USERS", true, &cfg.MobileAuth.AutoProvisionUsers},
+		{"IDP_DIRECTORY_SYNC_ENABLED", false, &cfg.MobileAuth.DirectorySyncEnabled},
 		{"METRICS_ENABLED", true, &cfg.Metrics.Enabled},
 		{"POP_REBALANCE_ENABLED", true, &cfg.PoP.RebalanceEnabled},
 	}
@@ -2120,6 +2139,14 @@ func (c Config) validate() error {
 	// scoped sessions.
 	if c.MobileAuth.SessionTokenTTL <= 0 {
 		return fmt.Errorf("MOBILE_AUTH_SESSION_TOKEN_TTL must be > 0, got %s", c.MobileAuth.SessionTokenTTL)
+	}
+	// When the directory-sync loop is enabled its cadence must be
+	// positive: a <= 0 interval is silently overridden by
+	// SyncService.Run's DefaultSyncInterval, so fail loudly rather than
+	// running on a cadence the operator never chose. Only enforced when
+	// the loop is enabled (the default-off path ignores the interval).
+	if c.MobileAuth.DirectorySyncEnabled && c.MobileAuth.DirectorySyncInterval <= 0 {
+		return fmt.Errorf("IDP_DIRECTORY_SYNC_INTERVAL must be > 0 when IDP_DIRECTORY_SYNC_ENABLED=true, got %s", c.MobileAuth.DirectorySyncInterval)
 	}
 	// Likewise, a <= 0 discovery-cache TTL would silently fall back to
 	// the service's 24h default rather than the configured value.

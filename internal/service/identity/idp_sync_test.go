@@ -359,3 +359,54 @@ func TestSyncSkipsDisabledConfig(t *testing.T) {
 		t.Errorf("users seen = %d, want 0", report.UsersSeen)
 	}
 }
+
+// noCreds resolves nothing — it models a provider config enabled for
+// token validation but never opted into directory sync.
+type noCreds struct{}
+
+func (noCreds) Resolve(_ context.Context, _ uuid.UUID, _ repository.IDPConfig) (DirectoryCredential, error) {
+	return DirectoryCredential{}, ErrNoDirectoryCredential
+}
+
+// An enabled config with no stored directory credential is counted as
+// skipped, not errored: the sync loop must stay quiet for the common
+// case of token-validation-only providers.
+func TestSyncSkipsConfigWithoutCredential(t *testing.T) {
+	t.Parallel()
+	store := memory.NewStore()
+	tn, err := memory.NewTenantRepository(store).Create(context.Background(), repository.Tenant{
+		Name: "NoCred", Slug: "nocred", Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	configs := memory.NewIDPConfigRepository(store)
+	if _, err := configs.Create(context.Background(), tn.ID, repository.IDPConfig{
+		ProviderType: repository.IDPProviderOkta,
+		IssuerURL:    "https://acme.okta.com",
+		ClientID:     "client",
+		Enabled:      true,
+	}); err != nil {
+		t.Fatalf("seed config: %v", err)
+	}
+	client := &fakeDirectoryClient{users: []DirectoryUser{{Email: "x@example.com", Active: true}}}
+	svc := NewSyncService(configs, memory.NewUserRepository(store), memory.NewRoleRepository(store),
+		memory.NewAuditLogRepository(store), singleTenant{id: tn.ID}, noCreds{}, fakeFactory{client: client}, newCapturePublisher(), nil)
+
+	report, err := svc.SyncTenant(context.Background(), tn.ID)
+	if err != nil {
+		t.Fatalf("SyncTenant: %v", err)
+	}
+	if report.ConfigsProcessed != 1 {
+		t.Errorf("configs processed = %d, want 1", report.ConfigsProcessed)
+	}
+	if report.ConfigsSkipped != 1 {
+		t.Errorf("configs skipped = %d, want 1", report.ConfigsSkipped)
+	}
+	if len(report.Errors) != 0 {
+		t.Errorf("errors = %v, want none (missing credential is not an error)", report.Errors)
+	}
+	if report.UsersSeen != 0 {
+		t.Errorf("users seen = %d, want 0 (skipped before directory call)", report.UsersSeen)
+	}
+}

@@ -72,6 +72,7 @@ import (
 	chwriter "github.com/kennguy3n/visible-fishbone/internal/service/telemetry/clickhouse"
 	telreplay "github.com/kennguy3n/visible-fishbone/internal/service/telemetry/replay"
 	s3writer "github.com/kennguy3n/visible-fishbone/internal/service/telemetry/s3"
+	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy"
 	"github.com/kennguy3n/visible-fishbone/internal/service/tenant"
 	"github.com/kennguy3n/visible-fishbone/internal/service/terraform"
 	"github.com/kennguy3n/visible-fishbone/internal/service/troubleshoot"
@@ -508,6 +509,25 @@ func run() error {
 			slog.Duration("reconcile_interval", cfg.CASB.NoOpsReconcileInterval))
 	}
 
+	// Leader-only IdP directory-sync loop. Nil unless
+	// IDP_DIRECTORY_SYNC_ENABLED=true (rc.IDPSyncService is only built
+	// in that case), so this is a no-op by default. Leader-gated like
+	// the other singleton sweeps so a multi-replica deployment pulls
+	// each tenant's directory exactly once per interval; runs in its
+	// own goroutine because RunIfLeader blocks until rootCtx is
+	// cancelled. SyncService.Run does an immediate full reconcile
+	// (cycle 0) on entry, then settles into the activity-tiered cadence.
+	if rc.IDPSyncService != nil {
+		idpSync := rc.IDPSyncService
+		go elector.RunIfLeader(rootCtx, "idp-directory-sync", func(ctx context.Context) {
+			if err := idpSync.Run(ctx, cfg.MobileAuth.DirectorySyncInterval); err != nil && !errors.Is(err, context.Canceled) {
+				logger.Error("sng-control: idp directory sync loop exited", slog.Any("error", err))
+			}
+		})
+		logger.Info("sng-control: IdP directory sync enabled",
+			slog.Duration("interval", cfg.MobileAuth.DirectorySyncInterval))
+	}
+
 	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer, rc.SampleRateResolver)
 	if err != nil {
 		return fmt.Errorf("start telemetry: %w", err)
@@ -735,6 +755,10 @@ type routerComponents struct {
 	// to startTelemetry so the telemetry consumer reads the same
 	// instance on its sampling hot path. Never nil.
 	SampleRateResolver *telemetry.MapSampleRateResolver
+	// IDPSyncService is the leader-only IdP directory-sync loop. Nil
+	// unless cfg.MobileAuth.DirectorySyncEnabled, in which case main()
+	// runs it via elector.RunIfLeader on cfg.MobileAuth.DirectorySyncInterval.
+	IDPSyncService *identity.SyncService
 }
 
 // buildRouter wires every repository / service / handler against
@@ -1428,6 +1452,56 @@ func buildRouter(
 	)
 	oidcHandler := handler.NewOIDCHandler(idpConfigRepo, oidcSvc, cfg.MobileAuth.MaxProvidersPerTenant)
 
+	// --- IdP directory sync (opt-in, leader-gated) -------------------
+	// When enabled, construct the sealed directory-credential vault,
+	// expose its per-config admin sub-resource on the OIDC handler, and
+	// build the SyncService that main() runs as a leader-only loop. All
+	// of this stays dormant under the default IDP_DIRECTORY_SYNC_ENABLED=false:
+	// no new routes, no background loop, no behavioural change.
+	var idpSyncSvc *identity.SyncService
+	if cfg.MobileAuth.DirectorySyncEnabled {
+		// Seal directory credentials at rest with the same AES-256-GCM
+		// master used for policy signing seeds when configured; fall
+		// back to passthrough (relying on TDE / disk encryption) when
+		// no master is set, exactly as the policy KeyService does.
+		var dirCredSealer identity.CredentialSealer = policy.PassthroughWrapper{}
+		if master, err := loadPolicyKeyWrapMaster(cfg); err != nil {
+			return routerComponents{}, fmt.Errorf("directory credential key-wrap master: %w", err)
+		} else if len(master) > 0 {
+			w, err := policy.NewAESGCMWrapper(master)
+			if err != nil {
+				return routerComponents{}, fmt.Errorf("directory credential key-wrap aes-gcm: %w", err)
+			}
+			dirCredSealer = w
+			logger.Info("idp directory sync: AES-256-GCM at-rest wrap enabled for directory credentials")
+		} else {
+			logger.Warn("idp directory sync: no key-wrap master set; directory credentials stored under passthrough (relying on at-rest disk/TDE encryption)")
+		}
+		credVault, err := identity.NewCredentialVault(store.NewIDPDirectoryCredentialRepository(), dirCredSealer)
+		if err != nil {
+			return routerComponents{}, fmt.Errorf("idp directory credential vault: %w", err)
+		}
+		oidcHandler = oidcHandler.WithDirectoryCredentials(credVault)
+
+		// Activity-tiered cadence so dormant trials are not reconciled
+		// every cycle. tenantRepo satisfies both the activity projection
+		// and (via idpTenantSource) the full-fanout fallback.
+		planner := tenancy.DefaultPlanner()
+		idpSyncSvc = identity.NewSyncService(
+			idpConfigRepo,
+			userRepo,
+			roleRepo,
+			auditRepo,
+			idpTenantSource{activity: tenantRepo},
+			credVault,
+			identity.DefaultDirectoryClientFactory{},
+			identity.NewNATSRevocationPublisher(natsAlertAdapter{p: telPub}),
+			logger,
+		).WithDormancyPlanner(&planner, tenantRepo)
+		logger.Info("idp directory sync: enabled (leader-gated)",
+			slog.Duration("interval", cfg.MobileAuth.DirectorySyncInterval))
+	}
+
 	// --- Admin SSO via iam-core (Session 2A, Task 3) -----------------
 	// The control-plane admin login federates to iam-core over the
 	// OAuth2 authorization-code + PKCE flow and mints an SNG admin
@@ -1728,6 +1802,7 @@ func buildRouter(
 		AppNoOpsEngine:     appNoOpsEngine,
 		Recompiler:         recompiler,
 		SampleRateResolver: sampleRateResolver,
+		IDPSyncService:     idpSyncSvc,
 	}, nil
 }
 
@@ -3318,6 +3393,30 @@ func (a natsAlertAdapter) Publish(ctx context.Context, subject string, data []by
 		return nil
 	}
 	return a.p.Publish(ctx, subject, data, sngnats.PublishOptions{})
+}
+
+// idpTenantSource adapts the tenant activity projection to
+// identity.TenantSource (the full-fanout fallback the SyncService uses
+// when no dormancy planner is configured). The directory-sync loop
+// always installs a planner, so ListTenants is effectively unused in
+// production — but NewSyncService requires a non-nil source, and
+// deriving ids from the same activity projection keeps the fallback
+// population identical to the planned path. Errors propagate so a
+// failed projection surfaces rather than silently syncing nothing.
+type idpTenantSource struct {
+	activity identity.TenantActivitySource
+}
+
+func (s idpTenantSource) ListTenants(ctx context.Context) ([]uuid.UUID, error) {
+	acts, err := s.activity.ListTenantActivity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]uuid.UUID, len(acts))
+	for i, a := range acts {
+		ids[i] = a.ID
+	}
+	return ids, nil
 }
 
 // hostnameForSyslog returns the local hostname used as the
