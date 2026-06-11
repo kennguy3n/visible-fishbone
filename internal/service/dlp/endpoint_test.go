@@ -642,6 +642,60 @@ func TestCompileEndpointBundle_FingerprintDedupPolicyWins(t *testing.T) {
 	}
 }
 
+// A policy fingerprint rule may carry its hex pattern_data in
+// uppercase (isHex16 accepts both cases, and the agent's
+// parse_simhash_hex decodes case-insensitively). The registered
+// fingerprint is always lowercase from hex.EncodeToString, so the dedup
+// must normalize case — otherwise the same SimHash is emitted twice and
+// fires twice on one upload.
+func TestCompileEndpointBundle_FingerprintDedupIsCaseInsensitive(t *testing.T) {
+	svc, tid := setup(t)
+	ctx := context.Background()
+
+	fp, err := svc.RegisterFingerprint(ctx, tid, "Merger Memo", "text/plain",
+		[]byte("project titan merger memo — material non-public information"))
+	if err != nil {
+		t.Fatalf("register fingerprint: %v", err)
+	}
+	lowerHash := hex.EncodeToString(fp.Hash)
+	upperHash := strings.ToUpper(lowerHash)
+
+	// Policy rule over the identical SimHash but in UPPERCASE hex.
+	if _, err := svc.CreatePolicy(ctx, tid, repository.DLPPolicy{
+		Name:    "Merger memo (hard block, uppercase hex)",
+		Rules:   []repository.DLPRule{{Type: repository.DLPRuleTypeFingerprint, Pattern: upperHash}},
+		Action:  repository.DLPActionBlock,
+		Enabled: true,
+	}); err != nil {
+		t.Fatalf("create policy: %v", err)
+	}
+
+	rules, err := svc.EndpointRules(ctx, tid)
+	if err != nil {
+		t.Fatalf("endpoint rules: %v", err)
+	}
+
+	matched := 0
+	var winner dlp.EndpointDLPRule
+	for _, r := range rules {
+		if strings.EqualFold(r.PatternData, lowerHash) {
+			matched++
+			winner = r
+		}
+	}
+	if matched != 1 {
+		t.Fatalf("expected exactly 1 rule for the shared SimHash across case, got %d: %+v", matched, rules)
+	}
+	// The policy rule (uppercase) wins; the registered lowercase
+	// duplicate is dropped despite the case mismatch.
+	if winner.Action != dlp.EndpointActionBlock {
+		t.Errorf("action = %v, want block (policy rule wins)", winner.Action)
+	}
+	if strings.HasPrefix(winner.ID, "fingerprint:") {
+		t.Errorf("id = %q, want the policy-derived rule, not the registered fingerprint", winner.ID)
+	}
+}
+
 // Two registrations of the same content yield the same SimHash; the
 // projection must collapse them to a single endpoint rule so one upload
 // raises one detection, not one per duplicate registration.

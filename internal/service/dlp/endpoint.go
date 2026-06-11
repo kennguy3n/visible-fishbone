@@ -369,10 +369,16 @@ func (s *Service) fingerprintRules(
 	if err != nil {
 		return nil, err
 	}
+	// Dedup keys are lowercased: `parse_simhash_hex` on the agent
+	// decodes hex case-insensitively, so a policy-derived rule carrying
+	// uppercase pattern_data ("...ABCDEF", which `isHex16` accepts) and a
+	// registered fingerprint — always lowercase from `hex.EncodeToString`
+	// — denote the *same* SimHash and would both fire on one upload.
+	// Normalizing both sides catches that collision.
 	seen := make(map[string]struct{})
 	for _, r := range existing {
 		if r.PatternType == repository.DLPRuleTypeFingerprint {
-			seen[r.PatternData] = struct{}{}
+			seen[strings.ToLower(r.PatternData)] = struct{}{}
 		}
 	}
 	rules := make([]EndpointDLPRule, 0, len(fps))
