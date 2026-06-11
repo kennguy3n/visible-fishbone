@@ -59,16 +59,15 @@ struct ZCase {
 pub async fn run() -> FunctionReport {
     let pristine = DevicePosture::pristine(NOW);
     let stale_posture = DevicePosture::pristine(NOW).with_attested_at_ms(NOW - H13_MS);
-    // Fresh attestation but fails the Basic floor (score 60): only
-    // disk encryption on (25) — well below 60 under the weighted
-    // risk_score model. Expanded signals stay healthy so this case
-    // isolates the *score* floor.
+    // Fresh attestation (kept at NOW via `pristine`) but fails the
+    // Basic floor (score 60): only disk encryption on (25) — well
+    // below 60 under the weighted risk_score model. Expanded signals
+    // stay healthy so this case isolates the *score* floor.
     let insufficient = DevicePosture::pristine(NOW)
         .with_os_patched(false)
         .with_antimalware_running(false)
         .with_firewall_enabled(false)
-        .with_screen_lock_configured(false)
-        .with_attested_at_ms(NOW);
+        .with_screen_lock_configured(false);
     // Expanded-signal regressions. Each keeps a full score (every
     // original signal on) and a fresh attestation, so only the new
     // hard gate it targets can flip the verdict to deny.
