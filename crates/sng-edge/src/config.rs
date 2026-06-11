@@ -459,7 +459,16 @@ impl IpsRuntimeSetting {
 }
 
 /// SWG subprocess management settings. Mirrors
-/// [`sng_swg::SwgManagerConfig`].
+/// [`sng_swg::SwgManagerConfig`] plus the ext-authz listener +
+/// ClamAV content-scan knobs.
+//
+// `struct_excessive_bools`: this is an operator-facing config
+// mirror, not a state machine — each bool is an independent
+// on/off knob (`enable`, `ext_authz_enabled`, `clamav_enabled`,
+// `clamav_fail_open`) deserialised straight from TOML, so folding
+// them into an enum would only obscure the 1:1 mapping to config
+// keys.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SwgConfig {
@@ -472,6 +481,54 @@ pub struct SwgConfig {
     /// Whether to actually start Envoy.
     #[serde(default = "default_true")]
     pub enable: bool,
+    /// Master switch for the ext-authz verdict listener — the
+    /// in-process server that answers Envoy's ext-authz filter on
+    /// [`Self::ext_authz_socket`]. Default **off**: until an
+    /// operator opts in, Envoy's ext-authz cluster dials a socket
+    /// nobody serves and (per its fail-open config) waves traffic
+    /// through, exactly as before this subsystem existed. Turning
+    /// it on stands up the verdict engine (safe-browsing category
+    /// deny + optional ClamAV content scan).
+    #[serde(default)]
+    pub ext_authz_enabled: bool,
+    /// Unix socket the ext-authz listener binds. Must match the
+    /// `ext_authz` cluster address baked into the rendered
+    /// `envoy.yaml` (`unix:///var/run/sng/ext_authz.sock`).
+    #[serde(default = "default_ext_authz_socket")]
+    pub ext_authz_socket: PathBuf,
+    /// Master switch for the ClamAV streaming content scanner.
+    /// Default **off**: when off the verdict engine runs the
+    /// malware chain with the hash check + YARA scan only and never
+    /// dials `clamd`. Only consulted when [`Self::ext_authz_enabled`]
+    /// is also true (the scanner is a stage inside the listener's
+    /// handler).
+    #[serde(default)]
+    pub clamav_enabled: bool,
+    /// `clamd` endpoint. Either `tcp://host:port` or, on Unix,
+    /// `unix:///path/to/clamd.sock`. Only consulted when
+    /// [`Self::clamav_enabled`] is true.
+    #[serde(default = "default_clamav_endpoint")]
+    pub clamav_endpoint: String,
+    /// Largest response body (bytes) the scanner streams to
+    /// `clamd`. Bodies larger than this are skipped (allowed) rather
+    /// than scanned. Default 32 MiB.
+    #[serde(default = "default_clamav_max_bytes")]
+    pub clamav_max_bytes: usize,
+    /// INSTREAM chunk size (bytes). Default 64 KiB.
+    #[serde(default = "default_clamav_chunk_size")]
+    pub clamav_chunk_size: usize,
+    /// Per-scan wall-clock ceiling. On expiry the scan resolves to
+    /// the configured fail posture ([`Self::clamav_fail_open`]).
+    /// Default 5s.
+    #[serde(default = "default_clamav_timeout", with = "humantime_serde")]
+    pub clamav_timeout: Duration,
+    /// Fail posture when `clamd` is unreachable / errors / times
+    /// out. `true` (default) fails **open** — an unavailable scanner
+    /// allows the body (availability over strictness); `false` fails
+    /// **closed** — an unavailable scanner denies with the
+    /// `scanner.unavailable` sentinel.
+    #[serde(default = "default_true")]
+    pub clamav_fail_open: bool,
 }
 
 impl Default for SwgConfig {
@@ -483,6 +540,17 @@ impl Default for SwgConfig {
             // above. See the matching note on `IpsConfig::default` for the
             // operator-footgun rationale.
             enable: default_true(),
+            // The ext-authz + ClamAV surface is opt-in: both master
+            // switches default off so an upgrade is behaviourally inert
+            // until an operator turns them on.
+            ext_authz_enabled: false,
+            ext_authz_socket: default_ext_authz_socket(),
+            clamav_enabled: false,
+            clamav_endpoint: default_clamav_endpoint(),
+            clamav_max_bytes: default_clamav_max_bytes(),
+            clamav_chunk_size: default_clamav_chunk_size(),
+            clamav_timeout: default_clamav_timeout(),
+            clamav_fail_open: default_true(),
         }
     }
 }
@@ -779,6 +847,52 @@ fn validate(cfg: &EdgeConfig) -> Result<(), String> {
         }
     }
     validate_ha(&cfg.ha)?;
+    validate_swg(&cfg.swg)?;
+    Ok(())
+}
+
+/// SWG content-scan invariants. Only enforced when the ext-authz
+/// listener *and* the ClamAV scanner are both enabled — the scanner
+/// is a stage inside the listener's handler, so its knobs are inert
+/// (and a defaulted/stray value must not fail an otherwise-valid
+/// config) until both master switches are on. The defaults are all
+/// non-zero, so these only bite an operator who explicitly zeroed a
+/// field. Mirrors the HA pattern: each zero here is well-defined
+/// downstream (chunk clamps to 1, max-bytes scans nothing, a zero
+/// timeout expires every scan into the fail posture) but silently
+/// neuters scanning, so we turn the typo into a load-time error
+/// rather than a scanner that quietly never inspects anything.
+fn validate_swg(swg: &SwgConfig) -> Result<(), String> {
+    if !(swg.ext_authz_enabled && swg.clamav_enabled) {
+        return Ok(());
+    }
+    // An empty endpoint is never a valid `clamd` target — guard it
+    // the same way `comms.endpoint` is guarded above. (A non-empty
+    // but unreachable / unparseable endpoint is intentionally left to
+    // surface as a fail-posture scan result with telemetry, per the
+    // `ClamdScanner` design, rather than a load-time error.)
+    if swg.clamav_endpoint.trim().is_empty() {
+        return Err(
+            "swg.clamav_endpoint must be non-empty when clamav_enabled (e.g. tcp://127.0.0.1:3310)"
+                .into(),
+        );
+    }
+    if swg.clamav_max_bytes == 0 {
+        return Err(
+            "swg.clamav_max_bytes must be > 0 when clamav_enabled (0 scans nothing)".into(),
+        );
+    }
+    if swg.clamav_chunk_size == 0 {
+        return Err(
+            "swg.clamav_chunk_size must be > 0 when clamav_enabled (0 streams no bytes)".into(),
+        );
+    }
+    if swg.clamav_timeout.is_zero() {
+        return Err(
+            "swg.clamav_timeout must be > 0 when clamav_enabled (0 expires every scan immediately)"
+                .into(),
+        );
+    }
     Ok(())
 }
 
@@ -931,6 +1045,21 @@ const fn default_ips_event_channel_capacity() -> usize {
 }
 fn default_envoy_config_path() -> PathBuf {
     PathBuf::from("/var/lib/sng/swg/envoy.yaml")
+}
+fn default_ext_authz_socket() -> PathBuf {
+    PathBuf::from(sng_swg::DEFAULT_SOCKET_PATH)
+}
+fn default_clamav_endpoint() -> String {
+    "tcp://127.0.0.1:3310".to_string()
+}
+const fn default_clamav_max_bytes() -> usize {
+    32 * 1024 * 1024
+}
+const fn default_clamav_chunk_size() -> usize {
+    64 * 1024
+}
+const fn default_clamav_timeout() -> Duration {
+    Duration::from_secs(5)
 }
 const fn default_true() -> bool {
     true
@@ -1402,6 +1531,109 @@ event_channel_capacity = 0
         };
         assert!(
             message.contains("ips.event_channel_capacity"),
+            "message did not name the bad field: {message}"
+        );
+    }
+
+    /// A zeroed ClamAV knob is rejected at load time once both the
+    /// listener and the scanner are enabled — otherwise the scanner
+    /// would silently never inspect anything (here `clamav_timeout =
+    /// 0` expires every scan into the fail posture).
+    #[test]
+    fn validate_rejects_zero_clamav_timeout_when_scanner_enabled() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+site_id   = "33333333-3333-3333-3333-333333333333"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[swg]
+ext_authz_enabled = true
+clamav_enabled    = true
+clamav_timeout    = "0s"
+"#,
+        )
+        .unwrap();
+        let err = load_from_path(f.path()).unwrap_err();
+        let ConfigError::Invariant { message, .. } = err else {
+            panic!("expected Invariant error, got {err:?}");
+        };
+        assert!(
+            message.contains("swg.clamav_timeout"),
+            "message did not name the bad field: {message}"
+        );
+    }
+
+    /// The same zeroed knob is inert (and so accepted) while the
+    /// scanner is off — the surface is opt-in, so a defaulted/stray
+    /// value must not fail an otherwise-valid config.
+    #[test]
+    fn validate_allows_zero_clamav_timeout_when_scanner_disabled() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+site_id   = "33333333-3333-3333-3333-333333333333"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[swg]
+clamav_timeout = "0s"
+"#,
+        )
+        .unwrap();
+        assert!(
+            load_from_path(f.path()).is_ok(),
+            "a zero clamav_timeout must be inert while the scanner is disabled"
+        );
+    }
+
+    /// An empty `clamav_endpoint` is rejected once the scanner is
+    /// enabled — it is never a valid `clamd` target, mirroring the
+    /// existing non-empty guard on `comms.endpoint`.
+    #[test]
+    fn validate_rejects_empty_clamav_endpoint_when_scanner_enabled() {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+site_id   = "33333333-3333-3333-3333-333333333333"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[swg]
+ext_authz_enabled = true
+clamav_enabled    = true
+clamav_endpoint   = ""
+"#,
+        )
+        .unwrap();
+        let err = load_from_path(f.path()).unwrap_err();
+        let ConfigError::Invariant { message, .. } = err else {
+            panic!("expected Invariant error, got {err:?}");
+        };
+        assert!(
+            message.contains("swg.clamav_endpoint"),
             "message did not name the bad field: {message}"
         );
     }

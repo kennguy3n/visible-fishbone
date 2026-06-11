@@ -24,6 +24,7 @@
 
 pub mod comms;
 pub mod dns;
+pub mod extauthz;
 pub mod fw;
 pub mod ha;
 pub mod ips;
@@ -36,6 +37,7 @@ pub mod ztna;
 
 pub use comms::CommsSubsystem;
 pub use dns::DnsSubsystem;
+pub use extauthz::ExtAuthzSubsystem;
 pub use fw::FwSubsystem;
 pub use ha::HaSubsystem;
 pub use ips::IpsSubsystem;

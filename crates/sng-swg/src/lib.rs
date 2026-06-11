@@ -104,6 +104,7 @@ pub mod config;
 pub mod envoy_supervisor;
 pub mod error;
 pub mod health;
+pub mod listener;
 pub mod malware;
 pub mod manager;
 pub mod process;
@@ -113,7 +114,7 @@ pub mod url_ml;
 pub mod verdict;
 pub mod yara;
 
-pub use auth::{ExtAuthzHandler, ExtAuthzRequest, ExtAuthzResponse};
+pub use auth::{ExtAuthzHandler, ExtAuthzHandlerBuilder, ExtAuthzRequest, ExtAuthzResponse};
 pub use bypass::{BypassDecision, BypassList, BypassReason};
 pub use casb::{
     AppCatalog, AppSignature, DetectedApp, InlineCasbInspector, PathRule, RequestSignals,
@@ -135,6 +136,7 @@ pub use envoy_supervisor::{
 };
 pub use error::SwgError;
 pub use health::{FailMode, HealthProbe, HealthReport, HealthState, ManagerHealth};
+pub use listener::{DEFAULT_SOCKET_PATH, ExtAuthzListener, ExtAuthzListenerConfig};
 pub use malware::{
     ContentScanVerdict, ContentScanner, ContentVerdictCache, MalwareVerdict,
     MalwareVerdictProvider, ScanSkip, StaticMalwareList,

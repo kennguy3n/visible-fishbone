@@ -33,7 +33,7 @@ use crate::casb::{InlineCasbInspector, RequestSignals};
 use crate::casb_rules::CasbRuleSet;
 use crate::categorizer::UrlCategorizer;
 use crate::error::SwgError;
-use crate::malware::{MalwareVerdict, MalwareVerdictProvider};
+use crate::malware::{ContentScanVerdict, ContentScanner, MalwareVerdict, MalwareVerdictProvider};
 use crate::rate_limit::RateLimiter;
 use crate::telemetry::{TelemetryEmitter, VerdictEvent};
 use crate::verdict::{Action, CategoryDenyConfig, CategoryDenyPolicy, RequestContext, Verdict};
@@ -346,6 +346,19 @@ struct HandlerInner {
     /// can install a new signed bundle without rebuilding the
     /// handler.
     yara: Option<Arc<YaraEngine>>,
+    /// Optional streaming content scanner (the canonical impl is
+    /// [`crate::clamd::ClamdScanner`], which streams the body to a
+    /// `clamd` daemon over INSTREAM). When set, the verdict pipeline
+    /// runs it over the (base64-decoded) response body as the *last*
+    /// stage of the malware chain — after the in-memory hash check
+    /// and the in-process YARA scan — because a daemon round-trip is
+    /// the most expensive check, so a cheaper local hit should
+    /// short-circuit first. The scanner owns its fail posture
+    /// (fail-open `Clean` allows, fail-closed `Malicious` with the
+    /// `scanner.unavailable` sentinel denies), so a scanner outage
+    /// degrades to the pre-scan coverage rather than wedging the
+    /// verdict. `None` leaves the pipeline unchanged.
+    content_scanner: Option<Arc<dyn ContentScanner>>,
 }
 
 impl std::fmt::Debug for ExtAuthzHandler {
@@ -353,6 +366,7 @@ impl std::fmt::Debug for ExtAuthzHandler {
         f.debug_struct("ExtAuthzHandler")
             .field("deny_exact_len", &self.inner.deny_policy.exact_len())
             .field("deny_group_len", &self.inner.deny_policy.group_len())
+            .field("content_scanner_set", &self.inner.content_scanner.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -377,6 +391,7 @@ pub struct ExtAuthzHandlerBuilder {
     elevated_risk_mode: bool,
     casb: Option<Arc<InlineCasbInspector>>,
     yara: Option<Arc<YaraEngine>>,
+    content_scanner: Option<Arc<dyn ContentScanner>>,
 }
 
 impl std::fmt::Debug for ExtAuthzHandlerBuilder {
@@ -392,6 +407,7 @@ impl std::fmt::Debug for ExtAuthzHandlerBuilder {
             .field("elevated_risk_mode", &self.elevated_risk_mode)
             .field("casb_set", &self.casb.is_some())
             .field("yara_set", &self.yara.is_some())
+            .field("content_scanner_set", &self.content_scanner.is_some())
             .finish()
     }
 }
@@ -412,6 +428,7 @@ impl ExtAuthzHandlerBuilder {
             elevated_risk_mode: false,
             casb: None,
             yara: None,
+            content_scanner: None,
         }
     }
 
@@ -544,6 +561,21 @@ impl ExtAuthzHandlerBuilder {
         self
     }
 
+    /// Install a streaming content scanner (the canonical impl is
+    /// [`crate::clamd::ClamdScanner`] over the `clamd` INSTREAM
+    /// protocol). Optional: a handler built without one runs the
+    /// malware chain with the hash check + YARA scan only. When wired,
+    /// the scanner runs as the last malware stage in [`Self::build`]'s
+    /// handler — after the cheap local checks — so a daemon round-trip
+    /// is paid only for content no earlier stage already denied. The
+    /// scanner is shared (`Arc`) and owns its own connection pool /
+    /// verdict cache, so the same scanner can back several handlers.
+    #[must_use]
+    pub fn with_content_scanner(mut self, scanner: Arc<dyn ContentScanner>) -> Self {
+        self.content_scanner = Some(scanner);
+        self
+    }
+
     /// Build the handler. Returns an error when any required
     /// dep was not set.
     pub fn build(self) -> Result<ExtAuthzHandler, SwgError> {
@@ -573,6 +605,7 @@ impl ExtAuthzHandlerBuilder {
                 elevated_risk_mode: self.elevated_risk_mode,
                 casb: self.casb,
                 yara: self.yara,
+                content_scanner: self.content_scanner,
             }),
         })
     }
@@ -710,15 +743,22 @@ impl ExtAuthzHandler {
     /// 6. YARA content scan on the response body (when supplied and
     ///    an engine is wired) — runs after the hash check so a known
     ///    hash hit short-circuits without a scan
+    /// 7. Streaming content scan / ClamAV INSTREAM on the response
+    ///    body (when supplied and a scanner is wired) — runs last in
+    ///    the malware chain because a daemon round-trip is the most
+    ///    expensive check, so a cheaper local hit denies first
     ///
     /// `signals` carries the out-of-band inline-CASB inputs (content
     /// length, sensitivity label) extracted from the request by
     /// [`ExtAuthzRequest::signals`]. They are ignored when no CASB
     /// inspector is wired. `scan_body` is the (already base64-decoded)
-    /// response body the YARA stage scans; `None` skips the scan
-    /// (mirroring a missing file hash). The verdict stays a pure
-    /// function of `(ctx, signals, scan_body)` over the configured
-    /// trait + inspector + engine snapshot.
+    /// response body the YARA stage and the streaming content scanner
+    /// scan; `None` skips both content stages (mirroring a missing
+    /// file hash). The verdict stays a pure function of
+    /// `(ctx, signals, scan_body)` over the configured trait +
+    /// inspector + engine + scanner snapshot (the streaming scanner is
+    /// the one stage that performs I/O — a `clamd` socket round-trip —
+    /// which is why `evaluate` is `async`).
     pub async fn evaluate(
         &self,
         ctx: &RequestContext,
@@ -880,6 +920,37 @@ impl ExtAuthzHandler {
                 }
                 YaraSeverity::Suspicious => {}
             }
+        }
+
+        // 7. Streaming content scan (ClamAV INSTREAM) on the response
+        //    body. Runs only when a scanner is wired AND Envoy
+        //    forwarded a body, and last in the malware chain — after
+        //    the in-memory hash check and the in-process YARA scan —
+        //    because it is the most expensive stage (a round-trip to
+        //    the `clamd` daemon). Ordering the cheap, local checks
+        //    first means a known-bad hash or a YARA signature hit
+        //    denies without ever paying for the daemon call.
+        //
+        //    The scanner owns its fail posture: a scan error / timeout
+        //    is resolved inside the scanner to either a fail-open
+        //    `Clean` (allow) or a fail-closed `Malicious` carrying the
+        //    `scanner.unavailable` sentinel (deny), so this stage never
+        //    sees a raw error and the open/closed decision lives in
+        //    exactly one place. `Clean` and `Skipped` (empty / oversize
+        //    body) are passthroughs.
+        //
+        //    We pass `None` for the precomputed hash rather than
+        //    `ctx.file_hash`: `body_sha256` is the *request*-body hash
+        //    the malware stage consumes and is not guaranteed to be the
+        //    SHA-256 of the (response) bytes scanned here, so handing it
+        //    in as the cache key could mis-key the scanner's
+        //    content-verdict cache. Letting the scanner hash the bytes
+        //    it actually inspects keeps the cache correct; the second
+        //    hash is cheap next to the socket round-trip it guards.
+        if let (Some(scanner), Some(body)) = (self.inner.content_scanner.as_ref(), scan_body)
+            && let ContentScanVerdict::Malicious { signature } = scanner.scan(body, None).await
+        {
+            return Verdict::deny_categorized(format!("malware.content.{signature}"));
         }
 
         // Allow path. A carried-forward CASB `log` / `allow`
@@ -1102,6 +1173,190 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.action, "allow");
+    }
+
+    /// Test content scanner: records how many times it was asked to
+    /// scan and returns a fixed verdict, so a test can assert both the
+    /// verdict mapping and the decision-tree ordering (that the
+    /// expensive scan stage is reached only when no cheaper stage
+    /// already denied).
+    #[derive(Debug)]
+    struct RecordingScanner {
+        verdict: ContentScanVerdict,
+        calls: Mutex<usize>,
+    }
+    impl RecordingScanner {
+        fn new(verdict: ContentScanVerdict) -> Self {
+            Self {
+                verdict,
+                calls: Mutex::new(0),
+            }
+        }
+        fn call_count(&self) -> usize {
+            *self.calls.lock()
+        }
+    }
+    #[async_trait::async_trait]
+    impl ContentScanner for RecordingScanner {
+        async fn scan(&self, _bytes: &[u8], _sha256_hex: Option<&str>) -> ContentScanVerdict {
+            *self.calls.lock() += 1;
+            self.verdict.clone()
+        }
+    }
+
+    /// Handler wired with a [`RecordingScanner`] returning `verdict`,
+    /// a generous rate-limit budget, and a hash list that flags
+    /// `"a".repeat(64)` so ordering-vs-hash tests can be expressed.
+    fn make_scanner_handler(
+        verdict: ContentScanVerdict,
+    ) -> (ExtAuthzHandler, Arc<RecordingScanner>) {
+        let cap = Arc::new(CapturingEmitter::default());
+        let cats = LocalCategoryDb::new(vec![CategoryEntry {
+            host: "biz.example".into(),
+            path_prefix: None,
+            category: Category("business.saas".into()),
+        }]);
+        let mal = Arc::new(StaticMalwareList::new(vec![(
+            "a".repeat(64),
+            MalwareVerdict::Malicious,
+        )]));
+        let clock = Arc::new(TestClock::new());
+        let rl = RateLimiter::new(100.0, 1.0, clock);
+        let scanner = Arc::new(RecordingScanner::new(verdict));
+        let h = ExtAuthzHandlerBuilder::new()
+            .with_categorizer(Arc::new(cats))
+            .with_malware(mal)
+            .with_bypass(Arc::new(BypassList::new(vec![])))
+            .with_rate_limiter(rl)
+            .with_telemetry(cap as Arc<dyn TelemetryEmitter>)
+            .with_content_scanner(Arc::clone(&scanner) as Arc<dyn ContentScanner>)
+            .build()
+            .unwrap();
+        (h, scanner)
+    }
+
+    #[tokio::test]
+    async fn content_scanner_malicious_body_triggers_deny() {
+        let (h, scanner) = make_scanner_handler(ContentScanVerdict::Malicious {
+            signature: "Eicar-Test-Signature".into(),
+        });
+        let resp = h
+            .handle_request(req_with_body("biz.example", b"some download"))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "deny");
+        assert_eq!(resp.status, Some(403));
+        assert_eq!(
+            resp.category.as_deref(),
+            Some("malware.content.Eicar-Test-Signature")
+        );
+        assert_eq!(scanner.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn content_scanner_clean_body_allows() {
+        let (h, scanner) = make_scanner_handler(ContentScanVerdict::Clean);
+        let resp = h
+            .handle_request(req_with_body("biz.example", b"clean bytes"))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "allow");
+        assert_eq!(scanner.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn content_scanner_skipped_body_allows() {
+        let (h, scanner) = make_scanner_handler(ContentScanVerdict::Skipped {
+            reason: crate::malware::ScanSkip::Oversize,
+        });
+        let resp = h
+            .handle_request(req_with_body("biz.example", b"oversize-ish"))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "allow");
+        assert_eq!(scanner.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn content_scanner_fail_closed_denies_with_sentinel() {
+        // The scanner resolves a backend failure to its fail-closed
+        // sentinel; the handler denies and the category carries the
+        // sentinel so the dashboard can tell it apart from a real hit.
+        let (h, _s) = make_scanner_handler(ContentScanVerdict::scanner_unavailable());
+        let resp = h
+            .handle_request(req_with_body("biz.example", b"x"))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "deny");
+        assert_eq!(
+            resp.category.as_deref(),
+            Some("malware.content.scanner.unavailable")
+        );
+    }
+
+    #[tokio::test]
+    async fn content_scanner_not_invoked_without_body() {
+        // No body forwarded → the scan stage is skipped entirely, the
+        // same passthrough a missing file hash gets at the hash stage.
+        let (h, scanner) = make_scanner_handler(ContentScanVerdict::Malicious {
+            signature: "should-not-run".into(),
+        });
+        let resp = h
+            .handle_request(req("biz.example", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "allow");
+        assert_eq!(scanner.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn hash_deny_short_circuits_before_content_scanner() {
+        // Known-bad hash + benign body + a scanner that WOULD deny.
+        // The hash check (step 5) must win and the scanner must never
+        // run — proving the daemon round-trip is paid only for content
+        // the cheaper hash check did not already flag.
+        let (h, scanner) = make_scanner_handler(ContentScanVerdict::Malicious {
+            signature: "should-not-run".into(),
+        });
+        let mut r = req_with_body("biz.example", b"benign content");
+        r.body_sha256 = Some("a".repeat(64));
+        let resp = h.handle_request(r).await.unwrap();
+        assert_eq!(resp.action, "deny");
+        assert_eq!(resp.category.as_deref(), Some("malware.detected"));
+        assert_eq!(scanner.call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn yara_deny_short_circuits_before_content_scanner() {
+        // Both a YARA engine and a content scanner are wired. An EICAR
+        // body trips YARA (step 6); the content scanner (step 7) must
+        // not run, proving the cheaper in-process scan denies before
+        // the daemon round-trip.
+        let scanner = Arc::new(RecordingScanner::new(ContentScanVerdict::Clean));
+        let cap = Arc::new(CapturingEmitter::default());
+        let cats = LocalCategoryDb::new(vec![CategoryEntry {
+            host: "biz.example".into(),
+            path_prefix: None,
+            category: Category("business.saas".into()),
+        }]);
+        let clock = Arc::new(TestClock::new());
+        let h = ExtAuthzHandlerBuilder::new()
+            .with_categorizer(Arc::new(cats))
+            .with_malware(Arc::new(NullMalwareProvider))
+            .with_bypass(Arc::new(BypassList::new(vec![])))
+            .with_rate_limiter(RateLimiter::new(100.0, 1.0, clock))
+            .with_telemetry(cap as Arc<dyn TelemetryEmitter>)
+            .with_yara_engine(Arc::new(YaraEngine::with_builtin_rules().unwrap()))
+            .with_content_scanner(Arc::clone(&scanner) as Arc<dyn ContentScanner>)
+            .build()
+            .unwrap();
+        let resp = h
+            .handle_request(req_with_body("biz.example", &eicar_bytes()))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "deny");
+        assert_eq!(resp.category.as_deref(), Some("malware.yara.eicar"));
+        assert_eq!(scanner.call_count(), 0);
     }
 
     fn req(host: &str, path: &str, sni: Option<&str>, file_hash: Option<&str>) -> ExtAuthzRequest {

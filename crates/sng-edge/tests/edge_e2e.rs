@@ -708,6 +708,7 @@ async fn full_stack_boots_pulls_bundle_then_drains_cleanly() {
         fw,
         ips,
         swg,
+        ext_authz,
         ztna,
         sdwan,
         ha,
@@ -721,6 +722,7 @@ async fn full_stack_boots_pulls_bundle_then_drains_cleanly() {
     drop(fw);
     drop(ips);
     drop(swg);
+    drop(ext_authz);
     drop(ztna);
     drop(sdwan);
     drop(ha);
@@ -874,6 +876,7 @@ async fn supervisor_drain_under_continuous_load_within_budget() {
         fw,
         ips,
         swg,
+        ext_authz,
         ztna,
         sdwan,
         ha,
@@ -887,6 +890,7 @@ async fn supervisor_drain_under_continuous_load_within_budget() {
     drop(fw);
     drop(ips);
     drop(swg);
+    drop(ext_authz);
     drop(ztna);
     drop(sdwan);
     drop(ha);
@@ -987,6 +991,7 @@ async fn comms_reconnects_after_control_plane_transient_outage() {
         fw,
         ips,
         swg,
+        ext_authz,
         ztna,
         sdwan,
         ha,
@@ -1000,6 +1005,7 @@ async fn comms_reconnects_after_control_plane_transient_outage() {
     drop(fw);
     drop(ips);
     drop(swg);
+    drop(ext_authz);
     drop(ztna);
     drop(sdwan);
     drop(ha);
