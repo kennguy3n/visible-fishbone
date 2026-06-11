@@ -69,6 +69,15 @@ fn validator_for(name: &str) -> Option<Validator> {
         "uae_emirates_id" => validators::uae_emirates_id,
         "saudi_id" => validators::saudi_national_id,
         "kuwait_civil_id" => validators::kuwait_civil_id,
+        // Secret / credential detectors (see `builtin_pattern`).
+        "private_key_block" => validators::private_key_block,
+        "aws_access_key_id" => validators::aws_access_key_id,
+        "google_api_key" => validators::google_api_key,
+        "github_token" => validators::github_token,
+        "github_pat" => validators::github_fine_grained_pat,
+        "slack_token" => validators::slack_token,
+        "stripe_secret_key" => validators::stripe_secret_key,
+        "jwt" => validators::jwt,
         // The jurisdiction detector catalog supplies validators for the
         // remaining national / regional identifiers (UK NINO + NHS,
         // Canada SIN, Australia TFN + Medicare, Germany, France, Brazil,
@@ -1033,6 +1042,24 @@ pub fn builtin_pattern(name: &str) -> Option<&'static str> {
         "qatar_qid" => r"\b\d{11}\b",
         "kuwait_civil_id" => r"\b\d{12}\b",
         "bahrain_cpr" => r"\b\d{9}\b",
+
+        // Secret / credential detectors. Distinctive vendor prefixes
+        // make these near-zero-FP; each resolves to a structural
+        // validator in `validator_for` that re-asserts the exact
+        // prefix + charset + length (or, for the JWT, a decodable
+        // header). The shapes mirror `builtinPatterns` in
+        // `internal/service/dlp/engine/regex.go`.
+        "private_key_block" => {
+            r"(?s)-----BEGIN (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----.*?-----END (?:RSA |EC |DSA |OPENSSH |PGP |ENCRYPTED )?PRIVATE KEY-----"
+        }
+        "aws_access_key_id" => r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b",
+        "google_api_key" => r"\bAIza[0-9A-Za-z_-]{35}\b",
+        "github_token" => r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9]{36}\b",
+        "github_pat" => r"\bgithub_pat_[A-Za-z0-9_]{82}\b",
+        "slack_token" => r"\bxox[abprs]-[0-9A-Za-z-]{10,}\b",
+        "stripe_secret_key" => r"\b(?:sk|rk)_live_[0-9A-Za-z]{16,}\b",
+        "jwt" => r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
+
         // The jurisdiction detector catalog supplies the regex shapes
         // for the remaining national / regional identifiers.
         _ => return crate::detectors::pattern(name),
