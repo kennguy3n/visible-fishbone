@@ -51,6 +51,7 @@ import (
 	casbconnectors "github.com/kennguy3n/visible-fishbone/internal/service/casb/connectors"
 	"github.com/kennguy3n/visible-fishbone/internal/service/compliance"
 	"github.com/kennguy3n/visible-fishbone/internal/service/dlp"
+	"github.com/kennguy3n/visible-fishbone/internal/service/dlpreview"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
 	"github.com/kennguy3n/visible-fishbone/internal/service/integration"
 	"github.com/kennguy3n/visible-fishbone/internal/service/integration/connectors"
@@ -1584,6 +1585,18 @@ func buildRouter(
 	// /dlp, /browser, and /terraform). Construct them here so the
 	// route-registration guards in buildRouter see non-nil handlers.
 	dlpSvc := dlp.New(dlpPolicyRepo, dlpFingerprintRepo, dlpMatchRepo, dlpModelRepo, logger)
+	// Human-in-the-loop DLP review queue: the coach-first AI-app
+	// exfiltration signal flags uploads without blocking, so they land
+	// in this per-tenant queue for an operator to approve/block/dismiss.
+	// The store, service, and migration 060 already shipped; this wires
+	// the operator REST surface (handler.DLPReviewHandler) so the queue
+	// is actually reachable. The in-row decided_by/decided_at columns are
+	// the durable decision trail, so the service runs with its default
+	// no-op audit sink here.
+	dlpReviewSvc, err := dlpreview.New(postgres.NewDLPReviewRepository(store))
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("dlp review queue: %w", err)
+	}
 	browserSvc := browser.New(browserPolicyRepo, auditRepo, logger)
 	terraformProvider := terraform.New(terraform.Deps{
 		Sites:               siteRepo,
@@ -1673,6 +1686,7 @@ func buildRouter(
 		Sandbox:           handler.NewSandboxHandler(sandboxSvc),
 		RBI:               handler.NewRBIHandler(rbiSvc),
 		DLP:               handler.NewDLPHandler(dlpSvc),
+		DLPReview:         handler.NewDLPReviewHandler(dlpReviewSvc),
 		Browser:           handler.NewBrowserHandler(browserSvc),
 		Terraform:         handler.NewTerraformHandler(terraformProvider),
 		APIKeyLookup:      apiKeySvc,
