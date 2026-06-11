@@ -535,6 +535,33 @@ func verhoeffValid(d []int) bool {
 // secrets-credentials rule decides identically on the endpoint and in
 // the control plane.
 
+// Byte character-class predicates for the secret validators. They are
+// expressed positively (rather than as negated disjunctions in each
+// scan loop) so the per-byte rejection reads `if !classByte(c)` — one
+// named class per credential charset, mirroring the Rust
+// `u8::is_ascii_*` helpers.
+func asciiDigitByte(c byte) bool { return c >= '0' && c <= '9' }
+func asciiUpperByte(c byte) bool { return c >= 'A' && c <= 'Z' }
+func asciiLowerByte(c byte) bool { return c >= 'a' && c <= 'z' }
+func asciiAlnumByte(c byte) bool {
+	return asciiDigitByte(c) || asciiUpperByte(c) || asciiLowerByte(c)
+}
+
+// awsKeyBodyByte is the AWS access-key body charset: uppercase base32
+// (A-Z, 0-9).
+func awsKeyBodyByte(c byte) bool { return asciiUpperByte(c) || asciiDigitByte(c) }
+
+// urlSafeB64Byte is the url-safe base64 charset (A-Z, a-z, 0-9, -, _),
+// used by Google API keys.
+func urlSafeB64Byte(c byte) bool { return asciiAlnumByte(c) || c == '-' || c == '_' }
+
+// alnumUnderscoreByte is the GitHub fine-grained PAT body charset
+// ([A-Za-z0-9_]).
+func alnumUnderscoreByte(c byte) bool { return asciiAlnumByte(c) || c == '_' }
+
+// alnumHyphenByte is the Slack token body charset ([A-Za-z0-9-]).
+func alnumHyphenByte(c byte) bool { return asciiAlnumByte(c) || c == '-' }
+
 // allASCIIAlnum reports whether s is non-empty and every byte is an
 // ASCII alphanumeric. Mirrors `all_ascii_alnum`.
 func allASCIIAlnum(s string) bool {
@@ -542,8 +569,7 @@ func allASCIIAlnum(s string) bool {
 		return false
 	}
 	for i := 0; i < len(s); i++ {
-		c := s[i]
-		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) {
+		if !asciiAlnumByte(s[i]) {
 			return false
 		}
 	}
@@ -568,8 +594,7 @@ func awsAccessKeyID(s string) bool {
 	}
 	body := s[4:]
 	for i := 0; i < len(body); i++ {
-		c := body[i]
-		if !((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+		if !awsKeyBodyByte(body[i]) {
 			return false
 		}
 	}
@@ -588,8 +613,7 @@ func googleAPIKey(s string) bool {
 		return false
 	}
 	for i := 0; i < len(body); i++ {
-		c := body[i]
-		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '-' || c == '_') {
+		if !urlSafeB64Byte(body[i]) {
 			return false
 		}
 	}
@@ -625,8 +649,7 @@ func githubFineGrainedPAT(s string) bool {
 		return false
 	}
 	for i := 0; i < len(body); i++ {
-		c := body[i]
-		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_') {
+		if !alnumUnderscoreByte(body[i]) {
 			return false
 		}
 	}
@@ -652,8 +675,7 @@ func slackToken(s string) bool {
 		return false
 	}
 	for i := 0; i < len(body); i++ {
-		c := body[i]
-		if !((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '-') {
+		if !alnumHyphenByte(body[i]) {
 			return false
 		}
 	}
