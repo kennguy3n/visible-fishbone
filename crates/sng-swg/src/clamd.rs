@@ -318,11 +318,32 @@ impl ClamdScanner {
             return Err(std::io::Error::other("clamd pool semaphore closed"));
         };
 
-        let mut conn = match self.inner.pool.take_idle() {
-            Some(conn) => conn,
-            None => self.inner.pool.connect().await?,
-        };
+        // Prefer a warm connection. clamd may have reaped its server-side
+        // session (its `IdleTimeout`) since we returned the connection, in
+        // which case the first write/read trips a transport-death error. That
+        // is not a scan result — failing the whole scan would needlessly allow
+        // a download (fail-open) or block one (fail-closed) once per idle
+        // period. So when a *reused* connection dies at the transport layer we
+        // drop it and retry exactly once on a fresh connection, self-healing
+        // within the same scan. A *freshly opened* connection that fails is a
+        // genuine clamd problem (no retry — it would only double latency), and
+        // a protocol error (clamd error reply, parsed as `InvalidData`) is a
+        // real reply we must not paper over with a reconnect.
+        if let Some(mut conn) = self.inner.pool.take_idle() {
+            match self.instream(&mut conn, bytes).await {
+                Ok(verdict) => {
+                    self.inner.pool.put_back(conn);
+                    return Ok(verdict);
+                }
+                Err(e) if is_transport_death(&e) => {
+                    // Stale pooled session: drop `conn` and fall through to a
+                    // fresh connection below.
+                }
+                Err(e) => return Err(e),
+            }
+        }
 
+        let mut conn = self.inner.pool.connect().await?;
         match self.instream(&mut conn, bytes).await {
             Ok(verdict) => {
                 self.inner.pool.put_back(conn);
@@ -432,6 +453,21 @@ impl ContentScanner for ClamdScanner {
     }
 }
 
+/// Whether an I/O error means the connection itself is dead (as opposed to a
+/// well-formed-but-unwanted reply). Used to decide whether reusing a pooled
+/// connection that clamd has since reaped warrants a one-shot reconnect: a
+/// dead transport is retryable, a protocol-level error (e.g. `InvalidData`
+/// from [`parse_reply`]) is a genuine reply that a reconnect would only repeat.
+fn is_transport_death(e: &std::io::Error) -> bool {
+    use std::io::ErrorKind::{
+        BrokenPipe, ConnectionAborted, ConnectionReset, NotConnected, UnexpectedEof,
+    };
+    matches!(
+        e.kind(),
+        BrokenPipe | ConnectionReset | ConnectionAborted | NotConnected | UnexpectedEof
+    )
+}
+
 /// Read bytes until a NUL terminator or EOF, capping at `max` bytes so a
 /// misbehaving peer cannot make us allocate without bound.
 async fn read_until_nul<R: AsyncRead + Unpin>(
@@ -443,7 +479,20 @@ async fn read_until_nul<R: AsyncRead + Unpin>(
     loop {
         let n = reader.read(&mut byte).await?;
         if n == 0 {
-            break; // EOF without terminator — parse what we have.
+            if buf.is_empty() {
+                // Peer closed before sending any reply byte — an empty reply is
+                // never valid clamd output and almost always means the pooled
+                // session was reaped (clamd `IdleTimeout`). Surface it as a
+                // transport death (not `InvalidData`) so a reused connection
+                // self-heals via reconnect rather than failing the scan. A
+                // *partial* reply followed by EOF falls through below and is
+                // parsed as-is, preserving the missing-terminator tolerance.
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "clamd closed the connection before replying",
+                ));
+            }
+            break; // EOF after partial data — parse what we have.
         }
         if byte[0] == 0 {
             break;
@@ -531,6 +580,10 @@ mod tests {
         /// Reply with a clamd error string that is neither OK nor FOUND
         /// (e.g. the body exceeded clamd's own `StreamMaxLength`).
         Error,
+        /// Serve exactly one scan, then close the connection — emulating
+        /// clamd reaping the session on its `IdleTimeout`. A client reusing
+        /// the pooled connection for its next scan finds it dead.
+        CloseAfterFirstScan,
     }
 
     /// A mock clamd server over a real loopback TCP listener. It speaks the
@@ -609,6 +662,11 @@ mod tests {
                 };
                 sock.write_all(reply.as_bytes()).await?;
                 sock.flush().await?;
+                if matches!(behavior, MockBehavior::CloseAfterFirstScan) {
+                    // Emulate clamd's IdleTimeout reaping the session: close
+                    // the connection after a single served scan.
+                    return Ok(());
+                }
             }
         }
     }
@@ -906,6 +964,64 @@ mod tests {
         assert_eq!(mock.scans(), 2);
         // Exactly one connection should be sitting idle in the pool.
         assert_eq!(scanner.inner.pool.idle.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn stale_pooled_connection_self_heals_within_one_scan() {
+        // clamd reaps the pooled session on its IdleTimeout (the mock closes
+        // after one served scan). The next scan reuses the now-dead connection
+        // and must NOT surface a scan failure: it transparently reconnects and
+        // succeeds, so no download is wrongly allowed (fail-open) or blocked
+        // (fail-closed) just because a connection went idle.
+        let mock = MockClamd::start(MockBehavior::CloseAfterFirstScan).await;
+        let mut c = cfg(&mock.addr);
+        c.fail_open = false; // a regression here would surface as a deny
+        let scanner = ClamdScanner::new(c);
+
+        // First scan: opens a fresh connection, succeeds, pools it. The mock
+        // then closes that connection.
+        assert_eq!(
+            scanner.scan(b"first", None).await,
+            ContentScanVerdict::Clean
+        );
+        assert_eq!(scanner.inner.pool.idle.lock().len(), 1);
+
+        // Second scan (distinct body, so it is not a cache hit) reuses the
+        // dead connection; the scanner must self-heal and still return Clean,
+        // not the fail-closed sentinel.
+        assert_eq!(
+            scanner.scan(b"second", None).await,
+            ContentScanVerdict::Clean,
+            "a reaped pooled connection must self-heal, not fail the scan"
+        );
+        assert_eq!(
+            mock.scans(),
+            2,
+            "the retry must actually re-scan on a fresh connection"
+        );
+    }
+
+    #[test]
+    fn transport_death_is_classified_for_retry() {
+        use std::io::{Error, ErrorKind};
+        for kind in [
+            ErrorKind::BrokenPipe,
+            ErrorKind::ConnectionReset,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::NotConnected,
+            ErrorKind::UnexpectedEof,
+        ] {
+            assert!(
+                is_transport_death(&Error::new(kind, "x")),
+                "{kind:?} is retryable"
+            );
+        }
+        // A protocol-level error (clamd error reply) must NOT trigger a
+        // reconnect — a fresh connection would only repeat the same reply.
+        assert!(!is_transport_death(&Error::new(
+            ErrorKind::InvalidData,
+            "bad reply"
+        )));
     }
 
     #[test]
