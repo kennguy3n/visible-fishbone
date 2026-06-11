@@ -1033,7 +1033,6 @@ impl MobileAgent {
             }
             ScheduledTask::CollectPosture => {
                 let snapshot = self.collect_posture().await?;
-                *self.last_posture.lock() = Some(snapshot.clone());
                 // Adaptive trust: drive a re-evaluation sweep on the
                 // freshly-collected posture so an app whose access no
                 // longer holds (posture decayed since the grant, or a
@@ -1055,6 +1054,10 @@ impl MobileAgent {
                         );
                     }
                 }
+                // Publish the freshly-collected posture after the sweep so
+                // the sweep can borrow it by reference and we move (not
+                // clone) it into the cache.
+                *self.last_posture.lock() = Some(snapshot);
             }
         }
         Ok(())
