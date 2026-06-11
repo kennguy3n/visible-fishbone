@@ -59,6 +59,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/playbook"
 	"github.com/kennguy3n/visible-fishbone/internal/service/playbook/executors"
 	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
+	"github.com/kennguy3n/visible-fishbone/internal/service/policytemplates"
 	"github.com/kennguy3n/visible-fishbone/internal/service/pop"
 	"github.com/kennguy3n/visible-fishbone/internal/service/rbac"
 	"github.com/kennguy3n/visible-fishbone/internal/service/rbi"
@@ -1457,6 +1458,23 @@ func buildRouter(
 		Audit:               auditRepo,
 	}, logger)
 
+	// Policy-template smart-default baselines: an SME picks industry +
+	// country and gets a deny-by-default policy.Graph. The catalog is
+	// code-defined, so the service is fully functional without the DB;
+	// SeedCatalog mirrors it into the global policy_templates table for
+	// audit/queryability and is idempotent (a no-op when unchanged), so
+	// a failure here is logged but not fatal — the API still serves the
+	// in-code catalog.
+	policyTemplateSvc := policytemplates.New(postgres.NewPolicyTemplateRepository(store), logger)
+	func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := policyTemplateSvc.SeedCatalog(ctx); err != nil {
+			logger.Warn("seed policy-template catalog failed; serving in-code catalog only",
+				slog.String("error", err.Error()))
+		}
+	}()
+
 	router := handler.NewRouter(handler.RouterDeps{
 		Config:  cfg,
 		Logger:  logger,
@@ -1499,6 +1517,7 @@ func buildRouter(
 			h.SetInlineService(inlineCASBSvc)
 			return h
 		}(),
+		PolicyTemplates:   handler.NewPolicyTemplateHandler(policyTemplateSvc),
 		MSP:               handler.NewMSPHandler(mspRepo, bulkSvc, brandingResolver, rbacSvc),
 		AI:                aiHandler,
 		SCIM:              handler.NewSCIMHandler(scimSvc),
