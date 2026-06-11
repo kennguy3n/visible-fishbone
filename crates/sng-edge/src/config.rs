@@ -459,7 +459,16 @@ impl IpsRuntimeSetting {
 }
 
 /// SWG subprocess management settings. Mirrors
-/// [`sng_swg::SwgManagerConfig`].
+/// [`sng_swg::SwgManagerConfig`] plus the ext-authz listener +
+/// ClamAV content-scan knobs.
+//
+// `struct_excessive_bools`: this is an operator-facing config
+// mirror, not a state machine — each bool is an independent
+// on/off knob (`enable`, `ext_authz_enabled`, `clamav_enabled`,
+// `clamav_fail_open`) deserialised straight from TOML, so folding
+// them into an enum would only obscure the 1:1 mapping to config
+// keys.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SwgConfig {
@@ -472,6 +481,54 @@ pub struct SwgConfig {
     /// Whether to actually start Envoy.
     #[serde(default = "default_true")]
     pub enable: bool,
+    /// Master switch for the ext-authz verdict listener — the
+    /// in-process server that answers Envoy's ext-authz filter on
+    /// [`Self::ext_authz_socket`]. Default **off**: until an
+    /// operator opts in, Envoy's ext-authz cluster dials a socket
+    /// nobody serves and (per its fail-open config) waves traffic
+    /// through, exactly as before this subsystem existed. Turning
+    /// it on stands up the verdict engine (safe-browsing category
+    /// deny + optional ClamAV content scan).
+    #[serde(default)]
+    pub ext_authz_enabled: bool,
+    /// Unix socket the ext-authz listener binds. Must match the
+    /// `ext_authz` cluster address baked into the rendered
+    /// `envoy.yaml` (`unix:///var/run/sng/ext_authz.sock`).
+    #[serde(default = "default_ext_authz_socket")]
+    pub ext_authz_socket: PathBuf,
+    /// Master switch for the ClamAV streaming content scanner.
+    /// Default **off**: when off the verdict engine runs the
+    /// malware chain with the hash check + YARA scan only and never
+    /// dials `clamd`. Only consulted when [`Self::ext_authz_enabled`]
+    /// is also true (the scanner is a stage inside the listener's
+    /// handler).
+    #[serde(default)]
+    pub clamav_enabled: bool,
+    /// `clamd` endpoint. Either `tcp://host:port` or, on Unix,
+    /// `unix:///path/to/clamd.sock`. Only consulted when
+    /// [`Self::clamav_enabled`] is true.
+    #[serde(default = "default_clamav_endpoint")]
+    pub clamav_endpoint: String,
+    /// Largest response body (bytes) the scanner streams to
+    /// `clamd`. Bodies larger than this are skipped (allowed) rather
+    /// than scanned. Default 32 MiB.
+    #[serde(default = "default_clamav_max_bytes")]
+    pub clamav_max_bytes: usize,
+    /// INSTREAM chunk size (bytes). Default 64 KiB.
+    #[serde(default = "default_clamav_chunk_size")]
+    pub clamav_chunk_size: usize,
+    /// Per-scan wall-clock ceiling. On expiry the scan resolves to
+    /// the configured fail posture ([`Self::clamav_fail_open`]).
+    /// Default 5s.
+    #[serde(default = "default_clamav_timeout", with = "humantime_serde")]
+    pub clamav_timeout: Duration,
+    /// Fail posture when `clamd` is unreachable / errors / times
+    /// out. `true` (default) fails **open** — an unavailable scanner
+    /// allows the body (availability over strictness); `false` fails
+    /// **closed** — an unavailable scanner denies with the
+    /// `scanner.unavailable` sentinel.
+    #[serde(default = "default_true")]
+    pub clamav_fail_open: bool,
 }
 
 impl Default for SwgConfig {
@@ -483,6 +540,17 @@ impl Default for SwgConfig {
             // above. See the matching note on `IpsConfig::default` for the
             // operator-footgun rationale.
             enable: default_true(),
+            // The ext-authz + ClamAV surface is opt-in: both master
+            // switches default off so an upgrade is behaviourally inert
+            // until an operator turns them on.
+            ext_authz_enabled: false,
+            ext_authz_socket: default_ext_authz_socket(),
+            clamav_enabled: false,
+            clamav_endpoint: default_clamav_endpoint(),
+            clamav_max_bytes: default_clamav_max_bytes(),
+            clamav_chunk_size: default_clamav_chunk_size(),
+            clamav_timeout: default_clamav_timeout(),
+            clamav_fail_open: default_true(),
         }
     }
 }
@@ -931,6 +999,21 @@ const fn default_ips_event_channel_capacity() -> usize {
 }
 fn default_envoy_config_path() -> PathBuf {
     PathBuf::from("/var/lib/sng/swg/envoy.yaml")
+}
+fn default_ext_authz_socket() -> PathBuf {
+    PathBuf::from(sng_swg::DEFAULT_SOCKET_PATH)
+}
+fn default_clamav_endpoint() -> String {
+    "tcp://127.0.0.1:3310".to_string()
+}
+const fn default_clamav_max_bytes() -> usize {
+    32 * 1024 * 1024
+}
+const fn default_clamav_chunk_size() -> usize {
+    64 * 1024
+}
+const fn default_clamav_timeout() -> Duration {
+    Duration::from_secs(5)
 }
 const fn default_true() -> bool {
     true

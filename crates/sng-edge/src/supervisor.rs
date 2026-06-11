@@ -47,8 +47,8 @@ use crate::cli::{Cli, DataPathSelection, PalBackend, UpdaterBackend};
 use crate::commodity::{CommodityProfile, SpecAssessment};
 use crate::config::EdgeConfig;
 use crate::subsystems::{
-    CommsSubsystem, DnsSubsystem, FwSubsystem, HaSubsystem, IpsSubsystem, PolicyEvalSubsystem,
-    SdwanSubsystem, SwgSubsystem, TelemetrySubsystem, UpdaterSubsystem,
+    CommsSubsystem, DnsSubsystem, ExtAuthzSubsystem, FwSubsystem, HaSubsystem, IpsSubsystem,
+    PolicyEvalSubsystem, SdwanSubsystem, SwgSubsystem, TelemetrySubsystem, UpdaterSubsystem,
     comms::{BundlePublisher, CommsBuildError},
     telemetry::TelemetryBuildError,
     updater::UpdaterSubsystemError,
@@ -137,6 +137,9 @@ pub struct BuiltEdge {
     pub ips: Arc<IpsSubsystem>,
     /// SWG adapter.
     pub swg: Arc<SwgSubsystem>,
+    /// Ext-authz verdict-listener adapter. Default-off; idles
+    /// unless `swg.ext_authz_enabled` is set.
+    pub ext_authz: Arc<ExtAuthzSubsystem>,
     /// ZTNA adapter.
     pub ztna: Arc<ZtnaSubsystem>,
     /// SD-WAN adapter.
@@ -333,6 +336,13 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
     // 7. SWG.
     let swg = Arc::new(SwgSubsystem::new(&cfg.swg));
 
+    // 7b. Ext-authz verdict listener. Owns the Unix-socket server
+    //     Envoy's ext-authz filter dials — the "deployment-layer"
+    //     piece the SWG manager intentionally does not own. Reads
+    //     the same `[swg]` slice; default-off so an upgrade is
+    //     behaviourally inert until `swg.ext_authz_enabled` is set.
+    let ext_authz = Arc::new(ExtAuthzSubsystem::new(&cfg.swg));
+
     // 8. ZTNA. The edge config's `max_inflight` maps onto
     //    ZtnaServiceConfig's `max_sessions` — both name the
     //    producer-enforced ceiling on concurrent ZTNA
@@ -366,6 +376,7 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
     builder = builder.with_subsystem(Arc::clone(&fw));
     builder = builder.with_subsystem(Arc::clone(&ips));
     builder = builder.with_subsystem(Arc::clone(&swg));
+    builder = builder.with_subsystem(Arc::clone(&ext_authz));
     builder = builder.with_subsystem(Arc::clone(&ztna));
     builder = builder.with_subsystem(Arc::clone(&sdwan));
     builder = builder.with_subsystem(Arc::clone(&ha));
@@ -382,6 +393,7 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
         fw,
         ips,
         swg,
+        ext_authz,
         ztna,
         sdwan,
         ha,
@@ -493,6 +505,7 @@ pub async fn run_edge(cli: Cli, cfg: EdgeConfig) -> Result<SupervisorReport, Edg
         fw,
         ips,
         swg,
+        ext_authz,
         ztna,
         sdwan,
         ha,
@@ -508,6 +521,7 @@ pub async fn run_edge(cli: Cli, cfg: EdgeConfig) -> Result<SupervisorReport, Edg
     drop(fw);
     drop(ips);
     drop(swg);
+    drop(ext_authz);
     drop(ztna);
     drop(sdwan);
     drop(ha);

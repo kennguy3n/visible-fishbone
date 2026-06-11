@@ -193,6 +193,7 @@ mod tests {
             config_path: dir.join("envoy.yaml"),
             envoy_binary: None,
             enable,
+            ..SwgConfig::default()
         }
     }
 
