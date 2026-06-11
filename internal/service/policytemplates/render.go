@@ -114,11 +114,14 @@ func composeSpecs(baseline, industry, compliance Spec) composedSpec {
 	}
 	for _, s := range []Spec{baseline, industry, compliance} {
 		for _, c := range s.Categories {
-			// Block always wins; monitor only fills a not-yet-set slot.
-			if cur, ok := out.categories[c.Category]; ok && cur == CategoryBlock {
-				continue
+			// Most-restrictive action wins, independent of layer order:
+			// a higher-ranked action upgrades an existing slot, a
+			// lower- or equal-ranked one never downgrades it. Today
+			// that means block beats monitor; the rank function is the
+			// single place to extend if a third action is added.
+			if cur, ok := out.categories[c.Category]; !ok || categoryRank(c.Action) > categoryRank(cur) {
+				out.categories[c.Category] = c.Action
 			}
-			out.categories[c.Category] = c.Action
 		}
 		for _, d := range s.Detectors {
 			if cur, ok := out.detectors[d.Detector]; !ok || sensitivityRank(d.Sensitivity) > sensitivityRank(cur) {
@@ -127,6 +130,19 @@ func composeSpecs(baseline, industry, compliance Spec) composedSpec {
 		}
 	}
 	return out
+}
+
+// categoryRank orders acceptable-use actions from least to most
+// restrictive so composeSpecs can pick the strongest deterministically.
+func categoryRank(a CategoryAction) int {
+	switch a {
+	case CategoryBlock:
+		return 2
+	case CategoryMonitor:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func sensitivityRank(s Sensitivity) int {

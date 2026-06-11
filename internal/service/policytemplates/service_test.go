@@ -178,6 +178,13 @@ func TestNilRepository(t *testing.T) {
 	if err := svc.SeedCatalog(ctx); !errors.Is(err, ErrRepositoryUnavailable) {
 		t.Errorf("SeedCatalog err = %v, want ErrRepositoryUnavailable", err)
 	}
+	// A missing repository is a server-side misconfiguration, so the
+	// sentinel must NOT be classified as a client input error
+	// (otherwise WriteRepositoryError maps it to HTTP 400 instead of
+	// 500).
+	if errors.Is(ErrRepositoryUnavailable, repository.ErrInvalidArgument) {
+		t.Error("ErrRepositoryUnavailable must not wrap ErrInvalidArgument (would map to HTTP 400, not 500)")
+	}
 	// Catalog-only methods still work.
 	if len(svc.ListTemplates()) == 0 {
 		t.Error("ListTemplates should work without a repository")

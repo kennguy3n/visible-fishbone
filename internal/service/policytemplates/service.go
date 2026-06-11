@@ -29,7 +29,13 @@ type Service struct {
 
 // ErrRepositoryUnavailable is returned by the persistence-backed
 // methods when the service was constructed without a repository.
-var ErrRepositoryUnavailable = fmt.Errorf("policytemplates: %w: repository not configured", errInvalidArgument)
+//
+// It is a standalone sentinel that deliberately does NOT wrap
+// repository.ErrInvalidArgument (or any other mapped sentinel): a
+// missing repository is a server-side misconfiguration, so the
+// standard handler error mapper (WriteRepositoryError) must fall
+// through to HTTP 500, not report a client 400.
+var ErrRepositoryUnavailable = errors.New("policytemplates: repository not configured")
 
 // New constructs the service over a repository. Pass nil for a
 // read-only (catalog-only) service.
@@ -160,13 +166,30 @@ func (s *Service) GetApplied(ctx context.Context, tenantID uuid.UUID) (AppliedTe
 }
 
 // toCatalogRow projects a Template into its persisted primitive form,
-// computing the canonical Spec content hash.
+// computing the content hash over EVERY persisted field (not just
+// Spec). Both repository impls skip a write when the stored hash is
+// unchanged, so hashing the full row ensures a metadata-only edit
+// (e.g. a renamed Name/Description) still propagates to the database
+// instead of being silently dropped.
 func toCatalogRow(t Template) (CatalogRow, error) {
 	spec, err := json.Marshal(t.Spec)
 	if err != nil {
 		return CatalogRow{}, fmt.Errorf("marshal spec for %q: %w", t.ID, err)
 	}
-	sum := sha256.Sum256(spec)
+	hashPayload, err := json.Marshal(struct {
+		ID          string          `json:"id"`
+		Kind        string          `json:"kind"`
+		Industry    string          `json:"industry"`
+		Regime      string          `json:"regime"`
+		Name        string          `json:"name"`
+		Description string          `json:"description"`
+		Version     int             `json:"version"`
+		Spec        json.RawMessage `json:"spec"`
+	}{t.ID, string(t.Kind), string(t.Industry), string(t.Regime), t.Name, t.Description, GraphVersion, spec})
+	if err != nil {
+		return CatalogRow{}, fmt.Errorf("marshal catalog row for %q: %w", t.ID, err)
+	}
+	sum := sha256.Sum256(hashPayload)
 	return CatalogRow{
 		ID:          t.ID,
 		Kind:        string(t.Kind),

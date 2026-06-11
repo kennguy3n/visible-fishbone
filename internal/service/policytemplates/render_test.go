@@ -240,6 +240,28 @@ func TestComposeSpecs_MonitorDoesNotDowngradeBlock(t *testing.T) {
 	}
 }
 
+func TestComposeSpecs_BlockWinsWhenItComesLast(t *testing.T) {
+	// Rank-based merge must be order-independent in BOTH directions: a
+	// later block upgrades an earlier monitor.
+	baseline := Spec{Categories: []CategoryRule{{CategoryGambling, CategoryMonitor}}}
+	compliance := Spec{Categories: []CategoryRule{{CategoryGambling, CategoryBlock}}}
+	c := composeSpecs(baseline, Spec{}, compliance)
+	if c.categories[CategoryGambling] != CategoryBlock {
+		t.Errorf("later block failed to upgrade monitor, got %q", c.categories[CategoryGambling])
+	}
+}
+
+func TestComposeSpecs_MonitorOnMonitorStaysMonitor(t *testing.T) {
+	// A monitor in a later layer must not change an existing monitor
+	// (and must never silently upgrade to block).
+	baseline := Spec{Categories: []CategoryRule{{CategorySocialMedia, CategoryMonitor}}}
+	industry := Spec{Categories: []CategoryRule{{CategorySocialMedia, CategoryMonitor}}}
+	c := composeSpecs(baseline, industry, Spec{})
+	if c.categories[CategorySocialMedia] != CategoryMonitor {
+		t.Errorf("monitor-on-monitor = %q, want monitor", c.categories[CategorySocialMedia])
+	}
+}
+
 func TestRenderRules_WithinRuleSizeLimit(t *testing.T) {
 	// Every rendered rule must satisfy the policy package's per-rule
 	// byte cap; Resolve already calls Validate, but assert explicitly
