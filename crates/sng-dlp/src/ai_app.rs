@@ -1190,8 +1190,26 @@ impl AiAppSignal {
     /// A heuristic (`Suspected`) destination with no catalog id maps to
     /// the [`SUSPECTED_AI_APP`] sentinel, matching the Go side's
     /// `dlpreview.SuspectedAppSentinel`.
+    ///
+    /// # Precondition
+    /// Only ever projected for *flagged* signals (see [`Self::is_flagged`]).
+    /// A flagged signal always has an AI-app destination, because a
+    /// non-AI destination skips the content scan entirely and short-
+    /// circuits to `Monitor` with no findings (so it is never flagged
+    /// and never reaches the wire). The `SUSPECTED_AI_APP` fallback is
+    /// therefore only applied to a genuinely *suspected* AI app, never
+    /// mislabelling a non-AI destination. The debug assertion encodes
+    /// this invariant so any future caller that projects a non-flagged
+    /// signal is caught in tests rather than emitting a misleading
+    /// destination label.
     #[must_use]
     pub fn to_wire_event(&self) -> sng_core::DlpEvent {
+        debug_assert!(
+            self.destination.is_ai_app(),
+            "to_wire_event projected for a non-AI-app destination ({:?}); \
+             only flagged signals (always AI-app) should reach the wire",
+            self.destination.kind,
+        );
         sng_core::DlpEvent {
             destination_app: self.destination.app.unwrap_or(SUSPECTED_AI_APP).to_string(),
             action: self.action.to_wire(),

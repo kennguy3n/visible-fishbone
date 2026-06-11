@@ -918,16 +918,18 @@ fn make_bundle_publisher(
 /// engine, treating the bundle as the source of truth.
 ///
 /// `dlp` is the verbatim `dl` section from the just-applied bundle
-/// (`None` when the bundle carried none). The three DLP dimensions are
-/// orthogonal, so we drive them with distinct calls:
-/// [`DlpEngine::install`] rotates the rule set + channel config and
-/// [`DlpEngine::set_ai_app_policy`] (re)arms the AI-app exfiltration
-/// detector. Absence of a `dl` section resets both to the inert
+/// (`None` when the bundle carried none). The rule set + channel config
+/// and the AI-app exfiltration detector both arrive in this one
+/// document, so they are installed together via
+/// [`DlpEngine::install_with_ai_app`] in a single atomic state swap —
+/// concurrent channel workers never observe the new rules paired with
+/// the previous detector. The orthogonal ML-NER model dimension is
+/// preserved. Absence of a `dl` section resets both to the inert
 /// default, so removing all endpoint DLP policy in the control plane
 /// disarms the edge rather than leaving a stale policy live.
 ///
 /// On a decode error the engine keeps its previous (valid) policy
-/// because `install` is only reached after a successful decode; we
+/// because the install is only reached after a successful decode; we
 /// surface the error so the puller logs it and counts a publish
 /// failure.
 fn apply_dlp_document(engine: &Arc<DlpEngine>, dlp: Option<&[u8]>) -> Result<(), String> {
@@ -936,14 +938,11 @@ fn apply_dlp_document(engine: &Arc<DlpEngine>, dlp: Option<&[u8]>) -> Result<(),
             .map_err(|e| format!("decode endpoint DLP policy: {e}"))?,
         None => DlpPolicy::default(),
     };
-    let ai_app = policy.ai_app.clone();
+    let ai_app = policy.ai_app;
     let rule_count = policy.rules().len();
     engine
-        .install(policy)
+        .install_with_ai_app(policy, ai_app)
         .map_err(|e| format!("install endpoint DLP policy: {e}"))?;
-    engine
-        .set_ai_app_policy(ai_app.clone())
-        .map_err(|e| format!("apply endpoint AI-app policy: {e}"))?;
     tracing::info!(
         target: "sng_agent::bundle_publisher",
         rules = rule_count,

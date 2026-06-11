@@ -244,6 +244,49 @@ impl DlpEngine {
         Ok(())
     }
 
+    /// Atomically install a new rule-set policy *and* (re)configure the
+    /// AI-app exfiltration detector in a single state swap.
+    ///
+    /// This is the bundle-apply path: the control plane ships the rule
+    /// set + channel config and the `ai_app` detector block in one
+    /// document, so they must land together. Doing it as one
+    /// [`ArcSwap`] store (rather than [`Self::install`] followed by
+    /// [`Self::set_ai_app_policy`]) means concurrent evaluators can
+    /// never observe the new rules paired with the *previous* detector
+    /// (or vice-versa) through the brief window between two separate
+    /// stores. The ML-NER model dimension is untouched and preserved.
+    ///
+    /// Both compilations happen before the store, so on any compile
+    /// failure the engine is left entirely untouched (fail-safe: a bad
+    /// bundle never disarms or half-updates DLP).
+    ///
+    /// # Errors
+    /// Propagates [`crate::error::DlpError::RuleCompile`] if any rule in
+    /// `policy` or the builtin AI-app PII rule set fails to compile. The
+    /// engine is unchanged.
+    pub fn install_with_ai_app(
+        &self,
+        policy: DlpPolicy,
+        ai_app_policy: Option<AiAppPolicy>,
+    ) -> DlpResult<()> {
+        let _guard = self.write_guard();
+        let current = self.state.load();
+        let max_scan_bytes = current.max_scan_bytes;
+        let model = current.model.clone();
+        let classifier =
+            ContentClassifier::compile_with_model(policy.rules(), max_scan_bytes, model.clone())?;
+        let ai_app = build_ai_app(ai_app_policy, max_scan_bytes, &model)?;
+        self.state.store(Arc::new(EngineState {
+            policy,
+            classifier,
+            max_scan_bytes,
+            model,
+            ai_app_policy,
+            ai_app,
+        }));
+        Ok(())
+    }
+
     /// Atomically install a verified ML-NER model, recompiling the
     /// active policy's classifier so its `MlNer` rules switch from the
     /// regex fallback to on-device ONNX inference. The model bytes are
@@ -1228,6 +1271,56 @@ mod tests {
                 DlpVerdict::WarnUser(_)
             ),
             "ai-app detector must still fire after a policy rotation"
+        );
+    }
+
+    #[test]
+    fn install_with_ai_app_swaps_both_dimensions_atomically() {
+        // The bundle-apply path installs the rule set and the AI-app
+        // detector in one swap. Starting from a disarmed engine, a
+        // single install_with_ai_app must land BOTH the new channel
+        // rule and the armed detector — no second call required.
+        let e = engine_with(vec![]);
+        assert!(e.ai_app_policy().is_none(), "detector starts disarmed");
+
+        e.install_with_ai_app(
+            DlpPolicy {
+                rules: vec![rule("k1", "alpha", RuleAction::Block, Severity::High)],
+                ..DlpPolicy::default()
+            },
+            Some(AiAppPolicy::default()),
+        )
+        .expect("install with ai-app");
+
+        // Rule set landed.
+        assert_eq!(e.current_policy().rules.len(), 1);
+        assert_eq!(e.current_policy().rules[0].id, "k1");
+        // Detector armed in the same swap.
+        assert_eq!(e.ai_app_policy(), Some(AiAppPolicy::default()));
+        assert!(matches!(
+            e.evaluate(
+                AiAppExfilDetector::channel(),
+                SECRET_BODY,
+                &ai_upload_meta()
+            ),
+            DlpVerdict::WarnUser(_)
+        ));
+
+        // Passing None disarms the detector while swapping rules, so
+        // clearing endpoint DLP in the control plane disarms the edge.
+        e.install_with_ai_app(DlpPolicy::default(), None)
+            .expect("install default");
+        assert!(
+            e.ai_app_policy().is_none(),
+            "detector disarmed on empty doc"
+        );
+        assert_eq!(
+            e.evaluate(
+                AiAppExfilDetector::channel(),
+                SECRET_BODY,
+                &ai_upload_meta()
+            ),
+            DlpVerdict::Allow
         );
     }
 }
