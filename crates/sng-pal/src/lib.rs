@@ -41,7 +41,8 @@ pub use dlp::{
 };
 pub use keystore::{KeyHandle, KeyStoreError, SecureKeyStore};
 pub use posture::{
-    DiskEncryptionState, FirewallState, PostureCollector, PostureSnapshot, ScreenLockState,
+    AntivirusStatus, CertificateHealth, DiskEncryptionState, EdrState, FirewallState,
+    PostureCollector, PostureSnapshot, ScreenLockState,
 };
 pub use sysinfo::{OsRelease, SystemInfo, SystemInfoError};
 pub use traffic::{PacketRecord, TrafficCapture, TrafficCaptureError};

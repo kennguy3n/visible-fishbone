@@ -268,14 +268,7 @@ mod tests {
         DeviceTrust {
             device_id: id.into(),
             tenant_id: tenant.into(),
-            posture: sng_ztna::DevicePosture {
-                disk_encrypted: true,
-                os_patched: true,
-                antimalware_running: true,
-                firewall_enabled: true,
-                screen_lock_configured: true,
-                attested_at_ms: 1_000,
-            },
+            posture: sng_ztna::DevicePosture::pristine(1_000),
             tags: std::collections::HashMap::new(),
         }
     }

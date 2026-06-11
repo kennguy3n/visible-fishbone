@@ -550,6 +550,158 @@ mod tests {
     }
 
     #[test]
+    fn degraded_edr_revokes_session() {
+        // App demands a healthy EDR sensor via the hard gate but
+        // imposes no score floor, so only the EDR signal can flip
+        // the verdict — isolating the new gate from the weighted
+        // score.
+        let now = TEST_EPOCH_MS;
+        let h = harness(
+            vec![app(
+                "crm",
+                PostureRequirement::new(0).with_require_edr(true),
+                &[],
+            )],
+            vec![device("dev-1", TENANT, DevicePosture::pristine(now))],
+            vec![user("alice", TENANT, &[], now)],
+        );
+        let (lp, tracker, mut rx) = loop_with(&h);
+        grant_session(&h, &tracker, "s1", "dev-1", "alice", "crm", now);
+
+        // The EDR sensor is killed; every other signal (and the
+        // score, which still reads 100) stays healthy.
+        h.devices.record(device(
+            "dev-1",
+            TENANT,
+            DevicePosture {
+                edr_healthy: false,
+                attested_at_ms: now,
+                ..DevicePosture::pristine(now)
+            },
+        ));
+
+        let stats = lp.sweep(now);
+        assert_eq!(stats.revoked, 1);
+        assert!(!tracker.contains("s1"), "killed EDR must revoke");
+        let ev = rx.try_recv().expect("revocation event emitted");
+        assert_eq!(ev.reason, ZtnaDecisionReason::DevicePostureInsufficient);
+    }
+
+    #[test]
+    fn stale_av_definitions_revoke_session() {
+        let now = TEST_EPOCH_MS;
+        let h = harness(
+            vec![app(
+                "crm",
+                PostureRequirement::new(0).with_max_av_definition_age_hours(24),
+                &[],
+            )],
+            vec![device("dev-1", TENANT, DevicePosture::pristine(now))],
+            vec![user("alice", TENANT, &[], now)],
+        );
+        let (lp, tracker, mut rx) = loop_with(&h);
+        grant_session(&h, &tracker, "s1", "dev-1", "alice", "crm", now);
+
+        // AV stays enabled but its definitions age past the 24h
+        // ceiling — the device is now scanning with stale sigs.
+        h.devices.record(device(
+            "dev-1",
+            TENANT,
+            DevicePosture {
+                antivirus_definitions_age_hours: 72,
+                attested_at_ms: now,
+                ..DevicePosture::pristine(now)
+            },
+        ));
+
+        let stats = lp.sweep(now);
+        assert_eq!(stats.revoked, 1);
+        assert!(!tracker.contains("s1"), "stale AV defs must revoke");
+        let ev = rx.try_recv().expect("revocation event emitted");
+        assert_eq!(ev.reason, ZtnaDecisionReason::DevicePostureInsufficient);
+    }
+
+    #[test]
+    fn out_of_date_patch_revokes_session_on_posture_push() {
+        // Exercise the out-of-cycle posture-push path
+        // (`reevaluate_device`) rather than the periodic sweep, so
+        // the patch-recency gate is shown to bound revocation
+        // latency to the push.
+        let now = TEST_EPOCH_MS;
+        let h = harness(
+            vec![app(
+                "crm",
+                PostureRequirement::new(0).with_min_patch_days(7),
+                &[],
+            )],
+            vec![device("dev-1", TENANT, DevicePosture::pristine(now))],
+            vec![user("alice", TENANT, &[], now)],
+        );
+        let (lp, tracker, mut rx) = loop_with(&h);
+        grant_session(&h, &tracker, "s1", "dev-1", "alice", "crm", now);
+
+        // The most recent OS patch slips to 30 days old, past the
+        // app's 7-day cadence. `os_patched` (and thus the score)
+        // stays true, proving the gate is what denies.
+        h.devices.record(device(
+            "dev-1",
+            TENANT,
+            DevicePosture {
+                os_patch_days_since: 30,
+                attested_at_ms: now,
+                ..DevicePosture::pristine(now)
+            },
+        ));
+
+        let stats = lp.reevaluate_device("dev-1", now);
+        assert_eq!(stats.revoked, 1);
+        assert!(!tracker.contains("s1"), "out-of-date patch must revoke");
+        let ev = rx.try_recv().expect("revocation event emitted");
+        assert_eq!(ev.reason, ZtnaDecisionReason::DevicePostureInsufficient);
+    }
+
+    #[test]
+    fn healthy_expanded_signals_retain_session() {
+        // All three new gates declared at once; a device meeting
+        // every one keeps its session through a sweep. Guards
+        // against a gate that denies a compliant device.
+        let now = TEST_EPOCH_MS;
+        let strict = PostureRequirement::new(60)
+            .with_require_edr(true)
+            .with_min_patch_days(30)
+            .with_max_av_definition_age_hours(48);
+        let h = harness(
+            vec![app("crm", strict, &[])],
+            vec![device("dev-1", TENANT, DevicePosture::pristine(now))],
+            vec![user("alice", TENANT, &[], now)],
+        );
+        let (lp, tracker, mut rx) = loop_with(&h);
+        grant_session(&h, &tracker, "s1", "dev-1", "alice", "crm", now);
+
+        // Re-attest with healthy expanded signals (well within
+        // every ceiling) at the same instant.
+        h.devices.record(device(
+            "dev-1",
+            TENANT,
+            DevicePosture {
+                os_patch_days_since: 3,
+                antivirus_definitions_age_hours: 6,
+                attested_at_ms: now,
+                ..DevicePosture::pristine(now)
+            },
+        ));
+
+        let stats = lp.sweep(now);
+        assert_eq!(stats.revoked, 0);
+        assert_eq!(stats.retained, 1);
+        assert!(tracker.contains("s1"), "compliant device must be retained");
+        assert!(
+            rx.try_recv().is_err(),
+            "no revocation for a compliant device"
+        );
+    }
+
+    #[test]
     fn sweep_does_not_revoke_a_concurrently_reauthed_session() {
         let now = TEST_EPOCH_MS;
         let h = harness(

@@ -64,7 +64,8 @@ pub async fn run() -> FunctionReport {
     };
     // Fresh attestation but fails the Basic floor (score 60): only
     // disk encryption on (25) — well below 60 under the weighted
-    // risk_score model.
+    // risk_score model. Expanded signals stay healthy so this case
+    // isolates the *score* floor.
     let insufficient = DevicePosture {
         disk_encrypted: true,
         os_patched: false,
@@ -72,6 +73,22 @@ pub async fn run() -> FunctionReport {
         firewall_enabled: false,
         screen_lock_configured: false,
         attested_at_ms: NOW,
+        ..DevicePosture::pristine(NOW)
+    };
+    // Expanded-signal regressions. Each keeps a full score (every
+    // original signal on) and a fresh attestation, so only the new
+    // hard gate it targets can flip the verdict to deny.
+    let killed_edr = DevicePosture {
+        edr_healthy: false,
+        ..DevicePosture::pristine(NOW)
+    };
+    let stale_av = DevicePosture {
+        antivirus_definitions_age_hours: 72,
+        ..DevicePosture::pristine(NOW)
+    };
+    let out_of_date_patch = DevicePosture {
+        os_patch_days_since: 30,
+        ..DevicePosture::pristine(NOW)
     };
 
     let apps = vec![
@@ -79,6 +96,23 @@ pub async fn run() -> FunctionReport {
         app("crm", PostureRequirement::BASIC, &["engineering"]),
         // Low-risk app: no posture floor, open to eng + sales.
         app("wiki", PostureRequirement::NONE, &["engineering", "sales"]),
+        // Expanded-posture apps: a Basic floor plus one hard gate
+        // each, all restricted to engineering.
+        app(
+            "crm-edr",
+            PostureRequirement::BASIC.with_require_edr(true),
+            &["engineering"],
+        ),
+        app(
+            "crm-av",
+            PostureRequirement::BASIC.with_max_av_definition_age_hours(24),
+            &["engineering"],
+        ),
+        app(
+            "crm-patch",
+            PostureRequirement::BASIC.with_min_patch_days(7),
+            &["engineering"],
+        ),
     ];
 
     let devices = vec![
@@ -86,6 +120,9 @@ pub async fn run() -> FunctionReport {
         device("dev-stale", "t1", stale_posture),
         device("dev-weak", "t1", insufficient),
         device("dev-foreign", "t2", DevicePosture::pristine(NOW)),
+        device("dev-no-edr", "t1", killed_edr),
+        device("dev-stale-av", "t1", stale_av),
+        device("dev-old-patch", "t1", out_of_date_patch),
     ];
 
     let users = vec![
@@ -172,6 +209,27 @@ pub async fn run() -> FunctionReport {
             device: "dev-foreign",
             user: "foreign",
         },
+        ZCase {
+            desc: "degraded EDR sensor -> EDR-gated crm",
+            bad: true,
+            app: "crm-edr",
+            device: "dev-no-edr",
+            user: "alice",
+        },
+        ZCase {
+            desc: "stale AV definitions (>24h) -> AV-gated crm",
+            bad: true,
+            app: "crm-av",
+            device: "dev-stale-av",
+            user: "alice",
+        },
+        ZCase {
+            desc: "out-of-date OS patch (>7d) -> patch-gated crm",
+            bad: true,
+            app: "crm-patch",
+            device: "dev-old-patch",
+            user: "alice",
+        },
         // --- known-good: MUST be allowed ---
         ZCase {
             desc: "engineer, pristine device, fresh MFA -> crm",
@@ -199,6 +257,27 @@ pub async fn run() -> FunctionReport {
             bad: false,
             app: "wiki",
             device: "dev-weak",
+            user: "alice",
+        },
+        ZCase {
+            desc: "healthy EDR sensor -> EDR-gated crm",
+            bad: false,
+            app: "crm-edr",
+            device: "dev-good",
+            user: "alice",
+        },
+        ZCase {
+            desc: "fresh AV definitions -> AV-gated crm",
+            bad: false,
+            app: "crm-av",
+            device: "dev-good",
+            user: "alice",
+        },
+        ZCase {
+            desc: "recent OS patch -> patch-gated crm",
+            bad: false,
+            app: "crm-patch",
+            device: "dev-good",
             user: "alice",
         },
     ];
@@ -250,8 +329,9 @@ pub async fn run() -> FunctionReport {
         cases,
         Some(
             "Real ZtnaService.evaluate brokering. Denies unknown app/device/identity, \
-             stale posture, insufficient posture, stale MFA, missing entitlement, and \
-             cross-tenant requests; admits authorized engineers on compliant devices."
+             stale posture, insufficient posture, degraded EDR, stale AV definitions, \
+             out-of-date OS patches, stale MFA, missing entitlement, and cross-tenant \
+             requests; admits authorized engineers on compliant devices."
                 .into(),
         ),
     )
@@ -311,6 +391,18 @@ fn features() -> Vec<Feature> {
              per-app min-score threshold (None/Basic/Strict map to 0/60/90), replacing the \
              old 3-level bucket with any-granularity thresholds.",
             "Weighted numeric posture, attestation-freshness window",
+        ),
+        f(
+            "Expanded posture hard gates",
+            "Beyond the weighted score, an app may declare independent hard gates on the \
+             expanded posture signals: require_edr (the EDR sensor must report healthy), \
+             min_patch_days (the OS must have been patched within N days), and \
+             max_av_definition_age_hours (antivirus must be enabled with definitions no \
+             older than N hours). Each is enforced separately from the score, so a device \
+             with a perfect score is still denied if its EDR was killed, its patches \
+             lapsed, or its AV signatures went stale — and the continuous re-evaluation \
+             loop revokes live sessions the moment a pushed posture trips any gate.",
+            "Reason `DevicePostureInsufficient` on degraded EDR / stale AV / out-of-date patch",
         ),
         f(
             "Per-app MFA freshness override",
