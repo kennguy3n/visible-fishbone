@@ -272,6 +272,23 @@ var builtinTemplates = []PolicyTemplate{
 		},
 		Action: repository.DLPActionRedact,
 	},
+	{
+		ID:          "secrets-credentials",
+		Name:        "Secrets & Credentials",
+		Description: "Detects machine credentials pasted into uploads, AI chatbots, or SaaS forms: AWS access keys, Google API keys, GitHub tokens & fine-grained PATs, Slack tokens, Stripe live keys, PEM private-key blocks, and JWTs. Each match is confirmed by a structural validator (fixed vendor prefix + charset + length, or a decodable JWT alg header) so same-shaped noise is suppressed.",
+		Category:    "secrets",
+		Rules: []repository.DLPRule{
+			{Type: repository.DLPRuleTypeRegex, Pattern: "private_key_block", SensitivityLevel: "high"},
+			{Type: repository.DLPRuleTypeRegex, Pattern: "aws_access_key_id", SensitivityLevel: "high"},
+			{Type: repository.DLPRuleTypeRegex, Pattern: "google_api_key", SensitivityLevel: "high"},
+			{Type: repository.DLPRuleTypeRegex, Pattern: "github_token", SensitivityLevel: "high"},
+			{Type: repository.DLPRuleTypeRegex, Pattern: "github_pat", SensitivityLevel: "high"},
+			{Type: repository.DLPRuleTypeRegex, Pattern: "slack_token", SensitivityLevel: "high"},
+			{Type: repository.DLPRuleTypeRegex, Pattern: "stripe_secret_key", SensitivityLevel: "high"},
+			{Type: repository.DLPRuleTypeRegex, Pattern: "jwt", SensitivityLevel: "medium"},
+		},
+		Action: repository.DLPActionBlock,
+	},
 }
 
 // ListTemplates returns the catalog of pre-baked DLP policy templates.
