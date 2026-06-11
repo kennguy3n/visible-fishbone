@@ -1269,6 +1269,138 @@ pub fn detect_forwarding_regression(
     Ok(RegressionReport { regressions })
 }
 
+/// Statistically gate a set of multi-queue scaling `samples` (N re-runs of
+/// the `multi-queue` sweep on this host) against a committed `baseline`.
+///
+/// Like the forwarding gate, this is **hardware-invariant**: it never
+/// diffs absolute Gbps (which tracks the host's core count and clock) but
+/// the dimensionless [`MultiQueueScalePoint::scaling_efficiency`] —
+/// `aggregate / (queues × single_stream)` — at each fan-out width. That
+/// ratio is the portable shape of the scaling curve, so a baseline
+/// captured on an 8-vCPU runner still gates a 16-vCPU one: a real loss of
+/// scale-out (lock contention, false sharing, an allocator regression in
+/// the per-queue harness) drops efficiency on every box, while swapping
+/// hardware moves only the absolute numbers the gate ignores.
+///
+/// The `queues == 1` point is skipped — its efficiency is `1.0` by
+/// construction (it *is* the baseline) and carries no signal. Each wider
+/// width is gated as a **drop** in efficiency, aggregated by median and
+/// tested against a `sigma × σ` noise band exactly as the forwarding gate,
+/// so a single noisy run on a shared runner does not fail the build. With
+/// one sample the band vanishes and the gate degrades to threshold-only.
+///
+/// # Errors
+/// Returns an error string when `samples` is empty or when any sample
+/// describes a different schema version, profile, mode, or backend than
+/// the baseline (so a `raw-l3` curve is never compared against a
+/// `full-stack` one).
+pub fn detect_multiqueue_regression_stats(
+    baseline: &MultiQueueReport,
+    samples: &[MultiQueueReport],
+    threshold: f64,
+    sigma: f64,
+) -> Result<StatRegressionReport, String> {
+    if samples.is_empty() {
+        return Err("no current samples to compare against the baseline".to_string());
+    }
+    for s in samples {
+        if baseline.schema_version != s.schema_version {
+            return Err(format!(
+                "multi-queue schema version mismatch: baseline {} vs current {}",
+                baseline.schema_version, s.schema_version
+            ));
+        }
+        if baseline.profile != s.profile || baseline.mode != s.mode || baseline.backend != s.backend
+        {
+            return Err(format!(
+                "cannot compare different sweeps: baseline {}/{}/{} vs current {}/{}/{}",
+                baseline.profile, baseline.mode, baseline.backend, s.profile, s.mode, s.backend
+            ));
+        }
+    }
+
+    let mut metrics = Vec::new();
+    for point in &baseline.points {
+        // queues == 1 is the efficiency baseline (always 1.0) → no signal.
+        if point.queues < 2 {
+            continue;
+        }
+        let base_val = point.scaling_efficiency;
+        if !base_val.is_finite() || base_val <= 0.0 {
+            continue; // no defined reference to take a fractional change from
+        }
+
+        // A sample missing this width simply does not contribute, rather
+        // than poisoning the set.
+        let sample_vals: Vec<f64> = samples
+            .iter()
+            .filter_map(|s| s.points.iter().find(|p| p.queues == point.queues))
+            .map(|p| p.scaling_efficiency)
+            .collect();
+        let Some(median_val) = median(&sample_vals) else {
+            continue; // no current evidence for this width
+        };
+        let stddev = sample_stddev(&sample_vals);
+
+        let change = (median_val - base_val) / base_val;
+        // Efficiency is advantage-like: a drop is the regression.
+        let exceeds_threshold = change <= -threshold;
+        let noise_band = sigma * stddev;
+        let outside_noise_band = (median_val - base_val).abs() > noise_band;
+
+        metrics.push(StatMetric {
+            metric: format!("q={} scaling-efficiency", point.queues),
+            baseline: base_val,
+            median: median_val,
+            stddev,
+            samples: sample_vals.len(),
+            change_fraction: change,
+            exceeds_threshold,
+            outside_noise_band,
+            flagged: exceeds_threshold && outside_noise_band,
+        });
+    }
+
+    Ok(StatRegressionReport {
+        sigma,
+        threshold,
+        sample_count: samples.len(),
+        metrics,
+    })
+}
+
+/// Compare a single current multi-queue sweep against a committed
+/// baseline. The single-sample special case of
+/// [`detect_multiqueue_regression_stats`] (zero-width noise band),
+/// hardware-invariant but not noise-robust — prefer the statistical gate
+/// with N samples on a shared runner.
+///
+/// # Errors
+/// Propagates the validation errors of
+/// [`detect_multiqueue_regression_stats`].
+pub fn detect_multiqueue_regression(
+    baseline: &MultiQueueReport,
+    current: &MultiQueueReport,
+    threshold: f64,
+) -> Result<RegressionReport, String> {
+    let stats = detect_multiqueue_regression_stats(
+        baseline,
+        std::slice::from_ref(current),
+        threshold,
+        0.0,
+    )?;
+    let regressions = stats
+        .flagged()
+        .map(|m| Regression {
+            metric: m.metric.clone(),
+            previous: m.baseline,
+            current: m.median,
+            change_fraction: m.change_fraction,
+        })
+        .collect();
+    Ok(RegressionReport { regressions })
+}
+
 /// `numerator / denominator`, or `None` when the denominator is zero.
 fn ratio(numerator: f64, denominator: f64) -> Option<f64> {
     if denominator == 0.0 {
@@ -1808,5 +1940,114 @@ mod tests {
         let mut wrong_schema = fwd_sample_relcost(2.0);
         wrong_schema.schema_version = FORWARDING_SCHEMA_VERSION + 1;
         assert!(detect_forwarding_regression_stats(&base, &[wrong_schema], 0.15, 2.0).is_err());
+    }
+
+    /// A multi-queue report whose per-width scaling efficiencies are given
+    /// directly, so a test can dial the scaling curve precisely. The
+    /// `queues == 1` floor (efficiency `1.0`) is always prepended.
+    fn mq_report(efficiencies: &[(usize, f64)]) -> MultiQueueReport {
+        let point = |queues: usize, eff: f64| MultiQueueScalePoint {
+            queues,
+            aggregate_pps: 0.0,
+            aggregate_gbps: 0.0,
+            mean_pps_per_queue: 0.0,
+            scaling_efficiency: eff,
+            p50_ns_mean: 0,
+            p99_ns_max: 0,
+            streams: Vec::new(),
+        };
+        let mut points = vec![point(1, 1.0)];
+        points.extend(efficiencies.iter().map(|&(q, e)| point(q, e)));
+        MultiQueueReport {
+            schema_version: MULTIQUEUE_SCHEMA_VERSION,
+            profile: "micro".to_string(),
+            unix_time_secs: 1_700_000_000,
+            git_sha: None,
+            mode: "raw-l3".to_string(),
+            backend: "xdp".to_string(),
+            rule_count: 64,
+            packet_bytes: 64,
+            packets_per_queue: 50_000,
+            available_parallelism: 8,
+            target_gbps: 5.0,
+            points,
+        }
+    }
+
+    #[test]
+    fn multiqueue_gate_flags_efficiency_drop_outside_noise() {
+        let base = mq_report(&[(2, 0.95), (4, 0.90), (8, 0.80)]);
+        // q=8 collapses from 0.80 to 0.55 (a ~31% drop), the others hold.
+        let sample = mq_report(&[(2, 0.95), (4, 0.90), (8, 0.55)]);
+        let rr = detect_multiqueue_regression_stats(&base, &[sample], 0.15, 2.0).unwrap();
+        assert!(
+            rr.has_regression(),
+            "a real scaling collapse must flag: {rr:?}"
+        );
+        assert!(
+            rr.flagged().all(|m| m.metric.contains("q=8")),
+            "only the q=8 width regressed: {rr:?}"
+        );
+        // The single-stream floor is never gated (no signal).
+        assert!(rr.metrics.iter().all(|m| !m.metric.contains("q=1 ")));
+    }
+
+    #[test]
+    fn multiqueue_gate_passes_within_threshold() {
+        let base = mq_report(&[(2, 0.95), (4, 0.90), (8, 0.80)]);
+        // A few percent of scatter, well inside the 15% threshold.
+        let sample = mq_report(&[(2, 0.94), (4, 0.88), (8, 0.78)]);
+        let rr = detect_multiqueue_regression_stats(&base, &[sample], 0.15, 2.0).unwrap();
+        assert!(!rr.has_regression(), "minor scatter must not flag: {rr:?}");
+    }
+
+    #[test]
+    fn multiqueue_gate_noise_band_absorbs_single_outlier() {
+        let base = mq_report(&[(8, 0.80)]);
+        // One wild low sample, the rest healthy: the median holds and the
+        // dispersion widens the band, so the gate does not fire on noise.
+        let samples = [
+            mq_report(&[(8, 0.50)]),
+            mq_report(&[(8, 0.80)]),
+            mq_report(&[(8, 0.81)]),
+            mq_report(&[(8, 0.79)]),
+            mq_report(&[(8, 0.80)]),
+        ];
+        let rr = detect_multiqueue_regression_stats(&base, &samples, 0.15, 2.0).unwrap();
+        assert!(
+            !rr.has_regression(),
+            "a lone outlier inside the noise band must not fail the build: {rr:?}"
+        );
+    }
+
+    #[test]
+    fn multiqueue_gate_rejects_empty_and_mismatched_sweeps() {
+        let base = mq_report(&[(2, 0.9)]);
+        assert!(detect_multiqueue_regression_stats(&base, &[], 0.15, 2.0).is_err());
+
+        let mut wrong_mode = mq_report(&[(2, 0.9)]);
+        wrong_mode.mode = "full-stack".to_string();
+        assert!(
+            detect_multiqueue_regression_stats(&base, &[wrong_mode], 0.15, 2.0).is_err(),
+            "comparing different inspection depths must error"
+        );
+
+        let mut wrong_backend = mq_report(&[(2, 0.9)]);
+        wrong_backend.backend = "nftables".to_string();
+        assert!(detect_multiqueue_regression_stats(&base, &[wrong_backend], 0.15, 2.0).is_err());
+
+        let mut wrong_schema = mq_report(&[(2, 0.9)]);
+        wrong_schema.schema_version = MULTIQUEUE_SCHEMA_VERSION + 1;
+        assert!(detect_multiqueue_regression_stats(&base, &[wrong_schema], 0.15, 2.0).is_err());
+    }
+
+    #[test]
+    fn multiqueue_single_sample_wrapper_matches_threshold_only() {
+        let base = mq_report(&[(4, 0.90)]);
+        let regressed = mq_report(&[(4, 0.60)]);
+        let rr = detect_multiqueue_regression(&base, &regressed, 0.15).unwrap();
+        assert!(rr.has_regression());
+        assert_eq!(rr.regressions.len(), 1);
+        assert!(rr.regressions[0].metric.contains("q=4"));
     }
 }

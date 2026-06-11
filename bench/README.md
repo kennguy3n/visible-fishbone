@@ -41,7 +41,9 @@ forwarding fast path across N concurrent streams and reports the aggregate
 can be read side by side. See
 [`docs/multi-queue-throughput.md`](./docs/multi-queue-throughput.md) for
 the full methodology and how to read it honestly (it is a *software*
-multi-queue model on a VM, not an ASIC).
+multi-queue model on a VM, not an ASIC). Its scaling curve is
+regression-gated by `multi-queue-compare` (see
+[Multi-queue scaling gate](#multi-queue-scaling-gate)).
 
 A further subcommand, `compare`, diffs two JSON reports and exits non-zero
 on regression (see [Regression detection](#regression-detection)). Another,
@@ -229,6 +231,43 @@ git commit bench/results/forwarding-micro.json \
 Because the gate keys on hardware-invariant ratios, you do **not** need to
 regenerate the baseline just because CI moved to a different runner — only
 when the underlying ratios genuinely, intentionally changed.
+
+## Multi-queue scaling gate
+
+`multi-queue-compare` gates the multi-queue artifact the same way
+`forwarding-compare` gates the forwarding sweep, so the scaling ceiling is
+a watched metric rather than a number nobody re-checks. It is the same
+statistical machinery (median over N samples, `--threshold` + `--sigma × σ`
+noise band, exit `2` on a real regression) applied to the one quantity
+that is **hardware-invariant** for a scaling curve: the per-width
+`scaling_efficiency` (`aggregate / (queues × single_stream)`), never
+absolute Gbps. A baseline captured on an 8-vCPU runner therefore still
+gates a 16-vCPU one — a genuine loss of scale-out (lock contention, false
+sharing, an allocator regression in the per-queue harness) drops
+efficiency on every box, while swapping hardware moves only the absolute
+numbers the gate ignores. The `queues == 1` floor is never gated (its
+efficiency is `1.0` by construction).
+
+```bash
+# N samples of the same sweep, then gate their median against the baseline.
+for i in $(seq 1 7); do
+  sng-bench multi-queue --profile profiles/skus/micro.toml \
+    --mode raw-l3 --backend xdp \
+    --out target/mq-micro-samples/sample-$i.json
+done
+sng-bench multi-queue-compare \
+  --baseline results/multiqueue-micro.json \
+  --current target/mq-micro-samples/sample-1.json \
+  ... \
+  --current target/mq-micro-samples/sample-7.json \
+  --threshold 0.15 --sigma 2.0
+```
+
+As with `forwarding-compare`, a single `--current` collapses `σ` to zero
+and reproduces a one-shot threshold check. Refresh the committed baseline
+([`results/multiqueue-micro.json`](./results/multiqueue-micro.json)) the
+same way as the forwarding baseline — on `main`, after an intentional data
+path or methodology change.
 
 ## Business report
 

@@ -128,3 +128,19 @@ an 8-vCPU x86 VM (`available_parallelism = 8`):
 Absolute numbers depend on the host; re-run on your own hardware. The
 *shape* — a steep early climb that flattens past the physical core count —
 is the portable result.
+
+## Regression gating
+
+Because the *shape* is the portable result, that is what the
+`multi-queue-compare` subcommand gates on — not absolute Gbps. It diffs a
+committed baseline artifact against one or more current ones on the
+per-width `scaling_efficiency` (`aggregate / (queues × single_stream)`),
+which is dimensionless and so survives a change of runner: a real loss of
+scale-out drops efficiency on any box, while faster or slower hardware
+moves only the absolute numbers the gate ignores. It reuses the same
+statistical machinery as `forwarding-compare` — median across N samples,
+flagged only when the drop clears both the `--threshold` and a `--sigma × σ`
+noise band — and exits `2` on a real regression. The single-stream
+(`queues == 1`) point is never gated, since its efficiency is `1.0` by
+construction. See the **Multi-queue scaling gate** section of
+[`../README.md`](../README.md) for the exact invocation.
