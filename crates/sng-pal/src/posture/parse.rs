@@ -10,12 +10,12 @@
 //! output to a function here, get a typed posture value back.
 
 use chrono::{DateTime, Utc};
-// `NaiveDate` / `TimeZone` are only referenced by the Windows
-// hotfix-date parser (and the unit tests), so the import is gated
-// to those builds to stay warning-clean on the Linux/macOS lib
-// builds.
+// `NaiveDate` / `NaiveDateTime` / `TimeZone` are only referenced by
+// the Windows hotfix-date and Defender signature-timestamp parsers
+// (and the unit tests), so the import is gated to those builds to
+// stay warning-clean on the Linux/macOS lib builds.
 #[cfg(any(target_os = "windows", test))]
-use chrono::{NaiveDate, TimeZone};
+use chrono::{NaiveDate, NaiveDateTime, TimeZone};
 
 use super::{CertificateHealth, EdrState};
 // `AntivirusStatus` is only referenced by the Windows Security
@@ -28,10 +28,11 @@ use super::AntivirusStatus;
 /// future). Returns `u32::MAX` rather than overflowing for an
 /// absurdly old timestamp.
 // Used by the Linux (ClamAV signature mtime) and macOS (XProtect
-// bundle mtime) AV-freshness probes; the Windows backend derives
-// freshness from a Security Center flag instead, so the helper is
-// gated to the builds that call it.
-#[cfg(any(target_os = "linux", target_os = "macos", test))]
+// bundle mtime) AV-freshness probes, and by the Windows backend to
+// turn Microsoft Defender's `AntivirusSignatureLastUpdated`
+// timestamp into a freshness age (third-party Windows AVs still
+// fall back to the coarse Security Center flag).
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows", test))]
 #[must_use]
 pub(crate) fn hours_since(earlier: DateTime<Utc>, now: DateTime<Utc>) -> u32 {
     let secs = now.signed_duration_since(earlier).num_seconds();
@@ -313,6 +314,34 @@ pub(crate) fn newest_hotfix_date(stdout: &str) -> Option<DateTime<Utc>> {
     stdout.lines().filter_map(parse_iso_date).max()
 }
 
+/// Whether a Security Center product display name identifies the
+/// built-in Microsoft Defender Antivirus (e.g. `Windows Defender`,
+/// `Microsoft Defender Antivirus`) — the one Windows AV whose exact
+/// signature timestamp is separately queryable via
+/// `Get-MpComputerStatus`. Requires both "defender" and a
+/// Microsoft/Windows qualifier so a third-party product that merely
+/// contains "defender" in its name is not mistaken for it (the
+/// signature-age refinement keyed off this must only apply when
+/// Defender is genuinely the active AV).
+#[cfg(any(target_os = "windows", test))]
+#[must_use]
+pub(crate) fn is_microsoft_defender(display_name: &str) -> bool {
+    let n = display_name.to_ascii_lowercase();
+    n.contains("defender") && (n.contains("microsoft") || n.contains("windows"))
+}
+
+/// Parse Microsoft Defender's `AntivirusSignatureLastUpdated`
+/// instant, which the probe emits in UTC as `yyyy-MM-dd HH:mm:ss`
+/// (via `.ToUniversalTime().ToString(...)`). Empty / unparseable
+/// input yields `None` so the caller keeps the coarse Security
+/// Center freshness flag.
+#[cfg(any(target_os = "windows", test))]
+#[must_use]
+pub(crate) fn parse_defender_signature_timestamp(s: &str) -> Option<DateTime<Utc>> {
+    let dt = NaiveDateTime::parse_from_str(s.trim(), "%Y-%m-%d %H:%M:%S").ok()?;
+    Some(Utc.from_utc_datetime(&dt))
+}
+
 /// Parse a macOS `defaults read … LastFullSuccessfulDate`
 /// value, e.g. `2026-04-10 12:34:56 +0000`, into a UTC instant.
 #[cfg(any(target_os = "macos", test))]
@@ -488,6 +517,33 @@ mod tests {
         let stdout = "2026-01-02\n2026-05-30\nnot-a-date\n2026-03-15\n";
         assert_eq!(newest_hotfix_date(stdout), Some(ts(2026, 5, 30)));
         assert_eq!(newest_hotfix_date("\n\n"), None);
+    }
+
+    #[test]
+    fn defender_signature_timestamp_parsing() {
+        let dt = parse_defender_signature_timestamp("2026-06-10 22:00:00").expect("defender ts");
+        assert_eq!(dt, Utc.with_ymd_and_hms(2026, 6, 10, 22, 0, 0).unwrap());
+        // Surrounding whitespace (the probe trims, but be defensive).
+        assert_eq!(
+            parse_defender_signature_timestamp("  2026-06-10 22:00:00 \n"),
+            Some(Utc.with_ymd_and_hms(2026, 6, 10, 22, 0, 0).unwrap())
+        );
+        // Defender absent / query failed -> None (keep coarse flag).
+        assert_eq!(parse_defender_signature_timestamp(""), None);
+        assert_eq!(parse_defender_signature_timestamp("garbage"), None);
+    }
+
+    #[test]
+    fn microsoft_defender_identification() {
+        // The built-in AV under its common Security Center names.
+        assert!(is_microsoft_defender("Windows Defender"));
+        assert!(is_microsoft_defender("Microsoft Defender Antivirus"));
+        // Third-party products must NOT be taken for Defender, or the
+        // signature-age refinement would query Defender's timestamp
+        // for the wrong AV.
+        assert!(!is_microsoft_defender("CrowdStrike Falcon Sensor"));
+        assert!(!is_microsoft_defender("Acme Defender Pro"));
+        assert!(!is_microsoft_defender(""));
     }
 
     #[test]

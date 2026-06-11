@@ -70,11 +70,17 @@ impl WindowsPostureCollector {
     }
 
     /// AV status, definition age, and EDR health from Security
-    /// Center. Definition age is derived from "definitions out
-    /// of date": a current product reports `Some(0)` (fresh),
-    /// an out-of-date one reports `None` so the policy floor's
-    /// `max_av_definition_age_hours` treats it as stale.
-    fn detect_security_center(&self) -> (AntivirusStatus, Option<u32>, EdrState) {
+    /// Center. Definition age is derived from the "definitions out
+    /// of date" bit: an out-of-date product reports `None` so the
+    /// policy floor's `max_av_definition_age_hours` treats it as
+    /// stale (fail-closed). A current product reports `Some(0)` —
+    /// except for Microsoft Defender, where the exact signature
+    /// timestamp is available (see [`Self::refined_definition_age`])
+    /// and used instead so freshness gates compare real hours.
+    fn detect_security_center(
+        &self,
+        now: DateTime<Utc>,
+    ) -> (AntivirusStatus, Option<u32>, EdrState) {
         let script = "Get-CimInstance -Namespace root/SecurityCenter2 \
              -ClassName AntiVirusProduct -ErrorAction SilentlyContinue | \
              ForEach-Object { \"$($_.displayName)|$($_.productState)\" }";
@@ -85,7 +91,7 @@ impl WindowsPostureCollector {
             None => (AntivirusStatus::Unknown, None, EdrState::NotInstalled),
             Some(av) => {
                 let def_age = if av.definitions_up_to_date {
-                    Some(0)
+                    Some(self.refined_definition_age(&av.display_name, now))
                 } else {
                     None
                 };
@@ -94,6 +100,38 @@ impl WindowsPostureCollector {
                 (av.status, def_age, edr)
             }
         }
+    }
+
+    /// Refine the coarse Security Center "fresh" verdict into exact
+    /// hours for Microsoft Defender, whose real
+    /// `AntivirusSignatureLastUpdated` instant is queryable via
+    /// `Get-MpComputerStatus`. Third-party AVs expose no such
+    /// timestamp, so they keep the binary `0` (fresh).
+    ///
+    /// This is **strictness-only**: it is reached only on the
+    /// `definitions_up_to_date` branch, so it can turn `0` into a
+    /// larger age (tightening a `max_av_definition_age_hours` gate
+    /// toward operator intent) but can never relax a stale verdict.
+    /// A failed / empty Defender query falls back to `0`, never to a
+    /// fail-open value.
+    fn refined_definition_age(&self, display_name: &str, now: DateTime<Utc>) -> u32 {
+        if !parse::is_microsoft_defender(display_name) {
+            return 0;
+        }
+        self.defender_signature_age_hours(now).unwrap_or(0)
+    }
+
+    /// Whole hours since Microsoft Defender last updated its
+    /// antivirus signatures, or `None` if Defender is absent or the
+    /// query fails. The instant is emitted in UTC so the parse step
+    /// is timezone-unambiguous and unit-testable on the CI host.
+    fn defender_signature_age_hours(&self, now: DateTime<Utc>) -> Option<u32> {
+        let script = "Get-MpComputerStatus -ErrorAction SilentlyContinue | \
+             ForEach-Object { \
+             $_.AntivirusSignatureLastUpdated.ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss') }";
+        let stdout = run_powershell(script)?;
+        let updated = parse::parse_defender_signature_timestamp(&stdout)?;
+        Some(parse::hours_since(updated, now))
     }
 
     fn last_os_update(&self) -> Option<DateTime<Utc>> {
@@ -151,7 +189,7 @@ fn run_powershell(script: &str) -> Option<String> {
 impl PostureCollector for WindowsPostureCollector {
     async fn collect(&self) -> Result<PostureSnapshot, PostureError> {
         let now = Utc::now();
-        let (antivirus, antivirus_definitions_age_hours, edr) = self.detect_security_center();
+        let (antivirus, antivirus_definitions_age_hours, edr) = self.detect_security_center(now);
         let last_os_update = self.last_os_update();
         Ok(PostureSnapshot {
             collected_at: now,
