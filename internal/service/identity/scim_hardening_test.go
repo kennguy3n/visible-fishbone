@@ -599,3 +599,70 @@ func TestFilterPrecedenceEvaluation(t *testing.T) {
 		})
 	}
 }
+
+// --- NATS revocation publisher: wire shape ---------------------------------
+
+// captureMsgPublisher captures the subject and payload of the last
+// Publish so a test can assert the wire contract the ZTNA enforcement
+// plane consumes.
+type captureMsgPublisher struct {
+	subject string
+	data    []byte
+	calls   int
+}
+
+func (m *captureMsgPublisher) Publish(_ context.Context, subject string, data []byte) error {
+	m.subject = subject
+	m.data = append([]byte(nil), data...)
+	m.calls++
+	return nil
+}
+
+// TestNATSRevocationPublisherWireShape pins the subject and JSON payload
+// the concrete NATSRevocationPublisher emits — the publisher now wired
+// into the SCIM service in production (cmd/sng-control). The enforcement
+// plane subscribes per-tenant to sng.<tenant>.ztna.revoke and keys off
+// this payload, so the contract must stay stable.
+func TestNATSRevocationPublisherWireShape(t *testing.T) {
+	t.Parallel()
+	mp := &captureMsgPublisher{}
+	pub := NewNATSRevocationPublisher(mp)
+	tid := uuid.New()
+	uid := uuid.New()
+
+	if err := pub.PublishRevocation(context.Background(), tid, uid, "scim_user_deactivated"); err != nil {
+		t.Fatalf("PublishRevocation: %v", err)
+	}
+	if mp.calls != 1 {
+		t.Fatalf("Publish calls = %d, want 1", mp.calls)
+	}
+	if want := "sng." + tid.String() + ".ztna.revoke"; mp.subject != want {
+		t.Fatalf("subject = %q, want %q", mp.subject, want)
+	}
+	var msg map[string]string
+	if err := json.Unmarshal(mp.data, &msg); err != nil {
+		t.Fatalf("unmarshal payload: %v", err)
+	}
+	for k, want := range map[string]string{
+		"action":    "revoke_access",
+		"user_id":   uid.String(),
+		"tenant_id": tid.String(),
+		"reason":    "scim_user_deactivated",
+		"source":    "idp_sync",
+	} {
+		if msg[k] != want {
+			t.Errorf("payload[%q] = %q, want %q", k, msg[k], want)
+		}
+	}
+}
+
+// TestNATSRevocationPublisherNilBrokerIsNoop verifies a nil broker is a
+// safe no-op rather than a panic, matching the prod wiring where the
+// NATS publisher may be unset.
+func TestNATSRevocationPublisherNilBrokerIsNoop(t *testing.T) {
+	t.Parallel()
+	pub := NewNATSRevocationPublisher(nil)
+	if err := pub.PublishRevocation(context.Background(), uuid.New(), uuid.New(), "x"); err != nil {
+		t.Fatalf("nil-broker publisher should be a no-op, got %v", err)
+	}
+}
