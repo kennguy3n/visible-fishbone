@@ -781,6 +781,47 @@ impl ForwardingHarness {
         }
     }
 
+    /// Measure a single `(mode, backend)` forwarding loop over a freshly
+    /// built mixed flow pool — the one-stream unit the multi-queue harness
+    /// fans out across worker threads.
+    ///
+    /// This is exactly one `(mode, backend)` cell of [`Self::sweep`],
+    /// exposed so a caller can drive it on its own thread/core to model an
+    /// independent NIC receive (RSS) queue. Each caller owns a distinct
+    /// `ForwardingHarness` (its own engine, conntrack, and flow pool), so N
+    /// of them running concurrently model N queues with no shared mutable
+    /// state — the aggregate is then bounded only by the host's real core
+    /// count and memory bandwidth, which is the line-rate ceiling the
+    /// single-stream floor cannot see.
+    #[must_use]
+    pub fn measure_stream(
+        &self,
+        mix: &TrafficMix,
+        sample_packets: usize,
+        mode: ForwardingMode,
+        backend: Backend,
+    ) -> ForwardingResult {
+        self.prepare_stream(mix, sample_packets)
+            .measure(mode, backend)
+    }
+
+    /// Build the flow pool for one stream without timing anything, yielding
+    /// a [`PreparedStream`] whose [`PreparedStream::measure`] runs only the
+    /// timed loop. A multi-queue caller prepares every stream *before* its
+    /// release barrier, so all queues enter their measured windows together
+    /// (genuine contention) rather than each absorbing its own pool-build
+    /// time after the barrier.
+    #[must_use]
+    pub fn prepare_stream(&self, mix: &TrafficMix, sample_packets: usize) -> PreparedStream<'_> {
+        let sample_packets = sample_packets.max(1);
+        let pool = self.build_flow_pool(mix, sample_packets.min(FLOW_POOL));
+        PreparedStream {
+            harness: self,
+            pool,
+            sample_packets,
+        }
+    }
+
     /// Measure one `(mode, backend)` loop over `sample_packets` packets
     /// cycled from `pool`, then a second batched pass for the latency
     /// distribution.
@@ -1039,6 +1080,28 @@ impl ForwardingHarness {
             nonce,
             sealed,
         }
+    }
+}
+
+/// One stream's flow pool, built and ready to measure. Produced by
+/// [`ForwardingHarness::prepare_stream`] so the (untimed) pool build can
+/// happen before a multi-queue release barrier, leaving only the timed
+/// loop inside the barrier-synchronised window. Borrows the harness it was
+/// built from; the internal pool representation stays private.
+#[derive(Debug)]
+pub struct PreparedStream<'h> {
+    harness: &'h ForwardingHarness,
+    pool: Vec<SynFlow>,
+    sample_packets: usize,
+}
+
+impl PreparedStream<'_> {
+    /// Run the timed forwarding loop over the prepared pool. This is the
+    /// only part a multi-queue caller wants inside its barrier.
+    #[must_use]
+    pub fn measure(&self, mode: ForwardingMode, backend: Backend) -> ForwardingResult {
+        self.harness
+            .measure(&self.pool, self.sample_packets, mode, backend)
     }
 }
 

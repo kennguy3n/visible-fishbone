@@ -720,6 +720,210 @@ impl ForwardingReport {
     }
 }
 
+/// Schema version for the multi-queue throughput artifact
+/// (`bench/results/multiqueue-*.json`). Independent of [`SCHEMA_VERSION`]
+/// and [`FORWARDING_SCHEMA_VERSION`] so the three report families version
+/// separately.
+pub const MULTIQUEUE_SCHEMA_VERSION: u32 = 1;
+
+/// One measured stream — a single NIC receive (RSS) queue pinned to a
+/// worker thread for the duration of a fanout point.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MultiQueueStreamMeasurement {
+    /// Stream / queue index, `0..queues`.
+    pub queue_index: usize,
+    /// Packets this stream pushed through the pipeline.
+    pub packets: u64,
+    /// This stream's throughput in packets per second, measured while all
+    /// queues at this fanout width were running concurrently.
+    pub pps: f64,
+    /// This stream's throughput in Gbps at the representative frame size.
+    pub gbps: f64,
+    /// Median per-packet service time (ns) for this stream.
+    pub p50_ns: u64,
+    /// 99th-percentile per-packet service time (ns) for this stream.
+    pub p99_ns: u64,
+}
+
+/// Aggregate result at one queue-fanout width (`queues` parallel streams
+/// running concurrently). The `queues == 1` point is the single-stream
+/// *floor*; the widest point is the multi-queue *ceiling*.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MultiQueueScalePoint {
+    /// Number of concurrent streams (NIC RSS queues) at this point.
+    pub queues: usize,
+    /// Sum of every stream's throughput — the aggregate the box sustains
+    /// at this fanout width.
+    pub aggregate_pps: f64,
+    /// Aggregate throughput in Gbps at the representative frame size.
+    pub aggregate_gbps: f64,
+    /// Mean per-stream throughput (`aggregate_pps / queues`). Falls as the
+    /// fanout exceeds the host's physical cores — the contention the
+    /// single-stream number cannot show.
+    pub mean_pps_per_queue: f64,
+    /// Scaling efficiency: `aggregate_pps / (queues × single_stream_pps)`,
+    /// where the single-stream rate is the `queues == 1` aggregate. `1.0`
+    /// is ideal linear scaling; below `1.0` is the real, contended ceiling.
+    pub scaling_efficiency: f64,
+    /// Mean across streams of the per-stream median service time (ns).
+    pub p50_ns_mean: u64,
+    /// Worst (max) across streams of the per-stream p99 service time (ns).
+    pub p99_ns_max: u64,
+    /// Per-stream detail for this fanout width.
+    pub streams: Vec<MultiQueueStreamMeasurement>,
+}
+
+/// A multi-queue / multi-stream wire-throughput report for one SKU: a
+/// scaling curve from a single stream up to the widest fanout, recording
+/// aggregate throughput and per-stream scaling at each width.
+///
+/// The point of the artifact is to publish a realistic *line-rate
+/// ceiling* (many queues, the way a multi-queue physical NIC and the
+/// per-queue XDP fast path actually run) alongside the honestly-caveated
+/// single-stream *floor* the blog already quotes. It is still
+/// software-on-a-VM, not an ASIC — see [`Self::to_markdown`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MultiQueueReport {
+    /// Artifact schema version.
+    pub schema_version: u32,
+    /// SKU profile name the sweep ran against.
+    pub profile: String,
+    /// Wall-clock time the report was produced (Unix seconds).
+    pub unix_time_secs: u64,
+    /// Source revision, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_sha: Option<String>,
+    /// Forwarding mode (inspection depth) measured (`raw-l3`, ...).
+    pub mode: String,
+    /// Forwarding substrate measured (`xdp`, `nftables`).
+    pub backend: String,
+    /// Rule count of the synthetic policy each stream walked.
+    pub rule_count: usize,
+    /// Representative frame size used for the Gbps figures.
+    pub packet_bytes: u32,
+    /// Packets each stream pushed per measurement.
+    pub packets_per_queue: usize,
+    /// `std::thread::available_parallelism()` on the measuring host — the
+    /// physical/logical core budget the scaling curve is bounded by.
+    pub available_parallelism: usize,
+    /// The SKU's published acceptance target in Gbps, for context.
+    pub target_gbps: f64,
+    /// The scaling curve, in ascending queue-count order.
+    pub points: Vec<MultiQueueScalePoint>,
+}
+
+impl MultiQueueReport {
+    /// Serialize to pretty JSON.
+    ///
+    /// # Errors
+    /// Propagates a `serde_json` failure (never expected for this plain
+    /// struct).
+    pub fn to_json(&self) -> Result<String, ReportError> {
+        Ok(serde_json::to_string_pretty(self)?)
+    }
+
+    /// Parse from JSON.
+    ///
+    /// # Errors
+    /// Returns [`ReportError::Json`] on malformed input.
+    pub fn from_json(s: &str) -> Result<Self, ReportError> {
+        Ok(serde_json::from_str(s)?)
+    }
+
+    /// The single-stream floor (`queues == 1`), if measured.
+    #[must_use]
+    pub fn single_stream(&self) -> Option<&MultiQueueScalePoint> {
+        self.points.iter().find(|p| p.queues == 1)
+    }
+
+    /// The widest-fanout multi-queue ceiling, if any point was measured.
+    #[must_use]
+    pub fn ceiling(&self) -> Option<&MultiQueueScalePoint> {
+        self.points.iter().max_by_key(|p| p.queues)
+    }
+
+    /// Render the markdown summary: the scaling table, the floor→ceiling
+    /// headline, and the standing honesty caveat.
+    #[must_use]
+    pub fn to_markdown(&self) -> String {
+        let mut out = String::new();
+        let _ = writeln!(out, "### Multi-queue throughput: `{}`", self.profile);
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "Mode `{}` · backend `{}` · {} rules · representative frame {} B · \
+             {} packets/stream · host parallelism {}.",
+            self.mode,
+            self.backend,
+            self.rule_count,
+            self.packet_bytes,
+            self.packets_per_queue,
+            self.available_parallelism
+        );
+        let _ = writeln!(out);
+
+        let _ = writeln!(
+            out,
+            "| Queues | Aggregate Mpps | Aggregate Gbps | Per-queue Mpps | Scaling eff. | p50 | p99 (max) |"
+        );
+        let _ = writeln!(out, "| ---: | ---: | ---: | ---: | ---: | ---: | ---: |");
+        for p in &self.points {
+            let _ = writeln!(
+                out,
+                "| {} | {:.2} | {:.3} | {:.2} | {:.0}% | {} | {} |",
+                p.queues,
+                p.aggregate_pps / 1e6,
+                p.aggregate_gbps,
+                p.mean_pps_per_queue / 1e6,
+                p.scaling_efficiency * 100.0,
+                fmt_ns(p.p50_ns_mean),
+                fmt_ns(p.p99_ns_max)
+            );
+        }
+        let _ = writeln!(out);
+
+        if let (Some(floor), Some(ceil)) = (self.single_stream(), self.ceiling())
+            && ceil.queues > floor.queues
+        {
+            let lift = if floor.aggregate_gbps > 0.0 {
+                ceil.aggregate_gbps / floor.aggregate_gbps
+            } else {
+                0.0
+            };
+            let _ = writeln!(
+                out,
+                "Single-stream floor: **{:.3} Gbps** ({} queue). \
+                 Multi-queue ceiling: **{:.3} Gbps** ({} queues) — a **{:.2}×** lift.",
+                floor.aggregate_gbps, floor.queues, ceil.aggregate_gbps, ceil.queues, lift
+            );
+            let _ = writeln!(out);
+        }
+
+        if self.target_gbps > 0.0 {
+            let _ = writeln!(
+                out,
+                "SKU published acceptance target: **{:.3} Gbps**.",
+                self.target_gbps
+            );
+            let _ = writeln!(out);
+        }
+
+        let _ = writeln!(
+            out,
+            "> **Read this honestly.** This is the in-process forwarding fast path fanned \
+             out across {} worker threads on a generic x86 VM — a *software* multi-queue \
+             model, not a multi-queue physical NIC and not an ASIC. The single-stream row \
+             is the same conservative floor the blog quotes; the wider rows show how the \
+             per-queue XDP fast path scales when the box is allowed to use all its cores. \
+             Treat the ceiling as an apples-*closer* figure to a vendor's multi-queue \
+             line-rate number, still not apples-to-apples.",
+            self.available_parallelism
+        );
+
+        out
+    }
+}
+
 /// Direction in which a forwarding metric regresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RegressDir {
@@ -1048,6 +1252,144 @@ pub fn detect_forwarding_regression(
     threshold: f64,
 ) -> Result<RegressionReport, String> {
     let stats = detect_forwarding_regression_stats(
+        baseline,
+        std::slice::from_ref(current),
+        threshold,
+        0.0,
+    )?;
+    let regressions = stats
+        .flagged()
+        .map(|m| Regression {
+            metric: m.metric.clone(),
+            previous: m.baseline,
+            current: m.median,
+            change_fraction: m.change_fraction,
+        })
+        .collect();
+    Ok(RegressionReport { regressions })
+}
+
+/// Statistically gate a set of multi-queue scaling `samples` (N re-runs of
+/// the `multi-queue` sweep on this host) against a committed `baseline`.
+///
+/// Like the forwarding gate, this is **hardware-invariant**: it never
+/// diffs absolute Gbps (which tracks the host's core count and clock) but
+/// the dimensionless [`MultiQueueScalePoint::scaling_efficiency`] —
+/// `aggregate / (queues × single_stream)` — at each fan-out width. That
+/// ratio is the portable shape of the scaling curve, so a baseline
+/// captured on an 8-vCPU runner still gates a 16-vCPU one: a real loss of
+/// scale-out (lock contention, false sharing, an allocator regression in
+/// the per-queue harness) drops efficiency on every box, while swapping
+/// hardware moves only the absolute numbers the gate ignores.
+///
+/// The `queues == 1` point is skipped — its efficiency is `1.0` by
+/// construction (it *is* the baseline) and carries no signal. Each wider
+/// width is gated as a **drop** in efficiency, aggregated by median and
+/// tested against a `sigma × σ` noise band exactly as the forwarding gate,
+/// so a single noisy run on a shared runner does not fail the build. With
+/// one sample the band vanishes and the gate degrades to threshold-only.
+///
+/// # Errors
+/// Returns an error string when `samples` is empty or when any sample
+/// describes a different schema version, profile, mode, or backend than
+/// the baseline (so a `raw-l3` curve is never compared against a
+/// `full-stack` one).
+pub fn detect_multiqueue_regression_stats(
+    baseline: &MultiQueueReport,
+    samples: &[MultiQueueReport],
+    threshold: f64,
+    sigma: f64,
+) -> Result<StatRegressionReport, String> {
+    if samples.is_empty() {
+        return Err("no current samples to compare against the baseline".to_string());
+    }
+    for s in samples {
+        if baseline.schema_version != s.schema_version {
+            return Err(format!(
+                "multi-queue schema version mismatch: baseline {} vs current {}",
+                baseline.schema_version, s.schema_version
+            ));
+        }
+        if baseline.profile != s.profile || baseline.mode != s.mode || baseline.backend != s.backend
+        {
+            return Err(format!(
+                "cannot compare different sweeps: baseline {}/{}/{} vs current {}/{}/{}",
+                baseline.profile, baseline.mode, baseline.backend, s.profile, s.mode, s.backend
+            ));
+        }
+    }
+
+    let mut metrics = Vec::new();
+    for point in &baseline.points {
+        // queues == 1 is the efficiency baseline (always 1.0) → no signal.
+        if point.queues < 2 {
+            continue;
+        }
+        let base_val = point.scaling_efficiency;
+        if !base_val.is_finite() || base_val <= 0.0 {
+            continue; // no defined reference to take a fractional change from
+        }
+
+        // A sample missing this width simply does not contribute, rather
+        // than poisoning the set. Non-finite efficiencies are filtered here
+        // too — `median`/`sample_stddev` ignore them internally, so keeping
+        // them out at collection makes `sample_vals.len()` the true count of
+        // finite samples that fed the statistics (matching the documented
+        // `StatMetric::samples` contract and the forwarding gate's
+        // finite-only collection).
+        let sample_vals: Vec<f64> = samples
+            .iter()
+            .filter_map(|s| s.points.iter().find(|p| p.queues == point.queues))
+            .map(|p| p.scaling_efficiency)
+            .filter(|e| e.is_finite())
+            .collect();
+        let Some(median_val) = median(&sample_vals) else {
+            continue; // no current evidence for this width
+        };
+        let stddev = sample_stddev(&sample_vals);
+
+        let change = (median_val - base_val) / base_val;
+        // Efficiency is advantage-like: a drop is the regression.
+        let exceeds_threshold = change <= -threshold;
+        let noise_band = sigma * stddev;
+        let outside_noise_band = (median_val - base_val).abs() > noise_band;
+
+        metrics.push(StatMetric {
+            metric: format!("q={} scaling-efficiency", point.queues),
+            baseline: base_val,
+            median: median_val,
+            stddev,
+            samples: sample_vals.len(),
+            change_fraction: change,
+            exceeds_threshold,
+            outside_noise_band,
+            flagged: exceeds_threshold && outside_noise_band,
+        });
+    }
+
+    Ok(StatRegressionReport {
+        sigma,
+        threshold,
+        sample_count: samples.len(),
+        metrics,
+    })
+}
+
+/// Compare a single current multi-queue sweep against a committed
+/// baseline. The single-sample special case of
+/// [`detect_multiqueue_regression_stats`] (zero-width noise band),
+/// hardware-invariant but not noise-robust — prefer the statistical gate
+/// with N samples on a shared runner.
+///
+/// # Errors
+/// Propagates the validation errors of
+/// [`detect_multiqueue_regression_stats`].
+pub fn detect_multiqueue_regression(
+    baseline: &MultiQueueReport,
+    current: &MultiQueueReport,
+    threshold: f64,
+) -> Result<RegressionReport, String> {
+    let stats = detect_multiqueue_regression_stats(
         baseline,
         std::slice::from_ref(current),
         threshold,
@@ -1604,5 +1946,140 @@ mod tests {
         let mut wrong_schema = fwd_sample_relcost(2.0);
         wrong_schema.schema_version = FORWARDING_SCHEMA_VERSION + 1;
         assert!(detect_forwarding_regression_stats(&base, &[wrong_schema], 0.15, 2.0).is_err());
+    }
+
+    /// A multi-queue report whose per-width scaling efficiencies are given
+    /// directly, so a test can dial the scaling curve precisely. The
+    /// `queues == 1` floor (efficiency `1.0`) is always prepended.
+    fn mq_report(efficiencies: &[(usize, f64)]) -> MultiQueueReport {
+        let point = |queues: usize, eff: f64| MultiQueueScalePoint {
+            queues,
+            aggregate_pps: 0.0,
+            aggregate_gbps: 0.0,
+            mean_pps_per_queue: 0.0,
+            scaling_efficiency: eff,
+            p50_ns_mean: 0,
+            p99_ns_max: 0,
+            streams: Vec::new(),
+        };
+        let mut points = vec![point(1, 1.0)];
+        points.extend(efficiencies.iter().map(|&(q, e)| point(q, e)));
+        MultiQueueReport {
+            schema_version: MULTIQUEUE_SCHEMA_VERSION,
+            profile: "micro".to_string(),
+            unix_time_secs: 1_700_000_000,
+            git_sha: None,
+            mode: "raw-l3".to_string(),
+            backend: "xdp".to_string(),
+            rule_count: 64,
+            packet_bytes: 64,
+            packets_per_queue: 50_000,
+            available_parallelism: 8,
+            target_gbps: 5.0,
+            points,
+        }
+    }
+
+    #[test]
+    fn multiqueue_gate_flags_efficiency_drop_outside_noise() {
+        let base = mq_report(&[(2, 0.95), (4, 0.90), (8, 0.80)]);
+        // q=8 collapses from 0.80 to 0.55 (a ~31% drop), the others hold.
+        let sample = mq_report(&[(2, 0.95), (4, 0.90), (8, 0.55)]);
+        let rr = detect_multiqueue_regression_stats(&base, &[sample], 0.15, 2.0).unwrap();
+        assert!(
+            rr.has_regression(),
+            "a real scaling collapse must flag: {rr:?}"
+        );
+        assert!(
+            rr.flagged().all(|m| m.metric.contains("q=8")),
+            "only the q=8 width regressed: {rr:?}"
+        );
+        // The single-stream floor is never gated (no signal).
+        assert!(rr.metrics.iter().all(|m| !m.metric.contains("q=1 ")));
+    }
+
+    #[test]
+    fn multiqueue_gate_passes_within_threshold() {
+        let base = mq_report(&[(2, 0.95), (4, 0.90), (8, 0.80)]);
+        // A few percent of scatter, well inside the 15% threshold.
+        let sample = mq_report(&[(2, 0.94), (4, 0.88), (8, 0.78)]);
+        let rr = detect_multiqueue_regression_stats(&base, &[sample], 0.15, 2.0).unwrap();
+        assert!(!rr.has_regression(), "minor scatter must not flag: {rr:?}");
+    }
+
+    #[test]
+    fn multiqueue_gate_noise_band_absorbs_single_outlier() {
+        let base = mq_report(&[(8, 0.80)]);
+        // One wild low sample, the rest healthy: the median holds and the
+        // dispersion widens the band, so the gate does not fire on noise.
+        let samples = [
+            mq_report(&[(8, 0.50)]),
+            mq_report(&[(8, 0.80)]),
+            mq_report(&[(8, 0.81)]),
+            mq_report(&[(8, 0.79)]),
+            mq_report(&[(8, 0.80)]),
+        ];
+        let rr = detect_multiqueue_regression_stats(&base, &samples, 0.15, 2.0).unwrap();
+        assert!(
+            !rr.has_regression(),
+            "a lone outlier inside the noise band must not fail the build: {rr:?}"
+        );
+    }
+
+    #[test]
+    fn multiqueue_gate_rejects_empty_and_mismatched_sweeps() {
+        let base = mq_report(&[(2, 0.9)]);
+        assert!(detect_multiqueue_regression_stats(&base, &[], 0.15, 2.0).is_err());
+
+        let mut wrong_mode = mq_report(&[(2, 0.9)]);
+        wrong_mode.mode = "full-stack".to_string();
+        assert!(
+            detect_multiqueue_regression_stats(&base, &[wrong_mode], 0.15, 2.0).is_err(),
+            "comparing different inspection depths must error"
+        );
+
+        let mut wrong_backend = mq_report(&[(2, 0.9)]);
+        wrong_backend.backend = "nftables".to_string();
+        assert!(detect_multiqueue_regression_stats(&base, &[wrong_backend], 0.15, 2.0).is_err());
+
+        let mut wrong_schema = mq_report(&[(2, 0.9)]);
+        wrong_schema.schema_version = MULTIQUEUE_SCHEMA_VERSION + 1;
+        assert!(detect_multiqueue_regression_stats(&base, &[wrong_schema], 0.15, 2.0).is_err());
+    }
+
+    #[test]
+    fn multiqueue_gate_sample_count_excludes_non_finite() {
+        let base = mq_report(&[(8, 0.80)]);
+        // Two healthy samples and one with a non-finite efficiency (which
+        // the guards in multiqueue.rs prevent in practice, but the gate
+        // must not count it): the reported sample count must be the finite
+        // pair, not three.
+        let samples = [
+            mq_report(&[(8, 0.80)]),
+            mq_report(&[(8, f64::NAN)]),
+            mq_report(&[(8, 0.79)]),
+        ];
+        let rr = detect_multiqueue_regression_stats(&base, &samples, 0.15, 2.0).unwrap();
+        let q8 = rr
+            .metrics
+            .iter()
+            .find(|m| m.metric.contains("q=8"))
+            .expect("q=8 width is gated");
+        assert_eq!(
+            q8.samples, 2,
+            "non-finite sample must not inflate the count"
+        );
+        assert!(q8.median.is_finite());
+        assert!(!rr.has_regression());
+    }
+
+    #[test]
+    fn multiqueue_single_sample_wrapper_matches_threshold_only() {
+        let base = mq_report(&[(4, 0.90)]);
+        let regressed = mq_report(&[(4, 0.60)]);
+        let rr = detect_multiqueue_regression(&base, &regressed, 0.15).unwrap();
+        assert!(rr.has_regression());
+        assert_eq!(rr.regressions.len(), 1);
+        assert!(rr.regressions[0].metric.contains("q=4"));
     }
 }

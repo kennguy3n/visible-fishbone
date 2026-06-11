@@ -88,6 +88,52 @@ enum Command {
     /// Merge a dry-run and a wire `business-report` JSON into one
     /// dual-column datasheet (markdown + combined JSON).
     Datasheet(DatasheetArgs),
+    /// Drive the forwarding fast path across N concurrent streams (one per
+    /// NIC RSS queue) and report the aggregate multi-queue throughput
+    /// ceiling and per-stream scaling, versus the single-stream floor.
+    MultiQueue(MultiQueueArgs),
+    /// Compare multi-queue scaling artifacts and fail (exit 2) on a
+    /// scaling-efficiency regression. Hardware-invariant: gates the
+    /// dimensionless per-width scaling efficiency, not absolute Gbps.
+    MultiQueueCompare(MultiQueueCompareArgs),
+}
+
+/// Forwarding inspection-depth selector for the multi-queue sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliForwardingMode {
+    RawL3,
+    NgfwVerdict,
+    FullStack,
+    FullStackTls,
+}
+
+impl CliForwardingMode {
+    fn to_mode(self) -> sng_bench::datapath::ForwardingMode {
+        use sng_bench::datapath::ForwardingMode;
+        match self {
+            CliForwardingMode::RawL3 => ForwardingMode::RawL3,
+            CliForwardingMode::NgfwVerdict => ForwardingMode::NgfwVerdict,
+            CliForwardingMode::FullStack => ForwardingMode::FullStack,
+            CliForwardingMode::FullStackTls => ForwardingMode::FullStackTlsDecrypt,
+        }
+    }
+}
+
+/// Forwarding-substrate selector for the multi-queue sweep.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliBackend {
+    Nftables,
+    Xdp,
+}
+
+impl CliBackend {
+    fn to_backend(self) -> sng_bench::datapath::Backend {
+        use sng_bench::datapath::Backend;
+        match self {
+            CliBackend::Nftables => Backend::Nftables,
+            CliBackend::Xdp => Backend::Xdp,
+        }
+    }
 }
 
 /// IP version selector for the CLI.
@@ -389,6 +435,75 @@ struct ForwardingCompareArgs {
     sigma: f64,
 }
 
+#[derive(Debug, Args)]
+struct MultiQueueArgs {
+    /// Path to the edge-SKU profile TOML (sets the rule count, frame size,
+    /// per-stream sample size, and published target for context).
+    #[arg(long, env = "SNG_BENCH_PROFILE")]
+    profile: PathBuf,
+
+    /// Queue-fanout widths to measure (comma-separated). A single-stream
+    /// (`1`) floor is always measured regardless. Empty (the default)
+    /// derives a curve of `1, 2, 4, …` up to the SKU's queue fan-out, the
+    /// host's available parallelism, and the next power of two above it, so
+    /// the curve always spans from the floor through (and a little past)
+    /// the host's real core budget.
+    #[arg(long, value_delimiter = ',')]
+    queues: Vec<usize>,
+
+    /// Packets each stream pushes per measurement. `0` uses the profile's
+    /// `[datapath] sample_packets`.
+    #[arg(long, default_value_t = 0)]
+    packets_per_queue: usize,
+
+    /// Synthetic L3/L4 rule count each stream walks. `0` uses the profile's
+    /// `[datapath] rule_count`.
+    #[arg(long, default_value_t = 0)]
+    rule_count: usize,
+
+    /// Inspection depth measured on every stream.
+    #[arg(long, value_enum, default_value_t = CliForwardingMode::RawL3)]
+    mode: CliForwardingMode,
+
+    /// Forwarding substrate measured on every stream.
+    #[arg(long, value_enum, default_value_t = CliBackend::Xdp)]
+    backend: CliBackend,
+
+    /// Where to write the JSON artifact. Omitted prints to stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
+
+    /// Git commit recorded in the artifact.
+    #[arg(long, env = "SNG_BENCH_GIT_SHA")]
+    git_sha: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct MultiQueueCompareArgs {
+    /// Committed baseline multi-queue artifact.
+    #[arg(long)]
+    baseline: PathBuf,
+    /// Current multi-queue artifact(s). Pass `--current` once per sample
+    /// (the `multi-queue` sweep re-run N times on this host); the gate
+    /// aggregates the samples by median and tests the move against a noise
+    /// band. A single `--current` reproduces the legacy one-shot compare.
+    #[arg(long, required = true, num_args = 1..)]
+    current: Vec<PathBuf>,
+    /// Fractional *drop* in per-width scaling efficiency of the sample
+    /// *median* that counts as a regression. Must be finite and
+    /// non-negative (a negative threshold would flag every run).
+    #[arg(long, default_value_t = 0.15, value_parser = parse_nonneg_f64)]
+    threshold: f64,
+    /// Noise-band width in sample standard deviations. A metric is flagged
+    /// only when the median move clears the threshold *and* is larger than
+    /// `sigma × σ` of the samples, so single-run scatter on a shared CI
+    /// runner does not fail the build. `0` disables the band (threshold
+    /// only); the default of ~2σ covers ~95% of Gaussian noise. Must be
+    /// finite and non-negative.
+    #[arg(long, default_value_t = 2.0, value_parser = parse_nonneg_f64)]
+    sigma: f64,
+}
+
 /// Clap parser that accepts only finite, non-negative `f64` values. Used to
 /// reject footgun inputs (negative `--threshold`/`--sigma`, `NaN`, `inf`)
 /// that would quietly weaken or invert the regression gate.
@@ -427,6 +542,190 @@ fn run(cli: Cli) -> Result<std::process::ExitCode, BenchError> {
         Command::ForwardingDoc(args) => run_forwarding_doc(&args),
         Command::ForwardingCompare(args) => run_forwarding_compare(&args),
         Command::Datasheet(args) => run_datasheet(&args),
+        Command::MultiQueue(args) => run_multi_queue(&args),
+        Command::MultiQueueCompare(args) => run_multi_queue_compare(&args),
+    }
+}
+
+/// Derive the default queue-fanout curve when `--queues` is not given:
+/// `1, 2, 4, …` doubling up to the larger of the SKU's queue fan-out and
+/// the host's available parallelism, plus that bound itself and the next
+/// power of two above it — so the curve always spans the single-stream
+/// floor, the host's real core budget, and one oversubscribed step past it
+/// (where the contended ceiling shows). The output is already strictly
+/// increasing for every realistic input; `MultiQueueConfig::normalized_queue_counts`
+/// remains the single authoritative sort/dedup point (idempotent here, and
+/// the only thing that would collapse the lone `bound == usize::MAX`
+/// degenerate duplicate), so this function need not re-implement it.
+fn default_queue_curve(sku_queues: u32, parallelism: usize) -> Vec<usize> {
+    let bound = (sku_queues as usize).max(parallelism).max(1);
+    let mut curve = Vec::new();
+    let mut q = 1usize;
+    while q < bound {
+        curve.push(q);
+        // Saturating so the loop is provably terminating even if `bound`
+        // approached `usize::MAX` on a 32-bit target: a saturated `q` is
+        // `>= bound` and exits.
+        q = q.saturating_mul(2);
+    }
+    // The host/SKU bound itself, then one power-of-two step past it. After
+    // the loop `q` is the smallest power of two `>= bound`: when `bound` is
+    // itself a power of two (`q == bound`) the next step up is `q * 2`;
+    // otherwise `q` already sits one power of two above `bound`.
+    curve.push(bound);
+    let oversubscribed = if q > bound { q } else { q.saturating_mul(2) };
+    curve.push(oversubscribed);
+    curve
+}
+
+fn run_multi_queue(args: &MultiQueueArgs) -> Result<std::process::ExitCode, BenchError> {
+    use sng_bench::multiqueue::{self, MultiQueueConfig};
+    use sng_bench::report::{MULTIQUEUE_SCHEMA_VERSION, MultiQueueReport};
+
+    let profile = load_profile(&args.profile)?;
+    let parallelism = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+
+    let rule_count = if args.rule_count > 0 {
+        args.rule_count
+    } else {
+        profile.datapath.rule_count
+    };
+    // Clamp to >= 1 here, at the single resolution point, so the value
+    // written to the report is exactly the one the measurement runs:
+    // `measure_scaling` also floors to 1 internally, and resolving the
+    // clamp up front keeps the report metadata and the runtime in lockstep
+    // even for a degenerate `sample_packets == 0` profile.
+    let packets_per_queue = if args.packets_per_queue > 0 {
+        args.packets_per_queue
+    } else {
+        profile.datapath.sample_packets
+    }
+    .max(1);
+    let queue_counts = if args.queues.is_empty() {
+        default_queue_curve(profile.effective_nic_queues(), parallelism)
+    } else {
+        args.queues.clone()
+    };
+
+    let config = MultiQueueConfig {
+        queue_counts,
+        packets_per_queue,
+        rule_count,
+        mode: args.mode.to_mode(),
+        backend: args.backend.to_backend(),
+    };
+
+    let packet_bytes = profile.datapath.packet_bytes;
+    let points = multiqueue::measure_scaling(&profile.traffic_mix, &config, packet_bytes);
+
+    let report = MultiQueueReport {
+        schema_version: MULTIQUEUE_SCHEMA_VERSION,
+        profile: profile.name.clone(),
+        unix_time_secs: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+        git_sha: args.git_sha.clone(),
+        mode: args.mode.to_mode().label().to_string(),
+        backend: args.backend.to_backend().label().to_string(),
+        rule_count,
+        packet_bytes,
+        packets_per_queue,
+        available_parallelism: parallelism,
+        target_gbps: profile.target_gbps,
+        points,
+    };
+
+    // Always print the human-readable summary so a live run is legible on
+    // the console; write the machine-readable JSON when an `--out` is given.
+    eprintln!("{}", report.to_markdown());
+    let json = report.to_json()?;
+    if let Some(out) = &args.out {
+        write_file(out, &json)?;
+        eprintln!("wrote {}", out.display());
+    } else {
+        println!("{json}");
+    }
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+fn load_multiqueue_report(path: &Path) -> Result<report::MultiQueueReport, BenchError> {
+    let s = std::fs::read_to_string(path).map_err(|source| BenchError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    Ok(report::MultiQueueReport::from_json(&s)?)
+}
+
+/// Gate one-or-more current multi-queue artifacts against a committed
+/// baseline on the hardware-invariant per-width scaling efficiency, and
+/// exit 2 on a real regression. Mirrors `forwarding-compare`: it surfaces
+/// the full statistical picture (median, σ, noise band) for every gated
+/// width so an engineer can see *why* the gate did or did not fire.
+fn run_multi_queue_compare(
+    args: &MultiQueueCompareArgs,
+) -> Result<std::process::ExitCode, BenchError> {
+    let baseline = load_multiqueue_report(&args.baseline)?;
+    let samples = args
+        .current
+        .iter()
+        .map(|p| load_multiqueue_report(p))
+        .collect::<Result<Vec<_>, _>>()?;
+    let label = samples.first().map_or_else(
+        || {
+            format!(
+                "{}/{}/{}",
+                baseline.profile, baseline.mode, baseline.backend
+            )
+        },
+        |s| format!("{}/{}/{}", s.profile, s.mode, s.backend),
+    );
+
+    let rr =
+        report::detect_multiqueue_regression_stats(&baseline, &samples, args.threshold, args.sigma)
+            .map_err(BenchError::Regression)?;
+
+    eprintln!(
+        "multi-queue gate: {label}, {} sample(s), threshold {:.0}%, noise band {:.1}σ",
+        rr.sample_count,
+        args.threshold * 100.0,
+        args.sigma,
+    );
+    for m in &rr.metrics {
+        let verdict = if m.flagged {
+            "REGRESSION"
+        } else if m.exceeds_threshold {
+            "within-noise" // crossed threshold but inside the σ band
+        } else {
+            "ok"
+        };
+        eprintln!(
+            "  [{verdict}] {}: baseline {:.4} -> median {:.4} ({:+.1}%), σ={:.4} (n={}), band=±{:.4}",
+            m.metric,
+            m.baseline,
+            m.median,
+            m.change_fraction * 100.0,
+            m.stddev,
+            m.samples,
+            args.sigma * m.stddev,
+        );
+    }
+
+    if rr.has_regression() {
+        eprintln!(
+            "MULTI-QUEUE SCALING REGRESSION DETECTED ({label}): {} width(s) cleared both the {:.0}% threshold and the {:.1}σ noise band.",
+            rr.flagged().count(),
+            args.threshold * 100.0,
+            args.sigma,
+        );
+        Ok(std::process::ExitCode::from(EXIT_REGRESSION))
+    } else {
+        println!(
+            "no multi-queue scaling regression: {label} median within {:.0}% threshold / {:.1}σ noise band across {} sample(s)",
+            args.threshold * 100.0,
+            args.sigma,
+            rr.sample_count,
+        );
+        Ok(std::process::ExitCode::SUCCESS)
     }
 }
 
@@ -1409,6 +1708,25 @@ mod tests {
         assert_eq!(Inspection::NoInspect.label(), "no-inspect");
         assert_eq!(Inspection::UrlCat.label(), "url-cat");
         assert_eq!(Inspection::FullTls.label(), "full-tls");
+    }
+
+    #[test]
+    fn default_queue_curve_spans_floor_bound_and_one_step_past() {
+        // Power-of-two bound: doubling curve up to the bound, then one
+        // power-of-two step past it.
+        assert_eq!(default_queue_curve(8, 8), vec![1, 2, 4, 8, 16]);
+        // SKU fan-out larger than host parallelism wins the bound.
+        assert_eq!(default_queue_curve(16, 8), vec![1, 2, 4, 8, 16, 32]);
+        // Non-power-of-two bound: the oversubscription point is the next
+        // power of two strictly above the bound (8, not 16), so the curve
+        // never skips that step.
+        assert_eq!(default_queue_curve(5, 5), vec![1, 2, 4, 5, 8]);
+        // A single-core host still yields a usable curve.
+        assert_eq!(default_queue_curve(1, 1), vec![1, 2]);
+        // The bound is always present and the curve is strictly increasing.
+        let curve = default_queue_curve(6, 3);
+        assert!(curve.contains(&6));
+        assert!(curve.windows(2).all(|w| w[0] < w[1]), "curve must increase");
     }
 
     #[test]
