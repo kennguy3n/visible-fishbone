@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/google/uuid"
@@ -83,6 +84,10 @@ func cloneTenant(t repository.Tenant) repository.Tenant {
 	if t.DeletedAt != nil {
 		ts := *t.DeletedAt
 		t.DeletedAt = &ts
+	}
+	if t.LastActiveAt != nil {
+		ts := *t.LastActiveAt
+		t.LastActiveAt = &ts
 	}
 	return t
 }
@@ -410,4 +415,61 @@ func (r *TenantRepository) Delete(ctx context.Context, id uuid.UUID) error {
 	}
 	r.s.tenants[id] = existing
 	return nil
+}
+
+// TouchLastActive advances the tenant's LastActiveAt to `seen`,
+// forward-only, mirroring the postgres GREATEST() semantics: a `seen`
+// at or before the stored value is a no-op so the signal never moves
+// backwards. UpdatedAt is intentionally left untouched (the postgres
+// trigger masks last_active_at-only changes; here we simply do not
+// touch it) so the activity path does not churn the config timestamp.
+// Returns ErrNotFound if the tenant does not exist or is soft-deleted.
+func (r *TenantRepository) TouchLastActive(ctx context.Context, id uuid.UUID, seen time.Time) error {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return err
+	}
+	if id == uuid.Nil {
+		return repository.ErrInvalidArgument
+	}
+	r.s.mu.Lock()
+	defer r.s.mu.Unlock()
+	existing, ok := r.s.tenants[id]
+	if !ok {
+		return repository.ErrNotFound
+	}
+	if existing.DeletedAt != nil || existing.Status == repository.TenantStatusDeleted {
+		return repository.ErrNotFound
+	}
+	seen = seen.UTC()
+	if existing.LastActiveAt == nil || seen.After(*existing.LastActiveAt) {
+		existing.LastActiveAt = &seen
+		r.s.tenants[id] = existing
+	}
+	return nil
+}
+
+// ListTenantActivity returns the (id, last_active_at) projection for
+// every live tenant, ordered by id, matching the postgres backend.
+func (r *TenantRepository) ListTenantActivity(ctx context.Context) ([]repository.TenantActivity, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return nil, err
+	}
+	r.s.mu.RLock()
+	defer r.s.mu.RUnlock()
+	out := make([]repository.TenantActivity, 0, len(r.s.tenants))
+	for _, t := range r.s.tenants {
+		if t.DeletedAt != nil || t.Status == repository.TenantStatusDeleted {
+			continue
+		}
+		a := repository.TenantActivity{ID: t.ID}
+		if t.LastActiveAt != nil {
+			ts := *t.LastActiveAt
+			a.LastActiveAt = &ts
+		}
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].ID.String() < out[j].ID.String()
+	})
+	return out, nil
 }

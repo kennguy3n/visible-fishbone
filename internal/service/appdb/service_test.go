@@ -330,6 +330,12 @@ func (f fakeTenantRepo) List(context.Context, repository.Page) (repository.PageR
 		Items: []repository.Tenant{{ID: f.tn, Status: repository.TenantStatusActive}},
 	}, nil
 }
+func (f fakeTenantRepo) TouchLastActive(context.Context, uuid.UUID, time.Time) error {
+	return nil
+}
+func (f fakeTenantRepo) ListTenantActivity(context.Context) ([]repository.TenantActivity, error) {
+	return []repository.TenantActivity{{ID: f.tn}}, nil
+}
 
 // TestDemotionEngine_TenantSignal installs a tenant-scoped override
 // when a tenant-local signal (anomaly) is processed.

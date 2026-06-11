@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -17,21 +18,23 @@ type TenantRepository struct{ s *Store }
 
 const tenantSelectColumns = `
 	id, name, slug, msp_id, status, COALESCE(region, ''), tier,
-	settings, created_at, updated_at, deleted_at
+	settings, created_at, updated_at, deleted_at, last_active_at
 `
 
 func scanTenant(row pgx.Row) (repository.Tenant, error) {
 	var (
-		t       repository.Tenant
-		mspID   nullableUUID
-		region  string
-		setBuf  []byte
-		deleted *deletedAtScan
+		t          repository.Tenant
+		mspID      nullableUUID
+		region     string
+		setBuf     []byte
+		deleted    *deletedAtScan
+		lastActive *deletedAtScan
 	)
 	deleted = &deletedAtScan{}
+	lastActive = &deletedAtScan{}
 	if err := row.Scan(
 		&t.ID, &t.Name, &t.Slug, &mspID, &t.Status, &region, &t.Tier,
-		&setBuf, &t.CreatedAt, &t.UpdatedAt, deleted,
+		&setBuf, &t.CreatedAt, &t.UpdatedAt, deleted, lastActive,
 	); err != nil {
 		return repository.Tenant{}, err
 	}
@@ -44,6 +47,10 @@ func scanTenant(row pgx.Row) (repository.Tenant, error) {
 	if deleted.Valid {
 		ts := deleted.Time
 		t.DeletedAt = &ts
+	}
+	if lastActive.Valid {
+		ts := lastActive.Time
+		t.LastActiveAt = &ts
 	}
 	return t, nil
 }
@@ -493,6 +500,81 @@ func (r *TenantRepository) UpdateStatus(ctx context.Context, id uuid.UUID, statu
 		return repository.Tenant{}, fmt.Errorf("update status lookup: %w", scanErr)
 	}
 	return repository.Tenant{}, repository.ErrForbidden
+}
+
+// TouchLastActive advances last_active_at to `seen`, forward-only. The
+// `GREATEST(last_active_at, $2)` (NULL-safe via COALESCE) makes the
+// write monotonic at the SQL level, so concurrent or out-of-order
+// pings from multiple PoPs converge on the latest timestamp without a
+// read-modify-write race. The WHERE filters soft-deleted tenants so a
+// stray ping cannot resurrect activity on a tombstoned row. updated_at
+// is intentionally left untouched: the tenants-specific trigger from
+// migration 059 detects a last_active_at-only change and skips the
+// bump, so this high-rate path never churns the config timestamp.
+func (r *TenantRepository) TouchLastActive(ctx context.Context, id uuid.UUID, seen time.Time) error {
+	if id == uuid.Nil {
+		return repository.ErrInvalidArgument
+	}
+	const q = `
+		UPDATE tenants
+		SET last_active_at = GREATEST(COALESCE(last_active_at, $2::timestamptz), $2::timestamptz)
+		WHERE id = $1::uuid AND status <> 'deleted' AND deleted_at IS NULL`
+	var tag int64
+	err := r.s.onPrimary(ctx, func(db pgxQuerier) error {
+		ct, e := db.Exec(ctx, q, id, seen.UTC())
+		if e != nil {
+			return e
+		}
+		tag = ct.RowsAffected()
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("touch last_active_at: %w", err)
+	}
+	if tag == 0 {
+		return repository.ErrNotFound
+	}
+	return nil
+}
+
+// ListTenantActivity returns (id, last_active_at) for every live
+// tenant in one indexed scan, ordered by id. This is the single cheap
+// query a sweep planner runs per cycle to bucket tenants by recency —
+// it never loads the heavy Tenant row, so enumeration stays O(1)
+// queries regardless of tenant count.
+func (r *TenantRepository) ListTenantActivity(ctx context.Context) ([]repository.TenantActivity, error) {
+	const q = `
+		SELECT id, last_active_at
+		FROM tenants
+		WHERE deleted_at IS NULL
+		ORDER BY id`
+	out := make([]repository.TenantActivity, 0, 256)
+	err := r.s.onPrimary(ctx, func(db pgxQuerier) error {
+		rows, e := db.Query(ctx, q)
+		if e != nil {
+			return fmt.Errorf("list tenant activity: %w", e)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var (
+				a          repository.TenantActivity
+				lastActive deletedAtScan
+			)
+			if e := rows.Scan(&a.ID, &lastActive); e != nil {
+				return fmt.Errorf("scan tenant activity: %w", e)
+			}
+			if lastActive.Valid {
+				ts := lastActive.Time
+				a.LastActiveAt = &ts
+			}
+			out = append(out, a)
+		}
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 func (r *TenantRepository) TransitionStatus(ctx context.Context, id uuid.UUID, from, to repository.TenantStatus) (repository.Tenant, error) {
