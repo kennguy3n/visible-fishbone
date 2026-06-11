@@ -1202,6 +1202,11 @@ pub struct AiAppExfilDetector {
     secrets: SecretScanner,
     confidential: ConfidentialScanner,
     policy: AiAppPolicy,
+    /// Scan ceiling for the secret/confidential passes, taken from the
+    /// classifier so all three passes bound the same byte range (a
+    /// custom engine ceiling no longer diverges from a hardcoded
+    /// default).
+    max_scan_bytes: usize,
 }
 
 impl AiAppExfilDetector {
@@ -1223,11 +1228,13 @@ impl AiAppExfilDetector {
     /// the default fallback-only one.
     #[must_use]
     pub fn with_classifier(classifier: ContentClassifier, policy: AiAppPolicy) -> Self {
+        let max_scan_bytes = classifier.max_scan_bytes();
         Self {
             classifier,
             secrets: SecretScanner::new(),
             confidential: ConfidentialScanner::new(),
             policy,
+            max_scan_bytes,
         }
     }
 
@@ -1302,7 +1309,7 @@ impl AiAppExfilDetector {
 
         // Secret + confidential scanners run on the same lossy-decoded
         // text the classifier inspects (bounded by the same ceiling).
-        let scanned = &body[..body.len().min(crate::DEFAULT_MAX_SCAN_BYTES)];
+        let scanned = &body[..body.len().min(self.max_scan_bytes)];
         let truncated = body.len() > scanned.len();
         let text = String::from_utf8_lossy(scanned);
         let secret_hits = self.secrets.scan(&text);
@@ -1425,7 +1432,9 @@ fn signal_to_verdict(
         meta.source = Some(signal.destination.domain.clone());
     }
     let pii = classifier.classify(AI_UPLOAD_CHANNEL, body, &meta).matches;
-    let scanned = &body[..body.len().min(crate::DEFAULT_MAX_SCAN_BYTES)];
+    // Same ceiling the classifier used, so the recovered secret/marker
+    // spans align with the PII spans rather than a hardcoded default.
+    let scanned = &body[..body.len().min(classifier.max_scan_bytes())];
     let text = String::from_utf8_lossy(scanned);
     let mut matches: Vec<RuleMatch> = pii;
     for s in secrets.scan(&text) {
@@ -1813,6 +1822,43 @@ mod tests {
         // Default policy is non-blocking even for secrets.
         assert_eq!(sig.action, AiAppAction::Coach, "{sig:?}");
         assert!(sig.findings.iter().any(|f| f.kind == FindingKind::Secret));
+    }
+
+    #[test]
+    fn custom_scan_ceiling_bounds_the_secret_pass_consistently() {
+        // A secret sitting past a small scan ceiling must be invisible to
+        // the secret pass exactly as it is to the PII classifier, so the
+        // engine's custom `max_scan_bytes` governs all three passes.
+        let mut body = vec![b'a'; 64];
+        body.extend_from_slice(b" AKIAIOSFODNN7EXAMPLE");
+
+        // Control: the default ceiling scans the whole body and flags it.
+        let wide = detector();
+        let wide_sig = wide.inspect("https://claude.ai/chat", &body, &ContentMetadata::default());
+        assert!(
+            wide_sig
+                .findings
+                .iter()
+                .any(|f| f.kind == FindingKind::Secret),
+            "default ceiling should see the trailing secret"
+        );
+
+        // A 16-byte ceiling stops before the secret: no secret finding,
+        // and the reported scan window matches the ceiling.
+        let classifier = ContentClassifier::compile_with_limit(&default_pii_rules(), 16)
+            .expect("classifier compiles");
+        let narrow = AiAppExfilDetector::with_classifier(classifier, AiAppPolicy::default());
+        let narrow_sig =
+            narrow.inspect("https://claude.ai/chat", &body, &ContentMetadata::default());
+        assert_eq!(narrow_sig.scanned_bytes, 16, "{narrow_sig:?}");
+        assert!(narrow_sig.truncated, "{narrow_sig:?}");
+        assert!(
+            !narrow_sig
+                .findings
+                .iter()
+                .any(|f| f.kind == FindingKind::Secret),
+            "a secret past the ceiling must not be scanned: {narrow_sig:?}"
+        );
     }
 
     #[test]

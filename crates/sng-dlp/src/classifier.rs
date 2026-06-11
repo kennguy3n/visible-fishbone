@@ -727,6 +727,15 @@ impl ContentClassifier {
         self.ml_detector.has_model()
     }
 
+    /// The byte ceiling this classifier bounds its span scan to. Callers
+    /// that run auxiliary scanners over the same content (e.g. the
+    /// AI-app secret/confidential scanners) read it so every pass shares
+    /// one ceiling instead of diverging on a hardcoded default.
+    #[must_use]
+    pub fn max_scan_bytes(&self) -> usize {
+        self.max_scan_bytes
+    }
+
     /// Classify `content` observed on `channel`. Only rules scoped
     /// to `channel` (or scoped to all channels) are considered.
     ///
