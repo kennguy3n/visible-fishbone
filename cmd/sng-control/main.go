@@ -473,7 +473,21 @@ func run() error {
 		// Act promptly on each newly discovered app: the engine
 		// classifies, audits and recommends/enforces as soon as the
 		// windowed flush upserts it. Must be set before Start.
-		shadowDiscoverer.SetDiscoveryHook(rc.AppNoOpsEngine)
+		//
+		// Leader-gated: every replica runs a discoverer, so an
+		// ungated hook would let each replica classify and append an
+		// action for the same app, producing duplicate audit rows and
+		// inflated digest counts in a multi-replica deployment. The
+		// gate restricts discovery-time classification to the leader;
+		// apps a non-leader observes are still caught by the
+		// leader-only Reconcile sweep below (which reconstructs the
+		// same connector/domain signal via catalogMetaFor), so nothing
+		// is missed — it is just classified on the reconcile cadence
+		// instead of at flush time.
+		shadowDiscoverer.SetDiscoveryHook(leaderGatedDiscoveryHook{
+			leader: elector,
+			hook:   rc.AppNoOpsEngine,
+		})
 	}
 	shadowDiscoverer.Start(0)
 	defer shadowDiscoverer.Stop()
@@ -2891,6 +2905,26 @@ func subscribePoPHealth(nc *nats.Conn, svc *pop.Service, logger *slog.Logger) (*
 				slog.String("pop_id", popID.String()), slog.Any("error", err))
 		}
 	})
+}
+
+// leaderGatedDiscoveryHook forwards shadow-IT discovery notifications to
+// the wrapped NoOps hook only while this replica holds leadership. Each
+// replica runs its own ShadowITDiscoverer, so without this gate every
+// replica's flush would classify and append an action for the same app —
+// duplicate audit rows and inflated digest counts. The leader-only
+// Reconcile sweep reclassifies all apps on its cadence (reconstructing the
+// connector/domain signal from the catalog), so gating the prompt path
+// loses no coverage, only flush-time immediacy for non-leader replicas.
+type leaderGatedDiscoveryHook struct {
+	leader interface{ IsLeader() bool }
+	hook   casb.AppDiscoveryHook
+}
+
+func (h leaderGatedDiscoveryHook) OnAppDiscovered(ctx context.Context, tenantID uuid.UUID, app repository.CASBDiscoveredApp, meta casb.AppDiscoveryMeta) {
+	if h.leader == nil || !h.leader.IsLeader() {
+		return
+	}
+	h.hook.OnAppDiscovered(ctx, tenantID, app, meta)
 }
 
 // runCASBNoOps drives the leader-only shadow-IT NoOps maintenance sweep:
