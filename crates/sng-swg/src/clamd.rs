@@ -144,6 +144,22 @@ impl ClamdConfig {
     }
 
     fn with_endpoint(endpoint: ClamdEndpoint) -> Self {
+        // 1 h: clamd's freshclam typically updates the signature database
+        // hourly, so a one-hour ceiling keeps a cached verdict from outliving a
+        // database update by more than one refresh cycle while still absorbing
+        // the bursty repeat downloads (a popular installer fetched by many
+        // employees) the cache exists for.
+        //
+        // `from_secs(60 * 60)` is intentional: `Duration::from_hours` is part of
+        // the still-unstable `duration_constructors` feature on the pinned 1.91
+        // toolchain (`rust-version` in the workspace `Cargo.toml`), so it would
+        // not compile there — see the same workaround in
+        // `sng-pal/src/dlp/linux.rs`. `unknown_lints` keeps this compiling on
+        // 1.91, whose clippy doesn't know `duration_suboptimal_units`; the second
+        // allow suppresses that lint on newer clippy, where `from_secs(3600)`
+        // would otherwise suggest the unstable `from_hours`.
+        #[allow(unknown_lints, clippy::duration_suboptimal_units)]
+        let cache_ttl = Duration::from_secs(60 * 60);
         Self {
             endpoint,
             // 32 MiB: covers the overwhelming majority of office documents,
@@ -172,12 +188,7 @@ impl ClamdConfig {
             // connections (those are reused in milliseconds). Operators who
             // raise clamd's `IdleTimeout` can raise this in step.
             pool_idle_ttl: Duration::from_secs(20),
-            // 1 h: clamd's freshclam typically updates the signature database
-            // hourly, so a one-hour ceiling keeps a cached verdict from
-            // outliving a database update by more than one refresh cycle
-            // while still absorbing the bursty repeat downloads (a popular
-            // installer fetched by many employees) the cache exists for.
-            cache_ttl: Duration::from_hours(1),
+            cache_ttl,
             // Default fail-open: a scanner outage must never block employees
             // from legitimate downloads. Regulated tenants opt into
             // fail-closed explicitly.
