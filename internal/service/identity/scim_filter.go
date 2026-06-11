@@ -236,16 +236,16 @@ func tokenizeFilter(raw string) ([]scimToken, error) {
 	i := 0
 	for i < len(raw) {
 		c := raw[i]
-		switch {
-		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+		switch c {
+		case ' ', '\t', '\n', '\r':
 			i++
-		case c == '(':
+		case '(':
 			toks = append(toks, scimToken{tokLParen, "("})
 			i++
-		case c == ')':
+		case ')':
 			toks = append(toks, scimToken{tokRParen, ")"})
 			i++
-		case c == '"':
+		case '"':
 			var sb strings.Builder
 			i++ // consume opening quote
 			closed := false
@@ -268,7 +268,7 @@ func tokenizeFilter(raw string) ([]scimToken, error) {
 				return nil, fmt.Errorf("unterminated string literal in filter")
 			}
 			toks = append(toks, scimToken{tokString, sb.String()})
-		case c == '[' || c == ']':
+		case '[', ']':
 			return nil, fmt.Errorf("valuePath filters (attr[...]) are not supported")
 		default:
 			start := i

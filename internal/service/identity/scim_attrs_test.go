@@ -26,7 +26,7 @@ func TestScimUserVersionNoSeparatorCollision(t *testing.T) {
 	}
 
 	// Identical state must still produce a stable, equal version.
-	if scimUserVersion(a) != scimUserVersion(a) {
+	if first, second := scimUserVersion(a), scimUserVersion(a); first != second {
 		t.Error("version is not stable for identical input")
 	}
 }

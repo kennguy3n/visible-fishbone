@@ -31,6 +31,7 @@ type RouterDeps struct {
 	Alert            *AlertHandler
 	Integrations     *IntegrationHandler
 	CASB             *CASBHandler
+	PolicyTemplates  *PolicyTemplateHandler
 	MSP              *MSPHandler
 	Browser          *BrowserHandler
 	Terraform        *TerraformHandler
@@ -165,6 +166,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.CASB != nil {
 		deps.CASB.Register(apiMux)
+	}
+	if deps.PolicyTemplates != nil {
+		deps.PolicyTemplates.Register(apiMux)
 	}
 	if deps.MSP != nil {
 		deps.MSP.Register(apiMux)

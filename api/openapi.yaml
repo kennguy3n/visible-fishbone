@@ -44,6 +44,16 @@ tags:
       reports posture snapshots. The device identity comes from the
       token's device_key claim, so a session only ever acts on its
       own device.
+  - name: policy-templates
+    description: |
+      Smart-default security baselines. An SME picks an industry +
+      country and gets a deny-by-default Policy-Graph (safe-browsing
+      category filtering, per-regime DLP detector sensitivity, and a
+      baseline firewall posture). The catalog (one baseline, one per
+      industry, one per compliance regime) is global, immutable, and
+      code-defined; preview renders the composed graph without
+      persisting, and apply idempotently stores it as the tenant's
+      active baseline (one row per tenant).
   - name: pops
     description: |
       Cloud PoP (Point-of-Presence) service. A PoP is a shared,
@@ -3438,6 +3448,106 @@ paths:
         "403": { $ref: "#/components/responses/Error" }
         "404": { $ref: "#/components/responses/Error" }
 
+  /policy-templates:
+    get:
+      tags: [policy-templates]
+      operationId: listPolicyTemplates
+      summary: List the smart-default security baseline catalog
+      description: |
+        Returns the immutable, code-defined template catalog: one
+        universal baseline, one per supported industry, and one per
+        supported compliance regime. Global (not tenant-scoped);
+        authenticated. An SME browses these, then previews/applies a
+        selection.
+      responses:
+        "200":
+          description: The full template catalog.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/PolicyTemplate" }
+  /policy-templates/{id}:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: "Template id, e.g. `baseline/global`, `industry/finance`, `compliance/eu-gdpr`."
+        schema: { type: string }
+    get:
+      tags: [policy-templates]
+      operationId: getPolicyTemplate
+      summary: Get a single catalog template by id
+      responses:
+        "200":
+          description: The catalog template.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyTemplate" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/policy-templates/preview:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [policy-templates]
+      operationId: previewPolicyTemplate
+      summary: Preview the rendered Policy-Graph intent for a selection
+      description: |
+        Renders (without persisting) the composed deny-by-default
+        Policy-Graph for an industry + country selection. A dry-run
+        used by the setup wizard before apply.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PolicyTemplateSelection" }
+      responses:
+        "200":
+          description: The rendered baseline preview.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyTemplatePreview" }
+        "400": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/policy-templates/apply:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [policy-templates]
+      operationId: applyPolicyTemplate
+      summary: Apply a baseline to the tenant (idempotent)
+      description: |
+        Renders the baseline for the selection and idempotently
+        persists it as the tenant's active baseline. Re-applying the
+        same selection is a no-op that returns the stored row;
+        changing the selection re-renders and replaces it in place.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PolicyTemplateSelection" }
+      responses:
+        "200":
+          description: The tenant's applied baseline.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppliedPolicyTemplate" }
+        "400": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/policy-templates/applied:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [policy-templates]
+      operationId: getAppliedPolicyTemplate
+      summary: Get the tenant's current applied baseline
+      responses:
+        "200":
+          description: The tenant's applied baseline.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppliedPolicyTemplate" }
+        "404": { $ref: "#/components/responses/Error" }
+
 components:
   securitySchemes:
     BearerJWT:
@@ -3533,6 +3643,72 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/TenantMigration" }
   schemas:
+    PolicyTemplate:
+      type: object
+      description: |
+        A catalog template. `kind` is one of `baseline`, `industry`,
+        or `compliance`; `industry` is set only for industry templates
+        and `regime` only for compliance templates. `spec` carries the
+        URL categories, DLP detectors, and firewall posture the
+        renderer composes into a Policy-Graph.
+      properties:
+        id: { type: string, example: "industry/finance" }
+        kind: { type: string, enum: [baseline, industry, compliance] }
+        name: { type: string }
+        description: { type: string }
+        industry: { type: string }
+        regime: { type: string }
+        spec: { type: object, additionalProperties: true }
+    PolicyTemplateSelection:
+      type: object
+      required: [industry, country]
+      description: An SME's industry + country pick.
+      properties:
+        industry:
+          type: string
+          description: "Industry token, e.g. `finance`, `healthcare`, `retail`, `general`."
+          example: finance
+        country:
+          type: string
+          description: "ISO-3166 alpha-2 country code (case-insensitive), e.g. `DE`, `GB`, `US`."
+          example: DE
+    PolicyTemplatePreview:
+      type: object
+      description: The rendered (non-persisted) baseline for a selection.
+      properties:
+        selection: { $ref: "#/components/schemas/PolicyTemplateSelection" }
+        regime:
+          type: string
+          description: "Resolved compliance regime, e.g. `eu-gdpr`, `uk-dpa`, `us-baseline`."
+        template_ids:
+          type: array
+          items: { type: string }
+          description: "The catalog templates composing the graph: [baseline, industry, compliance]."
+        graph_hash:
+          type: string
+          description: SHA-256 of the canonical Policy-Graph JSON; the idempotency key.
+        graph:
+          type: object
+          additionalProperties: true
+          description: The rendered, validated deny-by-default Policy-Graph intent.
+    AppliedPolicyTemplate:
+      type: object
+      description: A tenant's persisted active baseline (one row per tenant).
+      properties:
+        tenant_id: { type: string, format: uuid }
+        industry: { type: string }
+        country: { type: string }
+        regime: { type: string }
+        template_ids:
+          type: array
+          items: { type: string }
+        graph_hash: { type: string }
+        graph:
+          type: object
+          additionalProperties: true
+        version: { type: integer }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
     Error:
       type: object
       required: [error]

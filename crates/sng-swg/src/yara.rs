@@ -912,16 +912,16 @@ mod tests {
         // scan. The plaintext `vbaProject.bin` member name in the ZIP
         // local-file header must therefore be a sufficient signal on its own.
         let engine = YaraEngine::with_builtin_rules().unwrap();
-        let mut docm = vec![0x50, 0x4B, 0x03, 0x04];
-        docm.extend_from_slice(b"....word/vbaProject.bin....<deflated VBA bytecode>....");
-        let m = engine.worst_match(&docm).expect("docm match");
+        let mut macro_doc = vec![0x50, 0x4B, 0x03, 0x04];
+        macro_doc.extend_from_slice(b"....word/vbaProject.bin....<deflated VBA bytecode>....");
+        let m = engine.worst_match(&macro_doc).expect("docm match");
         assert_eq!(m.rule, "office_macro_enabled");
 
         // A macro-free OOXML (plain .docx: ZIP magic, no VBA project) must
         // still never match.
-        let mut docx = vec![0x50, 0x4B, 0x03, 0x04];
-        docx.extend_from_slice(b"....word/document.xml....word/styles.xml....");
-        assert!(engine.scan(&docx).is_empty());
+        let mut plain_doc = vec![0x50, 0x4B, 0x03, 0x04];
+        plain_doc.extend_from_slice(b"....word/document.xml....word/styles.xml....");
+        assert!(engine.scan(&plain_doc).is_empty());
     }
 
     #[test]
