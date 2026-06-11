@@ -100,13 +100,17 @@ func (h *TenantMigrationHandler) start(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, http.StatusBadRequest, "missing_target_region", "target_region is required")
 		return
 	}
-	// Start drives the migration synchronously to a terminal state and
-	// returns the final record. If the migration rolled back, it returns
-	// the original failure cause alongside the (rolled_back/failed)
-	// record; that is a defined terminal outcome, not a server error, so
-	// it is surfaced below as a 200 with the record (see the err branch)
-	// rather than a 5xx. Only pre-flight errors (validation, conflict,
-	// not-found) and infrastructure errors map to non-2xx.
+	// In the control-plane's async mode (EnableAsyncDrive) Start returns
+	// the freshly-created pending record once it is durably persisted and
+	// drives the pipeline on a background context; the response below is
+	// then a 202 Accepted and the client polls migration-status for
+	// progress. In sync mode (tests/embeddings) Start instead drives to a
+	// terminal state and returns the final record: a rolled_back/failed
+	// migration comes back with the original forward-step cause, a
+	// defined terminal outcome (not a server error) surfaced as a 200 via
+	// the isTerminalRollback branch below. Either way, only pre-flight
+	// errors (validation, conflict, not-found) and infrastructure errors
+	// map to non-2xx.
 	mig, err := h.migrator.Start(r.Context(), id, req.TargetRegion)
 	if err != nil {
 		// A migration that ran but rolled back is reported through the

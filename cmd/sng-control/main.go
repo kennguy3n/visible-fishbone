@@ -614,6 +614,15 @@ func run() error {
 			logger.Warn("sng-control: metrics shutdown error", slog.Any("error", err))
 		}
 	}
+	// Drain WS11 migration drives that the migrate-region handler launched
+	// on a background context (decoupled from the now-closed HTTP server,
+	// so srv.Shutdown above did not wait for them). Bounded by shutdownCtx:
+	// if a drive does not finish in the shutdown window it is cancelled and
+	// left non-terminal for the leader resume loop to pick up (every step
+	// is idempotent). No-op when async drive was never enabled.
+	if rc.RegionMigrator != nil {
+		rc.RegionMigrator.Shutdown(shutdownCtx)
+	}
 
 	if err := webhookWorker.Stop(shutdownCtx); err != nil {
 		logger.Warn("sng-control: webhook worker shutdown error", slog.Any("error", err))
@@ -1441,6 +1450,15 @@ func buildRouter(
 	if err != nil {
 		return routerComponents{}, fmt.Errorf("build region migrator: %w", err)
 	}
+	// Drive migrations asynchronously: the migrate-region handler returns
+	// 202 Accepted with the pending record and the pipeline runs on a
+	// background context, so a long-running migration (real KMS re-wrap,
+	// ClickHouse partition copies, S3 transfers) never blocks on — or is
+	// killed by — the HTTP request's WriteTimeout. Clients poll
+	// migration-status; the leader resume loop is the crash net. The
+	// graceful-shutdown block drains in-flight background drives via
+	// tenantMigrator.Shutdown.
+	tenantMigrator.EnableAsyncDrive()
 	tenantMigrationHandler := handler.NewTenantMigrationHandler(tenantMigrator)
 
 	// Workstream 10 — per-tenant rate limiter: a fair per-tenant

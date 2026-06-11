@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -193,6 +194,66 @@ type RegionMigrator struct {
 	clock      func() time.Time
 
 	steps []migrationStep
+
+	// Asynchronous drive (WS11). When asyncCtx is non-nil
+	// (EnableAsyncDrive was called by the control-plane wiring) Start
+	// creates the migration row and returns the pending record
+	// immediately, then drives the pipeline on asyncCtx — a background
+	// context independent of the HTTP request that started it, whose own
+	// context is cancelled the instant the 202 response is written. The
+	// handler therefore replies 202 Accepted and clients poll
+	// migration-status. asyncWG tracks in-flight background drives so
+	// graceful shutdown can drain them (see Shutdown); the leader resume
+	// loop is the crash-recovery net if the process dies mid-drive. When
+	// asyncCtx is nil (the default, used by tests and any embedding that
+	// wants a blocking call) Start drives synchronously and returns the
+	// terminal record.
+	asyncCtx    context.Context
+	asyncCancel context.CancelFunc
+	asyncWG     sync.WaitGroup
+}
+
+// EnableAsyncDrive switches Start into asynchronous mode: Start creates
+// the migration row, launches the pipeline on a background context, and
+// returns the pending record so the HTTP handler can reply 202 Accepted
+// while the client polls migration-status. Without it (the default)
+// Start drives the pipeline synchronously and returns the terminal
+// record.
+//
+// The background context is deliberately independent of the server's
+// root context so an in-flight migration gets a bounded drain window on
+// shutdown (see Shutdown) instead of being cancelled the instant a
+// SIGTERM arrives. Call once during wiring, before the server starts
+// accepting requests; it is not safe to call concurrently with Start.
+// A second call is a no-op.
+func (m *RegionMigrator) EnableAsyncDrive() {
+	if m.asyncCtx != nil {
+		return
+	}
+	m.asyncCtx, m.asyncCancel = context.WithCancel(context.Background())
+}
+
+// Shutdown drains the background drives started by an async-mode Start,
+// blocking until they finish or ctx is done. If ctx expires first the
+// background context is cancelled so the drives abort promptly, leaving
+// their migrations non-terminal for the leader resume loop to pick up
+// (every step is idempotent, so an interrupted drive re-completes
+// safely on resume). Safe to call when async drive was never enabled
+// (no-op) and safe to call more than once.
+func (m *RegionMigrator) Shutdown(ctx context.Context) {
+	if m.asyncCtx == nil {
+		return
+	}
+	done := make(chan struct{})
+	go func() {
+		m.asyncWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+	m.asyncCancel()
 }
 
 // NewRegionMigrator builds a RegionMigrator. migrations and tenants are
@@ -321,11 +382,23 @@ func (m *RegionMigrator) buildSteps() []migrationStep {
 }
 
 // Start opens a new cross-region migration for tenantID toward
-// targetRegion and drives it to a terminal state synchronously. It
-// returns the final migration record. ErrMigrationInProgress if one is
-// already running, ErrSourceRegionUnset if the tenant has no residency
-// region, and ErrInvalidArgument (wrapped) for a malformed/identical
-// target region.
+// targetRegion. The pre-flight (validation, source/target resolution,
+// row creation) always runs synchronously on ctx, so its errors are
+// returned to the caller: ErrMigrationInProgress if one is already
+// running, ErrSourceRegionUnset if the tenant has no residency region,
+// ErrInvalidArgument (wrapped) for a malformed/identical target region,
+// and any store error creating the row.
+//
+// The pipeline drive then runs in one of two modes (see
+// EnableAsyncDrive):
+//   - async (control-plane default): the freshly-created pending record
+//     is returned immediately and the pipeline is driven on a
+//     background context, so the HTTP handler replies 202 Accepted and
+//     the client polls migration-status.
+//   - sync (default for embeddings/tests): the pipeline is driven to a
+//     terminal state on ctx and the final record is returned, with the
+//     original forward-step cause surfaced for a rolled_back/failed
+//     migration.
 func (m *RegionMigrator) Start(ctx context.Context, tenantID uuid.UUID, targetRegion string) (repository.TenantMigration, error) {
 	if tenantID == uuid.Nil {
 		return repository.TenantMigration{}, fmt.Errorf("tenant ID is required: %w", repository.ErrInvalidArgument)
@@ -369,7 +442,32 @@ func (m *RegionMigrator) Start(ctx context.Context, tenantID uuid.UUID, targetRe
 		"source_region": source,
 		"target_region": target,
 	})
+	if m.asyncCtx != nil {
+		// Async mode: hand the freshly-created (pending) record to a
+		// background drive decoupled from the request context and return
+		// it immediately so the handler replies 202 Accepted; the client
+		// observes progress via migration-status.
+		m.launchBackgroundDrive(created)
+		return created, nil
+	}
 	return m.drive(ctx, created)
+}
+
+// launchBackgroundDrive drives a freshly-created migration to a terminal
+// state on the background async context, decoupled from the HTTP request
+// that created it (whose context is cancelled the instant the 202
+// response is written). No caller observes the return, so the outcome is
+// logged at the same levels as a resume — a clean rollback is an
+// expected terminal outcome (warn), a failed rollback needs operator
+// attention (error). If the process dies mid-drive the leader resume
+// loop recovers the migration from its durable checkpoint.
+func (m *RegionMigrator) launchBackgroundDrive(mig repository.TenantMigration) {
+	m.asyncWG.Add(1)
+	go func() {
+		defer m.asyncWG.Done()
+		final, derr := m.drive(m.asyncCtx, mig)
+		m.logDriveOutcome(m.asyncCtx, mig, final, derr, "background drive")
+	}()
 }
 
 // Resume re-drives a tenant's in-flight migration from its durable
@@ -417,21 +515,38 @@ func (m *RegionMigrator) ResumeAll(ctx context.Context) (int, error) {
 // operators into thinking the rollback failed.
 func (m *RegionMigrator) resumeOne(ctx context.Context, mig repository.TenantMigration) (repository.TenantMigration, error) {
 	final, derr := m.drive(ctx, mig)
+	m.logDriveOutcome(ctx, mig, final, derr, "resume")
 	switch {
 	case derr == nil:
 		return final, nil
 	case final.State == repository.MigrationStateRolledBack:
-		m.logger.WarnContext(ctx, "tenant: in-flight migration rolled back during resume",
-			"tenant_id", mig.TenantID, "migration_id", mig.ID, "detail", final.Detail)
+		// A clean rollback is an expected, safe terminal outcome — the
+		// original cause was surfaced by drive for a synchronous Start
+		// caller, but ResumeAll must not treat it as a resume failure.
 		return final, nil
-	case final.State == repository.MigrationStateFailed:
-		m.logger.ErrorContext(ctx, "tenant: in-flight migration failed during resume (rollback incomplete; needs operator intervention)",
-			"tenant_id", mig.TenantID, "migration_id", mig.ID, "detail", final.Detail, "error", derr)
-		return final, derr
 	default:
-		m.logger.ErrorContext(ctx, "tenant: could not drive in-flight migration during resume",
-			"tenant_id", mig.TenantID, "migration_id", mig.ID, "state", final.State, "error", derr)
 		return final, derr
+	}
+}
+
+// logDriveOutcome logs the result of a non-synchronous drive (the leader
+// resume loop or an async background drive) at the level its terminal
+// state warrants. phase names the driver for the message ("resume",
+// "background drive"). A nil error is a clean completion and logs
+// nothing.
+func (m *RegionMigrator) logDriveOutcome(ctx context.Context, orig, final repository.TenantMigration, derr error, phase string) {
+	switch {
+	case derr == nil:
+		return
+	case final.State == repository.MigrationStateRolledBack:
+		m.logger.WarnContext(ctx, "tenant: in-flight migration rolled back during "+phase,
+			"tenant_id", orig.TenantID, "migration_id", orig.ID, "detail", final.Detail)
+	case final.State == repository.MigrationStateFailed:
+		m.logger.ErrorContext(ctx, "tenant: in-flight migration failed during "+phase+" (rollback incomplete; needs operator intervention)",
+			"tenant_id", orig.TenantID, "migration_id", orig.ID, "detail", final.Detail, "error", derr)
+	default:
+		m.logger.ErrorContext(ctx, "tenant: could not drive in-flight migration during "+phase,
+			"tenant_id", orig.TenantID, "migration_id", orig.ID, "state", final.State, "error", derr)
 	}
 }
 

@@ -4,12 +4,50 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/visible-fishbone/internal/service/residency"
 )
+
+// capturingHandler is a slog.Handler that records every emitted record
+// so a test can assert on the structured audit trail.
+type capturingHandler struct {
+	mu      sync.Mutex
+	records []slog.Record
+}
+
+func (h *capturingHandler) Enabled(context.Context, slog.Level) bool { return true }
+func (h *capturingHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	h.records = append(h.records, r.Clone())
+	h.mu.Unlock()
+	return nil
+}
+func (h *capturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *capturingHandler) WithGroup(string) slog.Handler      { return h }
+
+// attrsByMessage returns the attribute key→string map of the first
+// captured record with the given message, and whether it was found.
+func (h *capturingHandler) attrsByMessage(msg string) (map[string]string, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		if r.Message != msg {
+			continue
+		}
+		attrs := map[string]string{}
+		r.Attrs(func(a slog.Attr) bool {
+			attrs[a.Key] = a.Value.String()
+			return true
+		})
+		return attrs, true
+	}
+	return nil, false
+}
 
 // regionFn adapts a fixed designated region to a RegionResolver.
 func regionFn(r residency.Region) residency.RegionResolver {
@@ -284,6 +322,76 @@ func TestCMKServiceCanonicalizesRefRegion(t *testing.T) {
 	}
 	if got := rec.gotRef.Region; got != residency.Region("eu-central-1") {
 		t.Fatalf("provider received non-canonical region %q, want %q", got, "eu-central-1")
+	}
+}
+
+// TestCMKServiceReWrapDataKeyAuditTrail asserts that ReWrapDataKey
+// re-seals a DEK onto the target KEK (decryptable afterward) AND emits a
+// structured audit record naming the source→target KEK/region — the
+// observability the method's skipped region-binding relies on — even
+// though the tenant's resolver region is still the SOURCE.
+func TestCMKServiceReWrapDataKeyAuditTrail(t *testing.T) {
+	tid := uuid.New()
+	targetKeyURI := "arn:aws:kms:eu-central-1:123456789012:key/abcd"
+	target := residency.TenantKeyRef{
+		TenantID: tid, Kind: residency.ProviderAWSKMS, Region: "eu-central-1", KeyURI: targetKeyURI}
+
+	capH := &capturingHandler{}
+	// Resolver region is the SOURCE (us-east-1): ReWrapDataKey must not
+	// enforce it against the eu-central-1 target, and must still audit.
+	svc, err := residency.NewCMKService(
+		refFn(residency.TenantKeyRef{}), // tenant uses the platform KEK at source
+		regionFn("us-east-1"),
+		awsRegistry(t, "eu-central-1", targetKeyURI),
+		slog.New(capH))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	ec := residency.EncryptionContext{"plane": "telemetry"}
+
+	// Wrap a DEK under the source (platform) KEK, then re-wrap onto the
+	// target AWS CMK.
+	dk, err := svc.GenerateDataKey(ctx, tid, ec)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if dk.Wrapped.Kind != residency.ProviderPlatform {
+		t.Fatalf("source wrap kind = %q, want platform", dk.Wrapped.Kind)
+	}
+	rewrapped, err := svc.ReWrapDataKey(ctx, tid, dk.Wrapped, target, ec)
+	if err != nil {
+		t.Fatalf("re-wrap: %v", err)
+	}
+	if rewrapped.Kind != residency.ProviderAWSKMS || rewrapped.KeyURI != targetKeyURI {
+		t.Fatalf("re-wrapped onto %+v, want aws_kms %s", rewrapped, targetKeyURI)
+	}
+	// The re-wrapped DEK still decrypts to the same plaintext.
+	got, err := svc.UnwrapDataKey(ctx, tid, rewrapped, ec)
+	if err != nil {
+		t.Fatalf("unwrap re-wrapped: %v", err)
+	}
+	if !bytes.Equal(got, dk.Plaintext) {
+		t.Fatal("re-wrap changed the DEK plaintext")
+	}
+
+	// Audit record names the source→target KEK and the tenant.
+	attrs, ok := capH.attrsByMessage("residency: re-wrapped tenant DEK")
+	if !ok {
+		t.Fatal("no re-wrap audit record emitted")
+	}
+	want := map[string]string{
+		"audit":          "cmk.rewrap",
+		"tenant_id":      tid.String(),
+		"source_kind":    string(residency.ProviderPlatform),
+		"target_kind":    string(residency.ProviderAWSKMS),
+		"target_region":  "eu-central-1",
+		"target_key_uri": targetKeyURI,
+	}
+	for k, v := range want {
+		if attrs[k] != v {
+			t.Errorf("audit attr %q = %q, want %q", k, attrs[k], v)
+		}
 	}
 }
 
