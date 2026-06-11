@@ -224,6 +224,14 @@ func cloneReviewEvent(ev dlpreview.ReviewEvent) dlpreview.ReviewEvent {
 		out.Findings = make([]dlpreview.FindingAggregate, len(ev.Findings))
 		copy(out.Findings, ev.Findings)
 	}
+	if ev.DeviceID != nil {
+		id := *ev.DeviceID
+		out.DeviceID = &id
+	}
+	if ev.OccurredAt != nil {
+		at := *ev.OccurredAt
+		out.OccurredAt = &at
+	}
 	if ev.DecidedAt != nil {
 		at := *ev.DecidedAt
 		out.DecidedAt = &at

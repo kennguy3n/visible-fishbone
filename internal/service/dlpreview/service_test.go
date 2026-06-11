@@ -198,6 +198,57 @@ func TestEnqueue_StoresPendingAndAudits(t *testing.T) {
 	}
 }
 
+func TestEnqueue_PersistsTriageContext(t *testing.T) {
+	t.Parallel()
+	svc := newService(t, nil, nil)
+	tenant := uuid.New()
+	device := uuid.New()
+	occurred := time.Date(2026, 6, 9, 8, 30, 0, 0, time.UTC)
+
+	in := sampleInput()
+	in.DeviceID = device
+	in.OccurredAt = occurred
+
+	ev, err := svc.Enqueue(context.Background(), tenant, in)
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if ev.DeviceID == nil || *ev.DeviceID != device {
+		t.Fatalf("device id = %v, want %v", ev.DeviceID, device)
+	}
+	if ev.OccurredAt == nil || !ev.OccurredAt.Equal(occurred) {
+		t.Fatalf("occurred_at = %v, want %v", ev.OccurredAt, occurred)
+	}
+
+	// Round-trips through the store, separate from created_at.
+	got, err := svc.Get(context.Background(), tenant, ev.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.DeviceID == nil || *got.DeviceID != device {
+		t.Fatalf("stored device id = %v, want %v", got.DeviceID, device)
+	}
+	if got.OccurredAt == nil || !got.OccurredAt.Equal(occurred) {
+		t.Fatalf("stored occurred_at = %v, want %v", got.OccurredAt, occurred)
+	}
+}
+
+func TestEnqueue_OmitsZeroTriageContext(t *testing.T) {
+	t.Parallel()
+	svc := newService(t, nil, nil)
+	// sampleInput leaves DeviceID/OccurredAt at their zero values.
+	ev, err := svc.Enqueue(context.Background(), uuid.New(), sampleInput())
+	if err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if ev.DeviceID != nil {
+		t.Fatalf("zero device id must store nil, got %v", *ev.DeviceID)
+	}
+	if ev.OccurredAt != nil {
+		t.Fatalf("zero occurred_at must store nil, got %v", *ev.OccurredAt)
+	}
+}
+
 func TestEnqueue_DefaultsSignal(t *testing.T) {
 	t.Parallel()
 	svc := newService(t, nil, nil)

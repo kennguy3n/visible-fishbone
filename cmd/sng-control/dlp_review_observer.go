@@ -99,8 +99,8 @@ func newDLPReviewIngest(svc reviewEnqueuer, logger *slog.Logger, cfg dlpReviewIn
 // intentionally NOT retained — the worker enqueues under its own bounded
 // context so a shut-down dispatch context can't cancel an in-flight
 // write.
-func (d *dlpReviewIngest) ObserveDLP(_ context.Context, tenantID, _ uuid.UUID, ev schema.DLPEvent, _ time.Time) {
-	job := reviewJob{tenantID: tenantID, in: dlpEnqueueInput(ev)}
+func (d *dlpReviewIngest) ObserveDLP(_ context.Context, tenantID, deviceID uuid.UUID, ev schema.DLPEvent, occurredAt time.Time) {
+	job := reviewJob{tenantID: tenantID, in: dlpEnqueueInput(ev, deviceID, occurredAt)}
 	// Fast-path drop if we're already shutting down.
 	select {
 	case <-d.done:
@@ -166,8 +166,12 @@ func (d *dlpReviewIngest) Stop() {
 // dlpEnqueueInput maps the redacted wire event onto the review-queue
 // input. Both sides mirror the Rust DLP ladder (snake_case strings), so
 // the severity/kind strings round-trip without a lookup table. Signal is
-// left empty so the service stamps its default ("ai_app_upload").
-func dlpEnqueueInput(ev schema.DLPEvent) dlpreview.EnqueueInput {
+// left empty so the service stamps its default ("ai_app_upload"). The
+// envelope's device id and timestamp ride along as operator-triage
+// context (which endpoint, when the upload actually happened) — the
+// telemetry envelope always carries both, so they are not optional on
+// this path, but the service stores them only when non-zero.
+func dlpEnqueueInput(ev schema.DLPEvent, deviceID uuid.UUID, occurredAt time.Time) dlpreview.EnqueueInput {
 	findings := make([]dlpreview.FindingAggregate, 0, len(ev.Findings))
 	for _, f := range ev.Findings {
 		findings = append(findings, dlpreview.FindingAggregate{
@@ -183,5 +187,7 @@ func dlpEnqueueInput(ev schema.DLPEvent) dlpreview.EnqueueInput {
 		Severity:       dlpreview.Severity(ev.Severity),
 		Confidence:     ev.Confidence,
 		Findings:       findings,
+		DeviceID:       deviceID,
+		OccurredAt:     occurredAt,
 	}
 }

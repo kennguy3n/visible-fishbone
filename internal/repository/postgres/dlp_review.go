@@ -23,7 +23,8 @@ const defaultDLPReviewListLimit = 100
 // with the queries.
 const dlpReviewColumns = `
 	id, tenant_id, signal, destination_app, severity, confidence,
-	state, evidence_redacted, created_at, decided_at, decided_by`
+	state, evidence_redacted, created_at, decided_at, decided_by,
+	device_id, occurred_at`
 
 // DLPReviewRepository owns the dlp_review_queue table (migration 060):
 // the human-in-the-loop queue for AI-app DLP events the endpoint engine
@@ -65,12 +66,13 @@ func (r *DLPReviewRepository) Enqueue(ctx context.Context, tenantID uuid.UUID, e
 		const q = `
 			INSERT INTO dlp_review_queue
 				(id, tenant_id, signal, destination_app, severity,
-				 confidence, state, evidence_redacted)
-			VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8::jsonb)
+				 confidence, state, evidence_redacted, device_id, occurred_at)
+			VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7, $8::jsonb, $9::uuid, $10)
 			RETURNING ` + dlpReviewColumns
 		row := tx.QueryRow(ctx, q,
 			ev.ID, tenantID, ev.Signal, ev.DestinationApp, string(ev.Severity),
 			ev.Confidence, string(ev.State), evidence,
+			optionalUUID(ev.DeviceID), optionalTime(ev.OccurredAt),
 		)
 		scanned, scanErr := scanDLPReview(row)
 		if scanErr != nil {
@@ -325,16 +327,18 @@ type dlpReviewScanner interface {
 
 func scanDLPReviewInto(s dlpReviewScanner) (dlpreview.ReviewEvent, error) {
 	var (
-		ev        dlpreview.ReviewEvent
-		severity  string
-		state     string
-		evidence  []byte
-		decidedAt *time.Time
-		decidedBy *string
+		ev         dlpreview.ReviewEvent
+		severity   string
+		state      string
+		evidence   []byte
+		decidedAt  *time.Time
+		decidedBy  *string
+		deviceID   *uuid.UUID
+		occurredAt *time.Time
 	)
 	if err := s.Scan(
 		&ev.ID, &ev.TenantID, &ev.Signal, &ev.DestinationApp, &severity, &ev.Confidence,
-		&state, &evidence, &ev.CreatedAt, &decidedAt, &decidedBy,
+		&state, &evidence, &ev.CreatedAt, &decidedAt, &decidedBy, &deviceID, &occurredAt,
 	); err != nil {
 		return dlpreview.ReviewEvent{}, err
 	}
@@ -342,6 +346,8 @@ func scanDLPReviewInto(s dlpReviewScanner) (dlpreview.ReviewEvent, error) {
 	ev.State = dlpreview.ReviewState(state)
 	ev.DecidedAt = decidedAt
 	ev.DecidedBy = decidedBy
+	ev.DeviceID = deviceID
+	ev.OccurredAt = occurredAt
 	if len(evidence) > 0 {
 		if err := json.Unmarshal(evidence, &ev.Findings); err != nil {
 			return dlpreview.ReviewEvent{}, fmt.Errorf("unmarshal dlp review findings: %w", err)

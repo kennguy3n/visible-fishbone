@@ -60,6 +60,8 @@ type dlpReviewEventResponse struct {
 	Confidence     float64                      `json:"confidence"`
 	State          string                       `json:"state"`
 	Findings       []dlpreview.FindingAggregate `json:"findings"`
+	DeviceID       *string                      `json:"device_id,omitempty"`
+	OccurredAt     *string                      `json:"occurred_at,omitempty"`
 	CreatedAt      string                       `json:"created_at"`
 	DecidedAt      *string                      `json:"decided_at,omitempty"`
 	DecidedBy      *string                      `json:"decided_by,omitempty"`
@@ -80,6 +82,14 @@ func toDLPReviewEventResponse(e dlpreview.ReviewEvent) dlpReviewEventResponse {
 		State:          string(e.State),
 		Findings:       findings,
 		CreatedAt:      e.CreatedAt.Format(time.RFC3339),
+	}
+	if e.DeviceID != nil {
+		s := e.DeviceID.String()
+		r.DeviceID = &s
+	}
+	if e.OccurredAt != nil {
+		s := e.OccurredAt.Format(time.RFC3339)
+		r.OccurredAt = &s
 	}
 	if e.DecidedAt != nil {
 		s := e.DecidedAt.Format(time.RFC3339)

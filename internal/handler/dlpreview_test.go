@@ -153,6 +153,57 @@ func TestDLPReviewHandler_ListGetAndStateFilter(t *testing.T) {
 	}
 }
 
+func TestDLPReviewHandler_SurfacesTriageContext(t *testing.T) {
+	t.Parallel()
+	router, tenantID, _, svc, token := newDLPReviewTestRouter(t)
+	base := "/api/v1/tenants/" + tenantID.String() + "/dlp/review-queue"
+
+	device := uuid.New()
+	occurred := time.Date(2025, 1, 1, 11, 30, 0, 0, time.UTC)
+	ev, err := svc.Enqueue(t.Context(), tenantID, dlpreview.EnqueueInput{
+		DestinationApp: "chatgpt",
+		Severity:       dlpreview.SeverityHigh,
+		Confidence:     0.9,
+		DeviceID:       device,
+		OccurredAt:     occurred,
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	rec := doJSON(t, router, http.MethodGet, base+"/"+ev.ID.String(), token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get: want 200, got %d — %s", rec.Code, rec.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got["device_id"] != device.String() {
+		t.Fatalf("device_id = %v, want %s", got["device_id"], device)
+	}
+	if got["occurred_at"] != occurred.Format(time.RFC3339) {
+		t.Fatalf("occurred_at = %v, want %s", got["occurred_at"], occurred.Format(time.RFC3339))
+	}
+
+	// An event without triage context omits the keys entirely.
+	bare := seedReviewEvent(t, svc, tenantID, "notion", dlpreview.SeverityLow, 0.2)
+	rec = doJSON(t, router, http.MethodGet, base+"/"+bare.ID.String(), token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get bare: want 200, got %d", rec.Code)
+	}
+	var bareBody map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &bareBody); err != nil {
+		t.Fatalf("unmarshal bare: %v", err)
+	}
+	if _, ok := bareBody["device_id"]; ok {
+		t.Fatal("device_id must be omitted when unset")
+	}
+	if _, ok := bareBody["occurred_at"]; ok {
+		t.Fatal("occurred_at must be omitted when unset")
+	}
+}
+
 func TestDLPReviewHandler_DecisionsAndDoubleDecide(t *testing.T) {
 	t.Parallel()
 	router, tenantID, userID, svc, token := newDLPReviewTestRouter(t)

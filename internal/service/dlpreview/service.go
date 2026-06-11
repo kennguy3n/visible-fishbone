@@ -114,6 +114,12 @@ type EnqueueInput struct {
 	Confidence float64
 	// Findings is the redacted evidence (may be empty).
 	Findings []FindingAggregate
+	// DeviceID is the originating device, or uuid.Nil when unknown. A
+	// nil id is stored as NULL (not persisted as a zero uuid).
+	DeviceID uuid.UUID
+	// OccurredAt is the edge event time, or the zero time when unknown.
+	// A zero time is stored as NULL.
+	OccurredAt time.Time
 }
 
 // maxDestinationAppLen bounds destination_app so a malformed caller
@@ -147,6 +153,16 @@ func (s *Service) Enqueue(ctx context.Context, tenantID uuid.UUID, in EnqueueInp
 		State:          StatePending,
 		Findings:       normaliseFindings(in.Findings),
 		CreatedAt:      s.now(),
+	}
+	// Optional triage context: persist only when supplied, so an absent
+	// device/time is stored as NULL rather than a zero uuid / zero time.
+	if in.DeviceID != uuid.Nil {
+		dev := in.DeviceID
+		ev.DeviceID = &dev
+	}
+	if !in.OccurredAt.IsZero() {
+		at := in.OccurredAt.UTC()
+		ev.OccurredAt = &at
 	}
 
 	stored, err := s.repo.Enqueue(ctx, tenantID, ev)

@@ -69,7 +69,9 @@ func TestDLPReviewIngest_EnqueuesAndMaps(t *testing.T) {
 	fake := &fakeEnqueuer{}
 	ing := newDLPReviewIngest(fake, discardLogger(), dlpReviewIngestConfig{})
 	tenant := uuid.New()
-	ing.ObserveDLP(context.Background(), tenant, uuid.New(), sampleWireEvent(), time.Now())
+	device := uuid.New()
+	occurred := time.Now().Add(-30 * time.Second).UTC()
+	ing.ObserveDLP(context.Background(), tenant, device, sampleWireEvent(), occurred)
 	ing.Stop() // drains
 
 	got := fake.recorded()
@@ -79,6 +81,13 @@ func TestDLPReviewIngest_EnqueuesAndMaps(t *testing.T) {
 	in := got[0]
 	if in.DestinationApp != "chatgpt" || in.Severity != dlpreview.SeverityHigh || in.Confidence != 0.91 {
 		t.Fatalf("bad mapping: %+v", in)
+	}
+	// Triage context from the envelope flows into the input verbatim.
+	if in.DeviceID != device {
+		t.Fatalf("device id: got %v, want %v", in.DeviceID, device)
+	}
+	if !in.OccurredAt.Equal(occurred) {
+		t.Fatalf("occurred_at: got %v, want %v", in.OccurredAt, occurred)
 	}
 	if in.Signal != "" {
 		t.Fatalf("signal should be left empty for service default, got %q", in.Signal)

@@ -167,6 +167,16 @@ type ReviewEvent struct {
 	State ReviewState
 	// Findings is the redacted evidence: a list of finding aggregates.
 	Findings []FindingAggregate
+	// DeviceID is the originating device for the flagged upload, or nil
+	// when the producer did not supply one. It is triage context for the
+	// reviewer (which endpoint, is one device noisy), stored as the bare
+	// identifier — never PII.
+	DeviceID *uuid.UUID
+	// OccurredAt is when the upload happened at the edge, or nil when the
+	// producer did not supply it. Distinct from CreatedAt (the control
+	// plane's enqueue time): the telemetry pipeline can lag, so this is
+	// the time the user actually acted.
+	OccurredAt *time.Time
 	// CreatedAt is when the event was enqueued.
 	CreatedAt time.Time
 	// DecidedAt is when the event reached a terminal state, or nil while
