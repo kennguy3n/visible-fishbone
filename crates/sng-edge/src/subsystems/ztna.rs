@@ -113,8 +113,18 @@ impl ZtnaSubsystem {
     /// [`Self::register_subject`] is inert on a subsystem built this
     /// way. Use [`Self::from_service_with_identity_cache`] when the
     /// test needs to drive the cache.
+    ///
+    /// A `debug_assert` guards the footgun: passing a service built
+    /// with `subjectless_degraded_eval` enabled here would silently
+    /// drop every subject registration, so dev/test builds panic and
+    /// point the caller at [`Self::from_service_with_identity_cache`].
     #[must_use]
     pub fn from_service(service: Arc<ZtnaService>) -> Self {
+        debug_assert!(
+            !service.config().subjectless_degraded_eval,
+            "from_service drops subject registrations for a service built with \
+             subjectless_degraded_eval; use from_service_with_identity_cache instead"
+        );
         let stats = Arc::clone(service.stats());
         Self {
             service,

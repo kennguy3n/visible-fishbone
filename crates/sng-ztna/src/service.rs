@@ -301,6 +301,16 @@ impl ZtnaService {
         &self.stats
     }
 
+    /// The service configuration this instance was built with.
+    /// Exposed so producers can tell whether full user-subject
+    /// evaluation is opted in (`subjectless_degraded_eval`) and wire
+    /// the matching per-subject identity cache, rather than silently
+    /// dropping subject registrations.
+    #[must_use]
+    pub fn config(&self) -> &ZtnaServiceConfig {
+        &self.cfg
+    }
+
     /// Policy holder.
     #[must_use]
     pub fn policy(&self) -> &Arc<ZtnaPolicyHolder> {
