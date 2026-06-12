@@ -125,7 +125,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	rng := rand.New(rand.NewSource(*seed))
+	rng := rand.New(rand.NewSource(*seed)) //nolint:gosec // G404: deterministic, reproducible synthetic data; not security-sensitive
 	entries := build(rng, *scale)
 
 	// Deterministic shuffle so the load driver sees an interleaved benign /
@@ -158,11 +158,11 @@ func main() {
 	}
 	data = append(data, '\n')
 
-	if err := os.MkdirAll(filepath.Dir(*out), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(*out), 0o750); err != nil {
 		fmt.Fprintf(os.Stderr, "create output dir: %v\n", err)
 		os.Exit(1)
 	}
-	if err := os.WriteFile(*out, data, 0o644); err != nil {
+	if err := os.WriteFile(*out, data, 0o600); err != nil {
 		fmt.Fprintf(os.Stderr, "write %s: %v\n", *out, err)
 		os.Exit(1)
 	}
