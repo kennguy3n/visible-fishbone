@@ -115,14 +115,26 @@ impl HealthCheck for ZtnaSubsystem {
 
     async fn check(&self) -> SubsystemHealth {
         let snap = self.stats.snapshot();
+        // Sum every per-reason deny bucket so the operator `deny=`
+        // total reconciles with `requests_evaluated` (mirrors the
+        // edge health check). `deny_identity_absent` is structurally
+        // always zero here because the agent hardcodes
+        // `subjectless_degraded_eval: false`, but the context /
+        // revocation buckets can fire regardless of that flag.
         let denies = snap.deny_unknown_app
             + snap.deny_device_not_enrolled
             + snap.deny_device_posture_stale
             + snap.deny_device_posture_insufficient
             + snap.deny_identity_not_found
+            + snap.deny_identity_absent
             + snap.deny_mfa_stale
             + snap.deny_not_entitled
-            + snap.deny_tenant_mismatch;
+            + snap.deny_tenant_mismatch
+            + snap.deny_revoked
+            + snap.deny_geo_blocked
+            + snap.deny_network_type_blocked
+            + snap.deny_outside_hours
+            + snap.deny_tag_mismatch;
         let status = if snap.bundle_load_failures > 0 || snap.provider_failures > 0 {
             HealthStatus::Degraded
         } else {
