@@ -2,7 +2,6 @@ package leader
 
 import (
 	"context"
-	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -63,18 +62,16 @@ func TestFencingToken_ValidAndNewerThan(t *testing.T) {
 
 func TestFencingToken_FollowerGetsZeroToken(t *testing.T) {
 	cluster := newFakeCluster()
-	// Pre-occupy the lock so our elector stays a follower.
-	occ := New(cluster, WithCheckInterval(5*time.Millisecond), WithIdentity("occ"))
-	occCtx, occCancel := context.WithCancel(context.Background())
-	defer occCancel()
-	go occ.Run(occCtx)
-	waitFor(t, occ.IsLeader, "occupier to take the lock")
+	ctx := context.Background()
 
-	e := New(cluster, WithCheckInterval(5*time.Millisecond), WithIdentity("follower"))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go e.Run(ctx)
-	time.Sleep(40 * time.Millisecond)
+	// occ takes the lock first; e then contends and stays a follower.
+	occ := New(cluster, WithIdentity("occ"))
+	occ.tick(ctx)
+	e := New(cluster, WithIdentity("follower"))
+	e.tick(ctx)
+	if occ.IsLeader() == false || e.IsLeader() {
+		t.Fatalf("setup: occ=%v e=%v, want occ leader / e follower", occ.IsLeader(), e.IsLeader())
+	}
 
 	tok, ok := e.FencingToken()
 	if ok || tok.Valid() {
@@ -84,11 +81,12 @@ func TestFencingToken_FollowerGetsZeroToken(t *testing.T) {
 
 func TestFencingToken_LeaderEpochFromEpochReader(t *testing.T) {
 	cluster := newEpochCluster()
-	e := New(cluster, WithCheckInterval(5*time.Millisecond))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go e.Run(ctx)
-	waitFor(t, e.IsLeader, "elector to acquire leadership")
+	e := New(cluster)
+	ctx := context.Background()
+	e.tick(ctx)
+	if !e.IsLeader() {
+		t.Fatal("elector did not acquire leadership")
+	}
 
 	tok, ok := e.FencingToken()
 	if !ok || !tok.Valid() {
@@ -111,11 +109,12 @@ func TestFencingToken_GenerationFallbackWithoutEpochReader(t *testing.T) {
 	// The plain fakeSession does not implement EpochReader, so the
 	// elector falls back to its in-process generation counter.
 	cluster := newFakeCluster()
-	e := New(cluster, WithCheckInterval(5*time.Millisecond))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go e.Run(ctx)
-	waitFor(t, e.IsLeader, "elector to acquire leadership")
+	e := New(cluster)
+	ctx := context.Background()
+	e.tick(ctx)
+	if !e.IsLeader() {
+		t.Fatal("elector did not acquire leadership")
+	}
 
 	tok, ok := e.FencingToken()
 	if !ok || tok.Epoch == 0 {
@@ -125,23 +124,26 @@ func TestFencingToken_GenerationFallbackWithoutEpochReader(t *testing.T) {
 
 func TestHoldsToken_StaleAfterFlap(t *testing.T) {
 	cluster := newEpochCluster()
-	e := New(cluster, WithCheckInterval(5*time.Millisecond))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go e.Run(ctx)
-	waitFor(t, e.IsLeader, "elector to acquire leadership")
-
+	e := New(cluster)
+	ctx := context.Background()
+	e.tick(ctx)
+	if !e.IsLeader() {
+		t.Fatal("elector did not acquire leadership")
+	}
 	stale, _ := e.FencingToken()
 
 	// Kill the lock-holding session: the lock is reclaimed and the
-	// elector must step down, then re-acquire with a fresh epoch.
-	e.mu.Lock()
-	sess := e.session.(*epochSession).Session.(*fakeSession)
-	e.mu.Unlock()
-	sess.kill()
-
-	waitFor(t, func() bool { return !e.IsLeader() }, "elector to step down after losing its session")
-	waitFor(t, e.IsLeader, "elector to re-acquire leadership")
+	// elector must step down on its next tick, then re-acquire with a
+	// fresh, strictly newer epoch.
+	killLeaderSession(t, e)
+	e.tick(ctx)
+	if e.IsLeader() {
+		t.Fatal("elector did not step down after losing its session")
+	}
+	e.tick(ctx)
+	if !e.IsLeader() {
+		t.Fatal("elector did not re-acquire leadership")
+	}
 
 	fresh, ok := e.FencingToken()
 	if !ok {
@@ -164,12 +166,12 @@ func TestTransitionsMetric_IncrementsOnAcquisition(t *testing.T) {
 		Help: "test",
 	})
 	cluster := newEpochCluster()
-	e := New(cluster, WithCheckInterval(5*time.Millisecond), WithTransitionsCounter(c))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go e.Run(ctx)
-	waitFor(t, e.IsLeader, "elector to acquire leadership")
-	waitFor(t, func() bool { return testutil.ToFloat64(c) >= 1 }, "transitions counter to reach 1")
+	e := New(cluster, WithTransitionsCounter(c))
+	ctx := context.Background()
+	e.tick(ctx)
+	if !e.IsLeader() {
+		t.Fatal("elector did not acquire leadership")
+	}
 
 	if got := testutil.ToFloat64(c); got != 1 {
 		t.Errorf("transitions_total = %v, want 1", got)
@@ -179,50 +181,42 @@ func TestTransitionsMetric_IncrementsOnAcquisition(t *testing.T) {
 func TestWithTransitionsMetric_RegistersCanonicalName(t *testing.T) {
 	reg := prometheus.NewRegistry()
 	cluster := newEpochCluster()
-	e := New(cluster, WithCheckInterval(5*time.Millisecond), WithTransitionsMetric(reg, ""))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go e.Run(ctx)
-	waitFor(t, e.IsLeader, "elector to acquire leadership")
+	e := New(cluster, WithTransitionsMetric(reg, ""))
+	ctx := context.Background()
+	e.tick(ctx)
+	if !e.IsLeader() {
+		t.Fatal("elector did not acquire leadership")
+	}
 
 	const name = "sng_leader_transitions_total"
-	waitFor(t, func() bool {
-		v, err := testutil.GatherAndCount(reg, name)
-		return err == nil && v == 1
-	}, "sng_leader_transitions_total to be registered and emitted")
+	v, err := testutil.GatherAndCount(reg, name)
+	if err != nil || v != 1 {
+		t.Fatalf("GatherAndCount(%s) = %d, err=%v; want 1, nil", name, v, err)
+	}
 }
 
 func TestRunIfLeaderFenced_PassesLiveToken(t *testing.T) {
 	cluster := newEpochCluster()
-	e := New(cluster, WithCheckInterval(5*time.Millisecond))
 	ctx, cancel := context.WithCancel(context.Background())
-	go e.Run(ctx)
-	waitFor(t, e.IsLeader, "elector to acquire leadership")
+	defer cancel()
 
-	var mu sync.Mutex
-	var seen FencingToken
-	gotToken := make(chan struct{}, 1)
+	poll := make(chan time.Time)
+	e := New(cluster, withTicker(staticTicker(poll)))
+	e.tick(ctx)
+	if !e.IsLeader() {
+		t.Fatal("elector did not acquire leadership")
+	}
+
+	gotToken := make(chan FencingToken, 1)
 	go e.RunIfLeaderFenced(ctx, "fenced-job", func(jctx context.Context, tok FencingToken) {
-		mu.Lock()
-		seen = tok
-		mu.Unlock()
-		select {
-		case gotToken <- struct{}{}:
-		default:
-		}
+		gotToken <- tok
 		<-jctx.Done()
 	})
 
-	select {
-	case <-gotToken:
-	case <-time.After(2 * time.Second):
-		t.Fatal("fenced job never received a token")
-	}
-	mu.Lock()
-	tok := seen
-	mu.Unlock()
+	// Drive one supervision beat so the fenced job starts.
+	poll <- time.Now()
+	tok := <-gotToken
 	if !tok.Valid() || !e.HoldsToken(tok) {
 		t.Fatalf("fenced job received an invalid/stale token: %+v", tok)
 	}
-	cancel()
 }

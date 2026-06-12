@@ -118,6 +118,37 @@ type LeaderElector struct {
 	// edges) for the sng_leader_transitions_total metric. Nil when
 	// no registerer was supplied; increments are guarded.
 	transitions prometheus.Counter
+
+	// newTicker constructs the periodic ticker that drives the
+	// election loop (Run) and the job-supervision poll (RunIfLeader).
+	// Production uses realTicker, a thin wrapper over time.NewTicker.
+	// Tests inject a manually driven ticker via withTicker so timing
+	// is deterministic rather than wall-clock dependent.
+	newTicker tickerFunc
+}
+
+// tickerFunc constructs a ticker firing every d: it returns the
+// tick channel and a stop function. It exists so tests can replace
+// the real time.Ticker with a hand-driven channel.
+type tickerFunc func(d time.Duration) (<-chan time.Time, func())
+
+// realTicker is the production tickerFunc: a thin wrapper over
+// time.NewTicker so behaviour is identical to using the ticker
+// directly.
+func realTicker(d time.Duration) (<-chan time.Time, func()) {
+	t := time.NewTicker(d)
+	return t.C, t.Stop
+}
+
+// withTicker overrides the ticker factory. It is unexported because
+// it is a test-only seam; production always uses realTicker. A nil
+// factory is ignored.
+func withTicker(f tickerFunc) Option {
+	return func(e *LeaderElector) {
+		if f != nil {
+			e.newTicker = f
+		}
+	}
 }
 
 // Option customises a LeaderElector.
@@ -162,11 +193,12 @@ func WithLogger(l *slog.Logger) Option {
 // New constructs a LeaderElector over the given SessionOpener.
 func New(opener SessionOpener, opts ...Option) *LeaderElector {
 	e := &LeaderElector{
-		opener:   opener,
-		lockID:   DefaultLockID,
-		interval: DefaultCheckInterval,
-		identity: "sng-control",
-		logger:   slog.Default(),
+		opener:    opener,
+		lockID:    DefaultLockID,
+		interval:  DefaultCheckInterval,
+		identity:  "sng-control",
+		logger:    slog.Default(),
+		newTicker: realTicker,
 	}
 	for _, opt := range opts {
 		opt(e)
@@ -189,14 +221,14 @@ func (e *LeaderElector) Run(ctx context.Context) {
 	// leader at boot without waiting a full interval.
 	e.tick(ctx)
 
-	ticker := time.NewTicker(e.interval)
-	defer ticker.Stop()
+	tickC, stop := e.newTicker(e.interval)
+	defer stop()
 	for {
 		select {
 		case <-ctx.Done():
 			e.relinquish(context.WithoutCancel(ctx))
 			return
-		case <-ticker.C:
+		case <-tickC:
 			e.tick(ctx)
 		}
 	}
@@ -318,8 +350,8 @@ func (e *LeaderElector) RunIfLeader(ctx context.Context, name string, fn func(co
 	if poll <= 0 {
 		poll = time.Second
 	}
-	ticker := time.NewTicker(poll)
-	defer ticker.Stop()
+	tickC, stop := e.newTicker(poll)
+	defer stop()
 
 	for {
 		if ctx.Err() != nil {
@@ -329,7 +361,7 @@ func (e *LeaderElector) RunIfLeader(ctx context.Context, name string, fn func(co
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
+			case <-tickC:
 			}
 			continue
 		}
@@ -346,7 +378,7 @@ func (e *LeaderElector) RunIfLeader(ctx context.Context, name string, fn func(co
 
 		// Watch for leadership loss (or a flap that bumped the
 		// generation) and cancel runCtx so fn unwinds.
-		e.superviseJob(ctx, ticker, startGen)
+		e.superviseJob(ctx, tickC, startGen)
 		cancel()
 		<-done
 		e.logger.Info("leader: singleton job stopped", slog.String("job", name))
@@ -356,12 +388,12 @@ func (e *LeaderElector) RunIfLeader(ctx context.Context, name string, fn func(co
 // superviseJob blocks until leadership is lost, the generation
 // changes (a lost-then-regained flap), or ctx is cancelled — any of
 // which means the currently running job should be torn down.
-func (e *LeaderElector) superviseJob(ctx context.Context, ticker *time.Ticker, startGen uint64) {
+func (e *LeaderElector) superviseJob(ctx context.Context, tickC <-chan time.Time, startGen uint64) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-tickC:
 			if !e.IsLeader() || e.generation.Load() != startGen {
 				return
 			}
