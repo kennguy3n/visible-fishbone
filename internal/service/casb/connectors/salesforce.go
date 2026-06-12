@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
@@ -172,7 +173,7 @@ func (sf *Salesforce) ListActivity(ctx context.Context, config json.RawMessage, 
 	}
 	events := make([]casb.ActivityEvent, 0, len(result.Records))
 	for _, r := range result.Records {
-		ts, _ := time.Parse(time.RFC3339, r.CreatedDate)
+		ts := parseSalesforceTime(r.CreatedDate)
 		events = append(events, casb.ActivityEvent{
 			ID:        r.ID,
 			Actor:     r.CreatedBy.Name,
@@ -215,6 +216,109 @@ func (sf *Salesforce) AssessPosture(_ context.Context, _ json.RawMessage, _ []by
 		RiskScore:  score,
 		AssessedAt: now,
 	}, nil
+}
+
+// salesforceAPIVersion is the Salesforce REST API version the
+// connector targets, kept in one place so the discovery and content
+// paths stay in lockstep.
+const salesforceAPIVersion = "v60.0"
+
+// parseSalesforceTime parses a Salesforce datetime. The REST API emits
+// ISO-8601 with a colon-less zone offset and millisecond precision
+// (e.g. "2025-06-01T10:00:00.000+0000"), which does NOT match
+// time.RFC3339 ("...Z07:00") — parsing with RFC3339 would silently
+// yield the zero time and defeat the modified-time (Since) filter. The
+// native layout is tried first, with RFC3339 variants as a fallback for
+// any field that arrives in the canonical form. A zero time is returned
+// for unparseable input.
+func parseSalesforceTime(s string) time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{
+		"2006-01-02T15:04:05.000-0700",
+		"2006-01-02T15:04:05-0700",
+		time.RFC3339,
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC()
+		}
+	}
+	return time.Time{}
+}
+
+// ScanContent implements casb.ContentInspector for Salesforce: it
+// queries the latest version of every file stored as a ContentVersion
+// and streams its bytes (bounded to opts.MaxBytesPerObject) for DLP
+// classification. SOQL result sets are followed via nextRecordsUrl so
+// large libraries are paged rather than buffered, and the file body is
+// pulled from the ContentVersion VersionData blob endpoint.
+func (sf *Salesforce) ScanContent(
+	ctx context.Context,
+	config json.RawMessage,
+	secret []byte,
+	opts casb.ContentScanOptions,
+	yield func(context.Context, casb.ContentObject) error,
+) error {
+	token, instanceURL, err := sf.getToken(ctx, config, secret)
+	if err != nil {
+		return err
+	}
+	soql := "SELECT Id, Title, FileExtension, FileType, ContentSize, LastModifiedDate FROM ContentVersion WHERE IsLatest = true"
+	if !opts.Since.IsZero() {
+		soql += fmt.Sprintf(" AND LastModifiedDate >= %s", opts.Since.UTC().Format(time.RFC3339))
+	}
+	endpoint := fmt.Sprintf("%s/services/data/%s/query?q=%s",
+		instanceURL, salesforceAPIVersion, url.QueryEscape(soql))
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var page struct {
+			Records []struct {
+				ID            string `json:"Id"`
+				Title         string `json:"Title"`
+				FileExtension string `json:"FileExtension"`
+				FileType      string `json:"FileType"`
+				ContentSize   int64  `json:"ContentSize"`
+				LastModified  string `json:"LastModifiedDate"`
+			} `json:"records"`
+			Done           bool   `json:"done"`
+			NextRecordsURL string `json:"nextRecordsUrl"`
+		}
+		if err := getJSON(ctx, sf.client, sf.userAgent, "salesforce", endpoint, token, &page); err != nil {
+			return err
+		}
+		for _, r := range page.Records {
+			modified := parseSalesforceTime(r.LastModified)
+			name := r.Title
+			if r.FileExtension != "" {
+				name = r.Title + "." + r.FileExtension
+			}
+			content, ctype, ferr := fetchContent(ctx, sf.client, sf.userAgent, "salesforce",
+				fmt.Sprintf("%s/services/data/%s/sobjects/ContentVersion/%s/VersionData",
+					instanceURL, salesforceAPIVersion, url.PathEscape(r.ID)),
+				token, opts.MaxBytesPerObject)
+			obj := casb.ContentObject{
+				ID:          r.ID,
+				Name:        name,
+				ContentType: contentTypeFromName(ctype, name),
+				SizeBytes:   r.ContentSize,
+				ModifiedAt:  modified,
+				Content:     content,
+				FetchErr:    ferr,
+			}
+			if err := yield(ctx, obj); err != nil {
+				return err
+			}
+		}
+		if page.Done || page.NextRecordsURL == "" {
+			break
+		}
+		endpoint = instanceURL + page.NextRecordsURL
+	}
+	return nil
 }
 
 func (sf *Salesforce) getToken(ctx context.Context, config json.RawMessage, secret []byte) (string, string, error) {

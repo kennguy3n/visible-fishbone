@@ -1471,7 +1471,13 @@ func buildRouter(
 	}
 	casbSvc := casb.New(
 		casbConnectorRepo, casbAppRepo, casbPostureRepo, auditRepo,
-		casbPlugins, logger)
+		casbPlugins, logger,
+		// API-CASB content inspection (DLP retro-scan) reuses the DLP
+		// classifier. Default-OFF: it arms RetroScanConnector only when
+		// CASB_CONTENT_INSPECTION_ENABLED=true, and even then nothing
+		// runs until an operator explicitly triggers a retro-scan.
+		casb.WithContentInspection(dlpSvc,
+			strings.EqualFold(strings.TrimSpace(os.Getenv("CASB_CONTENT_INSPECTION_ENABLED")), "true")))
 
 	// --- MSP hierarchy wiring (Phase 3 Block 5) -----------------------
 	// The MSP service is just the repository — there is no

@@ -83,11 +83,12 @@ type GoogleSecret struct {
 // Google implements CASBConnectorPlugin for Google Workspace via
 // Admin SDK + Reports API with service account domain-wide delegation.
 type Google struct {
-	client    HTTPDoer
-	userAgent string
-	baseURL   string // overridable for testing; defaults to https://admin.googleapis.com
-	tokenURL  string // overridable for testing; defaults to https://oauth2.googleapis.com/token
-	now       func() time.Time
+	client       HTTPDoer
+	userAgent    string
+	baseURL      string // overridable for testing; defaults to https://admin.googleapis.com
+	driveBaseURL string // overridable for testing; defaults to https://www.googleapis.com
+	tokenURL     string // overridable for testing; defaults to https://oauth2.googleapis.com/token
+	now          func() time.Time
 }
 
 // NewGoogle constructs a Google Workspace CASB connector.
@@ -99,11 +100,12 @@ func NewGoogle(client HTTPDoer, userAgent string) *Google {
 		userAgent = "sng-control/0.1 (+casb/google)"
 	}
 	return &Google{
-		client:    client,
-		userAgent: userAgent,
-		baseURL:   "https://admin.googleapis.com",
-		tokenURL:  googleTokenURL,
-		now:       time.Now,
+		client:       client,
+		userAgent:    userAgent,
+		baseURL:      "https://admin.googleapis.com",
+		driveBaseURL: "https://www.googleapis.com",
+		tokenURL:     googleTokenURL,
+		now:          time.Now,
 	}
 }
 
@@ -298,6 +300,228 @@ func (g *Google) AssessPosture(_ context.Context, _ json.RawMessage, _ []byte) (
 		RiskScore:  score,
 		AssessedAt: now,
 	}, nil
+}
+
+// googleDriveScope is the read-only Drive scope requested when minting
+// a per-user delegated token for content inspection. It is requested
+// only on the content-scan path, so the discovery token keeps its
+// narrow Admin-SDK scopes.
+const googleDriveScope = "https://www.googleapis.com/auth/drive.readonly"
+
+// ScanContent implements casb.ContentInspector for Google Workspace.
+// Because Drive content is owned per-user, it enumerates the directory
+// and — for each user — mints a domain-wide-delegated token
+// impersonating that user (the `sub` claim) so the connector reads
+// exactly what that user can see, then streams each Drive file's
+// content (bounded to opts.MaxBytesPerObject) for DLP classification.
+// Native Google-format docs are exported to text/plain; binary files
+// are downloaded via alt=media. Listings are paged via nextPageToken
+// so no user's Drive is ever fully buffered.
+func (g *Google) ScanContent(
+	ctx context.Context,
+	config json.RawMessage,
+	secret []byte,
+	opts casb.ContentScanOptions,
+	yield func(context.Context, casb.ContentObject) error,
+) error {
+	var cfg GoogleConfig
+	if err := json.Unmarshal(config, &cfg); err != nil {
+		return fmt.Errorf("google: invalid config: %w", err)
+	}
+	var sec GoogleSecret
+	if err := json.Unmarshal(secret, &sec); err != nil {
+		return fmt.Errorf("google: invalid secret: %w", err)
+	}
+	if trimmed := strings.TrimSpace(string(sec.PrivateKeyJSON)); trimmed == "" || trimmed == "null" {
+		return fmt.Errorf("google: service account private_key_json is required")
+	}
+	// Reuse the discovery token (admin scope) purely to enumerate the
+	// directory; per-user Drive reads use their own delegated tokens.
+	dirToken, err := g.getToken(ctx, config, secret)
+	if err != nil {
+		return err
+	}
+	emails, err := g.listUserEmails(ctx, dirToken, cfg)
+	if err != nil {
+		return err
+	}
+	for _, email := range emails {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		userToken, err := googleSAToken(ctx, g.client, g.userAgent, "google",
+			sec.PrivateKeyJSON, googleDriveScope, email, g.now(), g.tokenURL)
+		if err != nil {
+			// Impersonating a suspended/deleted user (or one outside the
+			// delegation grant) fails at token exchange. Skip that user
+			// and record it rather than aborting the whole org scan.
+			if yerr := yield(ctx, casb.ContentObject{
+				ID:       "user:" + email,
+				Owner:    email,
+				FetchErr: fmt.Errorf("mint delegated token: %w", err),
+			}); yerr != nil {
+				return yerr
+			}
+			continue
+		}
+		if err := g.scanUserDrive(ctx, userToken, email, opts, yield); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// listUserEmails returns the primary email of every directory user,
+// paged via nextPageToken so a large directory is not buffered whole.
+func (g *Google) listUserEmails(ctx context.Context, token string, cfg GoogleConfig) ([]string, error) {
+	customerID := cfg.CustomerID
+	if customerID == "" {
+		customerID = "my_customer"
+	}
+	var emails []string
+	pageToken := ""
+	for {
+		endpoint := fmt.Sprintf(
+			"%s/admin/directory/v1/users?customer=%s&maxResults=500&fields=nextPageToken,users(primaryEmail)",
+			g.baseURL, url.QueryEscape(customerID))
+		if pageToken != "" {
+			endpoint += "&pageToken=" + url.QueryEscape(pageToken)
+		}
+		var page struct {
+			Users []struct {
+				PrimaryEmail string `json:"primaryEmail"`
+			} `json:"users"`
+			NextPageToken string `json:"nextPageToken"`
+		}
+		if err := getJSON(ctx, g.client, g.userAgent, "google", endpoint, token, &page); err != nil {
+			return nil, err
+		}
+		for _, u := range page.Users {
+			if u.PrimaryEmail != "" {
+				emails = append(emails, u.PrimaryEmail)
+			}
+		}
+		if page.NextPageToken == "" {
+			break
+		}
+		pageToken = page.NextPageToken
+	}
+	return emails, nil
+}
+
+type googleDriveFile struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	MimeType     string `json:"mimeType"`
+	Size         string `json:"size"` // Drive v3 returns size as a string
+	ModifiedTime string `json:"modifiedTime"`
+}
+
+func (g *Google) scanUserDrive(
+	ctx context.Context,
+	token, owner string,
+	opts casb.ContentScanOptions,
+	yield func(context.Context, casb.ContentObject) error,
+) error {
+	pageToken := ""
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		q := "trashed = false"
+		if !opts.Since.IsZero() {
+			// Since is inclusive ("at or after"); use >= so a file modified
+			// at exactly the boundary (e.g. the previous scan's completion
+			// timestamp) is not silently dropped.
+			q += fmt.Sprintf(" and modifiedTime >= '%s'", opts.Since.UTC().Format(time.RFC3339))
+		}
+		endpoint := fmt.Sprintf(
+			"%s/drive/v3/files?corpora=user&pageSize=100&q=%s&fields=%s",
+			g.driveBaseURL, url.QueryEscape(q),
+			url.QueryEscape("nextPageToken,files(id,name,mimeType,size,modifiedTime)"))
+		if pageToken != "" {
+			endpoint += "&pageToken=" + url.QueryEscape(pageToken)
+		}
+		var page struct {
+			Files         []googleDriveFile `json:"files"`
+			NextPageToken string            `json:"nextPageToken"`
+		}
+		if err := getJSON(ctx, g.client, g.userAgent, "google", endpoint, token, &page); err != nil {
+			if ctx.Err() != nil {
+				return err
+			}
+			// A transient Drive listing error (e.g. a 500) for one user
+			// must not abort the whole org scan. Record it and move on to
+			// the next user, mirroring the per-user resilience used for
+			// token-exchange failures and the M365 connector.
+			return yield(ctx, casb.ContentObject{
+				ID:       "user:" + owner,
+				Owner:    owner,
+				FetchErr: fmt.Errorf("list drive files: %w", err),
+			})
+		}
+		for _, f := range page.Files {
+			// Skip folders and shortcuts: they carry no inspectable bytes.
+			if f.MimeType == "application/vnd.google-apps.folder" ||
+				f.MimeType == "application/vnd.google-apps.shortcut" {
+				continue
+			}
+			modified, _ := time.Parse(time.RFC3339, f.ModifiedTime)
+			downloadURL, exported := googleDownloadURL(g.driveBaseURL, f.ID, f.MimeType)
+			if downloadURL == "" {
+				// A native type with no text export (e.g. a Form); skip.
+				continue
+			}
+			content, ctype, ferr := fetchContent(ctx, g.client, g.userAgent, "google",
+				downloadURL, token, opts.MaxBytesPerObject)
+			reported := f.MimeType
+			if exported {
+				reported = "text/plain"
+			} else if ctype != "" {
+				reported = ctype
+			}
+			obj := casb.ContentObject{
+				ID:          f.ID,
+				Name:        f.Name,
+				Owner:       owner,
+				ContentType: contentTypeFromName(reported, f.Name),
+				SizeBytes:   parseInt64(f.Size),
+				ModifiedAt:  modified,
+				Content:     content,
+				FetchErr:    ferr,
+			}
+			if err := yield(ctx, obj); err != nil {
+				return err
+			}
+		}
+		if page.NextPageToken == "" {
+			break
+		}
+		pageToken = page.NextPageToken
+	}
+	return nil
+}
+
+// googleDownloadURL builds the content-fetch URL for a Drive file.
+// Native Google-format documents (Docs/Sheets/Slides) cannot be
+// downloaded directly and are exported to text/plain; ordinary binary
+// files use alt=media. It returns an empty URL for native types that
+// have no useful text export. The exported bool reports whether the
+// export path was chosen.
+func googleDownloadURL(driveBaseURL, fileID, mimeType string) (endpoint string, exported bool) {
+	if strings.HasPrefix(mimeType, "application/vnd.google-apps.") {
+		switch mimeType {
+		case "application/vnd.google-apps.document",
+			"application/vnd.google-apps.spreadsheet",
+			"application/vnd.google-apps.presentation":
+			return fmt.Sprintf("%s/drive/v3/files/%s/export?mimeType=text/plain",
+				driveBaseURL, url.PathEscape(fileID)), true
+		default:
+			return "", false
+		}
+	}
+	return fmt.Sprintf("%s/drive/v3/files/%s?alt=media",
+		driveBaseURL, url.PathEscape(fileID)), false
 }
 
 // getToken performs OAuth2 service-account authentication with domain-wide

@@ -184,6 +184,122 @@ func (b *Box) ListActivity(ctx context.Context, config json.RawMessage, secret [
 	return events, nil
 }
 
+// boxItemPageLimit is the page size used when walking a Box folder
+// tree. Box caps offset-based item listings at 1000; 200 keeps each
+// response small while limiting round-trips.
+const boxItemPageLimit = 200
+
+// boxMaxFolders bounds how many folders a single scan will descend
+// into, a safety valve against pathologically deep/wide trees
+// exhausting the traversal queue. The object budget
+// (ContentScanOptions.MaxObjects) bounds files independently.
+const boxMaxFolders = 10000
+
+// ScanContent implements casb.ContentInspector for Box: it walks the
+// enterprise folder tree breadth-first and streams each file's content
+// (bounded to opts.MaxBytesPerObject) for DLP classification. Folders
+// are paged so the whole tree is never buffered, and the traversal
+// stops as soon as the caller's yield returns an error (e.g. the
+// object budget is reached) or ctx is cancelled.
+func (b *Box) ScanContent(
+	ctx context.Context,
+	config json.RawMessage,
+	secret []byte,
+	opts casb.ContentScanOptions,
+	yield func(context.Context, casb.ContentObject) error,
+) error {
+	token, err := b.token(ctx, config, secret)
+	if err != nil {
+		return err
+	}
+	// BFS over folders starting at the enterprise root ("0").
+	queue := []string{"0"}
+	foldersVisited := 0
+	for len(queue) > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		folderID := queue[0]
+		queue = queue[1:]
+		foldersVisited++
+		if foldersVisited > boxMaxFolders {
+			return nil
+		}
+		for offset := 0; ; offset += boxItemPageLimit {
+			items, total, err := b.listFolderItems(ctx, token, folderID, offset)
+			if err != nil {
+				if ctx.Err() != nil {
+					return err
+				}
+				// A transient error listing one folder (e.g. a 5xx or a
+				// 403 on a folder we cannot read) must not abort the
+				// whole enterprise tree scan. Record it and move on to
+				// the next folder, mirroring the per-user resilience in
+				// the M365 and Google connectors.
+				if yerr := yield(ctx, casb.ContentObject{
+					ID:       "folder:" + folderID,
+					FetchErr: fmt.Errorf("list folder items: %w", err),
+				}); yerr != nil {
+					return yerr
+				}
+				break
+			}
+			for _, it := range items {
+				switch it.Type {
+				case "folder":
+					queue = append(queue, it.ID)
+				case "file":
+					modified, _ := time.Parse(time.RFC3339, it.ModifiedAt)
+					if !opts.Since.IsZero() && !modified.IsZero() && modified.Before(opts.Since) {
+						continue
+					}
+					content, ctype, ferr := fetchContent(ctx, b.client, b.userAgent, "box",
+						fmt.Sprintf("%s/2.0/files/%s/content", b.baseURL, url.PathEscape(it.ID)),
+						token, opts.MaxBytesPerObject)
+					obj := casb.ContentObject{
+						ID:          it.ID,
+						Name:        it.Name,
+						ContentType: contentTypeFromName(ctype, it.Name),
+						SizeBytes:   it.Size,
+						ModifiedAt:  modified,
+						Content:     content,
+						FetchErr:    ferr,
+					}
+					if err := yield(ctx, obj); err != nil {
+						return err
+					}
+				}
+			}
+			if offset+len(items) >= total || len(items) == 0 {
+				break
+			}
+		}
+	}
+	return nil
+}
+
+type boxItem struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Type       string `json:"type"`
+	Size       int64  `json:"size"`
+	ModifiedAt string `json:"modified_at"`
+}
+
+func (b *Box) listFolderItems(ctx context.Context, token, folderID string, offset int) ([]boxItem, int, error) {
+	endpoint := fmt.Sprintf(
+		"%s/2.0/folders/%s/items?fields=id,name,type,size,modified_at&limit=%d&offset=%d",
+		b.baseURL, url.PathEscape(folderID), boxItemPageLimit, offset)
+	var out struct {
+		TotalCount int       `json:"total_count"`
+		Entries    []boxItem `json:"entries"`
+	}
+	if err := getJSON(ctx, b.client, b.userAgent, "box", endpoint, token, &out); err != nil {
+		return nil, 0, err
+	}
+	return out.Entries, out.TotalCount, nil
+}
+
 func (b *Box) AssessPosture(ctx context.Context, config json.RawMessage, secret []byte) (casb.PostureReport, error) {
 	token, err := b.token(ctx, config, secret)
 	if err != nil {
