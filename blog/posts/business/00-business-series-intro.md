@@ -2,7 +2,7 @@
 
 > **Business series, Post 0 of 5 — the intro and the evidence contract.**
 >
-> The eight-post [engineering series](../README.md) walks SNG end-to-end for a
+> The nine-post [engineering series](../README.md) walks SNG end-to-end for a
 > technical reader. This *business* series is for the buyer: the MSP owner, the
 > SME IT lead, the compliance officer, the CFO. It answers one question per
 > post — *"what job does this do for me, and can you prove it?"* — using the
@@ -50,8 +50,13 @@
 
 ## The cast (seeded data)
 
-One MSP, **Northwind Managed Security**, manages four tenants across three
-tiers — so every screenshot shows real, tier-shaped data:
+One MSP, **Northwind Managed Security**, manages the four cost-modelled base
+tenants below across three tiers — so every screenshot in this buyer series shows
+real, tier-shaped cost/margin data. (The platform fleet was since expanded to
+nine tenants across seven countries and eight industries for the residency and
+compliance walk-through — see engineering [Post 8](../08-six-scenarios-on-this-vm.md);
+the cost/margin captures here stay on the four base tenants they were measured
+against.)
 
 | Tenant | Tier | Vertical | Monthly cost (projected) | Margin |
 | --- | --- | --- | ---: | ---: |

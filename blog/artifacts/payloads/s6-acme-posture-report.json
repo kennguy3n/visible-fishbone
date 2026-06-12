@@ -1,6 +1,6 @@
 {
   "ai_generated": false,
-  "generated_at": "2026-06-10T16:05:34.603858556Z",
+  "generated_at": "2026-06-12T01:56:49.383587829Z",
   "overview": {
     "alerts_by_severity": {
       "critical": 1,
@@ -10,14 +10,14 @@
     "trend": "degrading"
   },
   "period": {
-    "end": "2026-06-10T16:05:34.60005421Z",
+    "end": "2026-06-12T01:56:49.380204219Z",
     "label": "weekly",
-    "start": "2026-06-03T16:05:34.60005421Z"
+    "start": "2026-06-05T01:56:49.380204219Z"
   },
   "policy_health": {
-    "active_policies": 10,
-    "coverage_pct": 83.33333333333334,
-    "total_policies": 12
+    "active_policies": 11,
+    "coverage_pct": 84.61538461538461,
+    "total_policies": 13
   },
   "recommendations": [
     "Investigate 1 critical alert(s) immediately.",

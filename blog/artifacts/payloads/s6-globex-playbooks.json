@@ -1,10 +1,10 @@
 {
   "items": [
     {
-      "created_at": "2026-06-10T16:05:23.170444Z",
+      "created_at": "2026-06-11T04:40:15.524527Z",
       "description": "Step up to re-authentication and revoke the active ZTNA session when an impossible-travel anomaly is detected for a clinician identity.",
       "enabled": false,
-      "id": "62901f40-afde-4ece-ab63-22eabd6be6f3",
+      "id": "4abeb357-5189-4812-a737-1a85689bcff3",
       "name": "Revoke access on impossible travel",
       "steps": [
         {
@@ -22,13 +22,13 @@
       ],
       "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
       "trigger_condition": "alert.type == 'impossible_travel'",
-      "updated_at": "2026-06-10T16:05:23.170444Z"
+      "updated_at": "2026-06-11T04:40:15.524527Z"
     },
     {
-      "created_at": "2026-06-10T16:05:23.164449Z",
+      "created_at": "2026-06-11T04:40:15.520468Z",
       "description": "Route the session to remote browser isolation when the PHI classifier fires on a webmail upload, then alert the privacy officer.",
       "enabled": true,
-      "id": "78296e97-60d5-4bd0-8e07-7d485d06f722",
+      "id": "ec67aaef-51b5-496d-8425-d52128ee48e6",
       "name": "Isolate PHI exfil over webmail",
       "steps": [
         {
@@ -48,7 +48,7 @@
       ],
       "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
       "trigger_condition": "dlp.violation && dlp.classifier == 'phi' && app.category == 'webmail'",
-      "updated_at": "2026-06-10T16:05:23.164449Z"
+      "updated_at": "2026-06-11T04:40:15.520468Z"
     }
   ],
   "next_cursor": ""

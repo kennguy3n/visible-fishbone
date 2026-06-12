@@ -1,0 +1,71 @@
+{
+  "scenario": "throttle",
+  "source": "sng-swg::RateLimiter (token bucket) + Verdict::rate_limit",
+  "limiter": {
+    "capacity_tokens": 5.0,
+    "refill_per_sec": 1.0
+  },
+  "burst_trace": [
+    {
+      "request": 1,
+      "permitted": true,
+      "retry_after_secs": 0,
+      "bucket_key": "92112770-7c0a-410b-b0f4-09dde70e063a|svc-bulk-backup@acme.example"
+    },
+    {
+      "request": 2,
+      "permitted": true,
+      "retry_after_secs": 0,
+      "bucket_key": "92112770-7c0a-410b-b0f4-09dde70e063a|svc-bulk-backup@acme.example"
+    },
+    {
+      "request": 3,
+      "permitted": true,
+      "retry_after_secs": 0,
+      "bucket_key": "92112770-7c0a-410b-b0f4-09dde70e063a|svc-bulk-backup@acme.example"
+    },
+    {
+      "request": 4,
+      "permitted": true,
+      "retry_after_secs": 0,
+      "bucket_key": "92112770-7c0a-410b-b0f4-09dde70e063a|svc-bulk-backup@acme.example"
+    },
+    {
+      "request": 5,
+      "permitted": true,
+      "retry_after_secs": 0,
+      "bucket_key": "92112770-7c0a-410b-b0f4-09dde70e063a|svc-bulk-backup@acme.example"
+    },
+    {
+      "request": 6,
+      "permitted": false,
+      "retry_after_secs": 1,
+      "bucket_key": "92112770-7c0a-410b-b0f4-09dde70e063a|svc-bulk-backup@acme.example"
+    },
+    {
+      "request": 7,
+      "permitted": false,
+      "retry_after_secs": 1,
+      "bucket_key": "92112770-7c0a-410b-b0f4-09dde70e063a|svc-bulk-backup@acme.example"
+    },
+    {
+      "request": 8,
+      "permitted": false,
+      "retry_after_secs": 1,
+      "bucket_key": "92112770-7c0a-410b-b0f4-09dde70e063a|svc-bulk-backup@acme.example"
+    }
+  ],
+  "verdict": {
+    "action": "rate_limit",
+    "reason": "rate_limit.92112770-7c0a-410b-b0f4-09dde70e063a|svc-bulk-backup@acme.example",
+    "category": null,
+    "retry_after_secs": 1
+  },
+  "wire_response": {
+    "_comment": "ExtAuthzResponse::from_verdict maps Action::RateLimit -> HTTP 429 with Retry-After copied verbatim",
+    "action": "rate_limit",
+    "status": 429,
+    "reason": "rate_limit.92112770-7c0a-410b-b0f4-09dde70e063a|svc-bulk-backup@acme.example",
+    "retry_after_secs": 1
+  }
+}

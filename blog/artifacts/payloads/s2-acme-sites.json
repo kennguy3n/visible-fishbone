@@ -8,13 +8,13 @@
         "traffic_classification": "smart_bypass",
         "ztna": true
       },
-      "created_at": "2026-06-10T16:05:22.815433000Z",
-      "id": "7ce824bf-81fc-4c65-8b05-3044c48158c4",
+      "created_at": "2026-06-11T04:40:15.045484000Z",
+      "id": "4f622cbf-8876-4eb7-9aa2-e2acf03a5231",
       "name": "E-commerce Cloud VPC",
       "slug": "e-commerce-cloud-vpc",
       "template": "cloud_only",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-10T16:05:22.815433000Z"
+      "updated_at": "2026-06-11T04:40:15.045484000Z"
     },
     {
       "config": {
@@ -27,13 +27,13 @@
         "traffic_classification": "full",
         "wan_links": 2
       },
-      "created_at": "2026-06-10T16:05:22.811166000Z",
-      "id": "632e3701-6fd6-4fbd-b83b-aa325535d184",
+      "created_at": "2026-06-11T04:40:15.041961000Z",
+      "id": "caa82632-2c60-4e45-bf56-85343cfbce6f",
       "name": "Store #311 — San Antonio",
       "slug": "store-311-san-antonio",
       "template": "branch",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-10T16:05:22.811166000Z"
+      "updated_at": "2026-06-11T04:40:15.041961000Z"
     },
     {
       "config": {
@@ -46,13 +46,13 @@
         "traffic_classification": "full",
         "wan_links": 2
       },
-      "created_at": "2026-06-10T16:05:22.806982000Z",
-      "id": "b2e0192b-4133-4a1a-9326-2713e4c2c44e",
+      "created_at": "2026-06-11T04:40:15.038243000Z",
+      "id": "f6827a65-1d09-423c-b29d-7ed6427d65c0",
       "name": "Store #204 — Houston",
       "slug": "store-204-houston",
       "template": "branch",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-10T16:05:22.806982000Z"
+      "updated_at": "2026-06-11T04:40:15.038243000Z"
     },
     {
       "config": {
@@ -65,13 +65,13 @@
         "traffic_classification": "full",
         "wan_links": 2
       },
-      "created_at": "2026-06-10T16:05:22.802769000Z",
-      "id": "dd672612-a749-4077-82bf-b8edf57921aa",
+      "created_at": "2026-06-11T04:40:15.034189000Z",
+      "id": "ebe67ec3-0d8d-415f-a84f-a2cd6b259302",
       "name": "Store #118 — Austin",
       "slug": "store-118-austin",
       "template": "branch",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-10T16:05:22.802769000Z"
+      "updated_at": "2026-06-11T04:40:15.034189000Z"
     },
     {
       "config": {
@@ -81,13 +81,13 @@
         "throughput_mbps": 10000,
         "traffic_classification": "routing_only"
       },
-      "created_at": "2026-06-10T16:05:22.798611000Z",
-      "id": "7b015e02-ebbe-4b99-852e-1f65ccc06dfe",
+      "created_at": "2026-06-11T04:40:15.030072000Z",
+      "id": "704aa451-915d-4612-a502-ede595cbc75d",
       "name": "Distribution Center — Memphis",
       "slug": "distribution-center-memphis",
       "template": "hub",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-10T16:05:22.798611000Z"
+      "updated_at": "2026-06-11T04:40:15.030072000Z"
     },
     {
       "config": {
@@ -97,13 +97,13 @@
         "throughput_mbps": 10000,
         "traffic_classification": "routing_only"
       },
-      "created_at": "2026-06-10T16:05:22.793103000Z",
-      "id": "372eed32-5af4-4459-889c-97e3cb544d59",
+      "created_at": "2026-06-11T04:40:15.023152000Z",
+      "id": "eb3cc549-cbad-42af-b08c-fbf15d5837d9",
       "name": "Acme HQ — Dallas",
       "slug": "acme-hq-dallas",
       "template": "hub",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-10T16:05:22.793103000Z"
+      "updated_at": "2026-06-11T04:40:15.023152000Z"
     }
   ],
   "next_cursor": ""

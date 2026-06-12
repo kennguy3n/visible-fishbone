@@ -1,18 +1,20 @@
 # ShieldNet Gateway — the measured SASE series
 
-An eight-post engineering series that walks the real product end-to-end across
-seven executive scenarios, with live screenshots, verbatim API payloads, and an
-in-repo efficacy/performance harness. Every figure traces to an evidence source;
-every post ends with an honest "where we fall short."
+A nine-post engineering series that walks the real product end-to-end, with live
+screenshots, verbatim API payloads, and an in-repo efficacy/performance harness.
+Every figure traces to an evidence source; every post ends with an honest "where
+we fall short."
 
-**Refreshed this cycle:** six new capabilities are folded into the relevant posts
-— activity-tiered dormancy (#154, Posts 2/7), ClamAV + safe-browsing (#156, Post
-5), shadow-IT NoOps (#159/#172, Post 5), coach-first AI-app DLP + HITL queue
-(#158, Posts 5/6), smart-default policy templates (#157, Posts 2/7), and the
-self-hosted Bonsai-8B Q2_0 bake (#155, Posts 6/7). Most are code-complete and
-tested on `main` but not yet wired into the running control plane, so they're
-backed by real engine output and tests rather than live-enforcement screenshots —
-Post 0 has the per-capability "what's actually wired" table.
+**Refreshed this cycle:** the deferred runtime wiring landed — PRs
+[#172](https://github.com/kennguy3n/visible-fishbone/pull/172) and
+[#176](https://github.com/kennguy3n/visible-fishbone/pull/176)–[#183](https://github.com/kennguy3n/visible-fishbone/pull/183)
+are merged into `main`, all new enforcement surfaces shipping behind default-OFF
+gates. The data bootstrap was redone into a **nine-tenant fleet spanning seven
+countries and eight industries across five compliance regimes**, and a new
+capstone **Post 8** walks the six operator intents (route / allow / block /
+prioritise / throttle / threat-protection) as real typed policies with the
+benchmarks re-measured on this dev VM. Post 0 has the per-capability "what's
+actually wired" table.
 
 ## The posts
 
@@ -26,6 +28,7 @@ Post 0 has the per-capability "what's actually wired" table.
 | 5 | [Keep regulated data from leaving: DLP + CASB + RBI](05-s5-dlp-casb-rbi.md) | S5 | Lena / Tom |
 | 6 | [AI-assisted operations — with a verifier, not a vibe](06-s6-ai-assisted-ops.md) | S6 | Lena / Devraj |
 | 7 | [Prove the spend and the posture + competitive critique](07-s7-cost-compliance-competitive.md) | S7 | Tom |
+| 8 | [Six scenarios on one dev VM: route/allow/block/prioritise/throttle/protect](08-six-scenarios-on-this-vm.md) | — | Devraj / Lena |
 
 Scenario definitions and the evidence map live in
 [`../scenarios/00-scenario-catalog.md`](../scenarios/00-scenario-catalog.md).
@@ -33,11 +36,11 @@ Scenario definitions and the evidence map live in
 ## The business series (companion)
 
 A five-post, **buyer-facing** companion lives in
-[`business/`](business/README.md). It walks the five capabilities shipped this
-cycle — activity-tiered dormancy, CASB shadow-IT NoOps, coach-first AI-app DLP,
-smart-default compliance templates, and self-hosted Bonsai-8B — as
-persona + jobs-to-be-done journeys, with live console screenshots, the real CASB
-classifier's output, and an honest competitive assessment for the SME/MSP buyer.
+[`business/`](business/README.md). It walks the headline capabilities — CASB
+shadow-IT NoOps, coach-first AI-app DLP, smart-default compliance templates, and
+self-hosted AI — as persona + jobs-to-be-done journeys, with live console
+screenshots, the real CASB classifier's output, and an honest competitive
+assessment for the SME/MSP buyer.
 
 | # | Post | Persona | Capability |
 | --- | --- | --- | --- |
@@ -50,8 +53,11 @@ classifier's output, and an honest competitive assessment for the SME/MSP buyer.
 
 ## Evidence sources (all in-repo)
 
-- **Screenshots:** [`../artifacts/screenshots/`](../artifacts/screenshots/) — 16
-  live console captures, audited error-free across all 31 routes / 4 tenants.
+- **Screenshots:** [`../artifacts/screenshots/`](../artifacts/screenshots/) —
+  live console captures, including this cycle's six scenario captures (fleet
+  dashboard, multi-country tenants, the 6-verb policy editor, the React-Flow
+  policy graph, the populated DLP review queue, and the typed-graph JSON with
+  SLA params).
 - **Payloads:** [`../artifacts/payloads/`](../artifacts/payloads/) — verbatim
   control-plane responses across the seven scenarios, plus the S5 DLP-classify and
   S6 NL-query request payloads. This cycle adds the **real CASB NoOps engine
@@ -62,9 +68,16 @@ classifier's output, and an honest competitive assessment for the SME/MSP buyer.
   [`policy-templates-catalog.json`](../artifacts/payloads/policy-templates-catalog.json)
   captured verbatim from the templates API.
 - **Efficacy matrix:** [`../artifacts/efficacy-report.json`](../artifacts/efficacy-report.json)
-  — 8 functions, real crate APIs, curated corpora, suite verdict PASS.
+  — 11 functions (incl. kernel firewall, Suricata IPS, and two adversarial
+  corpora), real crate APIs, curated corpora, suite verdict PASS, re-run on this
+  VM.
 - **Performance datasheet:** [`../artifacts/edge-performance-datasheet.md`](../artifacts/edge-performance-datasheet.md)
-  — per-SKU throughput (dry-run, caveated) + per-packet latency percentiles.
+  — per-SKU throughput in **two columns (dry-run + real `AF_PACKET` wire)** +
+  per-packet latency percentiles, plus the multi-queue floor-vs-ceiling rig
+  ([`../artifacts/multi-queue-branch-large.json`](../artifacts/multi-queue-branch-large.json)).
+- **Scenario provenance:** [`../artifacts/scenarios.md`](../artifacts/scenarios.md)
+  — maps each of the six operator intents to its real code primitive + captured
+  evidence file.
 - **Competitor figures:** [`../../bench/business-report/competitors.json`](../../bench/business-report/competitors.json)
   — published datasheet numbers, each with `source_url` + `caveat`.
 
@@ -75,8 +88,10 @@ with the backend tech stack. With the stack up (control plane on `:8080`, consol
 on `:5173`) and `AUTH_JWT_SECRET` exported:
 
 ```bash
-# 1. Seed four tenants under one MSP (idempotent — rerun-safe).
+# 1. Seed the nine-tenant multi-country fleet under one MSP (idempotent — rerun-safe).
 (cd blog/harness/seed && go run .)
+# 1b. (optional) seed deterministic DLP review-queue rows for the queue screenshot.
+PGPASSWORD=sng psql -h 127.0.0.1 -U sng -d sng -f blog/harness/seed/dlp_review_seed.sql
 
 # 2. Drive usage so the metering projections have data.
 (cd blog/harness/usage && go run .)

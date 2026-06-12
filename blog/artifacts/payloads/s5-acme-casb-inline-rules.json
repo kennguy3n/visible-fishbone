@@ -4,12 +4,12 @@
       "action": "share",
       "app_id": "google_workspace",
       "conditions": {},
-      "created_at": "2026-06-10T16:05:22Z",
+      "created_at": "2026-06-11T04:40:15Z",
       "enabled": true,
-      "id": "0c2039ea-dddb-4aa2-b2c7-b971802affe9",
+      "id": "8fc417e4-fac7-4e64-b586-45a9c9ab844b",
       "priority": 40,
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-10T16:05:22Z",
+      "updated_at": "2026-06-11T04:40:15Z",
       "verdict": "log"
     },
     {
@@ -18,12 +18,12 @@
       "conditions": {
         "file_type": "csv"
       },
-      "created_at": "2026-06-10T16:05:22Z",
+      "created_at": "2026-06-11T04:40:15Z",
       "enabled": true,
-      "id": "81119dbf-1145-4d76-b2f2-ac5f9753585b",
+      "id": "8110b8e7-369c-42ac-a284-808f09def822",
       "priority": 30,
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-10T16:05:22Z",
+      "updated_at": "2026-06-11T04:40:15Z",
       "verdict": "block"
     },
     {
@@ -32,12 +32,12 @@
       "conditions": {
         "size_threshold": 10000000
       },
-      "created_at": "2026-06-10T16:05:22Z",
+      "created_at": "2026-06-11T04:40:15Z",
       "enabled": true,
-      "id": "cb111eef-68c8-45ee-9acc-356e19299102",
+      "id": "98594219-a8e7-47c5-bc2e-38b4bbbe65e3",
       "priority": 20,
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-10T16:05:22Z",
+      "updated_at": "2026-06-11T04:40:15Z",
       "verdict": "log"
     },
     {
@@ -46,12 +46,12 @@
       "conditions": {
         "label_match": "confidential"
       },
-      "created_at": "2026-06-10T16:05:22Z",
+      "created_at": "2026-06-11T04:40:15Z",
       "enabled": true,
-      "id": "cfe0f7a0-c372-48bf-8a40-44c6b5d010a0",
+      "id": "0440570e-866e-45b5-a08e-ea6e1a44b22c",
       "priority": 10,
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-10T16:05:22Z",
+      "updated_at": "2026-06-11T04:40:15Z",
       "verdict": "block"
     }
   ]

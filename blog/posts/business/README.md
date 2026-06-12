@@ -6,8 +6,14 @@ series answers one buyer question per post — *"what job does this do for me, a
 can you prove it?"* — using the same live, seeded control plane, console, and
 audit trail.
 
-All five new capabilities shipped this cycle are covered, each grounded in real
-console screenshots and captured API/DB evidence (no fabricated screenshots).
+All five headline capabilities are covered, each grounded in real console
+screenshots and captured API/DB evidence (no fabricated screenshots). This
+cycle's wiring is now merged into `main` (PRs
+[#172](https://github.com/kennguy3n/visible-fishbone/pull/172),
+[#176](https://github.com/kennguy3n/visible-fishbone/pull/176)–[#183](https://github.com/kennguy3n/visible-fishbone/pull/183),
+all default-OFF), and the underlying fleet was expanded to **nine tenants across
+seven countries and eight industries** so the residency and compliance story is
+real, not illustrative.
 
 ## The posts
 
@@ -38,8 +44,8 @@ console screenshots and captured API/DB evidence (no fabricated screenshots).
 
 ## Reproducing the CASB evidence
 
-With the stack up (control plane `:8080`, console `:5173`) and the four tenants
-seeded (`blog/harness/seed`), the CASB shadow-IT evidence is produced by:
+With the stack up (control plane `:8080`, console `:5173`) and the nine-tenant
+fleet seeded (`blog/harness/seed`), the CASB shadow-IT evidence is produced by:
 
 ```bash
 # Seeds a per-tenant shadow-IT inventory, then drives the REAL CASB NoOps

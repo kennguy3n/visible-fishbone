@@ -1,403 +1,403 @@
 {
-    "items": [
-        {
-            "id": "baseline/global",
-            "kind": "baseline",
-            "name": "Universal security baseline",
-            "description": "Blocks malware, phishing, hacking-tool and anonymiser categories at the DNS and SWG planes for every tenant.",
-            "spec": {
-                "categories": [
-                    {
-                        "category": "security.threat",
-                        "action": "block"
-                    },
-                    {
-                        "category": "security.hacking",
-                        "action": "block"
-                    },
-                    {
-                        "category": "anonymizer",
-                        "action": "block"
-                    }
-                ]
-            }
-        },
-        {
-            "id": "compliance/au-privacy",
-            "kind": "compliance",
-            "name": "Australia Privacy Act data-protection",
-            "description": "Australia Privacy Act: DLP detection for tfn_au, australia_medicare, phone, email.",
-            "regime": "au-privacy",
-            "spec": {
-                "detectors": [
-                    {
-                        "detector": "tfn_au",
-                        "sensitivity": "high"
-                    },
-                    {
-                        "detector": "australia_medicare",
-                        "sensitivity": "high"
-                    },
-                    {
-                        "detector": "phone",
-                        "sensitivity": "medium"
-                    },
-                    {
-                        "detector": "email",
-                        "sensitivity": "low"
-                    }
-                ]
-            }
-        },
-        {
-            "id": "compliance/ca-pipeda",
-            "kind": "compliance",
-            "name": "Canada PIPEDA data-protection",
-            "description": "Canada PIPEDA: DLP detection for canada_sin, phone, email.",
-            "regime": "ca-pipeda",
-            "spec": {
-                "detectors": [
-                    {
-                        "detector": "canada_sin",
-                        "sensitivity": "high"
-                    },
-                    {
-                        "detector": "phone",
-                        "sensitivity": "medium"
-                    },
-                    {
-                        "detector": "email",
-                        "sensitivity": "low"
-                    }
-                ]
-            }
-        },
-        {
-            "id": "compliance/eu-gdpr",
-            "kind": "compliance",
-            "name": "EU GDPR data-protection",
-            "description": "EU GDPR: DLP detection for iban, eu_vat, phone, email.",
-            "regime": "eu-gdpr",
-            "spec": {
-                "detectors": [
-                    {
-                        "detector": "iban",
-                        "sensitivity": "high"
-                    },
-                    {
-                        "detector": "eu_vat",
-                        "sensitivity": "medium"
-                    },
-                    {
-                        "detector": "phone",
-                        "sensitivity": "medium"
-                    },
-                    {
-                        "detector": "email",
-                        "sensitivity": "low"
-                    }
-                ]
-            }
-        },
-        {
-            "id": "compliance/uk-dpa",
-            "kind": "compliance",
-            "name": "UK GDPR / DPA 2018 data-protection",
-            "description": "UK GDPR / DPA 2018: DLP detection for ni_uk, uk_nhs, iban, phone, email.",
-            "regime": "uk-dpa",
-            "spec": {
-                "detectors": [
-                    {
-                        "detector": "ni_uk",
-                        "sensitivity": "high"
-                    },
-                    {
-                        "detector": "uk_nhs",
-                        "sensitivity": "high"
-                    },
-                    {
-                        "detector": "iban",
-                        "sensitivity": "high"
-                    },
-                    {
-                        "detector": "phone",
-                        "sensitivity": "medium"
-                    },
-                    {
-                        "detector": "email",
-                        "sensitivity": "low"
-                    }
-                ]
-            }
-        },
-        {
-            "id": "compliance/us-baseline",
-            "kind": "compliance",
-            "name": "US Baseline (PII/PCI) data-protection",
-            "description": "US Baseline (PII/PCI): DLP detection for ssn_us, credit_card, passport_us, phone, email.",
-            "regime": "us-baseline",
-            "spec": {
-                "detectors": [
-                    {
-                        "detector": "ssn_us",
-                        "sensitivity": "high"
-                    },
-                    {
-                        "detector": "credit_card",
-                        "sensitivity": "high"
-                    },
-                    {
-                        "detector": "passport_us",
-                        "sensitivity": "medium"
-                    },
-                    {
-                        "detector": "phone",
-                        "sensitivity": "low"
-                    },
-                    {
-                        "detector": "email",
-                        "sensitivity": "low"
-                    }
-                ]
-            }
-        },
-        {
-            "id": "industry/education",
-            "kind": "industry",
-            "name": "Education acceptable-use & firewall",
-            "description": "Education profile: standard firewall posture; blocks adult.content, violence, drugs, gambling; monitors social.media.",
-            "industry": "education",
-            "spec": {
-                "categories": [
-                    {
-                        "category": "adult.content",
-                        "action": "block"
-                    },
-                    {
-                        "category": "violence",
-                        "action": "block"
-                    },
-                    {
-                        "category": "drugs",
-                        "action": "block"
-                    },
-                    {
-                        "category": "gambling",
-                        "action": "block"
-                    },
-                    {
-                        "category": "social.media",
-                        "action": "monitor"
-                    }
-                ],
-                "firewall_posture": "standard"
-            }
-        },
-        {
-            "id": "industry/finance",
-            "kind": "industry",
-            "name": "Finance & Banking acceptable-use & firewall",
-            "description": "Finance & Banking profile: strict firewall posture; blocks adult.content, gambling; monitors social.media, webmail; adds credit_card, iban, swift, routing_number DLP detection.",
-            "industry": "finance",
-            "spec": {
-                "categories": [
-                    {
-                        "category": "adult.content",
-                        "action": "block"
-                    },
-                    {
-                        "category": "gambling",
-                        "action": "block"
-                    },
-                    {
-                        "category": "social.media",
-                        "action": "monitor"
-                    },
-                    {
-                        "category": "webmail",
-                        "action": "monitor"
-                    }
-                ],
-                "detectors": [
-                    {
-                        "detector": "credit_card",
-                        "sensitivity": "high"
-                    },
-                    {
-                        "detector": "iban",
-                        "sensitivity": "high"
-                    },
-                    {
-                        "detector": "swift",
-                        "sensitivity": "high"
-                    },
-                    {
-                        "detector": "routing_number",
-                        "sensitivity": "high"
-                    }
-                ],
-                "firewall_posture": "strict"
-            }
-        },
-        {
-            "id": "industry/general",
-            "kind": "industry",
-            "name": "General Business acceptable-use & firewall",
-            "description": "General Business profile: standard firewall posture; blocks adult.content, gambling.",
-            "industry": "general",
-            "spec": {
-                "categories": [
-                    {
-                        "category": "adult.content",
-                        "action": "block"
-                    },
-                    {
-                        "category": "gambling",
-                        "action": "block"
-                    }
-                ],
-                "firewall_posture": "standard"
-            }
-        },
-        {
-            "id": "industry/healthcare",
-            "kind": "industry",
-            "name": "Healthcare acceptable-use & firewall",
-            "description": "Healthcare profile: strict firewall posture; blocks adult.content, gambling, violence, drugs; monitors social.media; adds mrn, icd10 DLP detection.",
-            "industry": "healthcare",
-            "spec": {
-                "categories": [
-                    {
-                        "category": "adult.content",
-                        "action": "block"
-                    },
-                    {
-                        "category": "gambling",
-                        "action": "block"
-                    },
-                    {
-                        "category": "violence",
-                        "action": "block"
-                    },
-                    {
-                        "category": "drugs",
-                        "action": "block"
-                    },
-                    {
-                        "category": "social.media",
-                        "action": "monitor"
-                    }
-                ],
-                "detectors": [
-                    {
-                        "detector": "mrn",
-                        "sensitivity": "high"
-                    },
-                    {
-                        "detector": "icd10",
-                        "sensitivity": "high"
-                    }
-                ],
-                "firewall_posture": "strict"
-            }
-        },
-        {
-            "id": "industry/legal",
-            "kind": "industry",
-            "name": "Legal acceptable-use & firewall",
-            "description": "Legal profile: strict firewall posture; blocks adult.content, gambling; monitors social.media.",
-            "industry": "legal",
-            "spec": {
-                "categories": [
-                    {
-                        "category": "adult.content",
-                        "action": "block"
-                    },
-                    {
-                        "category": "gambling",
-                        "action": "block"
-                    },
-                    {
-                        "category": "social.media",
-                        "action": "monitor"
-                    }
-                ],
-                "firewall_posture": "strict"
-            }
-        },
-        {
-            "id": "industry/professional-services",
-            "kind": "industry",
-            "name": "Professional Services acceptable-use & firewall",
-            "description": "Professional Services profile: standard firewall posture; blocks adult.content, gambling; monitors social.media.",
-            "industry": "professional-services",
-            "spec": {
-                "categories": [
-                    {
-                        "category": "adult.content",
-                        "action": "block"
-                    },
-                    {
-                        "category": "gambling",
-                        "action": "block"
-                    },
-                    {
-                        "category": "social.media",
-                        "action": "monitor"
-                    }
-                ],
-                "firewall_posture": "standard"
-            }
-        },
-        {
-            "id": "industry/retail",
-            "kind": "industry",
-            "name": "Retail & E-commerce acceptable-use & firewall",
-            "description": "Retail & E-commerce profile: standard firewall posture; blocks adult.content; monitors gambling, social.media; adds credit_card DLP detection.",
-            "industry": "retail",
-            "spec": {
-                "categories": [
-                    {
-                        "category": "adult.content",
-                        "action": "block"
-                    },
-                    {
-                        "category": "gambling",
-                        "action": "monitor"
-                    },
-                    {
-                        "category": "social.media",
-                        "action": "monitor"
-                    }
-                ],
-                "detectors": [
-                    {
-                        "detector": "credit_card",
-                        "sensitivity": "high"
-                    }
-                ],
-                "firewall_posture": "standard"
-            }
-        },
-        {
-            "id": "industry/technology",
-            "kind": "industry",
-            "name": "Technology acceptable-use & firewall",
-            "description": "Technology profile: standard firewall posture; blocks adult.content; monitors gambling.",
-            "industry": "technology",
-            "spec": {
-                "categories": [
-                    {
-                        "category": "adult.content",
-                        "action": "block"
-                    },
-                    {
-                        "category": "gambling",
-                        "action": "monitor"
-                    }
-                ],
-                "firewall_posture": "standard"
-            }
-        }
-    ]
+  "items": [
+    {
+      "description": "Blocks malware, phishing, hacking-tool and anonymiser categories at the DNS and SWG planes for every tenant.",
+      "id": "baseline/global",
+      "kind": "baseline",
+      "name": "Universal security baseline",
+      "spec": {
+        "categories": [
+          {
+            "action": "block",
+            "category": "security.threat"
+          },
+          {
+            "action": "block",
+            "category": "security.hacking"
+          },
+          {
+            "action": "block",
+            "category": "anonymizer"
+          }
+        ]
+      }
+    },
+    {
+      "description": "Australia Privacy Act: DLP detection for tfn_au, australia_medicare, phone, email.",
+      "id": "compliance/au-privacy",
+      "kind": "compliance",
+      "name": "Australia Privacy Act data-protection",
+      "regime": "au-privacy",
+      "spec": {
+        "detectors": [
+          {
+            "detector": "tfn_au",
+            "sensitivity": "high"
+          },
+          {
+            "detector": "australia_medicare",
+            "sensitivity": "high"
+          },
+          {
+            "detector": "phone",
+            "sensitivity": "medium"
+          },
+          {
+            "detector": "email",
+            "sensitivity": "low"
+          }
+        ]
+      }
+    },
+    {
+      "description": "Canada PIPEDA: DLP detection for canada_sin, phone, email.",
+      "id": "compliance/ca-pipeda",
+      "kind": "compliance",
+      "name": "Canada PIPEDA data-protection",
+      "regime": "ca-pipeda",
+      "spec": {
+        "detectors": [
+          {
+            "detector": "canada_sin",
+            "sensitivity": "high"
+          },
+          {
+            "detector": "phone",
+            "sensitivity": "medium"
+          },
+          {
+            "detector": "email",
+            "sensitivity": "low"
+          }
+        ]
+      }
+    },
+    {
+      "description": "EU GDPR: DLP detection for iban, eu_vat, phone, email.",
+      "id": "compliance/eu-gdpr",
+      "kind": "compliance",
+      "name": "EU GDPR data-protection",
+      "regime": "eu-gdpr",
+      "spec": {
+        "detectors": [
+          {
+            "detector": "iban",
+            "sensitivity": "high"
+          },
+          {
+            "detector": "eu_vat",
+            "sensitivity": "medium"
+          },
+          {
+            "detector": "phone",
+            "sensitivity": "medium"
+          },
+          {
+            "detector": "email",
+            "sensitivity": "low"
+          }
+        ]
+      }
+    },
+    {
+      "description": "UK GDPR / DPA 2018: DLP detection for ni_uk, uk_nhs, iban, phone, email.",
+      "id": "compliance/uk-dpa",
+      "kind": "compliance",
+      "name": "UK GDPR / DPA 2018 data-protection",
+      "regime": "uk-dpa",
+      "spec": {
+        "detectors": [
+          {
+            "detector": "ni_uk",
+            "sensitivity": "high"
+          },
+          {
+            "detector": "uk_nhs",
+            "sensitivity": "high"
+          },
+          {
+            "detector": "iban",
+            "sensitivity": "high"
+          },
+          {
+            "detector": "phone",
+            "sensitivity": "medium"
+          },
+          {
+            "detector": "email",
+            "sensitivity": "low"
+          }
+        ]
+      }
+    },
+    {
+      "description": "US Baseline (PII/PCI): DLP detection for ssn_us, credit_card, passport_us, phone, email.",
+      "id": "compliance/us-baseline",
+      "kind": "compliance",
+      "name": "US Baseline (PII/PCI) data-protection",
+      "regime": "us-baseline",
+      "spec": {
+        "detectors": [
+          {
+            "detector": "ssn_us",
+            "sensitivity": "high"
+          },
+          {
+            "detector": "credit_card",
+            "sensitivity": "high"
+          },
+          {
+            "detector": "passport_us",
+            "sensitivity": "medium"
+          },
+          {
+            "detector": "phone",
+            "sensitivity": "low"
+          },
+          {
+            "detector": "email",
+            "sensitivity": "low"
+          }
+        ]
+      }
+    },
+    {
+      "description": "Education profile: standard firewall posture; blocks adult.content, violence, drugs, gambling; monitors social.media.",
+      "id": "industry/education",
+      "industry": "education",
+      "kind": "industry",
+      "name": "Education acceptable-use & firewall",
+      "spec": {
+        "categories": [
+          {
+            "action": "block",
+            "category": "adult.content"
+          },
+          {
+            "action": "block",
+            "category": "violence"
+          },
+          {
+            "action": "block",
+            "category": "drugs"
+          },
+          {
+            "action": "block",
+            "category": "gambling"
+          },
+          {
+            "action": "monitor",
+            "category": "social.media"
+          }
+        ],
+        "firewall_posture": "standard"
+      }
+    },
+    {
+      "description": "Finance & Banking profile: strict firewall posture; blocks adult.content, gambling; monitors social.media, webmail; adds credit_card, iban, swift, routing_number DLP detection.",
+      "id": "industry/finance",
+      "industry": "finance",
+      "kind": "industry",
+      "name": "Finance & Banking acceptable-use & firewall",
+      "spec": {
+        "categories": [
+          {
+            "action": "block",
+            "category": "adult.content"
+          },
+          {
+            "action": "block",
+            "category": "gambling"
+          },
+          {
+            "action": "monitor",
+            "category": "social.media"
+          },
+          {
+            "action": "monitor",
+            "category": "webmail"
+          }
+        ],
+        "detectors": [
+          {
+            "detector": "credit_card",
+            "sensitivity": "high"
+          },
+          {
+            "detector": "iban",
+            "sensitivity": "high"
+          },
+          {
+            "detector": "swift",
+            "sensitivity": "high"
+          },
+          {
+            "detector": "routing_number",
+            "sensitivity": "high"
+          }
+        ],
+        "firewall_posture": "strict"
+      }
+    },
+    {
+      "description": "General Business profile: standard firewall posture; blocks adult.content, gambling.",
+      "id": "industry/general",
+      "industry": "general",
+      "kind": "industry",
+      "name": "General Business acceptable-use & firewall",
+      "spec": {
+        "categories": [
+          {
+            "action": "block",
+            "category": "adult.content"
+          },
+          {
+            "action": "block",
+            "category": "gambling"
+          }
+        ],
+        "firewall_posture": "standard"
+      }
+    },
+    {
+      "description": "Healthcare profile: strict firewall posture; blocks adult.content, gambling, violence, drugs; monitors social.media; adds mrn, icd10 DLP detection.",
+      "id": "industry/healthcare",
+      "industry": "healthcare",
+      "kind": "industry",
+      "name": "Healthcare acceptable-use & firewall",
+      "spec": {
+        "categories": [
+          {
+            "action": "block",
+            "category": "adult.content"
+          },
+          {
+            "action": "block",
+            "category": "gambling"
+          },
+          {
+            "action": "block",
+            "category": "violence"
+          },
+          {
+            "action": "block",
+            "category": "drugs"
+          },
+          {
+            "action": "monitor",
+            "category": "social.media"
+          }
+        ],
+        "detectors": [
+          {
+            "detector": "mrn",
+            "sensitivity": "high"
+          },
+          {
+            "detector": "icd10",
+            "sensitivity": "high"
+          }
+        ],
+        "firewall_posture": "strict"
+      }
+    },
+    {
+      "description": "Legal profile: strict firewall posture; blocks adult.content, gambling; monitors social.media.",
+      "id": "industry/legal",
+      "industry": "legal",
+      "kind": "industry",
+      "name": "Legal acceptable-use & firewall",
+      "spec": {
+        "categories": [
+          {
+            "action": "block",
+            "category": "adult.content"
+          },
+          {
+            "action": "block",
+            "category": "gambling"
+          },
+          {
+            "action": "monitor",
+            "category": "social.media"
+          }
+        ],
+        "firewall_posture": "strict"
+      }
+    },
+    {
+      "description": "Professional Services profile: standard firewall posture; blocks adult.content, gambling; monitors social.media.",
+      "id": "industry/professional-services",
+      "industry": "professional-services",
+      "kind": "industry",
+      "name": "Professional Services acceptable-use & firewall",
+      "spec": {
+        "categories": [
+          {
+            "action": "block",
+            "category": "adult.content"
+          },
+          {
+            "action": "block",
+            "category": "gambling"
+          },
+          {
+            "action": "monitor",
+            "category": "social.media"
+          }
+        ],
+        "firewall_posture": "standard"
+      }
+    },
+    {
+      "description": "Retail & E-commerce profile: standard firewall posture; blocks adult.content; monitors gambling, social.media; adds credit_card DLP detection.",
+      "id": "industry/retail",
+      "industry": "retail",
+      "kind": "industry",
+      "name": "Retail & E-commerce acceptable-use & firewall",
+      "spec": {
+        "categories": [
+          {
+            "action": "block",
+            "category": "adult.content"
+          },
+          {
+            "action": "monitor",
+            "category": "gambling"
+          },
+          {
+            "action": "monitor",
+            "category": "social.media"
+          }
+        ],
+        "detectors": [
+          {
+            "detector": "credit_card",
+            "sensitivity": "high"
+          }
+        ],
+        "firewall_posture": "standard"
+      }
+    },
+    {
+      "description": "Technology profile: standard firewall posture; blocks adult.content; monitors gambling.",
+      "id": "industry/technology",
+      "industry": "technology",
+      "kind": "industry",
+      "name": "Technology acceptable-use & firewall",
+      "spec": {
+        "categories": [
+          {
+            "action": "block",
+            "category": "adult.content"
+          },
+          {
+            "action": "monitor",
+            "category": "gambling"
+          }
+        ],
+        "firewall_posture": "standard"
+      }
+    }
+  ]
 }

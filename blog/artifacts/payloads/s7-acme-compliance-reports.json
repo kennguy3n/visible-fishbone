@@ -67,7 +67,7 @@
           "status": "met"
         }
       ],
-      "created_at": "2026-06-10T16:05:22.958401Z",
+      "created_at": "2026-06-11T04:40:15.258115Z",
       "evidence_pack": {
         "controls": [
           {
@@ -136,7 +136,7 @@
           }
         ],
         "framework": "SOC2",
-        "generated_at": "2026-06-10T16:05:22.958245338Z",
+        "generated_at": "2026-06-11T04:40:15.257929249Z",
         "policies": [
           {
             "enforced": true,
@@ -167,8 +167,8 @@
         "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
       },
       "framework": "SOC2",
-      "generated_at": "2026-06-10T16:05:22.958245Z",
-      "id": "d8227797-1d96-46df-8120-ced7b72591d4",
+      "generated_at": "2026-06-11T04:40:15.257929Z",
+      "id": "61b3e52d-c878-4598-aebb-e595b22c8300",
       "max_score": 8,
       "score": 8,
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
