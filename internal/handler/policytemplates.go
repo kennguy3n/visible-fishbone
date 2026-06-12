@@ -97,6 +97,30 @@ func (h *PolicyTemplateHandler) authorize(w http.ResponseWriter, r *http.Request
 	return true
 }
 
+// enforceTenantScope rejects a cross-tenant roll-out that targets any
+// tenant outside the caller's bound scope. The fan-out routes are
+// global (not MountTenantScoped), so middleware.RequireTenant does not
+// run; this applies the same rule it would. A platform/global operator
+// (no tenant claim, so TenantIDFromContext is uuid.Nil) may target any
+// tenant — that is the intended cross-tenant operator action. A
+// tenant-bound credential may only roll out to its own tenant, so a
+// per-tenant admin cannot push baselines to tenants it does not own
+// merely by holding the policy permission.
+func (h *PolicyTemplateHandler) enforceTenantScope(w http.ResponseWriter, r *http.Request, targets []uuid.UUID) bool {
+	callerTenant := middleware.TenantIDFromContext(r.Context())
+	if callerTenant == uuid.Nil {
+		return true
+	}
+	for _, tid := range targets {
+		if tid != callerTenant {
+			WriteError(w, http.StatusForbidden, "tenant_mismatch",
+				"credentials do not authorise a roll-out to tenants outside their scope")
+			return false
+		}
+	}
+	return true
+}
+
 // Register attaches the policy-template routes.
 func (h *PolicyTemplateHandler) Register(mux *http.ServeMux) {
 	// Global catalog (authenticated, not tenant-scoped). Template IDs
@@ -109,10 +133,12 @@ func (h *PolicyTemplateHandler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/v1/policy-templates/options", h.options)
 	mux.HandleFunc("GET /api/v1/policy-templates/{id...}", h.getTemplate)
 
-	// Cross-tenant roll-out (authenticated, not tenant-scoped — the
+	// Cross-tenant roll-out (authenticated, not path-tenant-scoped — the
 	// operator pushes one baseline to N tenants at once). The repository
 	// scopes each write to the per-tenant id in the body, so this fans
-	// out over the existing per-tenant apply path.
+	// out over the existing per-tenant apply path; the handlers RBAC-gate
+	// the operation and enforceTenantScope confines a tenant-bound caller
+	// to its own tenant.
 	mux.HandleFunc("POST /api/v1/policy-templates/rollout/preview", h.rolloutPreview)
 	mux.HandleFunc("POST /api/v1/policy-templates/rollout", h.rollout)
 
@@ -172,6 +198,9 @@ func (h *PolicyTemplateHandler) rolloutPreview(w http.ResponseWriter, r *http.Re
 	if !ok {
 		return
 	}
+	if !h.enforceTenantScope(w, r, ids) {
+		return
+	}
 	preview, err := h.svc.PreviewRollout(r.Context(), ids, req.toSelection())
 	if err != nil {
 		WriteRepositoryError(w, err)
@@ -195,6 +224,9 @@ func (h *PolicyTemplateHandler) rollout(w http.ResponseWriter, r *http.Request) 
 	}
 	ids, ok := parseTenantIDs(w, req.TenantIDs)
 	if !ok {
+		return
+	}
+	if !h.enforceTenantScope(w, r, ids) {
 		return
 	}
 	result, err := h.svc.ExecuteRollout(r.Context(), ids, req.toSelection())

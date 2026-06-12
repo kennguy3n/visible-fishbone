@@ -26,6 +26,7 @@ const STATUS_TONE: Record<RolloutStatus, Tone> = {
   applied: "ok",
   unchanged: "neutral",
   failed: "danger",
+  cancelled: "warn",
 };
 
 // Cross-tenant roll-out: render one baseline (industry + country) and push it
@@ -92,7 +93,12 @@ export function PolicyRollout() {
       { industry, country, tenant_ids: selectedIds },
       {
         onSuccess: (result) => {
-          if (result.failed > 0) {
+          if (result.cancelled > 0) {
+            toast.error(
+              "Roll-out cancelled",
+              `${result.applied} applied · ${result.cancelled} not attempted`,
+            );
+          } else if (result.failed > 0) {
             toast.error(
               "Roll-out completed with failures",
               `${result.applied} applied · ${result.failed} failed (rolled back)`,
@@ -163,6 +169,13 @@ export function PolicyRollout() {
             <span style={{ color: "var(--text-dim)" }}>
               {row.error ?? "apply failed"}
               {row.rolled_back ? " · rolled back" : ""}
+            </span>
+          );
+        }
+        if (row.status === "cancelled") {
+          return (
+            <span style={{ color: "var(--text-dim)" }}>
+              {row.error ?? "cancelled"} · not attempted
             </span>
           );
         }
@@ -308,6 +321,9 @@ export function PolicyRollout() {
             <h3 className="card__title" style={{ marginBottom: 8 }}>
               Result — {execute.data.applied} applied · {execute.data.unchanged}{" "}
               unchanged · {execute.data.failed} failed
+              {execute.data.cancelled > 0
+                ? ` · ${execute.data.cancelled} cancelled`
+                : ""}
             </h3>
             <DataTable
               columns={outcomeColumns}

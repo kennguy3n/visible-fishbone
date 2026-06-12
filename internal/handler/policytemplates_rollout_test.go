@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"testing"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/visible-fishbone/internal/handler"
@@ -53,8 +54,11 @@ func TestPolicyTemplateHandler_Options(t *testing.T) {
 
 func TestPolicyTemplateHandler_RolloutPreviewAndExecute(t *testing.T) {
 	t.Parallel()
-	router, seeded, token := newPolicyTemplateTestRouter(t)
+	router, seeded, _ := newPolicyTemplateTestRouter(t)
 	fresh := uuid.New()
+	// A cross-tenant fan-out is a platform-operator action: the caller
+	// holds no tenant binding, so it may target any tenant.
+	token := signPolicyTemplateToken(t, jwt.MapClaims{})
 
 	body := map[string]any{
 		"industry":   "finance",
@@ -126,7 +130,8 @@ func TestPolicyTemplateHandler_RolloutPreviewAndExecute(t *testing.T) {
 
 func TestPolicyTemplateHandler_RolloutInvalidInput(t *testing.T) {
 	t.Parallel()
-	router, _, token := newPolicyTemplateTestRouter(t)
+	router, _, _ := newPolicyTemplateTestRouter(t)
+	token := signPolicyTemplateToken(t, jwt.MapClaims{})
 
 	cases := []struct {
 		name string
@@ -175,10 +180,49 @@ func TestPolicyTemplateHandler_RolloutAuthorization(t *testing.T) {
 	}
 
 	// A wired authorizer that grants the permission lets the roll-out
-	// proceed (the create fans out to the single fresh tenant).
-	allowed, _, allowedToken := newPolicyTemplateTestRouter(t, handler.WithPolicyTemplateAuthorizer(stubTemplateAuthorizer{allow: true}))
+	// proceed (the create fans out to the single fresh tenant). The
+	// caller is a platform operator (no tenant binding) so the
+	// cross-tenant scope check permits the arbitrary target.
+	allowed, _, _ := newPolicyTemplateTestRouter(t, handler.WithPolicyTemplateAuthorizer(stubTemplateAuthorizer{allow: true}))
+	allowedToken := signPolicyTemplateToken(t, jwt.MapClaims{})
 	rec := doJSON(t, allowed, http.MethodPost, "/api/v1/policy-templates/rollout", allowedToken, body)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200 when permission granted, got %d: %s", rec.Code, rec.Body.String())
+	}
+}
+
+// TestPolicyTemplateHandler_RolloutTenantScope verifies that a
+// tenant-bound caller may only roll out to its own tenant: targeting
+// any other tenant is rejected with 403 before any apply happens, while
+// targeting only its own tenant succeeds. A platform caller (no tenant
+// binding) is covered by the happy-path tests above.
+func TestPolicyTemplateHandler_RolloutTenantScope(t *testing.T) {
+	t.Parallel()
+	router, seeded, ownToken := newPolicyTemplateTestRouter(t)
+	other := uuid.New()
+
+	// Targeting a tenant outside the caller's scope is forbidden on
+	// both the preview and the execute route.
+	cross := map[string]any{
+		"industry":   "finance",
+		"country":    "DE",
+		"tenant_ids": []string{seeded.String(), other.String()},
+	}
+	for _, path := range []string{"/api/v1/policy-templates/rollout/preview", "/api/v1/policy-templates/rollout"} {
+		rec := doJSON(t, router, http.MethodPost, path, ownToken, cross)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("%s: expected 403 for out-of-scope tenant, got %d: %s", path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// Targeting only the caller's own tenant is permitted.
+	own := map[string]any{
+		"industry":   "finance",
+		"country":    "DE",
+		"tenant_ids": []string{seeded.String()},
+	}
+	rec := doJSON(t, router, http.MethodPost, "/api/v1/policy-templates/rollout", ownToken, own)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 for in-scope tenant, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

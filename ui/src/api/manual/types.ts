@@ -476,7 +476,11 @@ export interface RolloutPreview {
   targets: RolloutTargetDiff[];
 }
 
-export type RolloutStatus = "applied" | "unchanged" | "failed";
+export type RolloutStatus =
+  | "applied"
+  | "unchanged"
+  | "failed"
+  | "cancelled";
 
 export interface RolloutOutcome {
   tenant_id: string;
@@ -496,6 +500,7 @@ export interface RolloutResult {
   applied: number;
   unchanged: number;
   failed: number;
+  cancelled: number;
 }
 
 export interface RolloutRequest {

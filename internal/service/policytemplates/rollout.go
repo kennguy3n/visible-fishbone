@@ -3,6 +3,7 @@ package policytemplates
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
 
 	"github.com/google/uuid"
@@ -82,6 +83,11 @@ const (
 	// RolloutStatusFailed — the apply errored for this tenant. See
 	// RolledBack for whether the tenant's prior baseline was preserved.
 	RolloutStatusFailed RolloutStatus = "failed"
+	// RolloutStatusCancelled — the caller's context was cancelled
+	// before this tenant was reached, so it was never attempted. No
+	// write occurred, so the tenant is in a clean state (a roll-out is
+	// idempotent, so re-running applies it).
+	RolloutStatusCancelled RolloutStatus = "cancelled"
 )
 
 // RolloutOutcome is the per-tenant result of an executed roll-out.
@@ -115,6 +121,9 @@ type RolloutResult struct {
 	Applied     int              `json:"applied"`
 	Unchanged   int              `json:"unchanged"`
 	Failed      int              `json:"failed"`
+	// Cancelled counts tenants that were not attempted because the
+	// caller's context was cancelled mid-fan-out.
+	Cancelled int `json:"cancelled"`
 }
 
 // dedupeTenants validates and de-duplicates a roll-out target list,
@@ -224,13 +233,24 @@ func (s *Service) ExecuteRollout(ctx context.Context, tenantIDs []uuid.UUID, sel
 		Outcomes:    make([]RolloutOutcome, 0, len(tids)),
 	}
 
-	for _, tid := range tids {
-		// Stop fanning out if the caller has gone away: every remaining
-		// rolloutOne would only fail at the repo layer with the same
-		// context error, so an early exit avoids reporting a tail of
-		// misleading per-tenant failures.
-		if err := ctx.Err(); err != nil {
-			return result, err
+	for i, tid := range tids {
+		// Stop fanning out if the caller has gone away: the remaining
+		// tenants were never attempted, so record them as cancelled (a
+		// clean, no-write state) rather than issuing writes that would
+		// only fail at the repo layer with the same context error. The
+		// partial result is still returned with a nil error so the
+		// handler emits a 200 reflecting exactly which tenants were
+		// applied before cancellation, instead of discarding them.
+		if cerr := ctx.Err(); cerr != nil {
+			for _, rem := range tids[i:] {
+				result.Cancelled++
+				result.Outcomes = append(result.Outcomes, RolloutOutcome{
+					TenantID: rem,
+					Status:   RolloutStatusCancelled,
+					Error:    cerr.Error(),
+				})
+			}
+			return result, nil
 		}
 		outcome := s.rolloutOne(ctx, tid, resolved)
 		switch outcome.Status {
@@ -292,11 +312,11 @@ func (s *Service) rolloutOne(ctx context.Context, tenantID uuid.UUID, resolved R
 	}
 
 	s.logger.InfoContext(ctx, "rolled out policy template baseline",
-		"tenant_id", tenantID.String(),
-		"industry", stored.Industry,
-		"country", stored.Country,
-		"regime", stored.Regime,
-		"graph_hash", stored.GraphHash,
+		slog.String("tenant_id", tenantID.String()),
+		slog.String("industry", stored.Industry),
+		slog.String("country", stored.Country),
+		slog.String("regime", stored.Regime),
+		slog.String("graph_hash", stored.GraphHash),
 	)
 	return RolloutOutcome{
 		TenantID:  tenantID,

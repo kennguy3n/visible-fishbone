@@ -221,6 +221,44 @@ func TestExecuteRollout_DeduplicatesTenants(t *testing.T) {
 	}
 }
 
+func TestExecuteRollout_ContextCancelledIsTotal(t *testing.T) {
+	svc, _ := newTestService(t)
+	sel := Selection{Industry: IndustryFinance, Country: "DE"}
+
+	// Cancel before any tenant is processed: the roll-out must not
+	// surface an error (so the handler emits a 200 reflecting true
+	// state) and every tenant must get a terminal outcome.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tenants := []uuid.UUID{uuid.New(), uuid.New(), uuid.New()}
+	result, err := svc.ExecuteRollout(ctx, tenants, sel)
+	if err != nil {
+		t.Fatalf("ExecuteRollout must not error on cancellation: %v", err)
+	}
+	if result.Cancelled != len(tenants) {
+		t.Fatalf("cancelled = %d, want %d", result.Cancelled, len(tenants))
+	}
+	if result.Applied != 0 || result.Failed != 0 || result.Unchanged != 0 {
+		t.Errorf("counts = applied:%d unchanged:%d failed:%d, want all 0",
+			result.Applied, result.Unchanged, result.Failed)
+	}
+	if len(result.Outcomes) != len(tenants) {
+		t.Fatalf("outcomes = %d, want %d (every tenant reported)", len(result.Outcomes), len(tenants))
+	}
+	for _, o := range result.Outcomes {
+		if o.Status != RolloutStatusCancelled {
+			t.Errorf("tenant %s status = %q, want cancelled", o.TenantID, o.Status)
+		}
+	}
+	// No write occurred for any tenant: a cancelled roll-out is clean.
+	for _, tid := range tenants {
+		if _, err := svc.GetApplied(context.Background(), tid); !errors.Is(err, ErrNotFound) {
+			t.Errorf("tenant %s should have no baseline after cancellation: %v", tid, err)
+		}
+	}
+}
+
 func TestSelectionOptions(t *testing.T) {
 	svc, _ := newTestService(t)
 	opts := svc.SelectionOptions()
