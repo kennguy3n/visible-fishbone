@@ -159,11 +159,26 @@ func evalCompare(op scimCompareOp, field string, present bool, value string) boo
 // the result. Microsoft Entra ID emits fully-qualified attribute names
 // (e.g. "urn:ietf:params:scim:schemas:core:2.0:User:userName"), so this
 // keeps the qualified and short forms resolving to the same field across
-// both the in-memory matcher and the repository pushdown path.
+// both the in-memory matcher and the repository pushdown path. The
+// prefix match is case-insensitive: a URN namespace identifier is
+// case-insensitive (RFC 8141 §2), so a qualified path differing only in
+// the casing of its schema prefix must still canonicalise to the same
+// short attribute.
 func canonicalAttr(attr string) string {
-	a := strings.TrimPrefix(attr, SCIMSchemaUser+":")
-	a = strings.TrimPrefix(a, SCIMSchemaGroup+":")
-	return strings.ToLower(a)
+	return strings.ToLower(trimSchemaPrefix(attr))
+}
+
+// trimSchemaPrefix removes a leading core-schema URN prefix (User or
+// Group) from a qualified attribute path, comparing the prefix
+// case-insensitively. The post-prefix attribute portion is returned
+// unchanged (callers lowercase as needed).
+func trimSchemaPrefix(attr string) string {
+	for _, prefix := range [...]string{SCIMSchemaUser + ":", SCIMSchemaGroup + ":"} {
+		if len(attr) >= len(prefix) && strings.EqualFold(attr[:len(prefix)], prefix) {
+			return attr[len(prefix):]
+		}
+	}
+	return attr
 }
 
 // userAttr resolves a SCIM filter attribute path to a user's field
