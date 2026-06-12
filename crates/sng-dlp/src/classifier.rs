@@ -655,7 +655,21 @@ impl ContentClassifier {
                     rule_id: format!("<edm:{}>", dataset.id),
                     reason: e.to_string(),
                 })?;
-            edm_index.insert(dataset.id.as_str(), edm_compiled.len());
+            // Fail closed on a duplicate id rather than letting the
+            // later dataset silently overwrite the earlier one in the
+            // index: an `Edm` rule resolving to the wrong dataset is a
+            // privacy-relevant mismatch. `DlpPolicy::validate` already
+            // rejects this, but this builder is public, so it must not
+            // depend on a caller having validated first.
+            if edm_index
+                .insert(dataset.id.as_str(), edm_compiled.len())
+                .is_some()
+            {
+                return Err(DlpError::RuleCompile {
+                    rule_id: format!("<edm:{}>", dataset.id),
+                    reason: format!("duplicate edm dataset id {:?}", dataset.id),
+                });
+            }
             edm_compiled.push(compiled);
         }
         let mut edm_entries = Vec::new();
@@ -841,10 +855,17 @@ impl ContentClassifier {
     /// Classify `content` observed on `channel`. Only rules scoped
     /// to `channel` (or scoped to all channels) are considered.
     ///
-    /// `max_scan_bytes` bounds the *span* detectors (regex, keyword):
-    /// they decode the buffer into a UTF-8 string and run compiled
-    /// matchers over it, so their cost — and the one large allocation —
-    /// scales with the scanned length and is capped for safety. The
+    /// `max_scan_bytes` bounds the *span* detectors (regex, keyword,
+    /// EDM, ML): they decode the buffer into a UTF-8 string and run
+    /// compiled matchers over it, so their cost — and the one large
+    /// allocation — scales with the scanned length and is capped for
+    /// safety. EDM is a span detector here by design: it slides token
+    /// windows over the same truncated `text`, sharing the regex/keyword
+    /// ceiling so a pathological multi-megabyte upload cannot turn the
+    /// per-window hashing into an unbounded-cost path on the inspection
+    /// hot path. A record past the ceiling is therefore missed exactly
+    /// as a regex/keyword hit past the ceiling is — the system-wide
+    /// scan bound, not an EDM-specific gap. The
     /// fingerprint detector is a *whole-document* SimHash: to match the
     /// hash the control plane registered over the full document
     /// (`engine.RegisterFingerprint`), it must fold over the entire
@@ -1581,6 +1602,24 @@ mod tests {
         );
     }
 
+    // Pins the two equivalent forms of the near-duplicate threshold —
+    // the similarity ratio `FINGERPRINT_SIMILARITY_THRESHOLD` the Go
+    // control plane speaks and the Hamming distance the index queries by
+    // — so they can never drift. `sim = 1 - d/64 >= T` is exactly
+    // `d <= 64·(1 - T)`; if someone tightens the similarity threshold
+    // without recomputing the distance, this fails.
+    #[test]
+    fn fingerprint_distance_threshold_matches_similarity() {
+        let max_d = (64.0 * (1.0 - FINGERPRINT_SIMILARITY_THRESHOLD)).floor() as u32;
+        assert_eq!(max_d, FINGERPRINT_MAX_HAMMING_DISTANCE);
+        // And the distance bound really is the largest one the ratio
+        // admits: distance `max_d` clears the threshold, `max_d + 1`
+        // does not.
+        let sim = |d: u32| 1.0 - f64::from(d) / 64.0;
+        assert!(sim(FINGERPRINT_MAX_HAMMING_DISTANCE) >= FINGERPRINT_SIMILARITY_THRESHOLD);
+        assert!(sim(FINGERPRINT_MAX_HAMMING_DISTANCE + 1) < FINGERPRINT_SIMILARITY_THRESHOLD);
+    }
+
     #[test]
     fn fingerprint_matches_near_duplicate() {
         let original = b"the quick brown fox jumps over the lazy dog repeatedly today";
@@ -1730,6 +1769,24 @@ mod tests {
                 RuleAction::Block,
             )],
             &[],
+            DEFAULT_MAX_SCAN_BYTES,
+            MlNerDetector::fallback_only(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), crate::error::DlpErrorCode::RuleCompileFailed);
+    }
+
+    #[test]
+    fn compiling_duplicate_edm_dataset_ids_fails_closed() {
+        use crate::edm::{EdmDataset, random_salt};
+        let salt = random_salt();
+        let datasets = [
+            EdmDataset::register("dup", "A", &salt, &["alpha beta"]),
+            EdmDataset::register("dup", "B", &salt, &["gamma delta"]),
+        ];
+        let err = ContentClassifier::compile_with_model_edm(
+            &[],
+            &datasets,
             DEFAULT_MAX_SCAN_BYTES,
             MlNerDetector::fallback_only(),
         )

@@ -30,9 +30,10 @@ fn eleven_digits(s: &str) -> Option<[u32; 11]> {
 fn check_ten(d: &[u32]) -> u32 {
     let odd = d[0] + d[2] + d[4] + d[6] + d[8];
     let even = d[1] + d[3] + d[5] + d[7];
-    // The subtraction is done in mod-10 arithmetic; adding 10·even
-    // keeps the intermediate non-negative before the final reduction.
-    (odd * 7 + 10 * even - even) % 10
+    // d10 = (odd·7 − even) mod 10. Done entirely in unsigned arithmetic
+    // by replacing `−even` with `+9·even`: 9 ≡ −1 (mod 10), so the two
+    // are congruent, and there is no negative intermediate to underflow.
+    (odd * 7 + even * 9) % 10
 }
 
 /// Turkey T.C. Kimlik No: eleven digits, non-zero leading digit, with
