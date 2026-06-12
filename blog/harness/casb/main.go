@@ -38,19 +38,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/kennguy3n/visible-fishbone/blog/harness/fleet"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
 	"github.com/kennguy3n/visible-fishbone/internal/service/casb"
 )
-
-// canonicalTenantID mirrors the seed harness so this tool targets the
-// same four managed tenants.
-var canonicalTenantID = map[string]string{
-	"Acme Retail Group":     "92112770-7c0a-410b-b0f4-09dde70e063a",
-	"Globex Health Systems": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
-	"Initech Financial":     "b6520bda-e7bb-4af9-9c53-7b0051eae65b",
-	"Umbrella Logistics":    "0c8d2d9d-896d-45b1-8001-6a6776f832b9",
-}
 
 // discoveredApp is one shadow-IT row to seed. Vendor/category are the
 // identity labels the discoverer would attach; ActiveDevices is the
@@ -68,8 +60,10 @@ type discoveredApp struct {
 // perTenantApps is a realistic long-tail spread: sanctioned suites, a few
 // risky file-share / AI tools, and obscure long-tail apps the catalog has
 // never heard of (baseRisk 0) so the classifier's heuristics do the work.
+// Keyed by tenant SLUG (the stable fleet key); the UUID and display name
+// are resolved from the shared fleet package at seed time.
 var perTenantApps = map[string][]discoveredApp{
-	"Acme Retail Group": {
+	fleet.Acme.Slug: {
 		{"Microsoft 365", "Microsoft", "productivity", 10, 240, 240 * time.Hour},
 		{"Slack", "Salesforce", "collaboration", 15, 180, 200 * time.Hour},
 		{"Dropbox", "Dropbox", "cloud_storage", 55, 42, 90 * time.Hour},
@@ -80,7 +74,7 @@ var perTenantApps = map[string][]discoveredApp{
 		{"Pastebin", "Pastebin", "code_paste", 75, 4, 18 * time.Hour},
 		{"DeepL", "DeepL", "ai_translation", 40, 21, 48 * time.Hour},
 	},
-	"Globex Health Systems": {
+	fleet.Globex.Slug: {
 		{"Microsoft 365", "Microsoft", "productivity", 10, 410, 300 * time.Hour},
 		{"Epic MyChart", "Epic", "healthcare", 20, 380, 280 * time.Hour},
 		{"Google Drive", "Google", "cloud_storage", 50, 64, 96 * time.Hour},
@@ -89,7 +83,7 @@ var perTenantApps = map[string][]discoveredApp{
 		{"MEGA", "MEGA", "cloud_storage", 82, 6, 20 * time.Hour},
 		{"Claude", "Anthropic", "ai_assistant", 55, 47, 40 * time.Hour},
 	},
-	"Initech Financial": {
+	fleet.Initech.Slug: {
 		{"Microsoft 365", "Microsoft", "productivity", 10, 150, 260 * time.Hour},
 		{"Salesforce", "Salesforce", "crm", 18, 120, 240 * time.Hour},
 		{"Box", "Box", "cloud_storage", 35, 70, 110 * time.Hour},
@@ -97,7 +91,7 @@ var perTenantApps = map[string][]discoveredApp{
 		{"AnonFiles", "AnonFiles", "file_transfer", 85, 3, 14 * time.Hour},
 		{"Perplexity", "Perplexity", "ai_assistant", 48, 28, 36 * time.Hour},
 	},
-	"Umbrella Logistics": {
+	fleet.Umbrella.Slug: {
 		{"Microsoft 365", "Microsoft", "productivity", 10, 95, 220 * time.Hour},
 		{"Google Workspace", "Google", "productivity", 12, 88, 210 * time.Hour},
 		{"Dropbox", "Dropbox", "cloud_storage", 55, 24, 80 * time.Hour},
@@ -133,12 +127,13 @@ func main() {
 
 	now := time.Now().UTC()
 	totalApps := 0
-	for name, list := range perTenantApps {
-		idStr, ok := canonicalTenantID[name]
+	for slug, list := range perTenantApps {
+		t, ok := fleet.BySlug(slug)
 		if !ok {
 			continue
 		}
-		tid := uuid.MustParse(idStr)
+		tid := uuid.MustParse(t.ID)
+		name := t.Name
 		for _, a := range list {
 			risk := a.baseRisk
 			dev := a.devices
@@ -188,9 +183,13 @@ func main() {
 // reconcile pass. Scoped strictly by tenant_id; runs as the BYPASSRLS
 // superuser pool connection.
 func resetPriorOutput(ctx context.Context, pool *pgxpool.Pool) error {
-	ids := make([]uuid.UUID, 0, len(canonicalTenantID))
-	for _, s := range canonicalTenantID {
-		ids = append(ids, uuid.MustParse(s))
+	ids := make([]uuid.UUID, 0, len(perTenantApps))
+	for slug := range perTenantApps {
+		t, ok := fleet.BySlug(slug)
+		if !ok {
+			continue
+		}
+		ids = append(ids, uuid.MustParse(t.ID))
 	}
 	stmts := []string{
 		"DELETE FROM casb_app_actions WHERE tenant_id = ANY($1)",

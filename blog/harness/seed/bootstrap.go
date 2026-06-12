@@ -37,46 +37,20 @@ import (
 	"os"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/kennguy3n/visible-fishbone/blog/harness/fleet"
 )
 
-// canonicalTenantID pins each scenario tenant's slug to the stable UUID
-// the rest of the pipeline (capture/usage/anomalies harnesses, payloads,
-// blog posts) references. Slugs, names, regions and tiers come from the
-// single source of truth in scenarioTenants(); only the identity is
-// pinned here.
-var canonicalTenantID = map[string]string{
-	"acme-retail":        "92112770-7c0a-410b-b0f4-09dde70e063a",
-	"globex-health":      "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
-	"initech-financial":  "b6520bda-e7bb-4af9-9c53-7b0051eae65b",
-	"umbrella-logistics": "0c8d2d9d-896d-45b1-8001-6a6776f832b9",
-	// Multi-country / multi-industry expansion (GB, CA, AU, FR, SE).
-	"britannia-robotics": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c",
-	"maple-health":       "cef9c934-507c-4adc-985b-48f3cbe274b0",
-	"outback-retail":     "37619610-53b4-4eab-87f9-45ba902d30c2",
-	"lumiere-legal":      "890486df-98bd-482b-85a8-af361706676f",
-	"nordic-educloud":    "8c93e8b9-5710-4f3a-9981-6d2c558bb78f",
-}
-
-const (
-	// canonicalMSPID is the stable MSP UUID the S1 payloads
-	// (s1-msps.json, the msp_id on s1-tenants.json) reference. The
-	// seed's ensureMSP() finds it by slug and reuses it.
-	canonicalMSPID = "b47fb518-f336-4449-82b0-bd33a1f36833"
-	// platformAdminRoleID is a fixed id for the platform_admin role so
-	// reruns never create a duplicate grant target.
-	platformAdminRoleID = "a0000000-0000-4000-8000-000000000001"
-	// The platform tenant ("ShieldNet Platform") is the system tenant
-	// that houses platform-scoped operators. It is pinned to a stable
-	// UUID because GET /api/v1/tenants enumerates it alongside the four
-	// managed tenants (S1 evidence: s1-tenants.json carries five rows).
-	// The platform operator is homed here rather than inside a customer
-	// tenant so a platform principal never pollutes a tenant's user set
-	// and the isolation story stays clean.
-	platformTenantID   = "f79e9245-24eb-4573-b9f9-7e5b34fd7056"
-	platformTenantSlug = "platform"
-	platformTenantName = "ShieldNet Platform"
-	platformTenantTier = "enterprise"
-)
+// The canonical tenant, platform and MSP identities the rest of the
+// pipeline (capture/usage/anomalies/casb harnesses, payloads, blog posts)
+// references live in the shared fleet package — the single source of
+// truth. bootstrap.go pins those identities into the database; only
+// platformAdminRoleID, which is RBAC scaffolding rather than tenant
+// identity, is local.
+//
+// platformAdminRoleID is a fixed id for the platform_admin role so reruns
+// never create a duplicate grant target.
+const platformAdminRoleID = "a0000000-0000-4000-8000-000000000001"
 
 // bootstrapFixtures seeds the platform RBAC grant and the canonical
 // fixture identities. It is safe to run repeatedly.
@@ -110,7 +84,7 @@ func bootstrapFixtures(ctx context.Context, operatorID string) error {
 	// 2. canonical tenant identity rows. Slug is UNIQUE; on a fresh
 	// database this assigns the pinned UUID, and reruns are no-ops.
 	for _, t := range scenarioTenants() {
-		id, ok := canonicalTenantID[t.slug]
+		ft, ok := fleet.BySlug(t.slug)
 		if !ok {
 			return fmt.Errorf("no canonical id pinned for tenant slug %q", t.slug)
 		}
@@ -118,7 +92,7 @@ func bootstrapFixtures(ctx context.Context, operatorID string) error {
 			INSERT INTO tenants (id, name, slug, status, region, tier)
 			VALUES ($1::uuid, $2, $3, 'active', NULLIF($4, ''), $5)
 			ON CONFLICT (slug) DO NOTHING`,
-			id, t.name, t.slug, t.region, t.tier); err != nil {
+			ft.ID, t.name, t.slug, t.region, t.tier); err != nil {
 			return fmt.Errorf("seed tenant %s: %w", t.slug, err)
 		}
 	}
@@ -130,22 +104,22 @@ func bootstrapFixtures(ctx context.Context, operatorID string) error {
 		INSERT INTO tenants (id, name, slug, status, tier)
 		VALUES ($1::uuid, $2, $3, 'active', $4)
 		ON CONFLICT (slug) DO NOTHING`,
-		platformTenantID, platformTenantName, platformTenantSlug, platformTenantTier); err != nil {
+		fleet.PlatformTenantID, fleet.PlatformTenantName, fleet.PlatformTenantSlug, fleet.PlatformTenantTier); err != nil {
 		return fmt.Errorf("seed platform tenant: %w", err)
 	}
 
 	// 3. canonical MSP identity row; ensureMSP() reuses it by slug.
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO msps (id, name, slug, status)
-		VALUES ($1::uuid, 'Northwind Managed Security', 'northwind-msp', 'active')
-		ON CONFLICT (id) DO NOTHING`, canonicalMSPID); err != nil {
+		VALUES ($1::uuid, $2, $3, 'active')
+		ON CONFLICT (id) DO NOTHING`, fleet.MSPID, fleet.MSPName, fleet.MSPSlug); err != nil {
 		return fmt.Errorf("seed msp: %w", err)
 	}
 
 	// 4. operator user, homed in the platform tenant. users is
 	// RLS-FORCEd, so set the tenant GUC for this statement exactly as
 	// the control plane does before writing.
-	homeID := platformTenantID
+	homeID := fleet.PlatformTenantID
 	if _, err := tx.Exec(ctx, `SELECT set_config('sng.tenant_id', $1, true)`, homeID); err != nil {
 		return fmt.Errorf("set tenant context: %w", err)
 	}
@@ -178,11 +152,11 @@ func bootstrapFixtures(ctx context.Context, operatorID string) error {
 	// naturally the earliest event in each tenant's trail. audit_log is
 	// RLS-FORCEd, so the per-tenant GUC is set before each write, and the
 	// NOT EXISTS guard keeps reruns idempotent.
-	auditTenantIDs := make([]string, 0, len(canonicalTenantID)+1)
-	for _, id := range canonicalTenantID {
-		auditTenantIDs = append(auditTenantIDs, id)
+	auditTenantIDs := make([]string, 0, len(fleet.All())+1)
+	for _, t := range fleet.All() {
+		auditTenantIDs = append(auditTenantIDs, t.ID)
 	}
-	auditTenantIDs = append(auditTenantIDs, platformTenantID)
+	auditTenantIDs = append(auditTenantIDs, fleet.PlatformTenantID)
 	for _, id := range auditTenantIDs {
 		if _, err := tx.Exec(ctx, `SELECT set_config('sng.tenant_id', $1, true)`, id); err != nil {
 			return fmt.Errorf("set tenant context for audit %s: %w", id, err)
@@ -206,9 +180,9 @@ func bootstrapFixtures(ctx context.Context, operatorID string) error {
 	// row with the same slug but a different id would silently break the
 	// downstream harnesses, so surface it loudly rather than producing
 	// payloads keyed on an unexpected id).
-	expectedID := map[string]string{platformTenantSlug: platformTenantID}
-	for slug, want := range canonicalTenantID {
-		expectedID[slug] = want
+	expectedID := map[string]string{fleet.PlatformTenantSlug: fleet.PlatformTenantID}
+	for _, t := range fleet.All() {
+		expectedID[t.Slug] = t.ID
 	}
 	for slug, want := range expectedID {
 		var got string
@@ -220,7 +194,7 @@ func bootstrapFixtures(ctx context.Context, operatorID string) error {
 		}
 	}
 
-	logf("bootstrap: platform_admin granted to operator %s; %d canonical tenants + MSP pinned", operatorID, len(canonicalTenantID))
+	logf("bootstrap: platform_admin granted to operator %s; %d canonical tenants + MSP pinned", operatorID, len(fleet.All()))
 	return nil
 }
 

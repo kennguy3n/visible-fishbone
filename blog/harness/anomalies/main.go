@@ -41,22 +41,17 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/kennguy3n/visible-fishbone/blog/harness/fleet"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
 	"github.com/kennguy3n/visible-fishbone/internal/service/alert"
 	"github.com/kennguy3n/visible-fishbone/internal/service/baseline"
 )
 
-// seeded tenants (must match blog/artifacts/seed-summary.json).
-var tenants = []struct {
-	id   string
-	name string
-}{
-	{"92112770-7c0a-410b-b0f4-09dde70e063a", "Acme Retail Group"},
-	{"3bd7bb7b-d48a-4569-8f97-46be31ae8e5a", "Globex Health Systems"},
-	{"b6520bda-e7bb-4af9-9c53-7b0051eae65b", "Initech Financial"},
-	{"0c8d2d9d-896d-45b1-8001-6a6776f832b9", "Umbrella Logistics"},
-}
+// seeded tenants whose baselines this harness folds — the first four
+// scenario tenants. Identities come from the shared fleet package (the
+// single source of truth), so they always match seed-summary.json.
+var tenants = []fleet.Tenant{fleet.Acme, fleet.Globex, fleet.Initech, fleet.Umbrella}
 
 // dimProfile is one monitored metric and the spikes injected after
 // warmup. mean/std drive the warmup walk; spikeMultiples are how many
@@ -107,21 +102,21 @@ func main() {
 
 	totalEmitted := 0
 	for _, t := range tenants {
-		tid := uuid.MustParse(t.id)
+		tid := uuid.MustParse(t.ID)
 
 		// Idempotency: skip a tenant that already has alerts so a
 		// rerun neither re-folds baselines nor duplicates alerts.
 		existing, err := alertRepo.List(ctx, tid, repository.AlertListFilter{}, repository.Page{Limit: 1})
 		if err != nil {
-			fatal(fmt.Sprintf("list alerts for %s: %v", t.name, err))
+			fatal(fmt.Sprintf("list alerts for %s: %v", t.Name, err))
 		}
 		if len(existing.Items) > 0 {
-			logf("SKIP  %-22s already has alerts (idempotent)", t.name)
+			logf("SKIP  %-22s already has alerts (idempotent)", t.Name)
 			continue
 		}
 
 		emitted := seedTenant(ctx, det, tid)
-		logf("OK    %-22s emitted %d real anomaly alerts", t.name, emitted)
+		logf("OK    %-22s emitted %d real anomaly alerts", t.Name, emitted)
 		totalEmitted += emitted
 	}
 	logf("\nseeded %d anomaly alerts across %d tenants", totalEmitted, len(tenants))
