@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/kennguy3n/visible-fishbone/internal/service/policytemplates"
 )
 
@@ -31,12 +33,107 @@ func (h *PolicyTemplateHandler) Register(mux *http.ServeMux) {
 	// contain a slash (e.g. "industry/finance"), so the catch-all
 	// {id...} wildcard is used to capture the full id.
 	mux.HandleFunc("GET /api/v1/policy-templates", h.listCatalog)
+	// The selection vocabulary the console picks from. Registered
+	// before the {id...} catch-all; ServeMux prefers the more specific
+	// static segment so "options" never resolves as a template id.
+	mux.HandleFunc("GET /api/v1/policy-templates/options", h.options)
 	mux.HandleFunc("GET /api/v1/policy-templates/{id...}", h.getTemplate)
+
+	// Cross-tenant roll-out (authenticated, not tenant-scoped — the
+	// operator pushes one baseline to N tenants at once). The repository
+	// scopes each write to the per-tenant id in the body, so this fans
+	// out over the existing per-tenant apply path.
+	mux.HandleFunc("POST /api/v1/policy-templates/rollout/preview", h.rolloutPreview)
+	mux.HandleFunc("POST /api/v1/policy-templates/rollout", h.rollout)
 
 	// Per-tenant resolve / apply / read.
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/policy-templates/preview", h.preview)
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/policy-templates/apply", h.apply)
 	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/policy-templates/applied", h.getApplied)
+}
+
+// --- cross-tenant roll-out wire types -------------------------------------
+
+// templateRolloutRequest is the body for the roll-out preview/execute
+// routes: the selection to render plus the tenants to push it to.
+type templateRolloutRequest struct {
+	Industry  string   `json:"industry"`
+	Country   string   `json:"country"`
+	TenantIDs []string `json:"tenant_ids"`
+}
+
+func (req templateRolloutRequest) toSelection() policytemplates.Selection {
+	return policytemplates.Selection{
+		Industry: policytemplates.Industry(req.Industry),
+		Country:  policytemplates.Country(req.Country),
+	}
+}
+
+// parseTenantIDs maps the request's string tenant ids to UUIDs,
+// writing a 400 and returning ok=false on the first malformed id.
+func parseTenantIDs(w http.ResponseWriter, raw []string) ([]uuid.UUID, bool) {
+	if len(raw) == 0 {
+		WriteError(w, http.StatusBadRequest, "invalid_argument", "tenant_ids must contain at least one tenant")
+		return nil, false
+	}
+	ids := make([]uuid.UUID, 0, len(raw))
+	for _, s := range raw {
+		id, err := uuid.Parse(s)
+		if err != nil {
+			WriteError(w, http.StatusBadRequest, "invalid_argument", "tenant_ids contains an invalid uuid: "+s)
+			return nil, false
+		}
+		ids = append(ids, id)
+	}
+	return ids, true
+}
+
+// rolloutPreview returns the target baseline plus the per-tenant diff
+// for every selected tenant, without writing anything.
+func (h *PolicyTemplateHandler) rolloutPreview(w http.ResponseWriter, r *http.Request) {
+	var req templateRolloutRequest
+	if !DecodeJSON(w, r, &req) {
+		return
+	}
+	ids, ok := parseTenantIDs(w, req.TenantIDs)
+	if !ok {
+		return
+	}
+	preview, err := h.svc.PreviewRollout(r.Context(), ids, req.toSelection())
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, preview)
+}
+
+// rollout applies the target baseline to every selected tenant and
+// returns the per-tenant result. A roll-out always returns 200 with a
+// per-tenant breakdown — a tenant-level apply failure is reported in
+// the body (status=failed), not surfaced as a request-level error;
+// only a bad selection or malformed request is a 4xx.
+func (h *PolicyTemplateHandler) rollout(w http.ResponseWriter, r *http.Request) {
+	var req templateRolloutRequest
+	if !DecodeJSON(w, r, &req) {
+		return
+	}
+	ids, ok := parseTenantIDs(w, req.TenantIDs)
+	if !ok {
+		return
+	}
+	result, err := h.svc.ExecuteRollout(r.Context(), ids, req.toSelection())
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, result)
+}
+
+// options returns the closed selection vocabulary (industries +
+// supported countries with their compliance regime) the console builds
+// its roll-out picker and onboarding wizard from.
+func (h *PolicyTemplateHandler) options(w http.ResponseWriter, _ *http.Request) {
+	WriteJSON(w, http.StatusOK, h.svc.SelectionOptions())
 }
 
 // --- wire types -----------------------------------------------------------
