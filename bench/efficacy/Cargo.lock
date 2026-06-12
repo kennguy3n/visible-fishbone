@@ -2494,9 +2494,12 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "base64",
+ "ed25519-dalek",
  "ipnet",
  "parking_lot",
  "serde",
+ "serde_json",
  "sng-core",
  "sng-telemetry",
  "thiserror 2.0.18",
@@ -2517,6 +2520,7 @@ dependencies = [
 name = "sng-efficacy"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "chrono",
  "clap",
  "ipnet",

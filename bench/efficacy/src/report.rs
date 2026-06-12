@@ -104,6 +104,26 @@ impl Default for Targets {
     }
 }
 
+impl Targets {
+    /// Looser grading band for the *wild* (noisy-proxy) rows. The curated
+    /// decision-boundary suite is graded against [`Default`] (near-perfect by
+    /// construction); the wild corpus deliberately includes evasive malware a
+    /// signature engine misses and benign-but-suspicious traffic it flags, so
+    /// holding it to the curated band would be dishonest. These thresholds are
+    /// the band at which a *noisy* signal is still considered healthy, and the
+    /// rows they grade are marked `informational` so they never gate the
+    /// curated `overall_verdict`.
+    #[must_use]
+    pub fn wild() -> Self {
+        Self {
+            catch_pass: 0.90,
+            catch_warn: 0.75,
+            fp_pass: 0.05,
+            fp_warn: 0.10,
+        }
+    }
+}
+
 /// A capability the function under test actually exercises, with a
 /// one-line "how it works" explanation for the RFP datasheet. These are
 /// descriptive (not graded): they let the consolidated business report
@@ -161,6 +181,14 @@ pub struct FunctionReport {
     pub crate_name: String,
     pub kind: Kind,
     pub tested: bool,
+    /// `true` for the *wild* / *fpr_load* proxy rows: a noisier, FPR-aware
+    /// signal measured under sustained concurrent load. Informational rows are
+    /// excluded from the gating `overall_verdict` (and the binary exit code) so
+    /// the honest sub-100% wild numbers never masquerade as — nor drag down —
+    /// the curated decision-boundary correctness proof. They still serialize
+    /// and render with their own verdict graded against [`Targets::wild`].
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub informational: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub untested_reason: Option<String>,
 
@@ -254,6 +282,7 @@ impl FunctionReport {
             crate_name: crate_name.into(),
             kind,
             tested: true,
+            informational: false,
             untested_reason: None,
             features: Vec::new(),
             throughput: Vec::new(),
@@ -282,6 +311,7 @@ impl FunctionReport {
             crate_name: crate_name.into(),
             kind,
             tested: false,
+            informational: false,
             untested_reason: Some(reason.into()),
             features: Vec::new(),
             throughput: Vec::new(),
@@ -316,6 +346,31 @@ impl FunctionReport {
         self.throughput = throughput;
         self
     }
+
+    /// Mark this report as an informational (non-gating) wild / fpr_load proxy
+    /// row. Chainable. See the [`FunctionReport::informational`] field.
+    #[must_use]
+    pub fn with_informational(mut self) -> Self {
+        self.informational = true;
+        self
+    }
+
+    /// Replace the stored per-case list (e.g. with a compact per-family
+    /// rollup) without disturbing the already-computed confusion matrix /
+    /// verdict. Used by the wild driver, whose thousands of corpus entries
+    /// would otherwise bloat the artifact. Chainable.
+    #[must_use]
+    pub fn with_cases(mut self, cases: Vec<Case>) -> Self {
+        self.cases = cases;
+        self
+    }
+}
+
+/// serde `skip_serializing_if` predicate for the `informational` flag, so the
+/// existing curated rows serialize byte-identically (the key is omitted when
+/// false).
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Time `op` over the real decision code and return a throughput point.
@@ -398,13 +453,26 @@ impl EfficacyReport {
         // An empty report is not a pass: fold the per-function verdicts but
         // treat "nothing was tested" as UNTESTED so an accidentally-empty run
         // can never read as green.
-        let overall_verdict = if functions.is_empty() {
+        // The gating verdict folds only the *non-informational* rows: the
+        // curated decision-boundary suite is the correctness gate. The wild /
+        // fpr_load proxy rows carry honest sub-100% numbers under load and are
+        // reported alongside but must never flip the curated gate (nor the
+        // process exit code) green-to-red or vice versa. If somehow every row
+        // is informational, fold them all so an all-proxy run can't read green.
+        let gating: Vec<Grade> = functions
+            .iter()
+            .filter(|f| !f.informational)
+            .map(|f| f.verdict)
+            .collect();
+        let folded = if gating.is_empty() {
+            functions.iter().map(|f| f.verdict).collect::<Vec<_>>()
+        } else {
+            gating
+        };
+        let overall_verdict = if folded.is_empty() {
             Grade::Untested
         } else {
-            functions
-                .iter()
-                .map(|f| f.verdict)
-                .fold(Grade::Pass, Grade::worst)
+            folded.into_iter().fold(Grade::Pass, Grade::worst)
         };
         Self {
             suite: "security-efficacy".into(),
@@ -513,6 +581,85 @@ mod tests {
         let untested = FunctionReport::untested("b", "c", Kind::Detection, "tool missing");
         let rep = EfficacyReport::new("sha".into(), "host".into(), vec![pass, untested]);
         assert_eq!(rep.overall_verdict, Grade::Untested);
+    }
+
+    #[test]
+    fn informational_rows_do_not_gate_overall_verdict() {
+        // A PASSing curated row plus a WARN wild proxy row: the gate folds
+        // only the curated (non-informational) row, so overall stays PASS.
+        let curated = FunctionReport::from_cases(
+            "malware",
+            "sng-swg",
+            Kind::Detection,
+            Targets::default(),
+            vec![case(true, true), case(false, true)],
+            None,
+        );
+        assert_eq!(curated.verdict, Grade::Pass);
+        // WARN-grade wild row: catch 0.75 (3 of 4 bad caught) sits in the
+        // wild warn band [0.75, 0.90); fp clean.
+        let wild = FunctionReport::from_cases(
+            "malware_wild",
+            "sng-swg",
+            Kind::Detection,
+            Targets::wild(),
+            vec![
+                case(true, true),
+                case(true, true),
+                case(true, true),
+                case(true, false),
+                case(false, true),
+            ],
+            None,
+        )
+        .with_informational();
+        assert!(wild.informational);
+        assert_eq!(wild.verdict, Grade::Warn);
+        let rep = EfficacyReport::new("sha".into(), "host".into(), vec![curated, wild]);
+        assert_eq!(rep.overall_verdict, Grade::Pass);
+    }
+
+    #[test]
+    fn all_informational_rows_still_fold_so_a_proxy_only_run_is_not_falsely_green() {
+        // A `--wild`-only run has no curated gate; the fold must fall back to
+        // the informational rows so a WARN proxy run never reads PASS.
+        let wild = FunctionReport::from_cases(
+            "dlp_wild",
+            "sng-dlp",
+            Kind::Detection,
+            Targets::wild(),
+            vec![
+                case(true, true),
+                case(true, true),
+                case(true, true),
+                case(true, false),
+                case(false, true),
+            ],
+            None,
+        )
+        .with_informational();
+        assert_eq!(wild.verdict, Grade::Warn);
+        let rep = EfficacyReport::new("sha".into(), "host".into(), vec![wild]);
+        assert_eq!(rep.overall_verdict, Grade::Warn);
+    }
+
+    #[test]
+    fn informational_flag_is_omitted_from_the_wire_when_false() {
+        // Curated rows must serialize byte-identically to before this field
+        // existed: the key is skipped when false, present when true.
+        let curated = FunctionReport::from_cases(
+            "fw",
+            "sng-fw",
+            Kind::Enforcement,
+            Targets::default(),
+            vec![case(true, true)],
+            None,
+        );
+        let json = serde_json::to_string(&curated).unwrap();
+        assert!(!json.contains("informational"));
+        let wild = curated.with_informational();
+        let json = serde_json::to_string(&wild).unwrap();
+        assert!(json.contains("\"informational\":true"));
     }
 
     #[test]

@@ -18,7 +18,7 @@ use sng_ips::{ConfigGenerator, EveRecord, IpsConfigInput, IpsRuntime};
 
 use crate::report::{Case, FunctionReport, Kind, Targets};
 
-fn fixtures_dir() -> PathBuf {
+pub(crate) fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/ips")
 }
 
@@ -140,13 +140,13 @@ pub(crate) async fn alerts_for_pcap(
     Ok(alerts)
 }
 
-struct PcapCase {
-    file: &'static str,
-    bad: bool,
-    desc: &'static str,
+pub(crate) struct PcapCase {
+    pub(crate) file: &'static str,
+    pub(crate) bad: bool,
+    pub(crate) desc: &'static str,
 }
 
-fn corpus() -> Vec<PcapCase> {
+pub(crate) fn corpus() -> Vec<PcapCase> {
     vec![
         PcapCase {
             file: "bad-eicar.pcap",

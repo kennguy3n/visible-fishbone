@@ -50,6 +50,10 @@ clap = { version = "4", features = ["derive", "env", "wrap_help"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 
+# Decode the committed wild-traffic corpus (base64 payloads) for the
+# sustained-load driver (`wild.rs`).
+base64 = "0.22"
+
 # Async runtime — the SWG ext-authz decision path is async.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "process"] }
 

@@ -14,6 +14,7 @@ mod ips;
 mod malware;
 mod report;
 mod swg;
+mod wild;
 mod ztna;
 
 use std::path::PathBuf;
@@ -63,6 +64,11 @@ struct Cli {
     /// Run only the adversarial corpus drivers (malware + IPS evasion).
     #[arg(long)]
     adversarial: bool,
+    /// Run only the wild-traffic sustained-load drivers (noisy blended corpus
+    /// through the real YARA / DLP / Suricata engines under concurrent load;
+    /// emits the informational *_wild / *_fpr_load rows).
+    #[arg(long)]
+    wild: bool,
 
     /// Internal: emit one raw probe packet (`<src> <dst> <dport> <tcp|udp>`)
     /// then exit. Re-executed as root inside a network namespace by the
@@ -83,6 +89,7 @@ impl Cli {
             || self.malware
             || self.dns
             || self.adversarial
+            || self.wild
         {
             Selected {
                 firewall: self.firewall,
@@ -94,6 +101,7 @@ impl Cli {
                 malware: self.malware,
                 dns: self.dns,
                 adversarial: self.adversarial,
+                wild: self.wild,
             }
         } else {
             Selected {
@@ -106,6 +114,7 @@ impl Cli {
                 malware: true,
                 dns: true,
                 adversarial: true,
+                wild: true,
             }
         }
     }
@@ -131,6 +140,7 @@ struct Selected {
     malware: bool,
     dns: bool,
     adversarial: bool,
+    wild: bool,
 }
 
 #[tokio::main]
@@ -186,6 +196,14 @@ async fn main() {
         functions.push(adversarial::run_malware().await);
         eprintln!("running adversarial IPS efficacy (sng-ips + suricata, evasion corpus)...");
         functions.push(adversarial::run_ips().await);
+    }
+    if sel.wild {
+        eprintln!("running wild malware efficacy (sng-swg YARA, noisy corpus under load)...");
+        functions.extend(wild::run_malware());
+        eprintln!("running wild DLP efficacy (sng-dlp classifier, noisy corpus under load)...");
+        functions.extend(wild::run_dlp());
+        eprintln!("running wild IPS efficacy (sng-ips + suricata, concurrent load)...");
+        functions.push(wild::run_ips().await);
     }
 
     let report = EfficacyReport::new(cli.git_sha.clone(), host(), functions);

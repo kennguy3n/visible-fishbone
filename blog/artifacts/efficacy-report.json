@@ -1,7 +1,7 @@
 {
   "suite": "security-efficacy",
-  "git_sha": "98debf5",
-  "generated_at": "2026-06-12T01:09:20.550256347+00:00",
+  "git_sha": "17bc883",
+  "generated_at": "2026-06-12T08:13:57.543093655+00:00",
   "host": "devin-box",
   "overall_verdict": "PASS",
   "functions": [
@@ -383,15 +383,15 @@
           "label": "evaluate",
           "unit": "decisions/s",
           "iterations": 50000,
-          "per_op_ns": 571.24812,
-          "ops_per_sec": 1750552.807070945,
+          "per_op_ns": 565.81998,
+          "ops_per_sec": 1767346.5684262335,
           "debug_build": false
         }
       ],
-      "total_cases": 18,
-      "bad_cases": 11,
+      "total_cases": 20,
+      "bad_cases": 13,
       "good_cases": 7,
-      "tp": 11,
+      "tp": 13,
       "fn": 0,
       "tn": 7,
       "fp": 0,
@@ -406,7 +406,7 @@
         "fp_warn": 0.05
       },
       "verdict": "PASS",
-      "notes": "Real ZtnaService.evaluate brokering. Denies unknown app/device/identity, stale posture, insufficient posture, degraded EDR, stale AV definitions, out-of-date OS patches, stale MFA, missing entitlement, and cross-tenant requests; admits authorized engineers on compliant devices.",
+      "notes": "Real ZtnaService.evaluate brokering. Denies unknown app/device/identity, stale posture, insufficient posture, degraded EDR, stale AV definitions, out-of-date OS patches, stale MFA, missing entitlement, and cross-tenant requests; admits authorized engineers on compliant devices. With the opt-in subjectless_degraded_eval flag on, a subjectless request runs every device+context+posture gate and fails closed with an explicit IdentityAbsent deny when they pass, and still denies on a genuine device failure.",
       "cases": [
         {
           "description": "unknown app (not in catalog)",
@@ -533,6 +533,20 @@
           "expected": "allow",
           "actual": "allow (allow)",
           "correct": true
+        },
+        {
+          "description": "degraded eval: subjectless request, device+context gates pass -> IdentityAbsent deny",
+          "bad": true,
+          "expected": "deny",
+          "actual": "deny (identity_absent)",
+          "correct": true
+        },
+        {
+          "description": "degraded eval: subjectless request never masks a device failure (stale posture -> deny)",
+          "bad": true,
+          "expected": "deny",
+          "actual": "deny (device_posture_stale)",
+          "correct": true
         }
       ]
     },
@@ -568,10 +582,10 @@
           "label": "classify",
           "unit": "scans/s",
           "iterations": 5000,
-          "per_op_ns": 381797.2594,
-          "ops_per_sec": 2619.191142365754,
+          "per_op_ns": 379967.8222,
+          "ops_per_sec": 2631.8018041897235,
           "bytes_per_op": 548,
-          "mb_per_sec": 1.3688247165836651,
+          "mb_per_sec": 1.3754152190169988,
           "debug_build": false
         }
       ],
@@ -34224,10 +34238,10 @@
           "label": "ner_detect",
           "unit": "scans/s",
           "iterations": 5000,
-          "per_op_ns": 49173.582,
-          "ops_per_sec": 20336.12275794755,
+          "per_op_ns": 49748.714,
+          "ops_per_sec": 20101.022108832803,
           "bytes_per_op": 166,
-          "mb_per_sec": 3.2194103029435093,
+          "mb_per_sec": 3.182191534105535,
           "debug_build": false
         }
       ],
@@ -35633,6 +35647,710 @@
         },
         {
           "description": "benign HTTP GET /support/dns-info.html (substring only)",
+          "bad": false,
+          "expected": "no-alert",
+          "actual": "0 alert(s)",
+          "correct": true
+        }
+      ]
+    },
+    {
+      "function": "malware_wild",
+      "crate": "sng-swg",
+      "kind": "detection",
+      "tested": true,
+      "informational": true,
+      "features": [
+        {
+          "name": "Sustained-load wild scan",
+          "how": "YARA signature scan over a noisy benign+malicious blend on a multi-thread worker pool",
+          "coverage": "catch-rate + false-positive-rate under concurrent contention"
+        }
+      ],
+      "throughput": [
+        {
+          "label": "yara_scan_under_load",
+          "unit": "scans/s",
+          "iterations": 6784,
+          "per_op_ns": 225284.73201650946,
+          "ops_per_sec": 4438.8272167805735,
+          "mb_per_sec": 1.41308983273699,
+          "debug_build": false
+        }
+      ],
+      "total_cases": 1342,
+      "bad_cases": 302,
+      "good_cases": 1040,
+      "tp": 272,
+      "fn": 30,
+      "tn": 940,
+      "fp": 100,
+      "catch_rate": 0.9006622516556292,
+      "false_positive_rate": 0.09615384615384616,
+      "accuracy": 0.9031296572280179,
+      "precision": 0.7311827956989247,
+      "targets": {
+        "catch_pass": 0.9,
+        "catch_warn": 0.75,
+        "fp_pass": 0.05,
+        "fp_warn": 0.1
+      },
+      "verdict": "WARN",
+      "notes": "Real sng_swg::YaraEngine (built-in rules) over the noisy wild corpus under sustained concurrent load (8 worker threads, 6784 scans in 1528 ms). Verdict = block on ANY match (elevated-risk inspection). Includes evasive/novel-packed malware the signature set genuinely misses (honest false negatives) and benign-but-suspicious traffic it flags (honest false positives). Noisier proxy, NOT production traffic. Corpus: 2087 samples (457 malicious / 1630 benign ≈ 22% malicious; target 20%/80%), seed=0x53475744, sha256=07b2e837ed62, schema=sng-wild-corpus/v1. Generated by blog/harness/wildcorpus (deterministic).",
+      "cases": [
+        {
+          "description": "benign_elf_binary (benign): 0/40 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "0/40 correct",
+          "correct": false
+        },
+        {
+          "description": "benign_js_fromcharcode (benign): 40/40 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "40/40 correct",
+          "correct": true
+        },
+        {
+          "description": "benign_pdf_form (benign): 30/30 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "30/30 correct",
+          "correct": true
+        },
+        {
+          "description": "benign_pe_installer (benign): 0/60 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "0/60 correct",
+          "correct": false
+        },
+        {
+          "description": "clean_ooxml (benign): 80/80 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "80/80 correct",
+          "correct": true
+        },
+        {
+          "description": "config_json (benign): 100/100 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "100/100 correct",
+          "correct": true
+        },
+        {
+          "description": "eicar (malicious): 25/25 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "25/25 correct",
+          "correct": true
+        },
+        {
+          "description": "elf_executable (malicious): 20/20 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "20/20 correct",
+          "correct": true
+        },
+        {
+          "description": "handwritten_js (benign): 120/120 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "120/120 correct",
+          "correct": true
+        },
+        {
+          "description": "high_entropy_marked (malicious): 12/12 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "12/12 correct",
+          "correct": true
+        },
+        {
+          "description": "html_smuggle (malicious): 15/15 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "15/15 correct",
+          "correct": true
+        },
+        {
+          "description": "js_eval_atob (malicious): 25/25 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "25/25 correct",
+          "correct": true
+        },
+        {
+          "description": "js_eval_unescape (malicious): 20/20 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "20/20 correct",
+          "correct": true
+        },
+        {
+          "description": "js_indirect_eval (malicious): 15/15 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "15/15 correct",
+          "correct": true
+        },
+        {
+          "description": "macro_doc (malicious): 20/20 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "20/20 correct",
+          "correct": true
+        },
+        {
+          "description": "novel_packed_evasive (malicious): 0/30 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "0/30 correct",
+          "correct": false
+        },
+        {
+          "description": "pdf_active_js (malicious): 20/20 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "20/20 correct",
+          "correct": true
+        },
+        {
+          "description": "pe_executable (malicious): 30/30 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "30/30 correct",
+          "correct": true
+        },
+        {
+          "description": "plain_text (benign): 240/240 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "240/240 correct",
+          "correct": true
+        },
+        {
+          "description": "powershell_cradle (malicious): 15/15 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "15/15 correct",
+          "correct": true
+        },
+        {
+          "description": "ransom_note (malicious): 25/25 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "25/25 correct",
+          "correct": true
+        },
+        {
+          "description": "static_html (benign): 100/100 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "100/100 correct",
+          "correct": true
+        },
+        {
+          "description": "static_pdf (benign): 90/90 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "90/90 correct",
+          "correct": true
+        },
+        {
+          "description": "stylesheet_css (benign): 70/70 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "70/70 correct",
+          "correct": true
+        },
+        {
+          "description": "tabular_csv (benign): 70/70 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "70/70 correct",
+          "correct": true
+        },
+        {
+          "description": "upx_packed (malicious): 15/15 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "15/15 correct",
+          "correct": true
+        },
+        {
+          "description": "vba_macro_src (malicious): 15/15 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "15/15 correct",
+          "correct": true
+        }
+      ]
+    },
+    {
+      "function": "malware_fpr_load",
+      "crate": "sng-swg",
+      "kind": "detection",
+      "tested": true,
+      "informational": true,
+      "throughput": [
+        {
+          "label": "scan_under_load",
+          "unit": "scans/s",
+          "iterations": 11264,
+          "per_op_ns": 229217.09437144885,
+          "ops_per_sec": 4362.676364702053,
+          "mb_per_sec": 0.8199179156292504,
+          "debug_build": false
+        }
+      ],
+      "total_cases": 1040,
+      "bad_cases": 0,
+      "good_cases": 1040,
+      "tp": 0,
+      "fn": 0,
+      "tn": 940,
+      "fp": 100,
+      "catch_rate": 1.0,
+      "false_positive_rate": 0.09615384615384616,
+      "accuracy": 0.9038461538461539,
+      "precision": 0.0,
+      "targets": {
+        "catch_pass": 0.9,
+        "catch_warn": 0.75,
+        "fp_pass": 0.05,
+        "fp_warn": 0.1
+      },
+      "verdict": "WARN",
+      "notes": "False-positive-rate under maximum sustained concurrent load: YARA engine over the 1040 benign samples only (8 worker threads, 11264 scans in 2581 ms). No malicious cases by construction — catch-rate is not applicable (reported as 1.0 for a zero-bad corpus); the meaningful number is the false-positive-rate. Corpus: 2087 samples (457 malicious / 1630 benign ≈ 22% malicious; target 20%/80%), seed=0x53475744, sha256=07b2e837ed62, schema=sng-wild-corpus/v1. Generated by blog/harness/wildcorpus (deterministic).",
+      "cases": [
+        {
+          "description": "benign_elf_binary (benign): 0/40 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "0/40 correct",
+          "correct": false
+        },
+        {
+          "description": "benign_js_fromcharcode (benign): 40/40 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "40/40 correct",
+          "correct": true
+        },
+        {
+          "description": "benign_pdf_form (benign): 30/30 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "30/30 correct",
+          "correct": true
+        },
+        {
+          "description": "benign_pe_installer (benign): 0/60 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "0/60 correct",
+          "correct": false
+        },
+        {
+          "description": "clean_ooxml (benign): 80/80 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "80/80 correct",
+          "correct": true
+        },
+        {
+          "description": "config_json (benign): 100/100 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "100/100 correct",
+          "correct": true
+        },
+        {
+          "description": "handwritten_js (benign): 120/120 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "120/120 correct",
+          "correct": true
+        },
+        {
+          "description": "plain_text (benign): 240/240 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "240/240 correct",
+          "correct": true
+        },
+        {
+          "description": "static_html (benign): 100/100 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "100/100 correct",
+          "correct": true
+        },
+        {
+          "description": "static_pdf (benign): 90/90 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "90/90 correct",
+          "correct": true
+        },
+        {
+          "description": "stylesheet_css (benign): 70/70 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "70/70 correct",
+          "correct": true
+        },
+        {
+          "description": "tabular_csv (benign): 70/70 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "70/70 correct",
+          "correct": true
+        }
+      ]
+    },
+    {
+      "function": "dlp_wild",
+      "crate": "sng-dlp",
+      "kind": "detection",
+      "tested": true,
+      "informational": true,
+      "features": [
+        {
+          "name": "Sustained-load wild scan",
+          "how": "DLP content classification over a noisy benign+malicious blend on a multi-thread worker pool",
+          "coverage": "catch-rate + false-positive-rate under concurrent contention"
+        }
+      ],
+      "throughput": [
+        {
+          "label": "classify_under_load",
+          "unit": "scans/s",
+          "iterations": 1238400,
+          "per_op_ns": 1211.8362685723514,
+          "ops_per_sec": 825193.9853047038,
+          "mb_per_sec": 179.00112188702073,
+          "debug_build": false
+        }
+      ],
+      "total_cases": 745,
+      "bad_cases": 155,
+      "good_cases": 590,
+      "tp": 155,
+      "fn": 0,
+      "tn": 590,
+      "fp": 0,
+      "catch_rate": 1.0,
+      "false_positive_rate": 0.0,
+      "accuracy": 1.0,
+      "precision": 1.0,
+      "targets": {
+        "catch_pass": 0.9,
+        "catch_warn": 0.75,
+        "fp_pass": 0.05,
+        "fp_warn": 0.1
+      },
+      "verdict": "PASS",
+      "notes": "Real sng_dlp::ContentClassifier (7 credential/card detectors) over the noisy wild corpus under sustained concurrent load (8 worker threads, 1238400 scans in 1500 ms). Malicious = content carrying a valid secret/card; benign = prose + near-miss tokens the structural validators must suppress. Noisier proxy, NOT production traffic. Corpus: 2087 samples (457 malicious / 1630 benign ≈ 22% malicious; target 20%/80%), seed=0x53475744, sha256=07b2e837ed62, schema=sng-wild-corpus/v1. Generated by blog/harness/wildcorpus (deterministic).",
+      "cases": [
+        {
+          "description": "aws_access_key_id (malicious): 25/25 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "25/25 correct",
+          "correct": true
+        },
+        {
+          "description": "business_prose (benign): 300/300 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "300/300 correct",
+          "correct": true
+        },
+        {
+          "description": "credit_card (malicious): 40/40 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "40/40 correct",
+          "correct": true
+        },
+        {
+          "description": "github_token (malicious): 20/20 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "20/20 correct",
+          "correct": true
+        },
+        {
+          "description": "google_api_key (malicious): 20/20 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "20/20 correct",
+          "correct": true
+        },
+        {
+          "description": "nearmiss_aws (benign): 40/40 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "40/40 correct",
+          "correct": true
+        },
+        {
+          "description": "nearmiss_credit_card (benign): 60/60 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "60/60 correct",
+          "correct": true
+        },
+        {
+          "description": "placeholder_key (benign): 30/30 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "30/30 correct",
+          "correct": true
+        },
+        {
+          "description": "private_key_block (malicious): 20/20 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "20/20 correct",
+          "correct": true
+        },
+        {
+          "description": "random_token (benign): 80/80 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "80/80 correct",
+          "correct": true
+        },
+        {
+          "description": "short_numbers (benign): 80/80 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "80/80 correct",
+          "correct": true
+        },
+        {
+          "description": "slack_token (malicious): 15/15 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "15/15 correct",
+          "correct": true
+        },
+        {
+          "description": "stripe_secret_key (malicious): 15/15 scored as expected",
+          "bad": true,
+          "expected": "block",
+          "actual": "15/15 correct",
+          "correct": true
+        }
+      ]
+    },
+    {
+      "function": "dlp_fpr_load",
+      "crate": "sng-dlp",
+      "kind": "detection",
+      "tested": true,
+      "informational": true,
+      "throughput": [
+        {
+          "label": "scan_under_load",
+          "unit": "scans/s",
+          "iterations": 1971072,
+          "per_op_ns": 1268.71294655903,
+          "ops_per_sec": 788200.3590427401,
+          "mb_per_sec": 186.38703396346716,
+          "debug_build": false
+        }
+      ],
+      "total_cases": 590,
+      "bad_cases": 0,
+      "good_cases": 590,
+      "tp": 0,
+      "fn": 0,
+      "tn": 590,
+      "fp": 0,
+      "catch_rate": 1.0,
+      "false_positive_rate": 0.0,
+      "accuracy": 1.0,
+      "targets": {
+        "catch_pass": 0.9,
+        "catch_warn": 0.75,
+        "fp_pass": 0.05,
+        "fp_warn": 0.1
+      },
+      "verdict": "PASS",
+      "notes": "False-positive-rate under maximum sustained concurrent load: DLP engine over the 590 benign samples only (8 worker threads, 1971072 scans in 2500 ms). No malicious cases by construction — catch-rate is not applicable (reported as 1.0 for a zero-bad corpus); the meaningful number is the false-positive-rate. Corpus: 2087 samples (457 malicious / 1630 benign ≈ 22% malicious; target 20%/80%), seed=0x53475744, sha256=07b2e837ed62, schema=sng-wild-corpus/v1. Generated by blog/harness/wildcorpus (deterministic).",
+      "cases": [
+        {
+          "description": "business_prose (benign): 300/300 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "300/300 correct",
+          "correct": true
+        },
+        {
+          "description": "nearmiss_aws (benign): 40/40 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "40/40 correct",
+          "correct": true
+        },
+        {
+          "description": "nearmiss_credit_card (benign): 60/60 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "60/60 correct",
+          "correct": true
+        },
+        {
+          "description": "placeholder_key (benign): 30/30 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "30/30 correct",
+          "correct": true
+        },
+        {
+          "description": "random_token (benign): 80/80 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "80/80 correct",
+          "correct": true
+        },
+        {
+          "description": "short_numbers (benign): 80/80 scored as expected",
+          "bad": false,
+          "expected": "allow",
+          "actual": "80/80 correct",
+          "correct": true
+        }
+      ]
+    },
+    {
+      "function": "ips_wild",
+      "crate": "sng-ips",
+      "kind": "detection",
+      "tested": true,
+      "informational": true,
+      "throughput": [
+        {
+          "label": "suricata_pcap_under_load",
+          "unit": "pcap-scans/s",
+          "iterations": 39,
+          "per_op_ns": 29293780.230769232,
+          "ops_per_sec": 34.13693938174741,
+          "debug_build": false
+        }
+      ],
+      "total_cases": 13,
+      "bad_cases": 7,
+      "good_cases": 6,
+      "tp": 7,
+      "fn": 0,
+      "tn": 6,
+      "fp": 0,
+      "catch_rate": 1.0,
+      "false_positive_rate": 0.0,
+      "accuracy": 1.0,
+      "precision": 1.0,
+      "targets": {
+        "catch_pass": 0.9,
+        "catch_warn": 0.75,
+        "fp_pass": 0.05,
+        "fp_warn": 0.1
+      },
+      "verdict": "PASS",
+      "notes": "Real Suricata 6.0.4 (SNG ConfigGenerator-rendered suricata.yaml; EVE alerts normalised through sng_ips::EveAlert::to_ips_event) replaying the committed PCAP corpus under 8 concurrent Suricata processes (39 runs in 1142 ms, 3x replay per pcap). Detection-rate AND false-positive-rate measured under concurrent IDS load. Network-flow corpus is the committed PCAP set — smaller than the file/content wild lanes; noisier proxy, NOT production traffic.",
+      "cases": [
+        {
+          "description": "EICAR antivirus test string (malware marker)",
+          "bad": true,
+          "expected": "detect",
+          "actual": "1 alert(s)",
+          "correct": true
+        },
+        {
+          "description": "directory-traversal exploit (/etc/passwd)",
+          "bad": true,
+          "expected": "detect",
+          "actual": "1 alert(s)",
+          "correct": true
+        },
+        {
+          "description": "SQL-injection UNION SELECT probe",
+          "bad": true,
+          "expected": "detect",
+          "actual": "1 alert(s)",
+          "correct": true
+        },
+        {
+          "description": "known C2 beacon marker",
+          "bad": true,
+          "expected": "detect",
+          "actual": "1 alert(s)",
+          "correct": true
+        },
+        {
+          "description": "ransomware ransom-note delivery",
+          "bad": true,
+          "expected": "detect",
+          "actual": "1 alert(s)",
+          "correct": true
+        },
+        {
+          "description": "SMB PsExec lateral movement (east-west)",
+          "bad": true,
+          "expected": "detect",
+          "actual": "1 alert(s)",
+          "correct": true
+        },
+        {
+          "description": "DNS tunneling long encoded label",
+          "bad": true,
+          "expected": "detect",
+          "actual": "1 alert(s)",
+          "correct": true
+        },
+        {
+          "description": "benign HTTP GET /index.html",
+          "bad": false,
+          "expected": "no-alert",
+          "actual": "0 alert(s)",
+          "correct": true
+        },
+        {
+          "description": "benign JSON API POST",
+          "bad": false,
+          "expected": "no-alert",
+          "actual": "0 alert(s)",
+          "correct": true
+        },
+        {
+          "description": "benign DNS query",
+          "bad": false,
+          "expected": "no-alert",
+          "actual": "0 alert(s)",
+          "correct": true
+        },
+        {
+          "description": "benign load-balancer health check",
+          "bad": false,
+          "expected": "no-alert",
+          "actual": "0 alert(s)",
+          "correct": true
+        },
+        {
+          "description": "benign internal SMB file access",
+          "bad": false,
+          "expected": "no-alert",
+          "actual": "0 alert(s)",
+          "correct": true
+        },
+        {
+          "description": "benign DNS TXT (SPF) lookup",
           "bad": false,
           "expected": "no-alert",
           "actual": "0 alert(s)",
