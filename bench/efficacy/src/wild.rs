@@ -663,31 +663,35 @@ pub async fn run_ips() -> FunctionReport {
     // whole row is UNTESTED rather than a fabricated verdict.
     let mut alerts: Vec<Option<usize>> = vec![None; pcaps.len()];
     let mut runs = 0u64;
-    for h in handles {
+    let mut failure: Option<String> = None;
+    let mut pending = handles.into_iter();
+    for h in pending.by_ref() {
         match h.await {
             Ok((i, Ok(n))) => {
                 alerts[i] = Some(n);
                 runs += 1;
             }
             Ok((_, Err(e))) => {
-                return FunctionReport::untested(
-                    "ips_wild",
-                    "sng-ips",
-                    Kind::Detection,
-                    &format!("suricata execution failed under concurrent load: {e}"),
-                )
-                .with_informational();
+                failure = Some(format!(
+                    "suricata execution failed under concurrent load: {e}"
+                ));
+                break;
             }
             Err(e) => {
-                return FunctionReport::untested(
-                    "ips_wild",
-                    "sng-ips",
-                    Kind::Detection,
-                    &format!("IPS wild task join error: {e}"),
-                )
-                .with_informational();
+                failure = Some(format!("IPS wild task join error: {e}"));
+                break;
             }
         }
+    }
+    if let Some(reason) = failure {
+        // Abort and drain any not-yet-awaited tasks before returning so none
+        // keep writing into the work dir after `_guard` removes it on drop.
+        for h in pending {
+            h.abort();
+            let _ = h.await;
+        }
+        return FunctionReport::untested("ips_wild", "sng-ips", Kind::Detection, &reason)
+            .with_informational();
     }
     let elapsed = start.elapsed();
 
