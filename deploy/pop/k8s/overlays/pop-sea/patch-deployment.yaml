@@ -1,0 +1,8 @@
+# SEA capacity envelope. Tune replicas to the PoP's CapacityTier
+# (internal/service/pop: small/medium/large soft ceilings 10k/50k/200k).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sng-edge
+spec:
+  replicas: 3

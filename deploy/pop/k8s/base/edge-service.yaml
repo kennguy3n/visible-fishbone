@@ -1,0 +1,29 @@
+# Per-PoP front-door target. The cloud LB this Service provisions is the
+# regional endpoint that the front-door steers to: its address is the
+# PoP's anycast VIP (BGP) or the A/AAAA value the GeoDNS publisher writes
+# (internal/service/pop). The LB's own health check tracks /readyz on the
+# health port, so a PoP that fails readiness is pulled from rotation.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sng-edge
+  labels:
+    app.kubernetes.io/name: sng-edge
+    app.kubernetes.io/component: edge
+  annotations:
+    # Cloud-agnostic placeholder. On AWS this maps to an NLB with a
+    # health check against the health port; set the equivalent for your
+    # provider. The front-door (anycast/GeoDNS) sits in front of this.
+    service.beta.kubernetes.io/aws-load-balancer-type: external
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-port: "9119"
+    service.beta.kubernetes.io/aws-load-balancer-healthcheck-path: /readyz
+spec:
+  type: LoadBalancer
+  selector:
+    app.kubernetes.io/name: sng-edge
+  ports:
+    - name: health
+      port: 9119
+      targetPort: health
+      protocol: TCP

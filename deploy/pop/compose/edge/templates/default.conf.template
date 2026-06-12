@@ -1,0 +1,39 @@
+# ShieldNet Gateway — local multi-PoP simulation: edge stand-in.
+#
+# This is NOT the real sng-edge appliance. It is a tiny health-serving
+# stand-in so the front-door failover behaviour (deploy/pop/compose) is
+# runnable on a single host with no proprietary image. It mirrors only
+# the two health endpoints the real edge exposes on its supervisor
+# health aggregator (--health-bind, see crates/sng-edge): /healthz
+# (liveness) and /readyz (readiness). In production you replace this
+# service with ghcr.io/kennguy3n/sng-edge (see docker-compose.pop.yml).
+#
+# ${POP_NAME} / ${POP_REGION} are substituted by the nginx image's
+# envsubst entrypoint from the service environment.
+
+server {
+    listen 8080 default_server;
+    server_name _;
+
+    # Identify which PoP answered — used to observe front-door failover.
+    location = / {
+        default_type text/plain;
+        return 200 "PoP ${POP_NAME} (region-group ${POP_REGION})\n";
+    }
+
+    # Liveness: the process is up.
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ok\n";
+    }
+
+    # Readiness: the PoP is ready to take traffic. Toggle this off in a
+    # demo with `docker compose exec` to watch the front-door drain this
+    # PoP and fail traffic over to the backup (see README).
+    location = /readyz {
+        access_log off;
+        default_type text/plain;
+        return 200 "ready\n";
+    }
+}

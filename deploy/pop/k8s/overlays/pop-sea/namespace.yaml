@@ -1,0 +1,6 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sng-pop-sea
+  labels:
+    sng/region-group: SEA

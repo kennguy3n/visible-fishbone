@@ -1,0 +1,17 @@
+# DACH PoP edge identity — REPLACE the all-zero UUIDs with this PoP's
+# real tenant/device/site IDs. Reference schema:
+# crates/sng-edge/src/config.rs (EdgeConfig).
+[identity]
+tenant_id = "00000000-0000-0000-0000-000000000000"
+device_id = "00000000-0000-0000-0000-000000000000"
+site_id   = "00000000-0000-0000-0000-000000000000"
+
+[ips]
+enable = true
+interface = "eth0"
+rule_file_path = "/var/lib/sng/ips/sng.rules"
+staging_dir    = "/var/lib/sng/ips"
+runtime = "ids"
+
+[swg]
+config_path = "/var/lib/sng/swg/envoy.yaml"
