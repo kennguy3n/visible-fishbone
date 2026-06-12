@@ -19,6 +19,9 @@ import type {
   DlpClassifyResult,
   DlpPolicy,
   DlpPolicyCreate,
+  DlpReviewDigest,
+  DlpReviewEvent,
+  DlpReviewState,
   DlpTemplate,
   GenerateReportRequest,
   InfraCostProjection,
@@ -165,6 +168,111 @@ export function useClassifyText(tenantId: string) {
       }),
   });
 }
+
+// --- DLP review queue (HITL) -----------------------------------------------
+// Operator surface for internal/handler/dlpreview.go: list the backlog,
+// fetch one event, take the three terminal decisions (approve/block/dismiss),
+// and read the non-blocking digest. All five families share the
+// ["dlp","review-queue",tenantId] key prefix so a single invalidate after a
+// decision refreshes the list, the open detail, and the digest together.
+
+const reviewQueueKey = (tenantId: string) =>
+  ["dlp", "review-queue", tenantId] as const;
+
+// The backlog is a live, multi-operator surface: one reviewer's decision should
+// surface for the others without a manual reload. The app disables
+// refetch-on-focus globally (main.tsx), so the list and digest poll instead.
+// React Query pauses interval refetches while the tab is hidden
+// (refetchIntervalInBackground defaults to false), so idle operators add no
+// backend load — important at 5k-tenant scale. 30s matches the global
+// staleTime, so polling never refetches more eagerly than data is considered
+// fresh. The single-event detail isn't polled: it's a short-lived modal and is
+// refetched on demand after a decision.
+const REVIEW_QUEUE_POLL_MS = 30_000;
+
+export function useDlpReviewQueue(
+  tenantId: string,
+  state?: DlpReviewState,
+  limit?: number,
+): UseQueryResult<ListEnvelope<DlpReviewEvent>> {
+  return useQuery({
+    queryKey: [...reviewQueueKey(tenantId), "list", state ?? "all", limit ?? 0],
+    queryFn: ({ signal }) =>
+      sngRequest<ListEnvelope<DlpReviewEvent>>({
+        method: "GET",
+        url: `${base(tenantId)}/dlp/review-queue`,
+        params: {
+          ...(state ? { state } : {}),
+          ...(limit ? { limit } : {}),
+        },
+        signal,
+      }),
+    enabled: !!tenantId,
+    refetchInterval: REVIEW_QUEUE_POLL_MS,
+  });
+}
+
+export function useDlpReviewEvent(
+  tenantId: string,
+  id: string | null,
+): UseQueryResult<DlpReviewEvent> {
+  return useQuery({
+    queryKey: [...reviewQueueKey(tenantId), "event", id],
+    queryFn: ({ signal }) =>
+      sngRequest<DlpReviewEvent>({
+        method: "GET",
+        url: `${base(tenantId)}/dlp/review-queue/${id}`,
+        signal,
+      }),
+    enabled: !!tenantId && !!id,
+  });
+}
+
+export function useDlpReviewDigest(
+  tenantId: string,
+  digestWindow?: string,
+): UseQueryResult<DlpReviewDigest> {
+  return useQuery({
+    queryKey: [...reviewQueueKey(tenantId), "digest", digestWindow ?? "default"],
+    queryFn: ({ signal }) =>
+      sngRequest<DlpReviewDigest>({
+        method: "GET",
+        url: `${base(tenantId)}/dlp/review-queue/digest`,
+        params: digestWindow ? { window: digestWindow } : undefined,
+        signal,
+      }),
+    enabled: !!tenantId,
+    refetchInterval: REVIEW_QUEUE_POLL_MS,
+  });
+}
+
+// The three terminal decisions share a signature (POST .../{id}/{decision}
+// returning the updated event); this factory keeps them DRY. The cache key is
+// derived from the `tenantId` the hook was created with so a decision can
+// never invalidate another tenant's queue.
+type DlpReviewDecision = "approve" | "block" | "dismiss";
+
+function useDlpReviewDecision(tenantId: string, decision: DlpReviewDecision) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) =>
+      sngRequest<DlpReviewEvent>({
+        method: "POST",
+        url: `${base(tenantId)}/dlp/review-queue/${id}/${decision}`,
+      }),
+    onSuccess: () =>
+      qc.invalidateQueries({ queryKey: reviewQueueKey(tenantId) }),
+  });
+}
+
+export const useApproveDlpReview = (tenantId: string) =>
+  useDlpReviewDecision(tenantId, "approve");
+
+export const useBlockDlpReview = (tenantId: string) =>
+  useDlpReviewDecision(tenantId, "block");
+
+export const useDismissDlpReview = (tenantId: string) =>
+  useDlpReviewDecision(tenantId, "dismiss");
 
 // --- Compliance ------------------------------------------------------------
 

@@ -123,6 +123,59 @@ export interface DlpClassifyResult {
   confidence: number;
 }
 
+// --- DLP review queue (HITL) -----------------------------------------------
+// Mirrors the wire structs in internal/handler/dlpreview.go. The endpoint
+// AI-app exfiltration signal is coach-first: it flags but does not block, so
+// every flagged upload lands in this per-tenant queue for a human to approve,
+// block, or dismiss. Only redacted aggregates are stored/surfaced — never the
+// matched bytes, surrounding content, or upload URL — so these types
+// deliberately carry no raw-payload field.
+
+export type DlpReviewState = "pending" | "approved" | "blocked" | "dismissed";
+
+export type DlpSeverity = "low" | "medium" | "high" | "critical";
+
+export type DlpFindingKind = "pii" | "secret" | "confidential";
+
+// FindingAggregate: a redacted, aggregate description of one class of finding
+// (kind/label/count/severity). It has no offsets, snippets, or matched bytes.
+export interface DlpFindingAggregate {
+  kind: DlpFindingKind;
+  label: string;
+  count: number;
+  max_confidence: number;
+  severity: DlpSeverity;
+}
+
+export interface DlpReviewEvent {
+  id: string;
+  tenant_id: string;
+  signal: string;
+  destination_app: string;
+  severity: DlpSeverity;
+  confidence: number;
+  state: DlpReviewState;
+  findings: DlpFindingAggregate[];
+  created_at: string;
+  decided_at?: string | null;
+  decided_by?: string | null;
+}
+
+// Non-blocking backlog summary for the digest endpoint. The maps are keyed by
+// the stringified state / severity / destination-app and count events created
+// within the requested window.
+export interface DlpReviewDigest {
+  tenant_id: string;
+  window: string;
+  since: string;
+  generated_at: string;
+  total: number;
+  pending: number;
+  by_state: Record<string, number>;
+  by_severity: Record<string, number>;
+  pending_by_app: Record<string, number>;
+}
+
 // --- Compliance ------------------------------------------------------------
 
 export interface ComplianceControlStatus {

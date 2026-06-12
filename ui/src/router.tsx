@@ -15,6 +15,7 @@ import { Devices } from "@/routes/Devices";
 import { Policy } from "@/routes/Policy";
 import { NetworkPolicies } from "@/routes/NetworkPolicies";
 import { Dlp } from "@/routes/Dlp";
+import { DlpReviewQueue } from "@/routes/DlpReviewQueue";
 import { Casb } from "@/routes/Casb";
 import { Browser } from "@/routes/Browser";
 import { Alerts } from "@/routes/Alerts";
@@ -73,6 +74,7 @@ const appRoutes = [
   page("/policy", Policy),
   page("/network-policies", NetworkPolicies),
   page("/dlp", Dlp),
+  page("/dlp/review-queue", DlpReviewQueue),
   page("/casb", Casb),
   page("/browser", Browser),
   page("/alerts", Alerts),
