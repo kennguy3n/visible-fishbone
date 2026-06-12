@@ -342,7 +342,15 @@ func (s *Slack) scanChannelHistory(
 			return err
 		}
 		if !out.OK {
-			return fmt.Errorf("slack: conversations.history: %s", out.Error)
+			// Channel-level error (commonly not_in_channel when the
+			// token's app was never invited, or channel_not_found).
+			// Skip this channel rather than aborting the whole
+			// workspace scan; record it as a per-object fetch failure.
+			return yield(ctx, casb.ContentObject{
+				ID:       "channel:" + channelID,
+				Name:     "#" + channelName,
+				FetchErr: fmt.Errorf("conversations.history: %s", out.Error),
+			})
 		}
 		for _, msg := range out.Messages {
 			if msg.Text == "" {

@@ -293,6 +293,97 @@ func TestM365_ScanContent_MissingDriveSkipped(t *testing.T) {
 	}
 }
 
+func TestM365_ScanContent_PagesUsers(t *testing.T) {
+	// /users returns an @odata.nextLink; the second page's user (u2)
+	// must be scanned too, proving listDriveUserIDs follows paging.
+	var baseURL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "token"):
+			json.NewEncoder(w).Encode(map[string]any{"access_token": "test-tok", "expires_in": 3600})
+		case r.URL.Path == "/users":
+			json.NewEncoder(w).Encode(map[string]any{
+				"value":           []map[string]any{{"id": "u1"}},
+				"@odata.nextLink": baseURL + "/users-page2",
+			})
+		case r.URL.Path == "/users-page2":
+			json.NewEncoder(w).Encode(map[string]any{"value": []map[string]any{{"id": "u2"}}})
+		case r.URL.Path == "/users/u1/drive/root/children":
+			json.NewEncoder(w).Encode(map[string]any{"value": []map[string]any{
+				{"id": "f1", "name": "a.txt", "size": 1, "lastModifiedDateTime": "2025-06-01T10:00:00Z",
+					"file": map[string]any{"mimeType": "text/plain"}},
+			}})
+		case r.URL.Path == "/users/u2/drive/root/children":
+			json.NewEncoder(w).Encode(map[string]any{"value": []map[string]any{
+				{"id": "f2", "name": "b.txt", "size": 1, "lastModifiedDateTime": "2025-06-01T10:00:00Z",
+					"file": map[string]any{"mimeType": "text/plain"}},
+			}})
+		case r.URL.Path == "/users/u1/drive/items/f1/content":
+			w.Write([]byte("A"))
+		case r.URL.Path == "/users/u2/drive/items/f2/content":
+			w.Write([]byte("B"))
+		default:
+			http.Error(w, "not found: "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	baseURL = srv.URL
+	m := newTestM365(t, srv)
+	cfg, sec := m365TestCfg(t, srv.URL)
+
+	var c scanCollector
+	if err := m.ScanContent(context.Background(), cfg, sec, casb.ContentScanOptions{}, c.yield); err != nil {
+		t.Fatalf("ScanContent: %v", err)
+	}
+	if _, ok := c.byID("f1"); !ok {
+		t.Fatal("first-page user's file f1 missing")
+	}
+	if _, ok := c.byID("f2"); !ok {
+		t.Fatal("second-page user's file f2 missing — /users paging not followed")
+	}
+}
+
+func TestM365_ScanContent_PerUserErrorResilient(t *testing.T) {
+	// u1's drive returns 403 (not 404). The user must be skipped via a
+	// FetchErr placeholder and u2's drive still scanned.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodPost && strings.Contains(r.URL.Path, "token"):
+			json.NewEncoder(w).Encode(map[string]any{"access_token": "test-tok", "expires_in": 3600})
+		case r.URL.Path == "/users":
+			json.NewEncoder(w).Encode(map[string]any{"value": []map[string]any{{"id": "u1"}, {"id": "u2"}}})
+		case r.URL.Path == "/users/u1/drive/root/children":
+			http.Error(w, `{"error":{"code":"accessDenied"}}`, http.StatusForbidden)
+		case r.URL.Path == "/users/u2/drive/root/children":
+			json.NewEncoder(w).Encode(map[string]any{"value": []map[string]any{
+				{"id": "f2", "name": "b.txt", "size": 1, "lastModifiedDateTime": "2025-06-01T10:00:00Z",
+					"file": map[string]any{"mimeType": "text/plain"}},
+			}})
+		case r.URL.Path == "/users/u2/drive/items/f2/content":
+			w.Write([]byte("B"))
+		default:
+			http.Error(w, "not found: "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	m := newTestM365(t, srv)
+	cfg, sec := m365TestCfg(t, srv.URL)
+
+	var c scanCollector
+	if err := m.ScanContent(context.Background(), cfg, sec, casb.ContentScanOptions{}, c.yield); err != nil {
+		t.Fatalf("ScanContent should skip the forbidden drive, got: %v", err)
+	}
+	bad, ok := c.byID("user:u1")
+	if !ok || bad.FetchErr == nil {
+		t.Fatalf("expected FetchErr placeholder for u1, got %+v", bad)
+	}
+	if _, ok := c.byID("f2"); !ok {
+		t.Fatal("u2's file f2 missing — a single 403 aborted the scan")
+	}
+}
+
 // --- Google --------------------------------------------------------------
 
 func googleScanServer(t *testing.T, fx googleSAFixture) *httptest.Server {
@@ -462,6 +553,53 @@ func TestSlack_ScanContent(t *testing.T) {
 	}
 	if o.ModifiedAt.IsZero() {
 		t.Fatal("ModifiedAt not parsed from ts")
+	}
+}
+
+func TestSlack_ScanContent_NotInChannelResilient(t *testing.T) {
+	// C1 returns not_in_channel; C2 is readable. The scan must skip C1
+	// (recording a FetchErr) and still yield C2's message.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/api/conversations.list"):
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok": true,
+				"channels": []map[string]any{
+					{"id": "C1", "name": "locked"},
+					{"id": "C2", "name": "general"},
+				},
+			})
+		case strings.HasSuffix(r.URL.Path, "/api/conversations.history"):
+			if r.URL.Query().Get("channel") == "C1" {
+				json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "not_in_channel"})
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{
+				"ok": true,
+				"messages": []map[string]any{
+					{"type": "message", "ts": "1717238400.000100", "user": "U1", "text": "hello"},
+				},
+			})
+		default:
+			http.Error(w, "not found: "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	s := newTestSlack(t, srv)
+	s.webBaseURL = srv.URL
+	sec, _ := json.Marshal(SlackSecret{Token: "xoxp-test"})
+
+	var c scanCollector
+	if err := s.ScanContent(context.Background(), nil, sec, casb.ContentScanOptions{}, c.yield); err != nil {
+		t.Fatalf("ScanContent should skip not_in_channel, got: %v", err)
+	}
+	locked, ok := c.byID("channel:C1")
+	if !ok || locked.FetchErr == nil {
+		t.Fatalf("expected FetchErr placeholder for C1, got %+v", locked)
+	}
+	if _, ok := c.byID("C2:1717238400.000100"); !ok {
+		t.Fatal("C2's message missing — not_in_channel on C1 aborted the scan")
 	}
 }
 

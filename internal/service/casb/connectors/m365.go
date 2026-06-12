@@ -356,35 +356,29 @@ func (m *M365) ScanContent(
 }
 
 // listDriveUserIDs returns the ids of users whose OneDrive should be
-// scanned. It reuses the same /users listing the discovery path uses.
+// scanned. Graph caps /users at ~100 rows per page, so it must follow
+// @odata.nextLink to enumerate every user — otherwise a tenant with
+// more than a page of users would have most OneDrives silently skipped.
 func (m *M365) listDriveUserIDs(ctx context.Context, token string) ([]string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		m.graphBase+"/users?$select=id", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+token)
-	req.Header.Set("User-Agent", m.userAgent)
-	resp, err := m.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("m365: list drive users failed: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, fmt.Errorf("m365: list drive users returned %d: %s", resp.StatusCode, body)
-	}
-	var result struct {
-		Value []struct {
-			ID string `json:"id"`
-		} `json:"value"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("m365: decode drive users: %w", err)
-	}
-	ids := make([]string, 0, len(result.Value))
-	for _, u := range result.Value {
-		ids = append(ids, u.ID)
+	endpoint := m.graphBase + "/users?$select=id&$top=999"
+	var ids []string
+	for endpoint != "" {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		var result struct {
+			Value []struct {
+				ID string `json:"id"`
+			} `json:"value"`
+			NextLink string `json:"@odata.nextLink"`
+		}
+		if err := getJSON(ctx, m.client, m.userAgent, "m365", endpoint, token, &result); err != nil {
+			return nil, err
+		}
+		for _, u := range result.Value {
+			ids = append(ids, u.ID)
+		}
+		endpoint = result.NextLink
 	}
 	return ids, nil
 }
@@ -426,9 +420,22 @@ func (m *M365) scanUserDrive(
 		}
 		if err := getJSON(ctx, m.client, m.userAgent, "m365", endpoint, token, &page); err != nil {
 			if isM365NotFound(err) {
+				// User never provisioned a OneDrive; nothing to scan.
 				continue
 			}
-			return err
+			// Another per-user/per-folder Graph error (e.g. 403 on a
+			// drive we cannot read). Record it and move on rather than
+			// aborting the whole tenant scan. This getJSON path is
+			// distinct from the yield path below, so the object-budget
+			// stop sentinel is never swallowed here.
+			if yerr := yield(ctx, casb.ContentObject{
+				ID:       "user:" + userID,
+				Owner:    userID,
+				FetchErr: fmt.Errorf("list drive items: %w", err),
+			}); yerr != nil {
+				return yerr
+			}
+			return nil
 		}
 		for _, it := range page.Value {
 			if it.Folder != nil {
