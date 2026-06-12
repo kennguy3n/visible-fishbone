@@ -335,6 +335,10 @@ impl ZtnaSubsystem {
     /// `subject.user_id` is expected to match `request.user_id`; the
     /// brain resolves the identity by `request.user_id`, so a mismatch
     /// simply means the registered subject is not the one consulted.
+    /// A `debug_assert` catches such accidental mismatches in dev /
+    /// test builds; release builds keep the documented best-effort
+    /// contract (the mismatched subject is just never resolved, so the
+    /// request degrades to `IdentityAbsent` rather than misbehaving).
     ///
     /// # Errors
     ///
@@ -347,6 +351,11 @@ impl ZtnaSubsystem {
         subject: &UserIdentity,
         request: AccessRequest,
     ) -> Result<ZtnaDecision, ZtnaError> {
+        debug_assert_eq!(
+            subject.user_id, request.user_id,
+            "open_session_with_subject: subject.user_id must match request.user_id, \
+             otherwise the brain resolves a different (or absent) identity"
+        );
         self.register_subject(subject);
         self.open_session(session_id, tenant_id, request)
     }
