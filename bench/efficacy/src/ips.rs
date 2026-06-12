@@ -18,7 +18,7 @@ use sng_ips::{ConfigGenerator, EveRecord, IpsConfigInput, IpsRuntime};
 
 use crate::report::{Case, FunctionReport, Kind, Targets};
 
-fn fixtures_dir() -> PathBuf {
+pub(crate) fn fixtures_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/ips")
 }
 
@@ -106,6 +106,10 @@ pub(crate) async fn alerts_for_pcap(
         .args(["--set", "unix-command.enabled=no"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        // Kill the child if this future is dropped (e.g. the wild IPS lane
+        // aborts in-flight tasks on its error path) so we never orphan a
+        // Suricata process still writing into a work dir about to be removed.
+        .kill_on_drop(true)
         .status()
         .await
         .map_err(|e| format!("failed to spawn suricata: {e}"))?;
@@ -140,13 +144,13 @@ pub(crate) async fn alerts_for_pcap(
     Ok(alerts)
 }
 
-struct PcapCase {
-    file: &'static str,
-    bad: bool,
-    desc: &'static str,
+pub(crate) struct PcapCase {
+    pub(crate) file: &'static str,
+    pub(crate) bad: bool,
+    pub(crate) desc: &'static str,
 }
 
-fn corpus() -> Vec<PcapCase> {
+pub(crate) fn corpus() -> Vec<PcapCase> {
     vec![
         PcapCase {
             file: "bad-eicar.pcap",

@@ -51,10 +51,12 @@ cargo run --release -- --out efficacy-report.json --git-sha "$(git rev-parse --s
 ```
 
 Flags: `--out <path>` (default `efficacy-report.json`), `--git-sha <sha>`, and
-per-function toggles (`--firewall`, `--swg`, `--ztna`, `--ips`) to run a
-subset. Exit code is `0` only when every function PASSes, `2` otherwise (a
-`WARN` or `UNTESTED` overall verdict also exits `2`, so a half-run suite never
-reads as green to a CI gate).
+per-function toggles (`--firewall`, `--swg`, `--ztna`, `--ips`, `--dlp`,
+`--malware`, `--dns`, `--adversarial`, `--wild`) to run a subset. Exit code is
+`0` only when every **gating** function PASSes, `2` otherwise (a `WARN` or
+`UNTESTED` overall verdict also exits `2`, so a half-run suite never reads as
+green to a CI gate). The `--wild` rows are *informational* and never affect the
+exit code (see below).
 
 ### IPS prerequisite
 
@@ -96,6 +98,61 @@ PASS requires catch-rate ≥ 99% **and** false-positive-rate ≤ 2%; WARN is the
 looser band (≥ 90% / ≤ 5%); otherwise FAIL. A partially-run suite (e.g. IPS
 untested) grades `UNTESTED`, which is treated as worse than WARN so a
 half-run suite never masquerades as green.
+
+## Wild-traffic efficacy (noisy proxy, FPR under load)
+
+The curated corpora score ~100% **by construction** — they prove the
+enforcement code is correct, not that it catches real-world traffic. The
+`--wild` driver ([`src/wild.rs`](./src/wild.rs)) adds an honest, noisier
+signal: it replays a larger, committed, deterministically-generated corpus
+([`fixtures/wild/wild-corpus.json`](./fixtures/wild), produced by
+[`blog/harness/wildcorpus`](../../blog/harness/wildcorpus)) through the **real**
+engines under **sustained concurrent load**, and reports BOTH catch-rate AND
+false-positive-rate.
+
+| Row | Engine | What it measures |
+| --- | --- | --- |
+| `malware_wild` | `sng_swg::YaraEngine` | catch-rate + FPR over the blended corpus under load |
+| `malware_fpr_load` | `sng_swg::YaraEngine` | FPR over the **benign-only** slice at max concurrency |
+| `dlp_wild` | `sng_dlp::ContentClassifier` | catch-rate + FPR over the blended corpus under load |
+| `dlp_fpr_load` | `sng_dlp::ContentClassifier` | FPR over the **benign-only** slice at max concurrency |
+| `ips_wild` | Suricata (if present) | detection-rate + FPR replaying the committed PCAP corpus under concurrent Suricata processes |
+
+The blended corpus is **2087 samples** (≈22% malicious / 78% benign across
+mixed file types). It deliberately includes **benign-but-suspicious** traffic
+the signature engine flags (honest false positives) and **evasive/novel-packed**
+malware it misses (honest false negatives), so the wild numbers are
+intentionally below the curated 100%. The per-entry verdicts are deterministic
+(the engines are pure functions of input), so the confusion matrix is
+reproducible run-to-run; only the throughput figures vary. FPR is measured
+with the worker pool sized to the host's available parallelism.
+
+These rows are **informational**: they are graded against a looser band
+(`Targets::wild` — PASS ≥ 90% catch / ≤ 5% FPR, WARN ≥ 75% / ≤ 10%) and are
+**excluded from the gating `overall_verdict`** (and the process exit code) so
+the honest sub-100% wild numbers neither masquerade as — nor drag down — the
+curated decision-boundary correctness proof. They serialize with their own
+`verdict` and an `informational: true` flag.
+
+**Honesty contract.** This is a *noisier proxy, still not production traffic*.
+The corpus is synthetic, inert stand-in content; the ~1-in-5 malicious density
+is denser than live traffic on purpose (so each attack class is statistically
+meaningful), and the FPR is measured against the benign majority **under
+concurrent load**. If `suricata` is absent, `ips_wild` is reported
+`UNTESTED` and labelled **METHODOLOGY-ONLY** — the IPS wild row is never
+fabricated.
+
+### Wild fixtures
+
+`fixtures/wild/wild-corpus.json` is the committed, deterministic corpus.
+Regenerate it (and verify the `content_sha256` is unchanged) with:
+
+```bash
+go run ./blog/harness/wildcorpus              # rewrites the committed artifact
+```
+
+See the [`wildcorpus` README](../../blog/harness/wildcorpus/README.md) for the
+blend ratios, schema, and determinism details.
 
 ## Scope caveat
 
