@@ -154,7 +154,7 @@ func TestFilterLogicalGrammarVectors(t *testing.T) {
 		`((userName eq "a"))`,                                            // redundant nesting
 		`userName eq "a" and (displayName co "b" or displayName co "c")`, // nested group
 		`urn:ietf:params:scim:schemas:core:2.0:User:userName eq "a"`,     // qualified attr
-		`URN:IETF:PARAMS:SCIM:SCHEMAS:CORE:2.0:USER:userName eq "a"`,     // qualified attr, value preserved; prefix is case-tolerant via canonicalAttr at eval time
+		`URN:IETF:PARAMS:SCIM:SCHEMAS:CORE:2.0:USER:userName eq "a"`,     // qualified attr with upper-cased URN prefix (canonicalAttr strips it case-insensitively at eval time — see TestQualifiedAttributePathCaseInsensitive)
 		`userName eq "value with spaces and \"quotes\""`,                 // escaped quote
 		`userName eq "back\\slash"`,                                      // escaped backslash
 		`userName eq bareword`,                                           // unquoted value
@@ -495,6 +495,67 @@ func TestMemberValuePathTarget(t *testing.T) {
 			got, ok := memberValuePathTarget(tc.path)
 			if ok != tc.wantOK || got != tc.want {
 				t.Errorf("memberValuePathTarget(%q) = (%q, %v), want (%q, %v)", tc.path, got, ok, tc.want, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestCanonicalAttrPrefixCaseInsensitive pins that the core-schema URN
+// prefix is stripped case-insensitively (RFC 8141 §2 — URN namespace
+// identifiers are case-insensitive), so a qualified attribute path
+// resolves to the same short attribute regardless of the casing an IdP
+// uses for the `urn:...:User:`/`urn:...:Group:` prefix.
+func TestCanonicalAttrPrefixCaseInsensitive(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{SCIMSchemaUser + ":userName", "username"},
+		{"URN:IETF:PARAMS:SCIM:SCHEMAS:CORE:2.0:USER:userName", "username"},
+		{"Urn:Ietf:Params:Scim:Schemas:Core:2.0:User:displayName", "displayname"},
+		{SCIMSchemaGroup + ":members", "members"},
+		{"URN:IETF:PARAMS:SCIM:SCHEMAS:CORE:2.0:GROUP:members", "members"},
+		{"userName", "username"}, // unqualified, unchanged but lowered
+		{"name.givenName", "name.givenname"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			if got := canonicalAttr(tc.in); got != tc.want {
+				t.Errorf("canonicalAttr(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestQualifiedAttributePathCaseInsensitive proves the case-insensitive
+// prefix handling end to end: a filter whose attribute carries an
+// upper-cased schema URN must still match through ListUsers, not just
+// parse. This is the eval-time guarantee the grammar-vector comment
+// refers to.
+func TestQualifiedAttributePathCaseInsensitive(t *testing.T) {
+	t.Parallel()
+	svc, tid := newSCIMService(t)
+	ctx := context.Background()
+	if _, err := svc.CreateUser(ctx, tid, SCIMUser{UserName: "qualified@example.com", Active: boolPtr(true)}); err != nil {
+		t.Fatalf("CreateUser: %v", err)
+	}
+	filters := []string{
+		`urn:ietf:params:scim:schemas:core:2.0:User:userName eq "qualified@example.com"`,
+		`URN:IETF:PARAMS:SCIM:SCHEMAS:CORE:2.0:USER:userName eq "qualified@example.com"`,
+	}
+	for _, f := range filters {
+		f := f
+		t.Run(f, func(t *testing.T) {
+			t.Parallel()
+			list, err := svc.ListUsers(ctx, tid, f, 1, 10)
+			if err != nil {
+				t.Fatalf("ListUsers(%q): %v", f, err)
+			}
+			if list.TotalResults != 1 {
+				t.Errorf("ListUsers(%q) TotalResults = %d, want 1 (qualified path must resolve regardless of URN casing)", f, list.TotalResults)
 			}
 		})
 	}
