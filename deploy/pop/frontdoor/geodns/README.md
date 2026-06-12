@@ -9,9 +9,10 @@ This Terraform root matches the in-app GeoDNS model one-for-one
 (`internal/service/pop` `ZoneGenerator` / `GeoDNSPublisher`):
 
 - **one record set per enabled PoP**, A or AAAA by address family;
-- **latency** routing (nearest region) or **weighted** routing
-  proportional to capacity tier (`small=1, medium=5, large=20`, the same
-  `tierWeight` table as the publisher);
+- **latency** routing (nearest region), **weighted** routing proportional
+  to capacity tier (`small=1, medium=5, large=20`, the same `tierWeight`
+  table as the publisher), or **simple** (flat multi-value answer) —
+  the same three policies as the publisher's `RoutingPolicy`;
 - each record gated by a **Route53 health check** on the edge `/readyz`
   endpoint, so an unhealthy PoP is pulled from rotation.
 

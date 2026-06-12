@@ -1,4 +1,4 @@
-# SEA PoP edge identity — REPLACE the all-zero UUIDs with this PoP's
+# DACH PoP edge identity — REPLACE the all-zero UUIDs with this PoP's
 # real tenant/device/site IDs. Reference schema:
 # crates/sng-edge/src/config.rs (EdgeConfig).
 [identity]

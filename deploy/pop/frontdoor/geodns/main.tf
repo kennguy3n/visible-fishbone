@@ -90,4 +90,10 @@ resource "aws_route53_record" "pop" {
       weight = local.tier_weight[weighted_routing_policy.value]
     }
   }
+
+  # "simple" — flat multi-value answer (every healthy PoP), the Route53
+  # equivalent of internal/service/pop RoutingSimple. multivalue-answer
+  # records still carry a set_identifier and honour the per-PoP health
+  # check, so unhealthy PoPs are dropped from the answer.
+  multivalue_answer_routing_policy = var.routing_policy == "simple" ? true : null
 }

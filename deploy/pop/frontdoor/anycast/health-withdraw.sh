@@ -12,7 +12,14 @@
 #   READYZ_URL  - edge readiness URL (default http://127.0.0.1:9119/readyz)
 #   BIRDC       - birdc control socket client (default "birdc")
 #   INTERVAL    - poll seconds (default 5)
-set -eu
+#
+# NOTE: deliberately NOT `set -e`. A transient birdc failure (e.g. BIRD
+# restarting, control socket briefly unavailable) must NOT kill the
+# health gate — that would silently freeze the announce in whatever state
+# it was last in. Instead, a failed birdc call leaves `announced`
+# unchanged so the desired state is re-applied on the next tick. `set -u`
+# is kept to catch unset-variable bugs.
+set -u
 
 READYZ_URL="${READYZ_URL:-http://127.0.0.1:9119/readyz}"
 BIRDC="${BIRDC:-birdc}"
@@ -22,15 +29,21 @@ announced=""
 while true; do
   if curl -fsS --max-time 2 "$READYZ_URL" >/dev/null 2>&1; then
     if [ "$announced" != "yes" ]; then
-      "$BIRDC" enable sng_announce
-      announced="yes"
-      echo "readyz ok: anycast announce ENABLED"
+      if "$BIRDC" enable sng_announce; then
+        announced="yes"
+        echo "readyz ok: anycast announce ENABLED"
+      else
+        echo "readyz ok but birdc enable failed; will retry next tick" >&2
+      fi
     fi
   else
     if [ "$announced" != "no" ]; then
-      "$BIRDC" disable sng_announce
-      announced="no"
-      echo "readyz failing: anycast announce WITHDRAWN"
+      if "$BIRDC" disable sng_announce; then
+        announced="no"
+        echo "readyz failing: anycast announce WITHDRAWN"
+      else
+        echo "readyz failing but birdc disable failed; will retry next tick" >&2
+      fi
     fi
   fi
   sleep "$INTERVAL"

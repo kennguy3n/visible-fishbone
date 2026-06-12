@@ -36,18 +36,22 @@ variable "ttl" {
 
 variable "routing_policy" {
   description = <<-EOT
-    DNS steering strategy, mirroring internal/service/pop RoutingPolicy:
+    DNS steering strategy, mirroring internal/service/pop RoutingPolicy
+    (latency | weighted | simple):
       "latency"  — one record set per PoP; resolvers get the lowest-latency
                    region (Route53 latency records). Default "nearest PoP".
       "weighted" — weighted record sets proportional to capacity tier
                    (small=1, medium=5, large=20).
+      "simple"   — flat multi-value answer (every healthy PoP), via Route53
+                   multivalue-answer routing. No locality bias; the resolver
+                   picks among the returned records.
   EOT
   type        = string
   default     = "latency"
 
   validation {
-    condition     = contains(["latency", "weighted"], var.routing_policy)
-    error_message = "routing_policy must be \"latency\" or \"weighted\"."
+    condition     = contains(["latency", "weighted", "simple"], var.routing_policy)
+    error_message = "routing_policy must be \"latency\", \"weighted\", or \"simple\"."
   }
 }
 
