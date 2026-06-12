@@ -448,11 +448,8 @@ func (g *Google) scanUserDrive(
 				// A native type with no text export (e.g. a Form); skip.
 				continue
 			}
-			content, ctype, err := fetchContent(ctx, g.client, g.userAgent, "google",
+			content, ctype, ferr := fetchContent(ctx, g.client, g.userAgent, "google",
 				downloadURL, token, opts.MaxBytesPerObject)
-			if err != nil {
-				return err
-			}
 			reported := f.MimeType
 			if exported {
 				reported = "text/plain"
@@ -467,6 +464,7 @@ func (g *Google) scanUserDrive(
 				SizeBytes:   parseInt64(f.Size),
 				ModifiedAt:  modified,
 				Content:     content,
+				FetchErr:    ferr,
 			}
 			if err := yield(ctx, obj); err != nil {
 				return err

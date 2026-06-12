@@ -444,13 +444,10 @@ func (m *M365) scanUserDrive(
 			if !opts.Since.IsZero() && !modified.IsZero() && modified.Before(opts.Since) {
 				continue
 			}
-			content, ctype, err := fetchContent(ctx, m.client, m.userAgent, "m365",
+			content, ctype, ferr := fetchContent(ctx, m.client, m.userAgent, "m365",
 				fmt.Sprintf("%s/users/%s/drive/items/%s/content",
 					m.graphBase, url.PathEscape(userID), url.PathEscape(it.ID)),
 				token, opts.MaxBytesPerObject)
-			if err != nil {
-				return err
-			}
 			reported := ctype
 			if it.File.MimeType != "" {
 				reported = it.File.MimeType
@@ -463,6 +460,7 @@ func (m *M365) scanUserDrive(
 				SizeBytes:   it.Size,
 				ModifiedAt:  modified,
 				Content:     content,
+				FetchErr:    ferr,
 			}
 			if err := yield(ctx, obj); err != nil {
 				return err

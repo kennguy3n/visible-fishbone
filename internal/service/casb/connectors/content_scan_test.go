@@ -157,6 +157,50 @@ func TestBox_ScanContent_StopEarly(t *testing.T) {
 	}
 }
 
+func TestBox_ScanContent_FetchErrorIsResilient(t *testing.T) {
+	// File 100's content download 403s; the scan must surface that as a
+	// per-object FetchErr and still yield the other file rather than abort.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/oauth2/token"):
+			json.NewEncoder(w).Encode(map[string]any{"access_token": "box-tok"})
+		case r.URL.Path == "/2.0/folders/0/items":
+			json.NewEncoder(w).Encode(map[string]any{
+				"total_count": 2,
+				"entries": []map[string]any{
+					{"id": "100", "name": "denied.txt", "type": "file", "size": 1, "modified_at": "2025-06-01T10:00:00Z"},
+					{"id": "200", "name": "ok.txt", "type": "file", "size": 2, "modified_at": "2025-06-01T10:00:00Z"},
+				},
+			})
+		case r.URL.Path == "/2.0/files/100/content":
+			http.Error(w, "forbidden", http.StatusForbidden)
+		case r.URL.Path == "/2.0/files/200/content":
+			w.Write([]byte("ok"))
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	b, cfg, sec := newTestBox(srv)
+
+	var c scanCollector
+	if err := b.ScanContent(context.Background(), cfg, sec, casb.ContentScanOptions{}, c.yield); err != nil {
+		t.Fatalf("ScanContent should not abort on a single 403, got: %v", err)
+	}
+	if len(c.objs) != 2 {
+		t.Fatalf("got %d objects, want 2", len(c.objs))
+	}
+	denied, _ := c.byID("100")
+	if denied.FetchErr == nil {
+		t.Fatal("denied object should carry FetchErr")
+	}
+	ok, _ := c.byID("200")
+	if ok.FetchErr != nil || string(ok.Content) != "ok" {
+		t.Fatalf("ok object = %+v", ok)
+	}
+}
+
 // --- M365 ----------------------------------------------------------------
 
 func m365ScanServer(t *testing.T) *httptest.Server {

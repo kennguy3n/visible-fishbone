@@ -239,12 +239,9 @@ func (b *Box) ScanContent(
 					if !opts.Since.IsZero() && !modified.IsZero() && modified.Before(opts.Since) {
 						continue
 					}
-					content, ctype, err := fetchContent(ctx, b.client, b.userAgent, "box",
+					content, ctype, ferr := fetchContent(ctx, b.client, b.userAgent, "box",
 						fmt.Sprintf("%s/2.0/files/%s/content", b.baseURL, url.PathEscape(it.ID)),
 						token, opts.MaxBytesPerObject)
-					if err != nil {
-						return err
-					}
 					obj := casb.ContentObject{
 						ID:          it.ID,
 						Name:        it.Name,
@@ -252,6 +249,7 @@ func (b *Box) ScanContent(
 						SizeBytes:   it.Size,
 						ModifiedAt:  modified,
 						Content:     content,
+						FetchErr:    ferr,
 					}
 					if err := yield(ctx, obj); err != nil {
 						return err

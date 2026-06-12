@@ -80,6 +80,14 @@ type ContentObject struct {
 	ModifiedAt time.Time
 	// Content is the (possibly truncated) object bytes to classify.
 	Content []byte
+	// FetchErr, when non-nil, signals that the connector could not
+	// retrieve this object's content (e.g. a permission error on a
+	// single file, or an unsupported export). The connector sets it
+	// instead of aborting the whole pass; the service records it as a
+	// non-fatal scan error and moves on, so one un-downloadable object
+	// among thousands cannot starve a tenant's retro-scan. Content is
+	// empty when FetchErr is set.
+	FetchErr error
 }
 
 // ContentScanOptions configures a content-inspection pass. The zero
@@ -246,6 +254,14 @@ func (svc *Service) RetroScanConnector(
 		// (or could not) filter server-side.
 		if !opts.Since.IsZero() && !obj.ModifiedAt.IsZero() && obj.ModifiedAt.Before(opts.Since) {
 			return nil
+		}
+		if obj.FetchErr != nil {
+			// The connector could not retrieve this object's bytes.
+			// Count it against the budget and record the error, but
+			// keep scanning the rest of the estate.
+			result.ObjectsScanned++
+			svc.recordScanError(&result, fmt.Sprintf("object %s: fetch: %v", obj.ID, obj.FetchErr))
+			return svc.scanBudgetCheck(&result, opts)
 		}
 		if len(obj.Content) == 0 {
 			// Nothing to classify (empty file / empty message). Count

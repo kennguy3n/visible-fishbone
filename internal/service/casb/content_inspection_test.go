@@ -341,6 +341,34 @@ func TestRetroScan_ClassifyErrorIsResilient(t *testing.T) {
 	}
 }
 
+func TestRetroScan_FetchErrorIsResilient(t *testing.T) {
+	t.Parallel()
+	now := time.Now().UTC()
+	bad := obj("bad", "", now)
+	bad.FetchErr = errors.New("403 forbidden")
+	plugin := &inspectorPlugin{
+		typ:  repository.CASBConnectorM365,
+		objs: []casb.ContentObject{obj("good1", "data", now), bad, obj("good2", "data", now)},
+	}
+	cls := &fakeClassifier{}
+	svc, _, tenantID, connID := newRetroService(t, plugin, cls, true)
+
+	res, err := svc.RetroScanConnector(context.Background(), tenantID, connID, casb.ContentScanOptions{}, nil)
+	if err != nil {
+		t.Fatalf("RetroScanConnector: %v", err)
+	}
+	if res.ObjectsScanned != 3 {
+		t.Fatalf("ObjectsScanned = %d, want 3 (fetch error counted, scan continued)", res.ObjectsScanned)
+	}
+	if res.ErrorCount != 1 || len(res.Errors) != 1 {
+		t.Fatalf("ErrorCount = %d, Errors = %v, want 1", res.ErrorCount, res.Errors)
+	}
+	// The un-fetchable object must never reach the classifier.
+	if len(cls.calls) != 2 {
+		t.Fatalf("classifier calls = %d, want 2 (the two good objects)", len(cls.calls))
+	}
+}
+
 func TestRetroScan_EmptyContentSkipsClassify(t *testing.T) {
 	t.Parallel()
 	now := time.Now().UTC()

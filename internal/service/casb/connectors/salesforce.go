@@ -270,13 +270,10 @@ func (sf *Salesforce) ScanContent(
 			if r.FileExtension != "" {
 				name = r.Title + "." + r.FileExtension
 			}
-			content, ctype, err := fetchContent(ctx, sf.client, sf.userAgent, "salesforce",
+			content, ctype, ferr := fetchContent(ctx, sf.client, sf.userAgent, "salesforce",
 				fmt.Sprintf("%s/services/data/%s/sobjects/ContentVersion/%s/VersionData",
 					instanceURL, salesforceAPIVersion, url.PathEscape(r.ID)),
 				token, opts.MaxBytesPerObject)
-			if err != nil {
-				return err
-			}
 			obj := casb.ContentObject{
 				ID:          r.ID,
 				Name:        name,
@@ -284,6 +281,7 @@ func (sf *Salesforce) ScanContent(
 				SizeBytes:   r.ContentSize,
 				ModifiedAt:  modified,
 				Content:     content,
+				FetchErr:    ferr,
 			}
 			if err := yield(ctx, obj); err != nil {
 				return err
