@@ -335,30 +335,61 @@ func (s *Service) EvaluateAutoRollback(ctx context.Context, tenantID uuid.UUID, 
 	return rolled, true, nil
 }
 
-// EffectiveState is the read path for a capability GATE. It returns the
-// tenant's current state for the capability, FAILING CLOSED TO
-// [StateOff] on any error (unreadable state, bad capability, store
-// outage) — a gate must never enforce on a state it could not read. It
-// never returns an error for that reason.
-func (s *Service) EffectiveState(ctx context.Context, tenantID uuid.UUID, c Capability) State {
+// GateState is the read path for a capability GATE. It returns the
+// tenant's current state for the capability AND whether the tenant is
+// explicitly MANAGED by the framework for it (an operator has recorded a
+// transition row):
+//
+//   - managed == false: no row exists. The framework is not (yet)
+//     governing this tenant's capability, so the caller MUST fall back to
+//     its legacy pre-framework behavior. This is what makes deploying the
+//     framework a no-op until an operator opts a tenant in with its first
+//     transition — wiring the gate never silently disables a capability
+//     that was already enabled by the legacy config flag.
+//   - managed == true: the returned State is authoritative for the gate.
+//
+// It FAILS CLOSED on a genuine read error or a corrupt stored state,
+// returning ([StateOff], managed=true) so an unreadable state DISABLES the
+// capability rather than reverting to legacy-enabled — a gate must never
+// enforce, nor silently fall back to legacy-on, on a state it could not
+// read. It never returns an error for that reason. An invalid argument
+// (nil tenant / unknown capability) is a programmer error on the gate
+// path and likewise fails closed as managed-off.
+func (s *Service) GateState(ctx context.Context, tenantID uuid.UUID, c Capability) (State, bool) {
 	if tenantID == uuid.Nil || !c.Valid() {
-		return StateOff
+		return StateOff, true
 	}
 	rec, err := s.repo.Get(ctx, tenantID, c)
 	if err != nil {
-		if !isNotFound(err) {
-			// A genuine read failure (not "no row"): log and fail closed.
-			s.logger.WarnContext(ctx, "rollout: state unreadable; failing closed to off",
-				slog.String("tenant_id", tenantID.String()),
-				slog.String("capability", string(c)),
-				slog.Any("error", err))
+		if isNotFound(err) {
+			// No row: the tenant has not been opted into staged rollout
+			// for this capability. The caller uses its legacy behavior.
+			return StateOff, false
 		}
-		return StateOff
+		// A genuine read failure: log and fail closed (managed-off) so the
+		// gate disables the capability rather than reverting to legacy-on.
+		s.logger.WarnContext(ctx, "rollout: state unreadable; failing closed to off",
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("capability", string(c)),
+			slog.Any("error", err))
+		return StateOff, true
 	}
 	if !rec.State.Valid() {
-		return StateOff
+		return StateOff, true
 	}
-	return rec.State
+	return rec.State, true
+}
+
+// EffectiveState is the read path for callers that only need the
+// fail-closed state and not the managed/unmanaged distinction (telemetry,
+// projections). It returns the tenant's current state for the capability,
+// FAILING CLOSED TO [StateOff] on any error (unreadable state, bad
+// capability, store outage) and treating a never-transitioned tenant as
+// off. It never returns an error. Gates that must preserve legacy
+// behavior for unmanaged tenants use [Service.GateState] instead.
+func (s *Service) EffectiveState(ctx context.Context, tenantID uuid.UUID, c Capability) State {
+	state, _ := s.GateState(ctx, tenantID, c)
+	return state
 }
 
 // persist writes the post-transition record and notifies the audit sink

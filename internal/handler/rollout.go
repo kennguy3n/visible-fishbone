@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"net/http"
 	"time"
 
@@ -9,6 +10,26 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/service/rollout"
 )
+
+// Permissions gating the operator rollout surface. They follow the rbac
+// "resource:action" grammar (a platform/tenant admin's wildcard grant
+// satisfies both); a transition flips a security control's enforcement
+// posture, so it is a write-scoped, admin-level operation. Defined here
+// (not in the rbac package) so this session does not edit shared rbac
+// code.
+const (
+	permRolloutRead  = "rollout:read"
+	permRolloutWrite = "rollout:write"
+)
+
+// RolloutAuthorizer is the narrow RBAC seam the rollout handler gates on.
+// It is satisfied by *rbac.Service.HasPermission. Optional: a nil
+// authorizer leaves the routes ungated (minimum-wiring/tests); production
+// wires it so only operators holding the rollout permissions can read or
+// transition a capability.
+type RolloutAuthorizer interface {
+	HasPermission(ctx context.Context, userID uuid.UUID, permission string) (bool, error)
+}
 
 // RolloutHandler exposes the operator REST surface for the per-tenant
 // staged-enablement (rollout) framework (internal/service/rollout): read
@@ -22,12 +43,60 @@ import (
 // migration exist but an operator has no way to drive a tenant through
 // the progression; this wires that last mile.
 type RolloutHandler struct {
-	svc *rollout.Service
+	svc   *rollout.Service
+	authz RolloutAuthorizer
+}
+
+// RolloutOption customises a RolloutHandler.
+type RolloutOption func(*RolloutHandler)
+
+// WithRolloutAuthorizer gates every rollout route behind an RBAC
+// permission check: rollout:read for the GETs and rollout:write for a
+// transition. Without it the routes are tenant-scoped but not
+// role-gated. Production wiring always supplies one.
+func WithRolloutAuthorizer(authz RolloutAuthorizer) RolloutOption {
+	return func(h *RolloutHandler) {
+		if authz != nil {
+			h.authz = authz
+		}
+	}
 }
 
 // NewRolloutHandler wires the handler.
-func NewRolloutHandler(svc *rollout.Service) *RolloutHandler {
-	return &RolloutHandler{svc: svc}
+func NewRolloutHandler(svc *rollout.Service, opts ...RolloutOption) *RolloutHandler {
+	h := &RolloutHandler{svc: svc}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
+}
+
+// authorize enforces the RBAC permission for a rollout route. It returns
+// true (proceed) when no authorizer is wired. With one wired it requires
+// an authenticated user identity (401) holding the permission (403),
+// mirroring the MSP/compliance permission gates.
+func (h *RolloutHandler) authorize(w http.ResponseWriter, r *http.Request, permission string) bool {
+	if h.authz == nil {
+		return true
+	}
+	userID := middleware.UserIDFromContext(r.Context())
+	if userID == uuid.Nil {
+		WriteError(w, http.StatusUnauthorized, "unauthenticated",
+			"rollout routes require an authenticated user identity")
+		return false
+	}
+	allowed, err := h.authz.HasPermission(r.Context(), userID, permission)
+	if err != nil {
+		WriteError(w, http.StatusInternalServerError, "authorization_failed",
+			"failed to evaluate rollout authorization")
+		return false
+	}
+	if !allowed {
+		WriteError(w, http.StatusForbidden, "forbidden",
+			"credentials do not authorise this rollout operation")
+		return false
+	}
+	return true
 }
 
 // Register attaches routes. The transition is a POST on a sub-path of
@@ -95,6 +164,9 @@ type rolloutTransitionRequest struct {
 // --- handlers ---
 
 func (h *RolloutHandler) list(w http.ResponseWriter, r *http.Request) {
+	if !h.authorize(w, r, permRolloutRead) {
+		return
+	}
 	tenantID, ok := PathUUID(w, r, "tenant_id")
 	if !ok {
 		return
@@ -114,6 +186,9 @@ func (h *RolloutHandler) list(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *RolloutHandler) get(w http.ResponseWriter, r *http.Request) {
+	if !h.authorize(w, r, permRolloutRead) {
+		return
+	}
 	tenantID, ok := PathUUID(w, r, "tenant_id")
 	if !ok {
 		return
@@ -131,6 +206,9 @@ func (h *RolloutHandler) get(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *RolloutHandler) transition(w http.ResponseWriter, r *http.Request) {
+	if !h.authorize(w, r, permRolloutWrite) {
+		return
+	}
 	tenantID, ok := PathUUID(w, r, "tenant_id")
 	if !ok {
 		return

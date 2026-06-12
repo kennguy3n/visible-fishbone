@@ -1990,7 +1990,7 @@ func buildRouter(
 		RBI:               handler.NewRBIHandler(rbiSvc),
 		DLP:               handler.NewDLPHandler(dlpSvc),
 		DLPReview:         handler.NewDLPReviewHandler(dlpReviewSvc),
-		Rollout:           handler.NewRolloutHandler(rolloutSvc),
+		Rollout:           handler.NewRolloutHandler(rolloutSvc, handler.WithRolloutAuthorizer(rbacSvc)),
 		Browser:           handler.NewBrowserHandler(browserSvc),
 		Terraform:         handler.NewTerraformHandler(terraformProvider),
 		APIKeyLookup:      apiKeySvc,

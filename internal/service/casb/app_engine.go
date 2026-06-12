@@ -28,12 +28,17 @@ import (
 //     as a recommendation and takes NO enforcement action.
 //   - off     — auto-enforce is disabled; the engine recommends only.
 //
-// The signature matches *rollout.Service.EffectiveState, which fails
-// closed to off on any read error, so an unreadable rollout state can
-// never silently auto-enforce. A nil gate preserves the legacy behavior
-// (the global config flag governs auto-enforce eligibility).
+// The signature matches *rollout.Service.GateState, which returns the
+// state plus whether the tenant is explicitly MANAGED by the framework.
+// An UNMANAGED tenant (no rollout row) keeps the legacy behavior so
+// wiring the gate never silently disables auto-enforce for tenants that
+// were already protected by the config flag — they stay auto-enforcing
+// until an operator opts them into the staged progression. GateState
+// fails closed to (off, managed) on any read error, so an unreadable
+// rollout state can never silently auto-enforce. A nil gate preserves the
+// legacy behavior unconditionally.
 type AutoEnforceGate interface {
-	EffectiveState(ctx context.Context, tenantID uuid.UUID, c rollout.Capability) rollout.State
+	GateState(ctx context.Context, tenantID uuid.UUID, c rollout.Capability) (rollout.State, bool)
 }
 
 // AppNoOpsEngine is the per-tenant NoOps pipeline. For each discovered
@@ -165,7 +170,7 @@ func (e *AppNoOpsEngine) OnAppDiscovered(ctx context.Context, tenantID uuid.UUID
 		HasConnector:  meta.HasConnector,
 		Domains:       meta.Domains,
 	}
-	if err := e.process(ctx, tenantID, view); err != nil {
+	if err := e.process(ctx, tenantID, view, e.autoEnforceDecision(ctx, tenantID)); err != nil {
 		e.logger.WarnContext(ctx, "casb: noops process failed",
 			slog.String("tenant_id", tenantID.String()),
 			slog.String("app", app.Name),
@@ -185,6 +190,10 @@ func (e *AppNoOpsEngine) ReconcileTenant(ctx context.Context, tenantID uuid.UUID
 	if err != nil {
 		return fmt.Errorf("casb: list discovered apps: %w", err)
 	}
+	// Resolve the staged-enablement decision once per tenant rather than
+	// per app: the rollout state is tenant-wide, so a full-inventory sweep
+	// (potentially thousands of apps) needs a single gate read.
+	autoMode := e.autoEnforceDecision(ctx, tenantID)
 	var firstErr error
 	for _, app := range apps {
 		if err := ctx.Err(); err != nil {
@@ -200,7 +209,7 @@ func (e *AppNoOpsEngine) ReconcileTenant(ctx context.Context, tenantID uuid.UUID
 			HasConnector:  hasConnector,
 			Domains:       domains,
 		}
-		if err := e.process(ctx, tenantID, view); err != nil {
+		if err := e.process(ctx, tenantID, view, autoMode); err != nil {
 			e.logger.WarnContext(ctx, "casb: noops reconcile app failed",
 				slog.String("tenant_id", tenantID.String()),
 				slog.String("app", app.Name),
@@ -273,7 +282,11 @@ func (e *AppNoOpsEngine) Reconcile(ctx context.Context) error {
 }
 
 // process is the single-app pipeline shared by both entry points.
-func (e *AppNoOpsEngine) process(ctx context.Context, tenantID uuid.UUID, view DiscoveredAppView) error {
+// autoMode is the tenant's staged-enablement decision, resolved once by
+// the caller (per discovered app for the discovery hook, once per tenant
+// for the inventory sweep) so a full-inventory reconcile does not re-read
+// the rollout gate for every app.
+func (e *AppNoOpsEngine) process(ctx context.Context, tenantID uuid.UUID, view DiscoveredAppView, autoMode autoEnforceMode) error {
 	if tenantID == uuid.Nil {
 		return repository.ErrInvalidArgument
 	}
@@ -303,7 +316,7 @@ func (e *AppNoOpsEngine) process(ctx context.Context, tenantID uuid.UUID, view D
 	}
 
 	if mode == ActionModeAuto {
-		switch e.autoEnforceDecision(ctx, tenantID) {
+		switch autoMode {
 		case autoEnforceApply:
 			applied, finalReason := e.enforce(ctx, tenantID, view, verb, reason)
 			action.Applied = applied
@@ -354,15 +367,23 @@ const (
 
 // autoEnforceDecision resolves whether a would-be auto action may be
 // applied for this tenant, consulting the staged-enablement gate. With
-// no gate wired it returns autoEnforceApply so the legacy config-flag
-// behavior is preserved exactly; with a gate it maps the tenant's
-// rollout state for CapabilityNoOpsAutoEnforce onto the three outcomes,
-// failing closed to autoEnforceDisabled for off/unreadable state.
+// no gate wired — or for a tenant the framework does not yet manage (no
+// rollout row) — it returns autoEnforceApply so the legacy config-flag
+// behavior is preserved exactly, and wiring the gate never silently
+// disables auto-enforce for an already-protected tenant. For a MANAGED
+// tenant it maps the rollout state for CapabilityNoOpsAutoEnforce onto
+// the three outcomes, failing closed to autoEnforceDisabled for
+// off/unreadable state.
 func (e *AppNoOpsEngine) autoEnforceDecision(ctx context.Context, tenantID uuid.UUID) autoEnforceMode {
 	if e.rolloutGate == nil {
 		return autoEnforceApply
 	}
-	switch e.rolloutGate.EffectiveState(ctx, tenantID, rollout.CapabilityNoOpsAutoEnforce) {
+	state, managed := e.rolloutGate.GateState(ctx, tenantID, rollout.CapabilityNoOpsAutoEnforce)
+	if !managed {
+		// Tenant not opted into staged rollout: keep legacy auto-enforce.
+		return autoEnforceApply
+	}
+	switch state {
 	case rollout.StateEnforce:
 		return autoEnforceApply
 	case rollout.StateMonitor:

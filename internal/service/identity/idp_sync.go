@@ -30,12 +30,20 @@ import (
 //   - off     — the tenant is skipped entirely (no directory read, no
 //     mutation).
 //
-// The signature matches *rollout.Service.EffectiveState, which fails
-// closed to off on any read error, so an unreadable rollout state can
-// never silently off-board a tenant's users. A nil gate preserves the
-// legacy behavior (every tenant fully synced when the runner is wired).
+// GateState additionally reports whether the tenant is explicitly MANAGED
+// by the framework (has a rollout row). An UNMANAGED tenant keeps the
+// legacy full-sync behavior, so wiring the gate never silently stops
+// directory sync — and the off-boarding it performs — for tenants that
+// were already syncing; sync continues until an operator opts the tenant
+// into the staged progression. GateState fails closed to (off, managed)
+// on any read error, so an unreadable state can never silently off-board
+// a tenant's users. EvaluateAutoRollback lets the monitor (dry-run) pass
+// feed its observed error rate back to the framework so a capability that
+// errors past the configured threshold is rolled back to off rather than
+// promoted. A nil gate preserves the legacy behavior unconditionally.
 type RolloutGate interface {
-	EffectiveState(ctx context.Context, tenantID uuid.UUID, c rollout.Capability) rollout.State
+	GateState(ctx context.Context, tenantID uuid.UUID, c rollout.Capability) (rollout.State, bool)
+	EvaluateAutoRollback(ctx context.Context, tenantID uuid.UUID, c rollout.Capability, m rollout.MonitorMetrics) (rollout.Record, bool, error)
 }
 
 // DefaultSyncInterval is how often the IdP sync runner reconciles every
@@ -164,6 +172,11 @@ type SyncReport struct {
 	// tenant to enforce.
 	WouldProvision int
 	WouldOffboard  int
+	// AutoRolledBack is true when a monitor (dry-run) pass observed an
+	// error rate past the framework's configured threshold and the gate
+	// automatically rolled the directory-sync capability back to off for
+	// this tenant. State then reflects the post-rollback state ("off").
+	AutoRolledBack bool
 	// Errors are per-config / per-user failures that did not abort the
 	// whole tenant sync. The reconcile is best-effort: one provider or
 	// user failing must not stall the rest.
@@ -257,11 +270,15 @@ func (s *SyncService) WithDormancyPlanner(planner *tenancy.SweepPlanner, activit
 }
 
 // WithRolloutGate wires the staged-enablement gate for directory sync.
-// Once set, each tenant is synced per its rollout state for
+// Once set, each MANAGED tenant is synced per its rollout state for
 // CapabilityIDPDirectorySync: off skips the tenant, monitor dry-runs the
-// reconcile (no mutations), and enforce runs the full sync. A nil gate
-// is a no-op (legacy full-sync behavior retained), so wiring is
-// fail-safe. Returns the receiver for chaining at construction.
+// reconcile (no mutations) and feeds its error rate to the framework's
+// auto-rollback guardrail, and enforce runs the full sync. A tenant the
+// framework does not yet manage (no rollout row) keeps the legacy
+// full-sync behavior, so wiring the gate never silently stops an
+// already-syncing tenant. A nil gate is a no-op (legacy full-sync
+// behavior retained), so wiring is fail-safe. Returns the receiver for
+// chaining at construction.
 func (s *SyncService) WithRolloutGate(gate RolloutGate) *SyncService {
 	if gate != nil {
 		s.rolloutGate = gate
@@ -312,12 +329,25 @@ func (s *SyncService) syncAll(ctx context.Context) {
 				slog.String("tenant_id", tid.String()), slog.Any("error", err))
 			continue
 		}
-		if report.UsersOffboarded > 0 || report.UsersProvisioned > 0 || len(report.Errors) > 0 {
+		// Log when there is something to report: actual mutations (enforce),
+		// would-have mutations (monitor dry-run blast radius), an automatic
+		// rollback, or errors. Pure off/idle tenants stay quiet so the log
+		// is not flooded at 5000-tenant scale. Including the would_* counts
+		// and dry_run/state flags makes the monitor phase observable — the
+		// whole point of the staged progression.
+		if report.UsersOffboarded > 0 || report.UsersProvisioned > 0 ||
+			report.WouldProvision > 0 || report.WouldOffboard > 0 ||
+			report.AutoRolledBack || len(report.Errors) > 0 {
 			s.logger.Info("idp_sync: tenant reconciled",
 				slog.String("tenant_id", tid.String()),
+				slog.String("state", report.State),
+				slog.Bool("dry_run", report.DryRun),
+				slog.Bool("auto_rolled_back", report.AutoRolledBack),
 				slog.Int("seen", report.UsersSeen),
 				slog.Int("provisioned", report.UsersProvisioned),
 				slog.Int("offboarded", report.UsersOffboarded),
+				slog.Int("would_provision", report.WouldProvision),
+				slog.Int("would_offboard", report.WouldOffboard),
 				slog.Int("groups_assigned", report.GroupsAssigned),
 				slog.Int("groups_revoked", report.GroupsRevoked),
 				slog.Int("errors", len(report.Errors)),
@@ -364,19 +394,23 @@ func (s *SyncService) SyncTenant(ctx context.Context, tenantID uuid.UUID) (SyncR
 	report := SyncReport{TenantID: tenantID}
 
 	// Staged-enablement gate: decide whether this tenant syncs at all,
-	// and if so whether it enforces or only dry-runs. With no gate wired
-	// the legacy full-sync behavior is preserved.
+	// and if so whether it enforces or only dry-runs. With no gate wired,
+	// or for a tenant the framework does not yet manage (no rollout row),
+	// the legacy full-sync behavior is preserved so wiring the gate never
+	// silently stops an already-syncing tenant.
 	if s.rolloutGate != nil {
-		state := s.rolloutGate.EffectiveState(ctx, tenantID, rollout.CapabilityIDPDirectorySync)
-		report.State = string(state)
-		switch state {
-		case rollout.StateOff:
-			// Fail-closed default: do not read the directory or mutate
-			// anything for an off tenant.
-			report.Skipped = true
-			return report, nil
-		case rollout.StateMonitor:
-			report.DryRun = true
+		state, managed := s.rolloutGate.GateState(ctx, tenantID, rollout.CapabilityIDPDirectorySync)
+		if managed {
+			report.State = string(state)
+			switch state {
+			case rollout.StateOff:
+				// Fail-closed default: do not read the directory or mutate
+				// anything for an off tenant.
+				report.Skipped = true
+				return report, nil
+			case rollout.StateMonitor:
+				report.DryRun = true
+			}
 		}
 	}
 
@@ -393,6 +427,33 @@ func (s *SyncService) SyncTenant(ctx context.Context, tenantID uuid.UUID) (SyncR
 		if err := s.syncConfig(ctx, tenantID, cfg, &report); err != nil {
 			report.Errors = append(report.Errors,
 				fmt.Errorf("provider %s (%s): %w", cfg.ProviderType, cfg.IssuerURL, err))
+		}
+	}
+
+	// Monitor-phase auto-rollback: feed the dry-run's observed error rate
+	// back to the framework. The directory-sync error signal is the share
+	// of seen users (or configs) that failed to process; deny-rate does
+	// not apply (a would-off-board is the expected outcome, not an error),
+	// so only the error-rate guardrail governs the rollback. If it breaches
+	// the configured threshold the gate rolls the capability back to off,
+	// preventing an operator from promoting a directory integration that is
+	// erroring under dry-run to enforce. It only ever acts in monitor and
+	// only moves the capability toward safety.
+	if report.DryRun && s.rolloutGate != nil {
+		metrics := rollout.MonitorMetrics{Samples: report.UsersSeen, Errors: len(report.Errors)}
+		rec, rolled, rbErr := s.rolloutGate.EvaluateAutoRollback(ctx, tenantID, rollout.CapabilityIDPDirectorySync, metrics)
+		switch {
+		case rbErr != nil:
+			s.logger.Warn("idp_sync: auto-rollback evaluation failed",
+				slog.String("tenant_id", tenantID.String()), slog.Any("error", rbErr))
+		case rolled:
+			report.AutoRolledBack = true
+			report.State = string(rec.State)
+			s.logger.Warn("idp_sync: directory sync auto-rolled back to off",
+				slog.String("tenant_id", tenantID.String()),
+				slog.Int("seen", report.UsersSeen),
+				slog.Int("errors", len(report.Errors)),
+				slog.String("reason", rec.Reason))
 		}
 	}
 	return report, nil

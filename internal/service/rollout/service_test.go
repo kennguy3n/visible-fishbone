@@ -255,6 +255,63 @@ func TestEffectiveStateFailsClosed(t *testing.T) {
 	}
 }
 
+func TestGateStateDistinguishesUnmanagedFromOff(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// A never-transitioned tenant is UNMANAGED: the gate must learn that
+	// no row exists so the caller falls back to legacy behavior, NOT treat
+	// it as an explicit off.
+	svc, tid := newService(t)
+	if state, managed := svc.GateState(ctx, tid, rollout.CapabilityNoOpsAutoEnforce); managed || state != rollout.StateOff {
+		t.Fatalf("GateState(unmanaged) = (%s, managed=%v), want (off, managed=false)", state, managed)
+	}
+
+	// After an explicit transition the tenant is MANAGED and the state is
+	// authoritative.
+	if _, err := svc.Transition(ctx, tid, rollout.CapabilityNoOpsAutoEnforce,
+		rollout.TransitionInput{To: rollout.StateMonitor, Actor: "op"}); err != nil {
+		t.Fatalf("transition: %v", err)
+	}
+	if state, managed := svc.GateState(ctx, tid, rollout.CapabilityNoOpsAutoEnforce); !managed || state != rollout.StateMonitor {
+		t.Fatalf("GateState(managed) = (%s, managed=%v), want (monitor, managed=true)", state, managed)
+	}
+
+	// An explicit rollback to off is still MANAGED — the operator opted the
+	// tenant out, which must NOT be confused with the unmanaged default.
+	if _, err := svc.Transition(ctx, tid, rollout.CapabilityNoOpsAutoEnforce,
+		rollout.TransitionInput{To: rollout.StateOff, Actor: "op"}); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if state, managed := svc.GateState(ctx, tid, rollout.CapabilityNoOpsAutoEnforce); !managed || state != rollout.StateOff {
+		t.Fatalf("GateState(explicit off) = (%s, managed=%v), want (off, managed=true)", state, managed)
+	}
+}
+
+func TestGateStateFailsClosedManagedOnReadError(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+
+	// A genuine read failure must fail closed as (off, managed=true): the
+	// gate disables the capability rather than reverting to legacy-on.
+	failing, err := rollout.New(faultyRepo{err: errors.New("db down")})
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	if state, managed := failing.GateState(ctx, uuid.New(), rollout.CapabilityClamAVSWG); !managed || state != rollout.StateOff {
+		t.Fatalf("GateState(read error) = (%s, managed=%v), want (off, managed=true)", state, managed)
+	}
+
+	// Invalid arguments likewise fail closed as managed-off.
+	svc, tid := newService(t)
+	if state, managed := svc.GateState(ctx, tid, rollout.Capability("bogus")); !managed || state != rollout.StateOff {
+		t.Fatalf("GateState(bad cap) = (%s, managed=%v), want (off, managed=true)", state, managed)
+	}
+	if state, managed := svc.GateState(ctx, uuid.Nil, rollout.CapabilityClamAVSWG); !managed || state != rollout.StateOff {
+		t.Fatalf("GateState(nil tenant) = (%s, managed=%v), want (off, managed=true)", state, managed)
+	}
+}
+
 // --- test doubles ---
 
 type sinkEvent struct {

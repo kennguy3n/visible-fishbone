@@ -1,6 +1,7 @@
 package handler_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -18,7 +19,7 @@ import (
 
 // newRolloutTestRouter builds a router with only the rollout handler
 // wired over an in-memory repo, plus a JWT for the seeded tenant/user.
-func newRolloutTestRouter(t *testing.T) (http.Handler, uuid.UUID, uuid.UUID, string) {
+func newRolloutTestRouter(t *testing.T, opts ...handler.RolloutOption) (http.Handler, uuid.UUID, uuid.UUID, string) {
 	t.Helper()
 	store := memory.NewStore()
 	tenantID := uuid.New()
@@ -47,7 +48,7 @@ func newRolloutTestRouter(t *testing.T) (http.Handler, uuid.UUID, uuid.UUID, str
 	}
 	router := handler.NewRouter(handler.RouterDeps{
 		Config:  cfg,
-		Rollout: handler.NewRolloutHandler(svc),
+		Rollout: handler.NewRolloutHandler(svc, opts...),
 	})
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
@@ -188,5 +189,75 @@ func TestRolloutHandler_TenantIsolation(t *testing.T) {
 		"/api/v1/tenants/"+other.String()+"/rollout", token, nil)
 	if rec.Code == http.StatusOK {
 		t.Fatalf("cross-tenant read returned 200; want a 4xx tenant-scope rejection")
+	}
+}
+
+// stubRolloutAuthz is a scripted RolloutAuthorizer: it grants permission
+// only when present in `granted` (and records the permissions queried).
+type stubRolloutAuthz struct {
+	granted map[string]bool
+	err     error
+	queried []string
+}
+
+func (s *stubRolloutAuthz) HasPermission(_ context.Context, _ uuid.UUID, permission string) (bool, error) {
+	s.queried = append(s.queried, permission)
+	if s.err != nil {
+		return false, s.err
+	}
+	return s.granted[permission], nil
+}
+
+// With an authorizer wired, a caller lacking the permission is refused
+// 403 on both the read and the transition — a transition flips a security
+// control's enforcement posture, so it must be admin-gated.
+func TestRolloutHandler_RBACDeniesWithoutPermission(t *testing.T) {
+	t.Parallel()
+	authz := &stubRolloutAuthz{granted: map[string]bool{}}
+	router, tenantID, _, token := newRolloutTestRouter(t, handler.WithRolloutAuthorizer(authz))
+
+	rec := doJSON(t, router, http.MethodGet, "/api/v1/tenants/"+tenantID.String()+"/rollout", token, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("list without rollout:read: want 403, got %d — %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, router, http.MethodPost,
+		"/api/v1/tenants/"+tenantID.String()+"/rollout/clamav_swg/transition", token,
+		map[string]any{"to": "monitor"})
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("transition without rollout:write: want 403, got %d — %s", rec.Code, rec.Body.String())
+	}
+}
+
+// With the permission granted, the same calls succeed and the handler
+// queried the write permission for the transition (not the read one).
+func TestRolloutHandler_RBACAllowsWithPermission(t *testing.T) {
+	t.Parallel()
+	authz := &stubRolloutAuthz{granted: map[string]bool{
+		"rollout:read":  true,
+		"rollout:write": true,
+	}}
+	router, tenantID, _, token := newRolloutTestRouter(t, handler.WithRolloutAuthorizer(authz))
+
+	rec := doJSON(t, router, http.MethodGet, "/api/v1/tenants/"+tenantID.String()+"/rollout", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list with rollout:read: want 200, got %d — %s", rec.Code, rec.Body.String())
+	}
+
+	rec = doJSON(t, router, http.MethodPost,
+		"/api/v1/tenants/"+tenantID.String()+"/rollout/clamav_swg/transition", token,
+		map[string]any{"to": "monitor"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("transition with rollout:write: want 200, got %d — %s", rec.Code, rec.Body.String())
+	}
+
+	var sawWrite bool
+	for _, p := range authz.queried {
+		if p == "rollout:write" {
+			sawWrite = true
+		}
+	}
+	if !sawWrite {
+		t.Fatalf("transition must check rollout:write; queried=%v", authz.queried)
 	}
 }
