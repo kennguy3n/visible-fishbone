@@ -71,7 +71,7 @@ fn decide(app: &App, identity: &UserIdentity) -> sng_ztna::ZtnaDecision {
         EvaluationInputs {
             app,
             device: &dev,
-            identity,
+            identity: Some(identity),
             now_ms: NOW_MS,
             source_country: None,
             network_type: NetworkType::Unknown,

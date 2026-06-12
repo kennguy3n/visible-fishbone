@@ -584,6 +584,36 @@ pub struct ZtnaConfig {
     /// when [`Self::reeval_enabled`] is true.
     #[serde(default)]
     pub reeval_interval_ms: u64,
+    /// Master gate for **full user-subject evaluation**. When
+    /// **false** (the default) the appliance behaves
+    /// byte-for-byte as before: the edge does not register
+    /// verified user subjects with the brain's identity cache,
+    /// and an access request whose subject cannot be resolved
+    /// is denied with `identity_not_found` (a deny-by-default
+    /// provider miss).
+    ///
+    /// When **true** the operator opts in to threading the
+    /// verified user subject (groups / MFA freshness / tenant /
+    /// tags — resolved from the IdP / mTLS chain) through the
+    /// evaluator and the continuous re-evaluation loop:
+    ///
+    ///  - the ZTNA subsystem exposes a per-subject identity
+    ///    cache the producer feeds via
+    ///    [`ZtnaSubsystem::open_session_with_subject`](crate::subsystems::ztna::ZtnaSubsystem::open_session_with_subject),
+    ///    so a real user's groups / MFA timestamp drive the
+    ///    verdict (group-gated allow / deny, stale-MFA deny,
+    ///    revoked-user deny) instead of degrading;
+    ///  - a request that genuinely has no subject is denied
+    ///    with the explicit `identity_absent` reason rather
+    ///    than masquerading as a provider miss.
+    ///
+    /// Inert when disabled, mirroring the default-off
+    /// discipline of [`Self::reeval_enabled`] and
+    /// `swg.ext_authz_enabled` — never fails closed on an
+    /// upgrade, never makes a subjectless request more
+    /// permissive.
+    #[serde(default)]
+    pub user_subject_eval_enabled: bool,
 }
 
 impl Default for ZtnaConfig {
@@ -594,6 +624,9 @@ impl Default for ZtnaConfig {
             // explicit operator opt-in (see field docs).
             reeval_enabled: false,
             reeval_interval_ms: 0,
+            // Default OFF / inert: full user-subject evaluation is
+            // an explicit operator opt-in (see field docs).
+            user_subject_eval_enabled: false,
         }
     }
 }

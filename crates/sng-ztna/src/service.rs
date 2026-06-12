@@ -110,12 +110,44 @@ pub struct ZtnaServiceConfig {
     /// processes can call into a single brain via
     /// `Arc<ZtnaService>`).
     pub max_sessions: usize,
+    /// How the orchestrator handles an access request whose
+    /// user subject cannot be resolved (no inline subject and
+    /// the [`IdentityProvider`] has no record for
+    /// `request.user_id`).
+    ///
+    /// **`false` (default)** — the historical, deny-by-default
+    /// behaviour: a missing identity is an
+    /// [`ZtnaError::IdentityNotFound`] error (still a deny,
+    /// surfaced as [`ZtnaDecisionReason::IdentityNotFound`]).
+    /// The provider-miss path is unchanged.
+    ///
+    /// **`true`** — opt in to the explicit *degraded*
+    /// evaluation: instead of short-circuiting on the miss,
+    /// the orchestrator runs [`evaluate_policy`] with no
+    /// subject (`identity = None`). Every device + context +
+    /// posture check still runs; if they all pass the verdict
+    /// is an [`ZtnaDecisionReason::IdentityAbsent`] deny
+    /// rather than a device-only allow, so the degradation is
+    /// named on the wire rather than masquerading as a
+    /// provider miss. Still deny-by-default — this never makes
+    /// a subjectless request *more* permissive; it only makes
+    /// the reason honest and lets a genuinely device-gated
+    /// failure (stale / insufficient posture) surface its own
+    /// reason.
+    ///
+    /// The edge wires this from a default-OFF config flag
+    /// (`ztna.user_subject_eval_enabled`), so an upgrade is
+    /// behaviourally inert until an operator opts in.
+    pub subjectless_degraded_eval: bool,
 }
 
 impl Default for ZtnaServiceConfig {
     fn default() -> Self {
         Self {
             max_sessions: 131_072,
+            // Default OFF: a missing subject stays an
+            // `IdentityNotFound` deny, exactly as before.
+            subjectless_degraded_eval: false,
         }
     }
 }
@@ -262,11 +294,45 @@ impl std::fmt::Debug for ZtnaService {
     }
 }
 
+/// A verdict plus whether the brain actually resolved a verified user
+/// subject while producing it.
+///
+/// [`ZtnaService::evaluate`] returns only the [`ZtnaDecision`], because
+/// the access-path producer routes on the verdict alone and the service
+/// already records `identity_verified` on its own telemetry. Callers
+/// that build their *own* telemetry from the verdict (e.g. the mobile
+/// core) need the same signal the service computes internally —
+/// `identity.is_some()` at decision time — rather than re-deriving it
+/// from the reason, which cannot distinguish a degraded device/context
+/// deny (no subject, denied before the `IdentityAbsent` gate) from a
+/// fully-resolved one. [`ZtnaService::evaluate_detailed`] surfaces it so
+/// there is a single source of truth.
+#[derive(Debug, Clone)]
+pub struct EvalOutcome {
+    /// The access verdict.
+    pub decision: ZtnaDecision,
+    /// `true` only when a user subject was resolved before the verdict
+    /// was produced (step 4). Every pre-policy deny (revocation,
+    /// unknown app, unenrolled device, identity-not-found) and the
+    /// degraded subjectless path report `false`.
+    pub identity_verified: bool,
+}
+
 impl ZtnaService {
     /// Stats handle.
     #[must_use]
     pub fn stats(&self) -> &Arc<ZtnaStats> {
         &self.stats
+    }
+
+    /// The service configuration this instance was built with.
+    /// Exposed so producers can tell whether full user-subject
+    /// evaluation is opted in (`subjectless_degraded_eval`) and wire
+    /// the matching per-subject identity cache, rather than silently
+    /// dropping subject registrations.
+    #[must_use]
+    pub fn config(&self) -> &ZtnaServiceConfig {
+        &self.cfg
     }
 
     /// Policy holder.
@@ -368,6 +434,20 @@ impl ZtnaService {
     /// data path then treats the error as a deny.
     pub fn evaluate(&self, request: &AccessRequest) -> Result<ZtnaDecision, ZtnaError> {
         self.evaluate_reported(request, EvalReport::Emit)
+            .map(|o| o.decision)
+    }
+
+    /// Like [`Self::evaluate`], but also returns whether a verified user
+    /// subject was resolved while producing the verdict (see
+    /// [`EvalOutcome`]). For callers that build their own telemetry from
+    /// the verdict and need the authoritative `identity_verified` signal
+    /// instead of re-deriving it from the reason.
+    ///
+    /// # Errors
+    ///
+    /// Same provider-resolution errors as [`Self::evaluate`].
+    pub fn evaluate_detailed(&self, request: &AccessRequest) -> Result<EvalOutcome, ZtnaError> {
+        self.evaluate_reported(request, EvalReport::Emit)
     }
 
     /// Re-evaluate `request` for the continuous re-evaluation loop
@@ -398,13 +478,28 @@ impl ZtnaService {
     /// the corresponding revocation reason.
     pub fn evaluate_for_reeval(&self, request: &AccessRequest) -> Result<ZtnaDecision, ZtnaError> {
         self.evaluate_reported(request, EvalReport::Quiet)
+            .map(|o| o.decision)
+    }
+
+    /// Like [`Self::evaluate_for_reeval`], but also returns whether a
+    /// verified user subject was resolved (see [`EvalOutcome`]). The
+    /// sweep counterpart to [`Self::evaluate_detailed`].
+    ///
+    /// # Errors
+    ///
+    /// Same provider-resolution errors as [`Self::evaluate_for_reeval`].
+    pub fn evaluate_for_reeval_detailed(
+        &self,
+        request: &AccessRequest,
+    ) -> Result<EvalOutcome, ZtnaError> {
+        self.evaluate_reported(request, EvalReport::Quiet)
     }
 
     fn evaluate_reported(
         &self,
         request: &AccessRequest,
         report: EvalReport,
-    ) -> Result<ZtnaDecision, ZtnaError> {
+    ) -> Result<EvalOutcome, ZtnaError> {
         // Step 0: revocation. Checked before any provider
         // resolution so a compromised device or off-boarded
         // user is cut off immediately — even if its app /
@@ -429,7 +524,10 @@ impl ZtnaService {
                 &decision,
                 false,
             );
-            return Ok(decision);
+            return Ok(EvalOutcome {
+                decision,
+                identity_verified: false,
+            });
         }
 
         // Step 1: resolve the app.
@@ -462,13 +560,23 @@ impl ZtnaService {
             });
         };
 
-        // Step 3: resolve the identity. We pass
-        // `identity_verified=false` on the missing-
-        // identity path because, while the IdP-side
-        // verification may have produced a `sub` claim,
-        // the ZTNA brain itself cannot vouch for an
-        // identity it has no record of.
-        let Some(identity) = self.identities.get(&request.user_id) else {
+        // Step 3: resolve the user subject. When the
+        // identity provider has no record for the request's
+        // `user_id`, behaviour depends on
+        // [`ZtnaServiceConfig::subjectless_degraded_eval`]:
+        //
+        //  - default (false): the historical short-circuit —
+        //    an `IdentityNotFound` deny + error. The brain
+        //    cannot vouch for an identity it has no record
+        //    of, so it never reaches the evaluator.
+        //  - opt-in (true): fall through to the evaluator
+        //    with no subject (`identity = None`). The policy
+        //    runs every device + context + posture check it
+        //    still can and produces an explicit
+        //    `IdentityAbsent` deny if they pass, rather than
+        //    masquerading the degradation as a provider miss.
+        let identity = self.identities.get(&request.user_id);
+        if identity.is_none() && !self.cfg.subjectless_degraded_eval {
             self.emit_deny(
                 report,
                 &request.device_id,
@@ -480,16 +588,19 @@ impl ZtnaService {
             return Err(ZtnaError::IdentityNotFound {
                 user_id: request.user_id.clone(),
             });
-        };
+        }
 
-        // Step 4: run the policy.
+        // Step 4: run the policy. The subject is passed as a
+        // first-class `Option`: `Some` exercises the
+        // identity-derived gates, `None` takes the explicit
+        // degraded path.
         let policy_snap = self.policy.snapshot();
         let decision = evaluate_policy(
             &policy_snap,
             EvaluationInputs {
                 app: &app,
                 device: &device,
-                identity: &identity,
+                identity: identity.as_ref(),
                 now_ms: request.now_ms,
                 source_country: request.source_country.as_deref(),
                 // An absent network type is normalized to
@@ -509,13 +620,18 @@ impl ZtnaService {
             &request.device_id,
             &request.app_id,
             &decision,
-            // identity was resolved successfully — the
-            // producer's mTLS + IdP chain *did* yield a
-            // recognisable user.
-            true,
+            // `identity_verified` reflects whether the brain
+            // actually resolved a user subject — true only
+            // when the producer's mTLS + IdP chain yielded a
+            // user the brain has a record of. The degraded
+            // (subjectless) path reports false.
+            identity.is_some(),
         );
 
-        Ok(decision)
+        Ok(EvalOutcome {
+            decision,
+            identity_verified: identity.is_some(),
+        })
     }
 
     /// Record a finished decision on the access-path observability:
@@ -847,6 +963,193 @@ mod tests {
         assert!(!ev.identity_verified);
         let snap = svc.stats.snapshot();
         assert_eq!(snap.deny_identity_not_found, 1);
+    }
+
+    /// Build a service with full user-subject evaluation opted in
+    /// (`subjectless_degraded_eval = true`), mirroring the edge
+    /// `ztna.user_subject_eval_enabled` flag.
+    fn mk_service_degraded(
+        apps: Vec<App>,
+        devices: Vec<DeviceTrust>,
+        users: Vec<UserIdentity>,
+        pol: ZtnaPolicy,
+        chan_cap: usize,
+    ) -> (ZtnaService, mpsc::Receiver<TelemetryEvent>) {
+        let (tx, rx) = mpsc::channel(chan_cap);
+        let svc = ZtnaServiceBuilder::new()
+            .with_config(ZtnaServiceConfig {
+                subjectless_degraded_eval: true,
+                ..ZtnaServiceConfig::default()
+            })
+            .with_policy(Arc::new(ZtnaPolicyHolder::new(pol)))
+            .with_app_catalog(Arc::new(StaticAppCatalog::new(apps)))
+            .with_device_trust(Arc::new(StaticDeviceTrustProvider::new(devices)))
+            .with_identity(Arc::new(StaticIdentityProvider::new(users)))
+            .build(tx);
+        (svc, rx)
+    }
+
+    #[test]
+    fn degraded_eval_denies_identity_absent_when_device_and_posture_pass() {
+        // Flag ON, no subject in the provider: instead of the
+        // historical `IdentityNotFound` *error*, the evaluator runs
+        // device + context + posture and denies with the explicit
+        // `IdentityAbsent` reason (posture recorded as Pass).
+        let now = 1_000_000;
+        let (svc, mut rx) = mk_service_degraded(
+            vec![app("wiki", PostureRequirement::BASIC, &["eng"])],
+            vec![device("dev-1", TENANT, pristine_posture(now))],
+            vec![],
+            policy(TENANT),
+            4,
+        );
+        let d = svc
+            .evaluate(&req("wiki", "dev-1", "alice", now))
+            .expect("degraded eval returns Ok(deny), not Err");
+        assert!(!d.allow);
+        assert_eq!(d.reason, ZtnaDecisionReason::IdentityAbsent);
+        assert_eq!(d.posture_result, PostureResult::Pass);
+        let evs = drain(&mut rx);
+        let ev = ztna_event(&evs[0]);
+        assert_eq!(ev.decision, "deny");
+        assert_eq!(ev.reason, "identity_absent");
+        assert_eq!(ev.posture_result, "pass");
+        // No subject was resolved, so the brain cannot vouch for one.
+        assert!(!ev.identity_verified);
+        let snap = svc.stats.snapshot();
+        assert_eq!(snap.deny_identity_absent, 1);
+        // The provider-miss bucket is untouched: the degraded verdict
+        // is its own reason, not a relabelled `identity_not_found`.
+        assert_eq!(snap.deny_identity_not_found, 0);
+    }
+
+    #[test]
+    fn degraded_eval_surfaces_device_posture_before_identity_absent() {
+        // A subjectless request that *also* fails a device gate denies
+        // on the device reason, not `identity_absent`: the degradation
+        // never masks a genuine device-posture failure.
+        let now = 1_000_000;
+        let (svc, _rx) = mk_service_degraded(
+            vec![app("admin", PostureRequirement::STRICT, &[])],
+            // Unmanaged device cannot meet STRICT posture.
+            vec![device("dev-1", TENANT, DevicePosture::unmanaged())],
+            vec![],
+            policy(TENANT),
+            4,
+        );
+        let d = svc.evaluate(&req("admin", "dev-1", "alice", now)).unwrap();
+        assert!(!d.allow);
+        assert_eq!(d.reason, ZtnaDecisionReason::DevicePostureInsufficient);
+        assert_eq!(d.posture_result, PostureResult::Fail);
+    }
+
+    #[test]
+    fn evaluate_detailed_reports_identity_verified_truthfully() {
+        // `evaluate_detailed` surfaces the authoritative
+        // `identity.is_some()` the service computes for its own
+        // telemetry, so a caller building its own telemetry (the mobile
+        // core) need not — and must not — re-derive it from the reason.
+        let now = 1_000_000;
+
+        // (a) Resolved subject -> identity_verified = true.
+        let (svc, _rx) = mk_service_degraded(
+            vec![app("wiki", PostureRequirement::BASIC, &["eng"])],
+            vec![device("dev-1", TENANT, pristine_posture(now))],
+            vec![user("alice", TENANT, &["eng"], now)],
+            policy(TENANT),
+            4,
+        );
+        let out = svc
+            .evaluate_detailed(&req("wiki", "dev-1", "alice", now))
+            .expect("resolved subject");
+        assert!(out.decision.allow);
+        assert!(out.identity_verified);
+
+        // (b) No subject, every other gate passes -> IdentityAbsent,
+        // identity_verified = false.
+        let (svc, _rx) = mk_service_degraded(
+            vec![app("wiki", PostureRequirement::BASIC, &["eng"])],
+            vec![device("dev-1", TENANT, pristine_posture(now))],
+            vec![],
+            policy(TENANT),
+            4,
+        );
+        let out = svc
+            .evaluate_detailed(&req("wiki", "dev-1", "alice", now))
+            .expect("degraded ok-deny");
+        assert_eq!(out.decision.reason, ZtnaDecisionReason::IdentityAbsent);
+        assert!(!out.identity_verified);
+
+        // (c) No subject AND a device gate fails -> the verdict denies on
+        // the device reason, but identity_verified is still false. This
+        // is the subcase a reason-only heuristic (`reason !=
+        // IdentityAbsent`) would mislabel as verified, which is exactly
+        // why the signal is surfaced rather than re-derived.
+        let (svc, _rx) = mk_service_degraded(
+            vec![app("admin", PostureRequirement::STRICT, &[])],
+            vec![device("dev-1", TENANT, DevicePosture::unmanaged())],
+            vec![],
+            policy(TENANT),
+            4,
+        );
+        let out = svc
+            .evaluate_detailed(&req("admin", "dev-1", "alice", now))
+            .expect("degraded device-fail ok-deny");
+        assert_eq!(
+            out.decision.reason,
+            ZtnaDecisionReason::DevicePostureInsufficient
+        );
+        assert!(!out.identity_verified);
+    }
+
+    #[test]
+    fn degraded_eval_full_subject_still_allows() {
+        // With the flag on, a request that *does* resolve a subject
+        // takes the full identity-aware path and allows normally.
+        let now = 1_000_000;
+        let (svc, _rx) = mk_service_degraded(
+            vec![app("wiki", PostureRequirement::BASIC, &["eng"])],
+            vec![device("dev-1", TENANT, pristine_posture(now))],
+            vec![user("alice", TENANT, &["eng"], now)],
+            policy(TENANT),
+            4,
+        );
+        let d = svc.evaluate(&req("wiki", "dev-1", "alice", now)).unwrap();
+        assert!(d.allow);
+        assert_eq!(d.reason, ZtnaDecisionReason::Allow);
+    }
+
+    #[test]
+    fn degraded_eval_revoked_user_denied_before_identity_resolution() {
+        // Revocation is step 0 and runs regardless of the flag: a
+        // revoked user is cut off with `Revoked`, never reaching the
+        // degraded `identity_absent` path.
+        let now = 1_000_000;
+        let (tx, _rx) = mpsc::channel(4);
+        let svc = ZtnaServiceBuilder::new()
+            .with_config(ZtnaServiceConfig {
+                subjectless_degraded_eval: true,
+                ..ZtnaServiceConfig::default()
+            })
+            .with_policy(Arc::new(ZtnaPolicyHolder::new(policy(TENANT))))
+            .with_app_catalog(Arc::new(StaticAppCatalog::new(vec![app(
+                "wiki",
+                PostureRequirement::NONE,
+                &[],
+            )])))
+            .with_device_trust(Arc::new(StaticDeviceTrustProvider::new(vec![device(
+                "dev-1",
+                TENANT,
+                pristine_posture(now),
+            )])))
+            .with_revocation(Arc::new(StaticRevocationList::new(
+                HashSet::new(),
+                HashSet::from(["alice".to_string()]),
+            )))
+            .build(tx);
+        let d = svc.evaluate(&req("wiki", "dev-1", "alice", now)).unwrap();
+        assert!(!d.allow);
+        assert_eq!(d.reason, ZtnaDecisionReason::Revoked);
     }
 
     #[test]

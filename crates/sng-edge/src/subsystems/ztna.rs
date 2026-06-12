@@ -15,8 +15,9 @@ use sng_core::{
 };
 use sng_telemetry::TelemetryEvent;
 use sng_ztna::{
-    AccessGrant, AccessRequest, SessionTracker, ZtnaDecision, ZtnaError, ZtnaService,
-    ZtnaServiceBuilder, ZtnaServiceConfig, ZtnaStats,
+    AccessGrant, AccessRequest, IdentityProvider, SessionTracker, StaticIdentityProvider,
+    UserIdentity, ZtnaDecision, ZtnaError, ZtnaService, ZtnaServiceBuilder, ZtnaServiceConfig,
+    ZtnaStats,
 };
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -35,6 +36,17 @@ pub struct ZtnaSubsystem {
     /// access path byte-for-byte unchanged when re-evaluation is off —
     /// no grant is ever recorded, so there is nothing to walk.
     sessions: Option<Arc<SessionTracker>>,
+    /// Per-subject identity cache the producer feeds verified user
+    /// subjects into. `Some` only when full user-subject evaluation is
+    /// enabled (`ztna.user_subject_eval_enabled`); it is the *same*
+    /// allocation the service's [`sng_ztna::IdentityProvider`] resolves
+    /// against, so a subject registered here drives both the access-path
+    /// verdict and the continuous re-evaluation loop (which shares the
+    /// service). `None` keeps the access path byte-for-byte unchanged
+    /// when the feature is off — the brain falls back to the empty
+    /// boot-time provider and a subjectless request denies with
+    /// `identity_not_found`, exactly as before.
+    identities: Option<Arc<StaticIdentityProvider>>,
 }
 
 impl std::fmt::Debug for ZtnaSubsystem {
@@ -62,27 +74,83 @@ impl ZtnaSubsystem {
     #[must_use]
     pub fn new(cfg: ZtnaServiceConfig, telemetry: mpsc::Sender<TelemetryEvent>) -> Self {
         let stats = Arc::new(ZtnaStats::default());
-        let service = ZtnaServiceBuilder::new()
+        // Full user-subject evaluation and the explicit
+        // `identity_absent` degraded verdict are gated by the same
+        // service flag the edge maps `ztna.user_subject_eval_enabled`
+        // onto. When it is on we wire an explicit identity cache so the
+        // producer can register verified subjects (and hold a concrete
+        // handle to feed it); when off we leave the builder's default
+        // empty provider in place so the access path is unchanged.
+        let identities = cfg
+            .subjectless_degraded_eval
+            .then(|| Arc::new(StaticIdentityProvider::default()));
+        let mut builder = ZtnaServiceBuilder::new()
             .with_config(cfg)
-            .with_stats(Arc::clone(&stats))
-            .build(telemetry);
+            .with_stats(Arc::clone(&stats));
+        if let Some(cache) = identities.clone() {
+            // Coerce the concrete cache handle to the trait object the
+            // service stores. Both `Arc`s point at the same allocation,
+            // so subjects upserted through the concrete handle are seen
+            // by the service (and the re-eval loop) immediately.
+            let provider: Arc<dyn IdentityProvider> = cache;
+            builder = builder.with_identity(provider);
+        }
+        let service = builder.build(telemetry);
         Self {
             service: Arc::new(service),
             stats,
             sessions: None,
+            identities,
         }
     }
 
     /// Build from an explicitly-constructed service. Used by
     /// the integration tests when they want to seed non-empty
     /// providers without going through the policy puller.
+    ///
+    /// The per-subject identity cache handle is not recovered here
+    /// (the service owns its provider as an opaque trait object), so
+    /// [`Self::register_subject`] is inert on a subsystem built this
+    /// way. Use [`Self::from_service_with_identity_cache`] when the
+    /// test needs to drive the cache.
+    ///
+    /// A `debug_assert` guards the footgun: passing a service built
+    /// with `subjectless_degraded_eval` enabled here would silently
+    /// drop every subject registration, so dev/test builds panic and
+    /// point the caller at [`Self::from_service_with_identity_cache`].
     #[must_use]
     pub fn from_service(service: Arc<ZtnaService>) -> Self {
+        debug_assert!(
+            !service.config().subjectless_degraded_eval,
+            "from_service drops subject registrations for a service built with \
+             subjectless_degraded_eval; use from_service_with_identity_cache instead"
+        );
         let stats = Arc::clone(service.stats());
         Self {
             service,
             stats,
             sessions: None,
+            identities: None,
+        }
+    }
+
+    /// Build from an explicitly-constructed service plus the concrete
+    /// [`StaticIdentityProvider`] it was built with, so the producer
+    /// (and integration tests) can register verified subjects into the
+    /// very table the service resolves against. The caller is
+    /// responsible for having wired `cache` into `service` via
+    /// [`ZtnaServiceBuilder::with_identity`].
+    #[must_use]
+    pub fn from_service_with_identity_cache(
+        service: Arc<ZtnaService>,
+        cache: Arc<StaticIdentityProvider>,
+    ) -> Self {
+        let stats = Arc::clone(service.stats());
+        Self {
+            service,
+            stats,
+            sessions: None,
+            identities: Some(cache),
         }
     }
 
@@ -203,6 +271,104 @@ impl ZtnaSubsystem {
     pub fn close_session(&self, session_id: &str) -> Option<AccessGrant> {
         self.sessions.as_ref()?.remove(session_id)
     }
+
+    /// Whether full user-subject evaluation is wired (the
+    /// `ztna.user_subject_eval_enabled` opt-in). When `false` the
+    /// subject-threading methods below are inert.
+    #[must_use]
+    pub fn user_subject_eval_enabled(&self) -> bool {
+        self.identities.is_some()
+    }
+
+    /// The per-subject identity cache, if full user-subject
+    /// evaluation is enabled. Exposed so the policy puller / control
+    /// plane can also bulk-`replace` it and so tests can inspect it.
+    #[must_use]
+    pub fn identity_cache(&self) -> Option<&Arc<StaticIdentityProvider>> {
+        self.identities.as_ref()
+    }
+
+    /// Register (or refresh) a verified user subject the producer
+    /// resolved from the IdP / mTLS chain, so the brain evaluates the
+    /// request against the real identity — groups, MFA freshness,
+    /// tenant, tags — rather than degrading.
+    ///
+    /// The subject is upserted into the same identity table the
+    /// access path and the continuous re-evaluation loop both resolve
+    /// against, keyed by [`UserIdentity::user_id`]. Returns `true` if
+    /// it was registered; `false` (a no-op) when full user-subject
+    /// evaluation is disabled — the access path then stays exactly as
+    /// it was before the feature, with subjectless requests denying on
+    /// the provider miss.
+    ///
+    /// The registration is a positive cache entry: it is reconciled
+    /// (and bounded) by the control plane's periodic bulk
+    /// [`StaticIdentityProvider::replace`] IdP sync, so it does not
+    /// grow without an upstream record. Call [`Self::forget_subject`]
+    /// to evict eagerly.
+    pub fn register_subject(&self, subject: &UserIdentity) -> bool {
+        match self.identities.as_ref() {
+            Some(cache) => {
+                cache.upsert(subject);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Forget a previously-[registered](Self::register_subject) user
+    /// subject by id. Returns `true` if a subject was removed; `false`
+    /// when none was cached or the feature is disabled.
+    pub fn forget_subject(&self, user_id: &str) -> bool {
+        self.identities
+            .as_ref()
+            .is_some_and(|cache| cache.remove(user_id))
+    }
+
+    /// Open a ZTNA session with a verified user subject threaded
+    /// through as a first-class input.
+    ///
+    /// This is the fully-wired entry point for full user-subject
+    /// evaluation: it [registers](Self::register_subject) `subject`
+    /// (so the brain resolves the real identity) and then evaluates
+    /// exactly as [`Self::open_session`], binding the verdict to the
+    /// session lifecycle for the re-evaluation loop. Because the
+    /// subject stays in the identity cache, every subsequent sweep
+    /// re-resolves it, so a later group change / MFA expiry / user
+    /// revocation flips the verdict and tears the session down.
+    ///
+    /// When full user-subject evaluation is disabled the registration
+    /// is a no-op and this is exactly [`Self::open_session`] — the
+    /// subject is ignored and a subjectless request denies on the
+    /// provider miss, so the feature is inert until opted in.
+    ///
+    /// `subject.user_id` is expected to match `request.user_id`; the
+    /// brain resolves the identity by `request.user_id`, so a mismatch
+    /// simply means the registered subject is not the one consulted.
+    /// A `debug_assert` catches such accidental mismatches in dev /
+    /// test builds; release builds keep the documented best-effort
+    /// contract (the mismatched subject is just never resolved, so the
+    /// request degrades to `IdentityAbsent` rather than misbehaving).
+    ///
+    /// # Errors
+    ///
+    /// Propagates the same provider-resolution [`ZtnaError`]s as
+    /// [`Self::open_session`].
+    pub fn open_session_with_subject(
+        &self,
+        session_id: impl Into<String>,
+        tenant_id: impl Into<String>,
+        subject: &UserIdentity,
+        request: AccessRequest,
+    ) -> Result<ZtnaDecision, ZtnaError> {
+        debug_assert_eq!(
+            subject.user_id, request.user_id,
+            "open_session_with_subject: subject.user_id must match request.user_id, \
+             otherwise the brain resolves a different (or absent) identity"
+        );
+        self.register_subject(subject);
+        self.open_session(session_id, tenant_id, request)
+    }
 }
 
 #[async_trait]
@@ -227,19 +393,25 @@ impl HealthCheck for ZtnaSubsystem {
 
     async fn check(&self) -> SubsystemHealth {
         let snap = self.stats.snapshot();
-        // Denies aren't surfaced as a single counter — sum the
-        // per-reason buckets so the operator dashboard sees one
-        // total. Bundle / telemetry / provider failures degrade
-        // status to Degraded so the dashboard renders an amber
-        // marker rather than a green one.
+        // Denies aren't surfaced as a single counter — sum every
+        // per-reason bucket so the operator dashboard sees one total
+        // that actually reconciles with `requests_evaluated`. Bundle
+        // / telemetry / provider failures degrade status to Degraded
+        // so the dashboard renders an amber marker rather than green.
         let denies = snap.deny_unknown_app
             + snap.deny_device_not_enrolled
             + snap.deny_device_posture_stale
             + snap.deny_device_posture_insufficient
             + snap.deny_identity_not_found
+            + snap.deny_identity_absent
             + snap.deny_mfa_stale
             + snap.deny_not_entitled
-            + snap.deny_tenant_mismatch;
+            + snap.deny_tenant_mismatch
+            + snap.deny_revoked
+            + snap.deny_geo_blocked
+            + snap.deny_network_type_blocked
+            + snap.deny_outside_hours
+            + snap.deny_tag_mismatch;
         let status = if snap.bundle_load_failures > 0 || snap.provider_failures > 0 {
             HealthStatus::Degraded
         } else {
@@ -422,6 +594,145 @@ mod tests {
         assert!(
             sub.close_session("sess-1").is_none(),
             "no tracker => nothing to close"
+        );
+    }
+
+    /// A subsystem with full user-subject evaluation opted in: the
+    /// `(wiki, dev-1)` app + device are admitted, the identity table
+    /// starts empty (so a request degrades until a subject is
+    /// registered), and the concrete identity cache is returned so the
+    /// test can feed verified subjects exactly as the producer would.
+    fn degraded_subsystem() -> ZtnaSubsystem {
+        let apps = Arc::new(StaticAppCatalog::new(vec![App {
+            app_id: APP.into(),
+            display_name: APP.into(),
+            host_patterns: vec![],
+            // Group-gated: only `eng` may reach this app.
+            required_groups: HashSet::from(["eng".to_owned()]),
+            posture_requirement: PostureRequirement::new(0),
+            mfa_max_age_override_ms: None,
+            conditions: sng_ztna::AccessConditions::default(),
+            tags: std::collections::HashMap::new(),
+        }]));
+        let devices = Arc::new(StaticDeviceTrustProvider::new(vec![DeviceTrust {
+            device_id: DEVICE.into(),
+            tenant_id: TENANT.into(),
+            posture: DevicePosture::pristine(NOW_MS),
+            tags: std::collections::HashMap::new(),
+        }]));
+        let cache = Arc::new(StaticIdentityProvider::default());
+        let identities: Arc<dyn IdentityProvider> = cache.clone();
+        let policy = Arc::new(ZtnaPolicyHolder::new(ZtnaPolicy {
+            tenant_id: TENANT.into(),
+            ..ZtnaPolicy::default()
+        }));
+        let (tx, _rx) = mpsc::channel::<TelemetryEvent>(16);
+        let service = ZtnaServiceBuilder::new()
+            .with_config(ZtnaServiceConfig {
+                subjectless_degraded_eval: true,
+                ..ZtnaServiceConfig::default()
+            })
+            .with_policy(policy)
+            .with_app_catalog(apps)
+            .with_device_trust(devices)
+            .with_identity(identities)
+            .build(tx);
+        ZtnaSubsystem::from_service_with_identity_cache(Arc::new(service), cache)
+    }
+
+    fn subject(groups: &[&str]) -> UserIdentity {
+        UserIdentity {
+            user_id: USER.into(),
+            tenant_id: TENANT.into(),
+            groups: groups.iter().map(|s| (*s).to_owned()).collect(),
+            mfa_at_ms: NOW_MS,
+            tags: std::collections::HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn feature_off_register_subject_is_inert() {
+        // Default config => feature off: no identity cache, and
+        // subject registration is a no-op so the access path is
+        // unchanged.
+        let (tx, _rx) = mpsc::channel::<TelemetryEvent>(4);
+        let sub = ZtnaSubsystem::new(ZtnaServiceConfig::default(), tx);
+        assert!(!sub.user_subject_eval_enabled());
+        assert!(sub.identity_cache().is_none());
+        assert!(!sub.register_subject(&subject(&["eng"])));
+        assert!(!sub.forget_subject(USER));
+    }
+
+    #[test]
+    fn feature_on_wires_identity_cache() {
+        // Flag on via the service config => the subsystem owns a
+        // concrete identity cache pointing at the very table the
+        // service resolves against.
+        let (tx, _rx) = mpsc::channel::<TelemetryEvent>(4);
+        let sub = ZtnaSubsystem::new(
+            ZtnaServiceConfig {
+                subjectless_degraded_eval: true,
+                ..ZtnaServiceConfig::default()
+            },
+            tx,
+        );
+        assert!(sub.user_subject_eval_enabled());
+        assert!(sub.identity_cache().is_some());
+    }
+
+    #[test]
+    fn open_session_with_subject_threads_identity_and_allows() {
+        // The fully-wired path: registering a verified `eng` subject
+        // makes the brain resolve the real identity and allow the
+        // group-gated app.
+        let sub = degraded_subsystem();
+        let decision = sub
+            .open_session_with_subject("sess-1", TENANT, &subject(&["eng"]), req())
+            .expect("evaluate");
+        assert!(decision.allow, "an entitled subject must be allowed");
+        assert_eq!(decision.reason, sng_ztna::ZtnaDecisionReason::Allow);
+    }
+
+    #[test]
+    fn open_session_with_subject_denies_when_not_entitled() {
+        // A registered subject lacking the required group is denied
+        // on the identity gate — the full identity-aware verdict, not
+        // a degraded one.
+        let sub = degraded_subsystem();
+        let decision = sub
+            .open_session_with_subject("sess-1", TENANT, &subject(&["sales"]), req())
+            .expect("evaluate");
+        assert!(!decision.allow);
+        assert_eq!(decision.reason, sng_ztna::ZtnaDecisionReason::NotEntitled);
+    }
+
+    #[test]
+    fn subjectless_request_degrades_to_identity_absent() {
+        // No subject registered: the request denies with the explicit
+        // `identity_absent` verdict rather than erroring on a provider
+        // miss or allowing on the device alone.
+        let sub = degraded_subsystem();
+        let decision = sub.open_session("sess-1", TENANT, req()).expect("evaluate");
+        assert!(!decision.allow);
+        assert_eq!(
+            decision.reason,
+            sng_ztna::ZtnaDecisionReason::IdentityAbsent
+        );
+    }
+
+    #[test]
+    fn forget_subject_evicts_then_request_degrades() {
+        // After forgetting a registered subject, the next evaluation
+        // degrades again — the eviction seam works end to end.
+        let sub = degraded_subsystem();
+        assert!(sub.register_subject(&subject(&["eng"])));
+        assert!(sub.open_session("sess-1", TENANT, req()).unwrap().allow);
+        assert!(sub.forget_subject(USER));
+        let decision = sub.open_session("sess-1", TENANT, req()).expect("evaluate");
+        assert!(!decision.allow);
+        assert_eq!(
+            decision.reason,
+            sng_ztna::ZtnaDecisionReason::IdentityAbsent
         );
     }
 

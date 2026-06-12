@@ -8,7 +8,7 @@ use std::sync::Arc;
 use sng_ztna::{
     AccessRequest, App, DevicePosture, DeviceTrust, PostureRequirement, StaticAppCatalog,
     StaticDeviceTrustProvider, StaticIdentityProvider, UserIdentity, ZtnaPolicy, ZtnaPolicyHolder,
-    ZtnaServiceBuilder,
+    ZtnaService, ZtnaServiceBuilder, ZtnaServiceConfig,
 };
 
 use crate::report::{measure, Case, Feature, FunctionReport, Kind, Targets};
@@ -266,8 +266,11 @@ pub async fn run() -> FunctionReport {
         },
     ];
 
-    let mut cases = Vec::new();
-    for z in corpus {
+    // Evaluate one corpus case against a given service, fail-closed (an
+    // evaluation error is treated as a deny). Shared by the default
+    // corpus and the degraded-eval sub-corpus below so their scoring can
+    // never diverge.
+    let eval_case = |svc: &ZtnaService, z: &ZCase| -> Case {
         let req = AccessRequest::new(z.app, z.device, z.user, NOW);
         let (allowed, actual) = match svc.evaluate(&req) {
             Ok(d) => (
@@ -278,17 +281,75 @@ pub async fn run() -> FunctionReport {
                     d.reason.as_str()
                 ),
             ),
-            // Fail-closed: an evaluation error is treated as a deny.
             Err(e) => (false, format!("deny (error: {e})")),
         };
         let correct = if z.bad { !allowed } else { allowed };
-        cases.push(Case {
+        Case {
             description: z.desc.into(),
             bad: z.bad,
             expected: if z.bad { "deny" } else { "allow" }.into(),
             actual,
             correct,
-        });
+        }
+    };
+
+    let mut cases = Vec::new();
+    for z in &corpus {
+        cases.push(eval_case(&svc, z));
+    }
+
+    // --- degraded (subjectless) evaluation: the opt-in
+    // `subjectless_degraded_eval` path ---
+    // With the flag on, a request whose identity the brain cannot
+    // resolve no longer short-circuits as a provider miss; it runs every
+    // device + context + posture gate and, only if they all pass, denies
+    // with the explicit `IdentityAbsent` reason. These cases confirm the
+    // degraded path still fails closed (never a device-only allow) and
+    // never masks a genuine device failure. An empty identity provider
+    // guarantees every request here takes the degraded path.
+    let (dtx, _drx) = tokio::sync::mpsc::channel(16);
+    let degraded_svc = ZtnaServiceBuilder::new()
+        .with_config(ZtnaServiceConfig {
+            subjectless_degraded_eval: true,
+            ..ZtnaServiceConfig::default()
+        })
+        .with_policy(Arc::new(ZtnaPolicyHolder::new(ZtnaPolicy {
+            tenant_id: "t1".into(),
+            ..ZtnaPolicy::default()
+        })))
+        .with_app_catalog(Arc::new(StaticAppCatalog::new(vec![
+            app("wiki", PostureRequirement::NONE, &["engineering", "sales"]),
+            app("crm", PostureRequirement::BASIC, &["engineering"]),
+        ])))
+        .with_device_trust(Arc::new(StaticDeviceTrustProvider::new(vec![
+            device("dev-good", "t1", DevicePosture::pristine(NOW)),
+            device(
+                "dev-stale",
+                "t1",
+                DevicePosture::pristine(NOW).with_attested_at_ms(NOW - H13_MS),
+            ),
+        ])))
+        .with_identity(Arc::new(StaticIdentityProvider::new(vec![])))
+        .build(dtx);
+
+    let degraded_corpus = vec![
+        ZCase {
+            desc: "degraded eval: subjectless request, device+context gates pass -> IdentityAbsent deny",
+            bad: true,
+            app: "wiki",
+            device: "dev-good",
+            user: "ghost-user",
+        },
+        ZCase {
+            desc: "degraded eval: subjectless request never masks a device failure (stale posture -> deny)",
+            bad: true,
+            app: "crm",
+            device: "dev-stale",
+            user: "ghost-user",
+        },
+    ];
+    for z in &degraded_corpus {
+        cases.push(eval_case(&degraded_svc, z));
     }
 
     // Throughput: time the real evaluate() decision path over a fully
@@ -315,7 +376,10 @@ pub async fn run() -> FunctionReport {
             "Real ZtnaService.evaluate brokering. Denies unknown app/device/identity, \
              stale posture, insufficient posture, degraded EDR, stale AV definitions, \
              out-of-date OS patches, stale MFA, missing entitlement, and cross-tenant \
-             requests; admits authorized engineers on compliant devices."
+             requests; admits authorized engineers on compliant devices. With the opt-in \
+             subjectless_degraded_eval flag on, a subjectless request runs every \
+             device+context+posture gate and fails closed with an explicit IdentityAbsent \
+             deny when they pass, and still denies on a genuine device failure."
                 .into(),
         ),
     )

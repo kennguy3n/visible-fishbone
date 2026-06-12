@@ -146,6 +146,6 @@ pub use policy::{
 };
 pub use reeval::{ClockFn, ReevalLoop, SessionRevoked, SweepStats};
 pub use request::{AccessRequest, NetworkType};
-pub use service::{ZtnaService, ZtnaServiceBuilder, ZtnaServiceConfig};
+pub use service::{EvalOutcome, ZtnaService, ZtnaServiceBuilder, ZtnaServiceConfig};
 pub use session::{AccessGrant, DEFAULT_SHARDS, GuardedRemoval, SessionTracker};
 pub use stats::{ZtnaStats, ZtnaStatsSnapshot};

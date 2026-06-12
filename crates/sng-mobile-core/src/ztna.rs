@@ -295,19 +295,25 @@ impl MobileZtnaManager {
         }
         // Same verdict on both paths; `Reeval` stays off the
         // access-path counters and telemetry channel (see [`EvalPath`]).
+        // The `_detailed` variants additionally return whether the brain
+        // resolved a verified subject, so the telemetry below reports the
+        // authoritative `identity_verified` the service computed rather
+        // than assuming it — correct even if the mobile platform later
+        // opts into `subjectless_degraded_eval` (a degraded subjectless
+        // verdict then reports `false`).
         let result = match path {
-            EvalPath::Access => self.service.evaluate(request),
-            EvalPath::Reeval => self.service.evaluate_for_reeval(request),
+            EvalPath::Access => self.service.evaluate_detailed(request),
+            EvalPath::Reeval => self.service.evaluate_for_reeval_detailed(request),
         };
         match result {
-            Ok(decision) => Classified {
-                allow: decision.allow,
-                reason: decision.reason.as_str().to_owned(),
-                posture_result: decision.posture_result.as_str().to_owned(),
+            Ok(outcome) => Classified {
+                allow: outcome.decision.allow,
+                reason: outcome.decision.reason.as_str().to_owned(),
+                posture_result: outcome.decision.posture_result.as_str().to_owned(),
                 // Shared-policy decisions carry no mobile pre-gate cause.
                 posture_detail: None,
-                identity_verified: true,
-                result: Ok(decision),
+                identity_verified: outcome.identity_verified,
+                result: Ok(outcome.decision),
             },
             Err(err) => Classified {
                 allow: false,

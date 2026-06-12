@@ -307,6 +307,10 @@ pub fn build_agent(cli: &Cli, cfg: &AgentConfig) -> Result<BuiltAgent, AgentBuil
     let telemetry_tx = pipeline_handle_to_telemetry_sender(&telemetry, shutdown_signal_for_bridges);
     let ztna_cfg = ZtnaServiceConfig {
         max_sessions: cfg.ztna.max_inflight,
+        // Full user-subject evaluation is an edge-tier opt-in
+        // (`ztna.user_subject_eval_enabled`); the agent keeps the
+        // historical default-off behaviour.
+        subjectless_degraded_eval: false,
     };
     let ztna = Arc::new(ZtnaSubsystem::new(ztna_cfg, telemetry_tx));
 

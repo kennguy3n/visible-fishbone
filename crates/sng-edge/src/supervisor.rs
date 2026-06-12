@@ -361,6 +361,12 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
     //    happens at this producer layer).
     let ztna_cfg = ZtnaServiceConfig {
         max_sessions: cfg.ztna.max_inflight,
+        // Full user-subject evaluation (and the explicit
+        // `identity_absent` degraded verdict) is an operator opt-in,
+        // default-off and inert until `ztna.user_subject_eval_enabled`
+        // is set. The subsystem reads this same flag to decide whether
+        // to wire the per-subject identity cache.
+        subjectless_degraded_eval: cfg.ztna.user_subject_eval_enabled,
     };
     // Session store shared by the two halves of continuous-adaptive-
     // trust: the access-path producer (`ZtnaSubsystem::open_session`)

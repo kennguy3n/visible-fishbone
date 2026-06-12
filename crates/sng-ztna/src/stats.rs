@@ -23,6 +23,7 @@ pub struct ZtnaStats {
     deny_device_posture_stale: AtomicU64,
     deny_device_posture_insufficient: AtomicU64,
     deny_identity_not_found: AtomicU64,
+    deny_identity_absent: AtomicU64,
     deny_mfa_stale: AtomicU64,
     deny_not_entitled: AtomicU64,
     deny_tenant_mismatch: AtomicU64,
@@ -57,6 +58,7 @@ impl ZtnaStats {
             ZtnaDecisionReason::DevicePostureStale => &self.deny_device_posture_stale,
             ZtnaDecisionReason::DevicePostureInsufficient => &self.deny_device_posture_insufficient,
             ZtnaDecisionReason::IdentityNotFound => &self.deny_identity_not_found,
+            ZtnaDecisionReason::IdentityAbsent => &self.deny_identity_absent,
             ZtnaDecisionReason::MfaStale => &self.deny_mfa_stale,
             ZtnaDecisionReason::NotEntitled => &self.deny_not_entitled,
             ZtnaDecisionReason::TenantMismatch => &self.deny_tenant_mismatch,
@@ -107,6 +109,7 @@ impl ZtnaStats {
                 .deny_device_posture_insufficient
                 .load(Ordering::Relaxed),
             deny_identity_not_found: self.deny_identity_not_found.load(Ordering::Relaxed),
+            deny_identity_absent: self.deny_identity_absent.load(Ordering::Relaxed),
             deny_mfa_stale: self.deny_mfa_stale.load(Ordering::Relaxed),
             deny_not_entitled: self.deny_not_entitled.load(Ordering::Relaxed),
             deny_tenant_mismatch: self.deny_tenant_mismatch.load(Ordering::Relaxed),
@@ -142,6 +145,14 @@ pub struct ZtnaStatsSnapshot {
     pub deny_device_posture_insufficient: u64,
     /// Deny because the identity was not registered.
     pub deny_identity_not_found: u64,
+    /// Deny because no user subject was present at all and
+    /// the identity-gated portion of the decision could not
+    /// be completed (the explicit degraded verdict). Counted
+    /// separately from [`Self::deny_identity_not_found`] so
+    /// dashboards can tell degraded-by-design traffic (no
+    /// subject supplied) apart from a genuine identity miss
+    /// (a `user_id` was supplied but is unknown).
+    pub deny_identity_absent: u64,
     /// Deny because the user's MFA timestamp was older
     /// than the policy window.
     pub deny_mfa_stale: u64,
