@@ -125,6 +125,49 @@ func TestExecuteRollout_AppliesAcrossTenants(t *testing.T) {
 	}
 }
 
+func TestExecuteRollout_SameRegimeDifferentCountryRewritesMetadata(t *testing.T) {
+	svc, _ := newTestService(t)
+	ctx := context.Background()
+
+	// DE and FR are distinct countries that share RegimeEUGDPR, so a
+	// same-industry roll-out across them yields an identical GraphHash.
+	// The roll-out must still rewrite the stored Country (matching
+	// Apply's behaviour) rather than skip the write as "unchanged".
+	deRegime, _ := RegimeForCountry("DE")
+	frRegime, _ := RegimeForCountry("FR")
+	if deRegime != frRegime {
+		t.Fatalf("test assumes DE and FR share a regime, got %q vs %q", deRegime, frRegime)
+	}
+
+	tenant := uuid.New()
+	if _, err := svc.Apply(ctx, tenant, Selection{Industry: IndustryFinance, Country: "DE"}); err != nil {
+		t.Fatalf("seed DE baseline: %v", err)
+	}
+
+	sel := Selection{Industry: IndustryFinance, Country: "FR"}
+	result, err := svc.ExecuteRollout(ctx, []uuid.UUID{tenant}, sel)
+	if err != nil {
+		t.Fatalf("ExecuteRollout: %v", err)
+	}
+	if result.Applied != 1 || result.Unchanged != 0 {
+		t.Fatalf("counts = applied:%d unchanged:%d, want applied:1 unchanged:0 "+
+			"(same-regime country swap must rewrite, not no-op)",
+			result.Applied, result.Unchanged)
+	}
+	if got := result.Outcomes[0].Status; got != RolloutStatusApplied {
+		t.Errorf("outcome status = %q, want applied", got)
+	}
+
+	// The stored baseline now reflects the new country.
+	stored, err := svc.GetApplied(ctx, tenant)
+	if err != nil {
+		t.Fatalf("GetApplied: %v", err)
+	}
+	if stored.Country != "FR" {
+		t.Errorf("stored country = %q, want FR (metadata must follow the roll-out)", stored.Country)
+	}
+}
+
 func TestExecuteRollout_IsolatesFailureAndRollsBack(t *testing.T) {
 	ctx := context.Background()
 	sel := Selection{Industry: IndustryFinance, Country: "FR"}

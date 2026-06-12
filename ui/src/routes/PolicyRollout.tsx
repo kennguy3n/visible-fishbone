@@ -50,6 +50,10 @@ export function PolicyRollout() {
     [selected],
   );
   const ready = !!industry && !!country && selectedIds.length > 0;
+  // Execute is gated on a fresh preview for the current selection. Any
+  // baseline or target-set change calls preview.reset() below, so a
+  // surviving preview.data is guaranteed to match what will be applied.
+  const previewed = ready && preview.isSuccess;
 
   const regimeForCountry = useMemo(() => {
     const map: Record<string, string> = {};
@@ -295,12 +299,20 @@ export function PolicyRollout() {
           </button>
           <button
             className="btn btn--primary"
-            disabled={!ready || execute.isPending}
+            disabled={!previewed || execute.isPending}
+            title={
+              !previewed ? "Preview the diff before applying" : undefined
+            }
             onClick={runExecute}
           >
             {execute.isPending ? <Spinner /> : `Apply to ${selectedIds.length} tenant${selectedIds.length === 1 ? "" : "s"}`}
           </button>
         </div>
+        {ready && !previewed && (
+          <p style={{ marginTop: 8, color: "var(--text-dim)" }}>
+            Preview the per-tenant diff before applying.
+          </p>
+        )}
 
         {preview.data && !execute.data && (
           <div style={{ marginTop: 16 }}>

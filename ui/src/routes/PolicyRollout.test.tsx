@@ -10,6 +10,14 @@ import { PolicyRollout } from "./PolicyRollout";
 const previewMutate = vi.fn();
 const executeMutate = vi.fn();
 
+// Mutable preview-hook state so individual tests can simulate a
+// completed preview (isSuccess) and assert the execute gate.
+let previewState: { isPending: boolean; isSuccess: boolean; data: unknown } = {
+  isPending: false,
+  isSuccess: false,
+  data: undefined,
+};
+
 vi.mock("@/lib/tenant-context", () => ({
   useTenant: () => ({
     tenants: [
@@ -37,8 +45,9 @@ vi.mock("@/api/manual/hooks", () => ({
   usePreviewPolicyRollout: () => ({
     mutate: previewMutate,
     reset: vi.fn(),
-    isPending: false,
-    data: undefined,
+    isPending: previewState.isPending,
+    isSuccess: previewState.isSuccess,
+    data: previewState.data,
   }),
   useExecutePolicyRollout: () => ({
     mutate: executeMutate,
@@ -52,7 +61,18 @@ afterEach(() => {
   cleanup();
   previewMutate.mockReset();
   executeMutate.mockReset();
+  previewState = { isPending: false, isSuccess: false, data: undefined };
 });
+
+function chooseBaselineAndTenant() {
+  fireEvent.change(screen.getByLabelText("Industry"), {
+    target: { value: "finance" },
+  });
+  fireEvent.change(screen.getByLabelText("Country / data residency"), {
+    target: { value: "DE" },
+  });
+  fireEvent.click(screen.getAllByRole("checkbox")[0]);
+}
 
 describe("PolicyRollout", () => {
   it("renders the roll-out surface with the available tenants", () => {
@@ -71,14 +91,7 @@ describe("PolicyRollout", () => {
   it("passes the selected baseline and tenants into the preview mutation", () => {
     render(<PolicyRollout />);
 
-    fireEvent.change(screen.getByLabelText("Industry"), {
-      target: { value: "finance" },
-    });
-    fireEvent.change(screen.getByLabelText("Country / data residency"), {
-      target: { value: "DE" },
-    });
-    // Select the first tenant only.
-    fireEvent.click(screen.getAllByRole("checkbox")[0]);
+    chooseBaselineAndTenant();
 
     const previewBtn = screen.getByRole("button", { name: /preview diff/i });
     expect((previewBtn as HTMLButtonElement).disabled).toBe(false);
@@ -86,6 +99,42 @@ describe("PolicyRollout", () => {
 
     expect(previewMutate).toHaveBeenCalledTimes(1);
     expect(previewMutate.mock.calls[0][0]).toEqual({
+      industry: "finance",
+      country: "DE",
+      tenant_ids: ["t1"],
+    });
+  });
+
+  it("keeps execute disabled until a preview has succeeded, even with a full selection", () => {
+    render(<PolicyRollout />);
+    chooseBaselineAndTenant();
+
+    const executeBtn = screen.getByRole("button", { name: /apply to/i });
+    expect((executeBtn as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByText(/preview the per-tenant diff before applying/i)).toBeTruthy();
+  });
+
+  it("enables execute once a fresh preview has succeeded for the selection", () => {
+    previewState = {
+      isPending: false,
+      isSuccess: true,
+      data: {
+        selection: { industry: "finance", country: "DE" },
+        regime: "eu-gdpr",
+        template_ids: [],
+        graph_hash: "abc123",
+        targets: [],
+      },
+    };
+    render(<PolicyRollout />);
+    chooseBaselineAndTenant();
+
+    const executeBtn = screen.getByRole("button", { name: /apply to/i });
+    expect((executeBtn as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(executeBtn);
+
+    expect(executeMutate).toHaveBeenCalledTimes(1);
+    expect(executeMutate.mock.calls[0][0]).toEqual({
       industry: "finance",
       country: "DE",
       tenant_ids: ["t1"],

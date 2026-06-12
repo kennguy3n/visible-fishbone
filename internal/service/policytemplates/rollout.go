@@ -184,7 +184,13 @@ func (s *Service) PreviewRollout(ctx context.Context, tenantIDs []uuid.UUID, sel
 		case gerr == nil:
 			summary := summarize(current)
 			diff.Current = &summary
-			if current.GraphHash == resolved.GraphHash {
+			// Match rolloutOne / Apply: a no-op requires the full
+			// selection to match, not just the hash. Many countries
+			// share a regime, so a same-industry country swap keeps an
+			// identical GraphHash but still rewrites stored metadata.
+			if current.GraphHash == resolved.GraphHash &&
+				current.Industry == string(resolved.Selection.Industry) &&
+				current.Country == string(resolved.Selection.Country) {
 				diff.Action = RolloutActionNoop
 			} else {
 				diff.Action = RolloutActionUpdate
@@ -282,7 +288,16 @@ func (s *Service) rolloutOne(ctx context.Context, tenantID uuid.UUID, resolved R
 	}
 
 	// Idempotent no-op: the tenant already has this exact baseline.
-	if priorExists && priorHash == resolved.GraphHash {
+	// Mirror Apply's check (service.go) — compare Industry and Country
+	// alongside the hash. GraphHash is derived from baseline+industry+
+	// regime, and many countries share a regime (e.g. DE/FR/IT all map
+	// to RegimeEUGDPR), so a same-industry country swap within a regime
+	// yields an identical hash. Without the extra fields a roll-out
+	// would report "unchanged" and skip the write, leaving stale
+	// Country metadata that diverges from what Apply would store.
+	if priorExists && priorHash == resolved.GraphHash &&
+		prior.Industry == string(resolved.Selection.Industry) &&
+		prior.Country == string(resolved.Selection.Country) {
 		return RolloutOutcome{
 			TenantID:  tenantID,
 			Status:    RolloutStatusUnchanged,
