@@ -93,7 +93,11 @@ func (v *CredentialVault) Put(ctx context.Context, tenantID, configID uuid.UUID,
 	if cred.Token == "" {
 		return fmt.Errorf("%w: directory credential token is required", repository.ErrInvalidArgument)
 	}
-	plaintext, err := json.Marshal(sealedCredential{
+	// Copy fields explicitly rather than converting cred to
+	// sealedCredential: the two types are intentionally decoupled (see
+	// the sealedCredential doc) so the on-disk wire format stays
+	// independent of the in-memory layout.
+	plaintext, err := json.Marshal(sealedCredential{ //nolint:staticcheck // S1016: explicit copy is intentional; sealedCredential is decoupled from DirectoryCredential by design
 		BaseURL: cred.BaseURL,
 		Token:   cred.Token,
 		Subject: cred.Subject,
@@ -154,7 +158,14 @@ func (v *CredentialVault) Resolve(ctx context.Context, tenantID uuid.UUID, cfg r
 	if err := json.Unmarshal(plaintext, &sc); err != nil {
 		return DirectoryCredential{}, fmt.Errorf("decode directory credential: %w", err)
 	}
-	return DirectoryCredential{BaseURL: sc.BaseURL, Token: sc.Token, Subject: sc.Subject}, nil
+	// Copy fields explicitly rather than converting sc to
+	// DirectoryCredential: see the sealedCredential doc for why the two
+	// types are kept decoupled.
+	return DirectoryCredential{ //nolint:staticcheck // S1016: explicit copy is intentional; sealedCredential is decoupled from DirectoryCredential by design
+		BaseURL: sc.BaseURL,
+		Token:   sc.Token,
+		Subject: sc.Subject,
+	}, nil
 }
 
 // Ensure CredentialVault satisfies the resolver contract the
