@@ -296,7 +296,7 @@ impl ZtnaSubsystem {
     /// [`StaticIdentityProvider::replace`] IdP sync, so it does not
     /// grow without an upstream record. Call [`Self::forget_subject`]
     /// to evict eagerly.
-    pub fn register_subject(&self, subject: UserIdentity) -> bool {
+    pub fn register_subject(&self, subject: &UserIdentity) -> bool {
         match self.identities.as_ref() {
             Some(cache) => {
                 cache.upsert(subject);
@@ -344,7 +344,7 @@ impl ZtnaSubsystem {
         &self,
         session_id: impl Into<String>,
         tenant_id: impl Into<String>,
-        subject: UserIdentity,
+        subject: &UserIdentity,
         request: AccessRequest,
     ) -> Result<ZtnaDecision, ZtnaError> {
         self.register_subject(subject);
@@ -635,7 +635,7 @@ mod tests {
         let sub = ZtnaSubsystem::new(ZtnaServiceConfig::default(), tx);
         assert!(!sub.user_subject_eval_enabled());
         assert!(sub.identity_cache().is_none());
-        assert!(!sub.register_subject(subject(&["eng"])));
+        assert!(!sub.register_subject(&subject(&["eng"])));
         assert!(!sub.forget_subject(USER));
     }
 
@@ -663,7 +663,7 @@ mod tests {
         // group-gated app.
         let sub = degraded_subsystem();
         let decision = sub
-            .open_session_with_subject("sess-1", TENANT, subject(&["eng"]), req())
+            .open_session_with_subject("sess-1", TENANT, &subject(&["eng"]), req())
             .expect("evaluate");
         assert!(decision.allow, "an entitled subject must be allowed");
         assert_eq!(decision.reason, sng_ztna::ZtnaDecisionReason::Allow);
@@ -676,7 +676,7 @@ mod tests {
         // a degraded one.
         let sub = degraded_subsystem();
         let decision = sub
-            .open_session_with_subject("sess-1", TENANT, subject(&["sales"]), req())
+            .open_session_with_subject("sess-1", TENANT, &subject(&["sales"]), req())
             .expect("evaluate");
         assert!(!decision.allow);
         assert_eq!(decision.reason, sng_ztna::ZtnaDecisionReason::NotEntitled);
@@ -701,7 +701,7 @@ mod tests {
         // After forgetting a registered subject, the next evaluation
         // degrades again — the eviction seam works end to end.
         let sub = degraded_subsystem();
-        assert!(sub.register_subject(subject(&["eng"])));
+        assert!(sub.register_subject(&subject(&["eng"])));
         assert!(sub.open_session("sess-1", TENANT, req()).unwrap().allow);
         assert!(sub.forget_subject(USER));
         let decision = sub.open_session("sess-1", TENANT, req()).expect("evaluate");
