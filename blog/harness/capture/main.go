@@ -35,9 +35,13 @@ import (
 // per-scenario walk-throughs in the series.
 const acme = "92112770-7c0a-410b-b0f4-09dde70e063a"
 
-// Umbrella Logistics — the deliberately-sparse tenant (0 DLP policies);
-// used to capture an honest, intentional empty-state payload.
+// Umbrella Logistics — APAC residency tenant; carries a single
+// pdpa-singapore DLP policy (the Singapore-residency example).
 const umbrella = "0c8d2d9d-896d-45b1-8001-6a6776f832b9"
+
+// Nordic EduCloud — the deliberately-sparse starter tenant (0 DLP
+// policies); used to capture an honest, intentional empty-state payload.
+const nordic = "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
 
 // Initech Financial — the professional-tier tenant carrying a seeded
 // url_cat surge; used to capture the one credible cost anomaly in the
@@ -51,8 +55,9 @@ const globex = "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a"
 // Multi-country / multi-industry tenants — each resolves to a distinct
 // compliance regime via the smart-default policy-template engine, so
 // their applied baselines are the evidence for the jurisdiction story:
-//   britannia (GB) -> uk-dpa, maple (CA) -> ca-pipeda,
-//   outback   (AU) -> au-privacy, lumiere (FR) -> eu-gdpr.
+//
+//	britannia (GB) -> uk-dpa, maple (CA) -> ca-pipeda,
+//	outback   (AU) -> au-privacy, lumiere (FR) -> eu-gdpr.
 const (
 	britannia = "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
 	maple     = "cef9c934-507c-4adc-985b-48f3cbe274b0"
@@ -107,7 +112,8 @@ func main() {
 		{"s5-acme-casb-connectors", "/api/v1/tenants/" + acme + "/casb/connectors"},
 		{"s5-acme-casb-inline-rules", "/api/v1/tenants/" + acme + "/casb/inline-rules"},
 		{"s5-acme-browser-policies", "/api/v1/tenants/" + acme + "/browser-policies"},
-		{"s5-umbrella-dlp-policies-emptystate", "/api/v1/tenants/" + umbrella + "/dlp/policies"},
+		{"s5-nordic-dlp-policies-emptystate", "/api/v1/tenants/" + nordic + "/dlp/policies"},
+		{"s5-umbrella-dlp-policies", "/api/v1/tenants/" + umbrella + "/dlp/policies"},
 		// S6 — AI posture report (the live policy-coverage fix, #119)
 		{"s6-acme-posture-report", "/api/v1/tenants/" + acme + "/ai/reports/posture"},
 		{"s6-acme-playbooks", "/api/v1/tenants/" + acme + "/playbooks"},

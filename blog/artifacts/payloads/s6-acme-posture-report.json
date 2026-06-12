@@ -1,18 +1,18 @@
 {
   "ai_generated": false,
-  "generated_at": "2026-06-12T01:03:34.857976Z",
+  "generated_at": "2026-06-12T01:56:49.383587829Z",
   "overview": {
     "alerts_by_severity": {
-      "critical": 8,
-      "warning": 11
+      "critical": 1,
+      "warning": 3
     },
-    "total_alerts": 19,
+    "total_alerts": 4,
     "trend": "degrading"
   },
   "period": {
-    "end": "2026-06-12T01:03:34.854363694Z",
+    "end": "2026-06-12T01:56:49.380204219Z",
     "label": "weekly",
-    "start": "2026-06-05T01:03:34.854363694Z"
+    "start": "2026-06-05T01:56:49.380204219Z"
   },
   "policy_health": {
     "active_policies": 11,
@@ -20,9 +20,9 @@
     "total_policies": 13
   },
   "recommendations": [
-    "Investigate 8 critical alert(s) immediately.",
+    "Investigate 1 critical alert(s) immediately.",
     "Alert volume is increasing; review detection thresholds.",
-    "19 alert(s) remain open; prioritise triage."
+    "4 alert(s) remain open; prioritise triage."
   ],
   "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
   "threats": {

@@ -74,10 +74,17 @@ row by far:
 - **RBI as a policy action.** Remote browser isolation is a first-class action in
   the browser-policy model (migration 054), so "isolate uncategorized sites" is a
   policy verdict, not a bolt-on.
-- **Tier differentiation is real.** Umbrella (starter) has **zero** DLP policies
-  — captured deliberately as
-  [`s5-umbrella-dlp-policies-emptystate.json`](../artifacts/payloads/s5-umbrella-dlp-policies-emptystate.json)
-  — so the empty state in the UI is an honest tier difference, not a load failure.
+- **Tier differentiation is real.** Nordic EduCloud (starter) has **zero** DLP
+  policies — a freshly-onboarded tenant that has sites, devices and a baseline
+  AUP browser policy but hasn't configured DLP yet — captured deliberately as
+  [`s5-nordic-dlp-policies-emptystate.json`](../artifacts/payloads/s5-nordic-dlp-policies-emptystate.json)
+  — so the empty state in the UI is an honest tier/onboarding difference, not a
+  load failure. By contrast Umbrella (APAC) carries a single `pdpa-singapore`
+  policy ([`s5-umbrella-dlp-policies.json`](../artifacts/payloads/s5-umbrella-dlp-policies.json)),
+  the Singapore-residency example. (These per-tenant captures are only honest
+  because the control plane runs as the non-superuser `sng_app` role, so
+  Postgres RLS scopes each list to its tenant — see the per-tenant-isolation
+  note in [`scenarios.md`](../artifacts/scenarios.md).)
 
 ## Edge-driven wake: classify on-write, not on a timer
 

@@ -414,6 +414,13 @@ func scenarioTenants() []tenantSpec {
 			integrations: []integrationSpec{{"jira", "Lumière Jira SecOps"}},
 		},
 		{
+			// Nordic EduCloud is the deliberately-sparse starter tenant: a
+			// brand-new education customer that has onboarded sites, devices
+			// and a baseline AUP browser policy but has NOT yet configured any
+			// DLP policy. It carries zero DLP templates on purpose so the
+			// console renders an honest empty state (an intentional tier/
+			// onboarding difference, not a load failure) — captured as
+			// s5-nordic-dlp-policies-emptystate.json.
 			name: "Nordic EduCloud", slug: "nordic-educloud", region: "eu-north-1",
 			tier: "starter", relationship: "owner", country: "SE", industry: "education",
 			sites: []siteSpec{
@@ -424,7 +431,7 @@ func scenarioTenants() []tenantSpec {
 				{"nordic-faculty-ws-01", "windows", map[string]any{"disk_encrypted": true}},
 				{"nordic-lab-linux-01", "linux", map[string]any{"firewall_enabled": true}},
 			},
-			dlpTemplates: []string{"gdpr"},
+			dlpTemplates: []string{},
 			browser: []browserSpec{
 				{"Block adult content (campus AUP)", "adult_content", "block", "site"},
 				{"Block malware/phishing", "malware", "block", "site"},
@@ -788,11 +795,26 @@ func seedInlineCASBRules(tid string) int {
 // evidence-linked report to show. Idempotent: skips when a report
 // already exists. Returns the authoritative server-side count.
 func seedComplianceReport(tid string) int {
-	var existing struct {
-		Items []json.RawMessage `json:"items"`
+	// Count only reports scoped to tid. A global admin token can surface
+	// cross-tenant rows (e.g. when RLS is bypassed in a dev escape-hatch
+	// config), so filter with rowBelongsToTenant just like namedItemExists
+	// and listCount do — the summary must reflect this tenant's true state.
+	count := func() int {
+		var list struct {
+			Items []map[string]any `json:"items"`
+		}
+		if !doJSON("GET", fmt.Sprintf("/api/v1/tenants/%s/compliance/reports", tid), nil, &list) {
+			return 0
+		}
+		n := 0
+		for _, it := range list.Items {
+			if rowBelongsToTenant(it, tid) {
+				n++
+			}
+		}
+		return n
 	}
-	doJSON("GET", fmt.Sprintf("/api/v1/tenants/%s/compliance/reports", tid), nil, &existing)
-	if len(existing.Items) == 0 {
+	if count() == 0 {
 		body := map[string]any{
 			"framework":      "SOC2",
 			"dlp":            true,
@@ -802,9 +824,8 @@ func seedComplianceReport(tid string) int {
 			"access_control": true,
 		}
 		doJSON("POST", fmt.Sprintf("/api/v1/tenants/%s/compliance/reports/generate", tid), body, nil)
-		doJSON("GET", fmt.Sprintf("/api/v1/tenants/%s/compliance/reports", tid), nil, &existing)
 	}
-	return len(existing.Items)
+	return count()
 }
 
 // scenarioPolicyGraph is the unified policy graph published for every

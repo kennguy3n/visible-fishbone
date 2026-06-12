@@ -3,238 +3,6 @@
     {
       "action": "policy.compiled",
       "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T01:01:46.167104Z",
-      "details": {
-        "graph_id": "3b81cf33-8359-48be-9ae2-8de33cf47745",
-        "graph_version": 2,
-        "targets": [
-          "edge",
-          "endpoint",
-          "cloud",
-          "mobile"
-        ]
-      },
-      "id": "66de6aac-2448-4aa3-a358-c2883117dfe6",
-      "resource_id": "3b81cf33-8359-48be-9ae2-8de33cf47745",
-      "resource_type": "policy_graph",
-      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
-    },
-    {
-      "action": "policy.graph_updated",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T01:01:46.05173Z",
-      "details": {},
-      "id": "23b7920e-37ac-4c45-b1a3-489ece9e9cec",
-      "resource_id": "3b81cf33-8359-48be-9ae2-8de33cf47745",
-      "resource_type": "policy_graph",
-      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
-    },
-    {
-      "action": "policy.compiled",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T01:01:45.992374Z",
-      "details": {
-        "graph_id": "aa34ffb0-c287-44cc-a58c-befab716c4b7",
-        "graph_version": 2,
-        "targets": [
-          "edge",
-          "endpoint",
-          "cloud",
-          "mobile"
-        ]
-      },
-      "id": "7955cbf7-9a7c-46bd-ba42-454a0ef2cc79",
-      "resource_id": "aa34ffb0-c287-44cc-a58c-befab716c4b7",
-      "resource_type": "policy_graph",
-      "tenant_id": "890486df-98bd-482b-85a8-af361706676f"
-    },
-    {
-      "action": "policy.graph_updated",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T01:01:45.878843Z",
-      "details": {},
-      "id": "bd677e7b-3770-4a30-9ba9-75ddf96e682b",
-      "resource_id": "aa34ffb0-c287-44cc-a58c-befab716c4b7",
-      "resource_type": "policy_graph",
-      "tenant_id": "890486df-98bd-482b-85a8-af361706676f"
-    },
-    {
-      "action": "policy.compiled",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T01:01:45.819441Z",
-      "details": {
-        "graph_id": "43a4206a-bb8d-46fc-940c-652cd47743ae",
-        "graph_version": 2,
-        "targets": [
-          "edge",
-          "endpoint",
-          "cloud",
-          "mobile"
-        ]
-      },
-      "id": "db67cca6-022e-4440-8d38-296c2e27794b",
-      "resource_id": "43a4206a-bb8d-46fc-940c-652cd47743ae",
-      "resource_type": "policy_graph",
-      "tenant_id": "37619610-53b4-4eab-87f9-45ba902d30c2"
-    },
-    {
-      "action": "policy.graph_updated",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T01:01:45.694018Z",
-      "details": {},
-      "id": "4b68fc72-1472-48ec-a0cd-c1da34b9d405",
-      "resource_id": "43a4206a-bb8d-46fc-940c-652cd47743ae",
-      "resource_type": "policy_graph",
-      "tenant_id": "37619610-53b4-4eab-87f9-45ba902d30c2"
-    },
-    {
-      "action": "policy.compiled",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T01:01:45.620376Z",
-      "details": {
-        "graph_id": "113a2e61-3515-47a3-abbd-1694fb82811b",
-        "graph_version": 2,
-        "targets": [
-          "edge",
-          "endpoint",
-          "cloud",
-          "mobile"
-        ]
-      },
-      "id": "d3fb555e-b390-4f69-a702-e70e036e1eee",
-      "resource_id": "113a2e61-3515-47a3-abbd-1694fb82811b",
-      "resource_type": "policy_graph",
-      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0"
-    },
-    {
-      "action": "policy.graph_updated",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T01:01:45.507325Z",
-      "details": {},
-      "id": "5c8f0b98-c4c1-4c9e-9801-1ed399435b48",
-      "resource_id": "113a2e61-3515-47a3-abbd-1694fb82811b",
-      "resource_type": "policy_graph",
-      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0"
-    },
-    {
-      "action": "policy.compiled",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T01:01:45.438282Z",
-      "details": {
-        "graph_id": "d4b47136-cc9e-474a-a964-718d455732b6",
-        "graph_version": 2,
-        "targets": [
-          "edge",
-          "endpoint",
-          "cloud",
-          "mobile"
-        ]
-      },
-      "id": "19dd9e92-248d-4e53-9d24-acec45ef7fa0",
-      "resource_id": "d4b47136-cc9e-474a-a964-718d455732b6",
-      "resource_type": "policy_graph",
-      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
-    },
-    {
-      "action": "policy.graph_updated",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T01:01:45.321055Z",
-      "details": {},
-      "id": "b89a06e9-1cb4-4445-8b8f-393a4f934cf1",
-      "resource_id": "d4b47136-cc9e-474a-a964-718d455732b6",
-      "resource_type": "policy_graph",
-      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
-    },
-    {
-      "action": "policy.compiled",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T01:01:45.245732Z",
-      "details": {
-        "graph_id": "f317f39a-5319-415d-9564-36677a603a16",
-        "graph_version": 2,
-        "targets": [
-          "edge",
-          "endpoint",
-          "cloud",
-          "mobile"
-        ]
-      },
-      "id": "2188e4de-01c3-4d07-bebc-bc9fe88122f5",
-      "resource_id": "f317f39a-5319-415d-9564-36677a603a16",
-      "resource_type": "policy_graph",
-      "tenant_id": "0c8d2d9d-896d-45b1-8001-6a6776f832b9"
-    },
-    {
-      "action": "policy.graph_updated",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T01:01:45.129884Z",
-      "details": {},
-      "id": "9d019d09-1315-43bc-8763-22f0f413b44c",
-      "resource_id": "f317f39a-5319-415d-9564-36677a603a16",
-      "resource_type": "policy_graph",
-      "tenant_id": "0c8d2d9d-896d-45b1-8001-6a6776f832b9"
-    },
-    {
-      "action": "policy.compiled",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T01:01:45.06751Z",
-      "details": {
-        "graph_id": "0ba66a48-f633-4b4c-a17d-d3fa6cc4793f",
-        "graph_version": 2,
-        "targets": [
-          "edge",
-          "endpoint",
-          "cloud",
-          "mobile"
-        ]
-      },
-      "id": "87b008a5-13ba-4b6c-aa2e-6ede2ebc5106",
-      "resource_id": "0ba66a48-f633-4b4c-a17d-d3fa6cc4793f",
-      "resource_type": "policy_graph",
-      "tenant_id": "b6520bda-e7bb-4af9-9c53-7b0051eae65b"
-    },
-    {
-      "action": "policy.graph_updated",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T01:01:44.951005Z",
-      "details": {},
-      "id": "f3502201-8c19-4335-a035-8e17b72050be",
-      "resource_id": "0ba66a48-f633-4b4c-a17d-d3fa6cc4793f",
-      "resource_type": "policy_graph",
-      "tenant_id": "b6520bda-e7bb-4af9-9c53-7b0051eae65b"
-    },
-    {
-      "action": "policy.compiled",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T01:01:44.882866Z",
-      "details": {
-        "graph_id": "dbac8b48-923b-4c49-b2ab-0befc43e2ad1",
-        "graph_version": 2,
-        "targets": [
-          "edge",
-          "endpoint",
-          "cloud",
-          "mobile"
-        ]
-      },
-      "id": "c4ff7e5a-320a-44d2-aef7-85f953e3f10f",
-      "resource_id": "dbac8b48-923b-4c49-b2ab-0befc43e2ad1",
-      "resource_type": "policy_graph",
-      "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a"
-    },
-    {
-      "action": "policy.graph_updated",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T01:01:44.765553Z",
-      "details": {},
-      "id": "77160fd0-dc18-4b6a-bfad-8907e7023de1",
-      "resource_id": "dbac8b48-923b-4c49-b2ab-0befc43e2ad1",
-      "resource_type": "policy_graph",
-      "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a"
-    },
-    {
-      "action": "policy.compiled",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
       "created_at": "2026-06-12T01:01:44.685585Z",
       "details": {
         "graph_id": "c38877dc-829f-4b3c-8ded-2e1ea1b31189",
@@ -262,445 +30,965 @@
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.connector_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:57:13.714289Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:22:02.797828Z",
       "details": {
-        "name": "Lumière Salesforce",
-        "type": "salesforce"
+        "app_name": "Grammarly",
+        "applied": false,
+        "category": "ai_writing",
+        "confidence": 35,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated ai_writing app (risk 47): recommend inspect_lite",
+        "risk_score": 47,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
       },
-      "id": "73552f11-c696-48e3-afe0-dbb70c50d249",
-      "resource_id": "e3d463db-e078-496d-bc35-776f95adb290",
-      "resource_type": "casb_connector",
-      "tenant_id": "890486df-98bd-482b-85a8-af361706676f"
+      "id": "9ec9648f-dc7d-49c4-af5c-9ec7741b6296",
+      "resource_id": "118abb2e-59d7-4c94-ac95-b81838e65be4",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.connector_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:57:13.529464Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:22:02.79105Z",
       "details": {
-        "name": "Britannia Salesforce",
-        "type": "salesforce"
+        "app_name": "ChatGPT",
+        "applied": false,
+        "category": "ai_assistant",
+        "confidence": 35,
+        "enforcement": "protect",
+        "mode": "recommend",
+        "reason": "tolerated ai_assistant app (risk 60 / confidence 35): recommend inspect_full",
+        "risk_score": 60,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_full"
       },
-      "id": "3600b1bf-3b06-43cb-b882-eabc0c3885d6",
-      "resource_id": "c575dc8e-1272-4647-9617-efc7dc3bd083",
-      "resource_type": "casb_connector",
-      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
+      "id": "2266a17f-80b7-49bb-a4ec-b1a7a2e61b6a",
+      "resource_id": "72a44a34-c2c0-4509-9de5-f4e9ac64e682",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.connector_deleted",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:57:04.900562Z",
-      "details": {},
-      "id": "cf109949-a291-41ac-902b-ab68e0e11c77",
-      "resource_id": "6f9d8486-7a63-4479-9920-0f2c03e13274",
-      "resource_type": "casb_connector",
-      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
-    },
-    {
-      "action": "casb.connector_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:46.953731Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:22:02.776335Z",
       "details": {
-        "name": "probe-salesforce",
-        "type": "salesforce"
+        "app_name": "DeepL",
+        "applied": false,
+        "category": "ai_translation",
+        "confidence": 35,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated ai_translation app (risk 44): recommend inspect_lite",
+        "risk_score": 44,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
       },
-      "id": "04ee284d-42a8-429b-9fed-526633b1632c",
-      "resource_id": "6f9d8486-7a63-4479-9920-0f2c03e13274",
-      "resource_type": "casb_connector",
-      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
+      "id": "99769cf4-2606-4ab2-b613-406d65543244",
+      "resource_id": "70c0c4ab-3bae-47e3-8818-67f629caca21",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "apikey.create",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:21.326762Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:22:02.77018Z",
       "details": {
-        "name": "edge-bootstrap",
-        "subject": "svc:edge"
+        "app_name": "Pastebin",
+        "applied": false,
+        "category": "code_paste",
+        "confidence": 30,
+        "enforcement": "enforce",
+        "mode": "recommend",
+        "reason": "high-risk code_paste app (risk 75): recommend blocking — auto-block withheld as destructive",
+        "risk_score": 75,
+        "sanction": "tolerated",
+        "traffic_class": "block"
       },
-      "id": "d42fffc0-0695-43bb-ac30-d1b83f501724",
-      "resource_id": "52ca2e2e-eb50-4d4a-873c-fb942351e6ec",
-      "resource_type": "tenant_api_key",
-      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
+      "id": "3fed6a44-70fd-424a-8beb-82d95657ac17",
+      "resource_id": "959b2834-14e5-45a1-8c7d-91ebd2e98726",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:21.313966Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:22:02.764381Z",
       "details": {
-        "action": "share",
-        "app_id": "google_workspace",
-        "verdict": "log"
+        "app_name": "Notion",
+        "applied": false,
+        "category": "productivity",
+        "confidence": 85,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated productivity app (risk 36): recommend inspect_lite",
+        "risk_score": 36,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
       },
-      "id": "d09fa92e-6b49-4397-aa1d-65e97a4d80f4",
-      "resource_id": "592fbb53-3920-42c6-9aa9-c0c13974c10c",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
+      "id": "71c80a37-24a6-40f6-8b99-02f3f849ea57",
+      "resource_id": "be1e2fde-2f85-48c5-bb76-5cc772a3d95a",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:21.310158Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:22:02.757989Z",
       "details": {
-        "action": "download",
-        "app_id": "salesforce",
-        "verdict": "block"
+        "app_name": "WeTransfer",
+        "applied": false,
+        "category": "file_transfer",
+        "confidence": 85,
+        "enforcement": "enforce",
+        "mode": "recommend",
+        "reason": "high-risk file_transfer app (risk 70): recommend blocking — auto-block withheld as destructive",
+        "risk_score": 70,
+        "sanction": "unsanctioned",
+        "traffic_class": "block"
       },
-      "id": "9cf0fa1f-640f-4ab6-8ee4-7c5038dd2391",
-      "resource_id": "6fc0b2f5-baa7-4a9f-8fb7-747cd86ffc1f",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
+      "id": "b9a1874b-02eb-4f77-aa3b-df91a90088f2",
+      "resource_id": "5f3acb95-0e98-4def-b034-490ea18cfe17",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:21.306132Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:20:02.789975Z",
       "details": {
-        "action": "upload",
-        "app_id": "m365",
-        "verdict": "log"
+        "app_name": "Grammarly",
+        "applied": false,
+        "category": "ai_writing",
+        "confidence": 35,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated ai_writing app (risk 47): recommend inspect_lite",
+        "risk_score": 47,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
       },
-      "id": "bc10445c-d86d-47f8-887d-995060a26322",
-      "resource_id": "5fd625ec-e196-4060-a9ad-c72aedb52683",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
+      "id": "15ac19dd-0125-46f0-9547-5f5067371ad6",
+      "resource_id": "664bdeae-765a-49a2-8c72-6095f8d68587",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:21.302424Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:20:02.783677Z",
       "details": {
-        "action": "share",
-        "app_id": "m365",
-        "verdict": "block"
+        "app_name": "ChatGPT",
+        "applied": false,
+        "category": "ai_assistant",
+        "confidence": 35,
+        "enforcement": "protect",
+        "mode": "recommend",
+        "reason": "tolerated ai_assistant app (risk 60 / confidence 35): recommend inspect_full",
+        "risk_score": 60,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_full"
       },
-      "id": "5e187d8d-4490-40dc-bd96-03099b87588d",
-      "resource_id": "565ce7f8-800c-47f0-8c57-2f24ebd40f7e",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
+      "id": "aa939436-03c4-4c33-8fa6-b03c48f69898",
+      "resource_id": "47939848-96ee-4863-8b7d-38ac2762a732",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "apikey.create",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:21.254684Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:20:02.77109Z",
       "details": {
-        "name": "edge-bootstrap",
-        "subject": "svc:edge"
+        "app_name": "DeepL",
+        "applied": false,
+        "category": "ai_translation",
+        "confidence": 35,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated ai_translation app (risk 44): recommend inspect_lite",
+        "risk_score": 44,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
       },
-      "id": "4b61eac4-2e0d-47c8-bbd9-f6806f08c7dd",
-      "resource_id": "6e1a0d63-5bb7-47c2-a50f-aa9f1a9ec891",
-      "resource_type": "tenant_api_key",
-      "tenant_id": "890486df-98bd-482b-85a8-af361706676f"
+      "id": "88ae1835-b81d-4158-96d7-14a55d3eeea9",
+      "resource_id": "4af68675-dc80-4821-bffd-d36ab3f565aa",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:21.241797Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:20:02.765939Z",
       "details": {
-        "action": "share",
-        "app_id": "google_workspace",
-        "verdict": "log"
+        "app_name": "Pastebin",
+        "applied": false,
+        "category": "code_paste",
+        "confidence": 30,
+        "enforcement": "enforce",
+        "mode": "recommend",
+        "reason": "high-risk code_paste app (risk 75): recommend blocking — auto-block withheld as destructive",
+        "risk_score": 75,
+        "sanction": "tolerated",
+        "traffic_class": "block"
       },
-      "id": "85db0741-0f2c-437f-9733-9030d16308dc",
-      "resource_id": "d2d1e0c8-33e2-43f1-a195-645bf2afa6a8",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "890486df-98bd-482b-85a8-af361706676f"
+      "id": "ed62d9c3-402b-470e-b64c-2f6313bb57f4",
+      "resource_id": "f4b20773-545e-4e88-9e56-0d85de61b6b7",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:21.238239Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:20:02.760492Z",
       "details": {
-        "action": "download",
-        "app_id": "salesforce",
-        "verdict": "block"
+        "app_name": "Notion",
+        "applied": false,
+        "category": "productivity",
+        "confidence": 85,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated productivity app (risk 36): recommend inspect_lite",
+        "risk_score": 36,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
       },
-      "id": "69ee654a-1ece-48e3-9f57-80312fd192d0",
-      "resource_id": "3e5024e5-326d-4f21-93b3-d008ac444599",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "890486df-98bd-482b-85a8-af361706676f"
+      "id": "25e0e415-2002-4f8f-b9b3-22f08265e14f",
+      "resource_id": "2f94d4ee-6a8e-4081-beca-c87623259671",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:21.234392Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:20:02.754542Z",
       "details": {
-        "action": "upload",
-        "app_id": "m365",
-        "verdict": "log"
+        "app_name": "WeTransfer",
+        "applied": false,
+        "category": "file_transfer",
+        "confidence": 85,
+        "enforcement": "enforce",
+        "mode": "recommend",
+        "reason": "high-risk file_transfer app (risk 70): recommend blocking — auto-block withheld as destructive",
+        "risk_score": 70,
+        "sanction": "unsanctioned",
+        "traffic_class": "block"
       },
-      "id": "441e4587-a914-4e25-bc71-43fe82743c6d",
-      "resource_id": "1483d020-5ead-4619-acc7-0c73a7da6174",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "890486df-98bd-482b-85a8-af361706676f"
+      "id": "58c501b4-06fc-4ec3-b6e2-4e3895009f2b",
+      "resource_id": "de787844-23d7-451c-9c4a-72d498b79585",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:21.230346Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:18:02.788516Z",
       "details": {
-        "action": "share",
-        "app_id": "m365",
-        "verdict": "block"
+        "app_name": "Grammarly",
+        "applied": false,
+        "category": "ai_writing",
+        "confidence": 35,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated ai_writing app (risk 47): recommend inspect_lite",
+        "risk_score": 47,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
       },
-      "id": "c0703d2b-c06b-4c68-931e-172c160d325b",
-      "resource_id": "b2de0008-e927-44a5-94c7-3586d913e0cc",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "890486df-98bd-482b-85a8-af361706676f"
+      "id": "460860c6-5802-48e3-93fe-1333ee087f93",
+      "resource_id": "313fb29e-2c8b-46a8-a642-c2e1471a03e0",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "apikey.create",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:21.179224Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:18:02.7835Z",
       "details": {
-        "name": "edge-bootstrap",
-        "subject": "svc:edge"
+        "app_name": "ChatGPT",
+        "applied": false,
+        "category": "ai_assistant",
+        "confidence": 35,
+        "enforcement": "protect",
+        "mode": "recommend",
+        "reason": "tolerated ai_assistant app (risk 60 / confidence 35): recommend inspect_full",
+        "risk_score": 60,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_full"
       },
-      "id": "8b58cc3a-aaca-4fcc-a146-beb923c68243",
-      "resource_id": "38fb14c1-56c6-4c08-8116-9e5b61d00bb3",
-      "resource_type": "tenant_api_key",
-      "tenant_id": "37619610-53b4-4eab-87f9-45ba902d30c2"
+      "id": "f43f2f8c-902e-458b-aa16-65ab930e3081",
+      "resource_id": "5adb548f-bf4a-4831-ab6e-157e33e1daa4",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:21.167487Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:18:02.772045Z",
       "details": {
-        "action": "share",
-        "app_id": "google_workspace",
-        "verdict": "log"
+        "app_name": "DeepL",
+        "applied": false,
+        "category": "ai_translation",
+        "confidence": 35,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated ai_translation app (risk 44): recommend inspect_lite",
+        "risk_score": 44,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
       },
-      "id": "c1c495d5-40ce-4935-8b54-2914a65c6f00",
-      "resource_id": "89fd59d6-4c79-48f0-a1c4-678a7b4aa1da",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "37619610-53b4-4eab-87f9-45ba902d30c2"
+      "id": "d1bdf59f-d0ab-4ce4-b5b4-b504895fcf69",
+      "resource_id": "d5777106-e362-4cfa-af8d-284d894b47df",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:21.163665Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:18:02.766588Z",
       "details": {
-        "action": "download",
-        "app_id": "salesforce",
-        "verdict": "block"
+        "app_name": "Pastebin",
+        "applied": false,
+        "category": "code_paste",
+        "confidence": 30,
+        "enforcement": "enforce",
+        "mode": "recommend",
+        "reason": "high-risk code_paste app (risk 75): recommend blocking — auto-block withheld as destructive",
+        "risk_score": 75,
+        "sanction": "tolerated",
+        "traffic_class": "block"
       },
-      "id": "be641e44-c098-4d9d-8abb-d07297ee0235",
-      "resource_id": "59f26df5-64fb-454c-b6fe-e44f3798f655",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "37619610-53b4-4eab-87f9-45ba902d30c2"
+      "id": "f3bddaf9-a5d0-4bce-a284-8f5d1a247b7a",
+      "resource_id": "4488ab1f-3169-4f62-b38f-87df80c4972d",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:21.159932Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:18:02.761181Z",
       "details": {
-        "action": "upload",
-        "app_id": "m365",
-        "verdict": "log"
+        "app_name": "Notion",
+        "applied": false,
+        "category": "productivity",
+        "confidence": 85,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated productivity app (risk 36): recommend inspect_lite",
+        "risk_score": 36,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
       },
-      "id": "6f85ab3e-b455-4a6d-82ae-985f242e4664",
-      "resource_id": "5d1fabcf-0236-4645-8ab1-9578ea3d0645",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "37619610-53b4-4eab-87f9-45ba902d30c2"
+      "id": "99cfe771-8913-4dcf-9eb3-4c1dc2a96bee",
+      "resource_id": "d1da0b0a-129f-4991-a9c7-6c0a6e5ef8e9",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:21.155493Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:18:02.755761Z",
       "details": {
-        "action": "share",
-        "app_id": "m365",
-        "verdict": "block"
+        "app_name": "WeTransfer",
+        "applied": false,
+        "category": "file_transfer",
+        "confidence": 85,
+        "enforcement": "enforce",
+        "mode": "recommend",
+        "reason": "high-risk file_transfer app (risk 70): recommend blocking — auto-block withheld as destructive",
+        "risk_score": 70,
+        "sanction": "unsanctioned",
+        "traffic_class": "block"
       },
-      "id": "7e0df467-8581-4280-9db7-e5eb1372a0bf",
-      "resource_id": "d518b143-f477-45ff-8a36-33b8472a1bd1",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "37619610-53b4-4eab-87f9-45ba902d30c2"
+      "id": "29e08927-4cbf-4eb0-8fad-5a508ffb805e",
+      "resource_id": "ece9fa0f-0637-4742-a77e-7fbac9a8b03f",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "apikey.create",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:21.093694Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:16:02.797619Z",
       "details": {
-        "name": "edge-bootstrap",
-        "subject": "svc:edge"
+        "app_name": "Grammarly",
+        "applied": false,
+        "category": "ai_writing",
+        "confidence": 35,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated ai_writing app (risk 47): recommend inspect_lite",
+        "risk_score": 47,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
       },
-      "id": "5ba446a9-f5af-48d6-9ae4-76a69e427ec9",
-      "resource_id": "2ad716db-65d3-48f6-89ee-08f4f7726411",
-      "resource_type": "tenant_api_key",
-      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0"
+      "id": "6de59d65-a899-44f9-9075-0504b2d969e7",
+      "resource_id": "16489d13-aecb-4f4c-96b6-8532c052fa0c",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:21.077388Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:16:02.791882Z",
       "details": {
-        "action": "share",
-        "app_id": "google_workspace",
-        "verdict": "log"
+        "app_name": "ChatGPT",
+        "applied": false,
+        "category": "ai_assistant",
+        "confidence": 35,
+        "enforcement": "protect",
+        "mode": "recommend",
+        "reason": "tolerated ai_assistant app (risk 60 / confidence 35): recommend inspect_full",
+        "risk_score": 60,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_full"
       },
-      "id": "c90ac450-8f10-47f4-aecb-fe25e3c5fa02",
-      "resource_id": "96a1e163-c0ec-4367-9431-4b5a6ec816be",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0"
+      "id": "f19a27cf-bcc7-4f42-9dd6-86a47ee2060d",
+      "resource_id": "b5f13f5a-e4f7-49db-a0fa-915306830980",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:21.073804Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:16:02.777066Z",
       "details": {
-        "action": "download",
-        "app_id": "salesforce",
-        "verdict": "block"
+        "app_name": "DeepL",
+        "applied": false,
+        "category": "ai_translation",
+        "confidence": 35,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated ai_translation app (risk 44): recommend inspect_lite",
+        "risk_score": 44,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
       },
-      "id": "0a71a7e5-04b3-485d-a491-dd9c72778860",
-      "resource_id": "ff80b75a-0986-4078-919c-834e8c7aee8a",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0"
+      "id": "6c80538e-70dd-48eb-b9b9-7b2f79191150",
+      "resource_id": "3769d5c8-d674-4de5-b626-bb4cac94bd26",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:21.070455Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:16:02.770695Z",
       "details": {
-        "action": "upload",
-        "app_id": "m365",
-        "verdict": "log"
+        "app_name": "Pastebin",
+        "applied": false,
+        "category": "code_paste",
+        "confidence": 30,
+        "enforcement": "enforce",
+        "mode": "recommend",
+        "reason": "high-risk code_paste app (risk 75): recommend blocking — auto-block withheld as destructive",
+        "risk_score": 75,
+        "sanction": "tolerated",
+        "traffic_class": "block"
       },
-      "id": "00f5843e-3e78-4c0a-afd5-f862294bb150",
-      "resource_id": "c2508eec-0566-4fe7-9955-eabacfe18e7f",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0"
+      "id": "c9dae8c9-0e9c-4e25-930a-5f07be4d1838",
+      "resource_id": "28078261-ba0a-47ef-b586-1bbdd4ed3242",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:21.06677Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:16:02.76483Z",
       "details": {
-        "action": "share",
-        "app_id": "m365",
-        "verdict": "block"
+        "app_name": "Notion",
+        "applied": false,
+        "category": "productivity",
+        "confidence": 85,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated productivity app (risk 36): recommend inspect_lite",
+        "risk_score": 36,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
       },
-      "id": "f3ca5935-2697-4920-8c64-d2ec84ff0281",
-      "resource_id": "48dacc36-141f-474a-9ebd-18649fb80cf4",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0"
+      "id": "402f872a-d89e-4940-a925-64c3edec13fd",
+      "resource_id": "a57e80b1-015d-4db4-a030-236cbf2cf671",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "apikey.create",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:21.012558Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:16:02.758399Z",
       "details": {
-        "name": "edge-bootstrap",
-        "subject": "svc:edge"
+        "app_name": "WeTransfer",
+        "applied": false,
+        "category": "file_transfer",
+        "confidence": 85,
+        "enforcement": "enforce",
+        "mode": "recommend",
+        "reason": "high-risk file_transfer app (risk 70): recommend blocking — auto-block withheld as destructive",
+        "risk_score": 70,
+        "sanction": "unsanctioned",
+        "traffic_class": "block"
       },
-      "id": "85d3678a-68b1-49b4-b9ae-d3a4bcc5fb2a",
-      "resource_id": "6e4b939f-92f2-4556-ae36-5bd3cf6820e3",
-      "resource_type": "tenant_api_key",
-      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
+      "id": "567ed0ca-5e8e-414c-bc75-9d308f6d6ac2",
+      "resource_id": "d5f9c82f-2e2d-472c-b2d8-586f521b34f0",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:20.993799Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:14:02.795017Z",
       "details": {
-        "action": "share",
-        "app_id": "google_workspace",
-        "verdict": "log"
+        "app_name": "Grammarly",
+        "applied": false,
+        "category": "ai_writing",
+        "confidence": 35,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated ai_writing app (risk 47): recommend inspect_lite",
+        "risk_score": 47,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
       },
-      "id": "e745e21d-8588-44a4-9d8c-0e092d988577",
-      "resource_id": "7e941d00-ad89-4843-a4d8-6ff6dbaec055",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
+      "id": "01773f0a-f16a-4f94-b41b-4b7352bae770",
+      "resource_id": "d98fa6b7-0a30-4599-aec0-1491c308772e",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:20.989717Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:14:02.789106Z",
       "details": {
-        "action": "download",
-        "app_id": "salesforce",
-        "verdict": "block"
+        "app_name": "ChatGPT",
+        "applied": false,
+        "category": "ai_assistant",
+        "confidence": 35,
+        "enforcement": "protect",
+        "mode": "recommend",
+        "reason": "tolerated ai_assistant app (risk 60 / confidence 35): recommend inspect_full",
+        "risk_score": 60,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_full"
       },
-      "id": "7ba04253-5d00-447a-afc4-b2207f07677e",
-      "resource_id": "f0a81000-6261-4c03-919d-e670a226bd86",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
+      "id": "7babec7d-0c2b-450f-972f-493ea1e2aa3f",
+      "resource_id": "e77edef2-5e35-4bfe-9deb-7188ff4ebf26",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:20.98578Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:14:02.774965Z",
       "details": {
-        "action": "upload",
-        "app_id": "m365",
-        "verdict": "log"
+        "app_name": "DeepL",
+        "applied": false,
+        "category": "ai_translation",
+        "confidence": 35,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated ai_translation app (risk 44): recommend inspect_lite",
+        "risk_score": 44,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
       },
-      "id": "0ecacf1b-3dad-4c29-bbca-568b98866263",
-      "resource_id": "5871b46a-6c17-4225-b953-9901f129f79c",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
+      "id": "b69b4ef4-e636-4c4a-bcaa-5a27d0e604d5",
+      "resource_id": "ad100331-33e2-44d1-a549-448abf273db0",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:56:20.980958Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:14:02.76887Z",
       "details": {
-        "action": "share",
-        "app_id": "m365",
-        "verdict": "block"
+        "app_name": "Pastebin",
+        "applied": false,
+        "category": "code_paste",
+        "confidence": 30,
+        "enforcement": "enforce",
+        "mode": "recommend",
+        "reason": "high-risk code_paste app (risk 75): recommend blocking — auto-block withheld as destructive",
+        "risk_score": 75,
+        "sanction": "tolerated",
+        "traffic_class": "block"
       },
-      "id": "a483817b-69a5-4135-bc1d-7e41f18452e0",
-      "resource_id": "8af71f93-de1c-4bc6-860c-be9ee2d77848",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
+      "id": "64c0870a-fe72-4cd4-87a8-c0a0642f42e4",
+      "resource_id": "e698057b-b074-41d3-943a-397433878b02",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "webhook.endpoint_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:54:57.915815Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:14:02.763985Z",
       "details": {
-        "events": [
-          "alert.created",
-          "device.enrolled",
-          "dlp.violation"
-        ],
-        "url": "https://hooks.example.com/sng/nordic-educloud"
+        "app_name": "Notion",
+        "applied": false,
+        "category": "productivity",
+        "confidence": 85,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated productivity app (risk 36): recommend inspect_lite",
+        "risk_score": 36,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
       },
-      "id": "3d768cae-f4c1-4dec-b685-e9056adfe324",
-      "resource_id": "cc7b0d63-01a8-4a17-8659-6c807f121712",
-      "resource_type": "webhook_endpoint",
-      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
+      "id": "a55f0fb9-8d30-4e02-9939-b7012bbd7efc",
+      "resource_id": "18bce7c3-f9d4-4c96-b29c-64b54e1a1393",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "policy.compiled",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:54:57.897355Z",
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:14:02.758247Z",
       "details": {
-        "graph_id": "a7a495ee-a73c-4d15-83ca-ed8e661dcfe7",
-        "graph_version": 1,
-        "targets": [
-          "edge",
-          "endpoint",
-          "cloud",
-          "mobile"
-        ]
+        "app_name": "WeTransfer",
+        "applied": false,
+        "category": "file_transfer",
+        "confidence": 85,
+        "enforcement": "enforce",
+        "mode": "recommend",
+        "reason": "high-risk file_transfer app (risk 70): recommend blocking — auto-block withheld as destructive",
+        "risk_score": 70,
+        "sanction": "unsanctioned",
+        "traffic_class": "block"
       },
-      "id": "f9463999-6b86-479b-b172-c03323267ea2",
-      "resource_id": "a7a495ee-a73c-4d15-83ca-ed8e661dcfe7",
-      "resource_type": "policy_graph",
-      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
+      "id": "a274c251-191a-4404-a98a-15770f7e24ff",
+      "resource_id": "6de9a51a-e3c7-4223-bd34-770b7ae98f1d",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     },
     {
-      "action": "policy.graph_updated",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-12T00:54:57.772171Z",
-      "details": {},
-      "id": "0739ed1b-5cc6-4556-913c-4d903955be65",
-      "resource_id": "a7a495ee-a73c-4d15-83ca-ed8e661dcfe7",
-      "resource_type": "policy_graph",
-      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:12:02.783862Z",
+      "details": {
+        "app_name": "Grammarly",
+        "applied": false,
+        "category": "ai_writing",
+        "confidence": 35,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated ai_writing app (risk 47): recommend inspect_lite",
+        "risk_score": 47,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
+      },
+      "id": "2217d580-76a3-4e46-9e6d-f5fea03633d8",
+      "resource_id": "aba9c815-7ed2-4530-8c83-d8eb8adf7139",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:12:02.77766Z",
+      "details": {
+        "app_name": "ChatGPT",
+        "applied": false,
+        "category": "ai_assistant",
+        "confidence": 35,
+        "enforcement": "protect",
+        "mode": "recommend",
+        "reason": "tolerated ai_assistant app (risk 60 / confidence 35): recommend inspect_full",
+        "risk_score": 60,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_full"
+      },
+      "id": "c7250631-1865-47e1-858c-d4cdfe9b2550",
+      "resource_id": "3717d730-cf7f-48b6-9f8c-6756efb7f55e",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:12:02.765417Z",
+      "details": {
+        "app_name": "DeepL",
+        "applied": false,
+        "category": "ai_translation",
+        "confidence": 35,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated ai_translation app (risk 44): recommend inspect_lite",
+        "risk_score": 44,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
+      },
+      "id": "f2b5e694-7e51-462e-a9e6-d95f204fa616",
+      "resource_id": "07db7000-f046-48ef-86e3-653ae1b7b6fe",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:12:02.759896Z",
+      "details": {
+        "app_name": "Pastebin",
+        "applied": false,
+        "category": "code_paste",
+        "confidence": 30,
+        "enforcement": "enforce",
+        "mode": "recommend",
+        "reason": "high-risk code_paste app (risk 75): recommend blocking — auto-block withheld as destructive",
+        "risk_score": 75,
+        "sanction": "tolerated",
+        "traffic_class": "block"
+      },
+      "id": "6d5831ee-059e-4814-a6db-fa25718ea4af",
+      "resource_id": "5c279941-9fe9-4466-bebb-7df9be9cf4b8",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:12:02.754119Z",
+      "details": {
+        "app_name": "Notion",
+        "applied": false,
+        "category": "productivity",
+        "confidence": 85,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated productivity app (risk 36): recommend inspect_lite",
+        "risk_score": 36,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
+      },
+      "id": "892c0419-d915-4331-9d9e-6a5e1c0c6ed2",
+      "resource_id": "ba992f26-ce3e-429f-a54a-528b83d63af8",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:12:02.748483Z",
+      "details": {
+        "app_name": "WeTransfer",
+        "applied": false,
+        "category": "file_transfer",
+        "confidence": 85,
+        "enforcement": "enforce",
+        "mode": "recommend",
+        "reason": "high-risk file_transfer app (risk 70): recommend blocking — auto-block withheld as destructive",
+        "risk_score": 70,
+        "sanction": "unsanctioned",
+        "traffic_class": "block"
+      },
+      "id": "590cb710-c4dc-433d-b7fc-ab879fda9b23",
+      "resource_id": "8c90a4c0-4f9a-4a45-915f-8178933fdda2",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:10:02.802664Z",
+      "details": {
+        "app_name": "Grammarly",
+        "applied": false,
+        "category": "ai_writing",
+        "confidence": 35,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated ai_writing app (risk 47): recommend inspect_lite",
+        "risk_score": 47,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
+      },
+      "id": "12776681-e1a1-493b-8dc5-b60f68f65df7",
+      "resource_id": "79c025ed-6c5b-4e79-9755-78a9c0807a20",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:10:02.795967Z",
+      "details": {
+        "app_name": "ChatGPT",
+        "applied": false,
+        "category": "ai_assistant",
+        "confidence": 35,
+        "enforcement": "protect",
+        "mode": "recommend",
+        "reason": "tolerated ai_assistant app (risk 60 / confidence 35): recommend inspect_full",
+        "risk_score": 60,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_full"
+      },
+      "id": "cc47e4a7-cf9b-42a3-a46d-8f241ead0477",
+      "resource_id": "fc7f725f-ad56-453c-9109-f65a0ef5edbd",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:10:02.780273Z",
+      "details": {
+        "app_name": "DeepL",
+        "applied": false,
+        "category": "ai_translation",
+        "confidence": 35,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated ai_translation app (risk 44): recommend inspect_lite",
+        "risk_score": 44,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
+      },
+      "id": "d4cfcf2e-3c47-4a52-ab35-bb3f473fd24b",
+      "resource_id": "b92d3181-e2a9-4f8c-b555-a02dcd236bb9",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:10:02.774424Z",
+      "details": {
+        "app_name": "Pastebin",
+        "applied": false,
+        "category": "code_paste",
+        "confidence": 30,
+        "enforcement": "enforce",
+        "mode": "recommend",
+        "reason": "high-risk code_paste app (risk 75): recommend blocking — auto-block withheld as destructive",
+        "risk_score": 75,
+        "sanction": "tolerated",
+        "traffic_class": "block"
+      },
+      "id": "14d9a599-ac13-4ccf-9235-895253a21c38",
+      "resource_id": "cf5be0af-53d8-4901-a11d-1cdc64e93276",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:10:02.767902Z",
+      "details": {
+        "app_name": "Notion",
+        "applied": false,
+        "category": "productivity",
+        "confidence": 85,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated productivity app (risk 36): recommend inspect_lite",
+        "risk_score": 36,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
+      },
+      "id": "0f6d49e0-784d-4e90-95f2-79e32d1e50b9",
+      "resource_id": "00e36351-01eb-4a1f-a6b1-e0ce8e258397",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:10:02.761631Z",
+      "details": {
+        "app_name": "WeTransfer",
+        "applied": false,
+        "category": "file_transfer",
+        "confidence": 85,
+        "enforcement": "enforce",
+        "mode": "recommend",
+        "reason": "high-risk file_transfer app (risk 70): recommend blocking — auto-block withheld as destructive",
+        "risk_score": 70,
+        "sanction": "unsanctioned",
+        "traffic_class": "block"
+      },
+      "id": "00010b30-139d-44e1-931c-2b611f260c7e",
+      "resource_id": "22fe9a24-dcd3-4345-a53b-26c8cdc9becb",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:08:02.785575Z",
+      "details": {
+        "app_name": "Grammarly",
+        "applied": false,
+        "category": "ai_writing",
+        "confidence": 35,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated ai_writing app (risk 47): recommend inspect_lite",
+        "risk_score": 47,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
+      },
+      "id": "def49612-f30c-4fd5-a975-ff8742745f85",
+      "resource_id": "dd2638a1-e5a0-4900-88c8-05fca6a80e50",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:08:02.77967Z",
+      "details": {
+        "app_name": "ChatGPT",
+        "applied": false,
+        "category": "ai_assistant",
+        "confidence": 35,
+        "enforcement": "protect",
+        "mode": "recommend",
+        "reason": "tolerated ai_assistant app (risk 60 / confidence 35): recommend inspect_full",
+        "risk_score": 60,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_full"
+      },
+      "id": "460603a3-90a3-4f8c-93a4-43fbc53bc796",
+      "resource_id": "220528af-7daf-4d4f-ac61-3ef92c65001e",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:08:02.767202Z",
+      "details": {
+        "app_name": "DeepL",
+        "applied": false,
+        "category": "ai_translation",
+        "confidence": 35,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated ai_translation app (risk 44): recommend inspect_lite",
+        "risk_score": 44,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
+      },
+      "id": "6da34d64-03bd-43d0-a98c-510246c29f64",
+      "resource_id": "e9053cad-60d1-4c9b-a397-eb5cd8b2a49c",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:08:02.762144Z",
+      "details": {
+        "app_name": "Pastebin",
+        "applied": false,
+        "category": "code_paste",
+        "confidence": 30,
+        "enforcement": "enforce",
+        "mode": "recommend",
+        "reason": "high-risk code_paste app (risk 75): recommend blocking — auto-block withheld as destructive",
+        "risk_score": 75,
+        "sanction": "tolerated",
+        "traffic_class": "block"
+      },
+      "id": "0b4c939c-2419-4376-b997-aff4b6955d47",
+      "resource_id": "b858356a-4b7e-4409-a9b3-63a2ccaacb5f",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:08:02.756596Z",
+      "details": {
+        "app_name": "Notion",
+        "applied": false,
+        "category": "productivity",
+        "confidence": 85,
+        "enforcement": "throttle",
+        "mode": "recommend",
+        "reason": "tolerated productivity app (risk 36): recommend inspect_lite",
+        "risk_score": 36,
+        "sanction": "tolerated",
+        "traffic_class": "inspect_lite"
+      },
+      "id": "87d850d0-5109-48d3-9efe-367a793b72ce",
+      "resource_id": "d7c0c8eb-e12a-466a-b05e-8a15dfde707e",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.app_noops_recommend",
+      "created_at": "2026-06-11T19:08:02.75093Z",
+      "details": {
+        "app_name": "WeTransfer",
+        "applied": false,
+        "category": "file_transfer",
+        "confidence": 85,
+        "enforcement": "enforce",
+        "mode": "recommend",
+        "reason": "high-risk file_transfer app (risk 70): recommend blocking — auto-block withheld as destructive",
+        "risk_score": 70,
+        "sanction": "unsanctioned",
+        "traffic_class": "block"
+      },
+      "id": "194fe612-0450-4734-8dc0-661a23649e73",
+      "resource_id": "748468e7-d828-438e-aad4-c5e5517471da",
+      "resource_type": "casb_discovered_app",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
     }
   ],
-  "next_cursor": "eyJ0IjoiMjAyNi0wNi0xMlQwMDo1NDo1Ny43NzIxNzFaIiwiaSI6IjA3MzllZDFiLTVjYzYtNDU1Ni05MTNjLTRkOTAzOTU1YmU2NSJ9"
+  "next_cursor": "eyJ0IjoiMjAyNi0wNi0xMVQxOTowODowMi43NTA5M1oiLCJpIjoiMTk0ZmU2MTItMDQ1MC00NzM0LThkYzAtNjYxYTIzNjQ5ZTczIn0"
 }

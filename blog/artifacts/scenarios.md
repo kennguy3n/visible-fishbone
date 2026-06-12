@@ -51,6 +51,18 @@ payload below is byte-for-byte reproducible across reseeds.
   are seeded directly with `blog/harness/seed/dlp_review_seed.sql`,
   mirroring the exact redacted shape the real producer writes
   (kind/label/count/severity only). Re-runnable and deterministic.
+- **Per-tenant isolation is enforced, not assumed.** The capture harness
+  hits per-tenant endpoints (`/api/v1/tenants/{tid}/…`) with a global-admin
+  token, so the *only* thing that scopes each list to its tenant is Postgres
+  row-level security. RLS is bypassed for superuser/`BYPASSRLS` roles, so the
+  control plane must run as the non-superuser `sng_app` role (via
+  `PG_APP_ROLE=sng_app`, adopted per-connection with `SET SESSION ROLE`).
+  These artifacts were captured with that role active — which is why, e.g.,
+  `s5-acme-dlp-policies.json` shows Acme's **one** PCI-DSS policy (not the
+  fleet-wide list) and `s5-nordic-dlp-policies-emptystate.json` is a genuine
+  empty list. Capturing as the bare superuser login silently returns
+  cross-tenant rows; the harness counts therefore filter defensively with
+  `rowBelongsToTenant` as a second line of defence.
 - **Compliance regimes** (`pt-applied-*.json`) are the smart-default
   baselines the policy-template engine renders from each tenant's
   `(industry, country)` coordinates — one selection compiles to a
