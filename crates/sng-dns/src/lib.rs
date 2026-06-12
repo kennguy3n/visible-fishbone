@@ -53,6 +53,7 @@
 pub mod category;
 pub mod error;
 pub mod filter;
+pub mod managed;
 pub mod qtype;
 pub mod query;
 pub mod reputation;
@@ -66,6 +67,9 @@ pub mod wire;
 pub use category::{Category, CategoryAction, CategoryDb};
 pub use error::DnsError;
 pub use filter::{ChainOutcome, Filter, FilterChain, FilterDecision, combine_verdicts};
+pub use managed::{
+    AppliedFeed, FeedBundle, FeedBundleError, FeedVerifier, ManagedFeedApplier, SignedFeedBundle,
+};
 pub use qtype::{QType, RCode};
 pub use query::{DnsQuery, DnsResponse, canonicalize_name, domain_suffix_match};
 pub use reputation::Reputation;

@@ -3351,10 +3351,13 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "async-trait",
+ "base64",
+ "ed25519-dalek",
  "ipnet",
  "parking_lot",
  "pretty_assertions",
  "serde",
+ "serde_json",
  "sng-core",
  "sng-telemetry",
  "tempfile",

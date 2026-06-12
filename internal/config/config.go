@@ -86,6 +86,7 @@ type Config struct {
 	CASB               CASB
 	AI                 AI
 	ThreatIntel        ThreatIntel
+	ManagedDNSFeeds    ManagedDNSFeeds
 	MobileAuth         MobileAuth
 	Metering           Metering
 	PoP                PoP
@@ -512,6 +513,59 @@ type ThreatIntel struct {
 	// HealthInterval is how often per-feed staleness and store-size
 	// telemetry is evaluated and published. Defaults to 1m.
 	HealthInterval time.Duration
+}
+
+// ManagedDNSFeeds carries the runtime knobs for the MANAGED DNS
+// threat-intel feed pipeline (internal/service/threatintel): the
+// leader-gated control-plane loop that fetches DNS reputation /
+// category feeds from configured upstream URLs, normalizes them into
+// the feed format the `sng-dns` crate consumes, and signs +
+// distributes the resulting bundle over NATS.
+//
+// This is distinct from the ThreatIntel section above (the WS8 IOC
+// aggregator for the IPS data plane, env prefix THREATINTEL_*). This
+// section produces the DNS reputation / category feeds specifically and
+// uses the THREAT_INTEL_* env prefix.
+//
+// The whole pipeline is DEFAULT-OFF: Enabled gates registration of the
+// RunIfLeader loop, so with the flag unset no goroutine is started and
+// no upstream is contacted. Parsed leniently for the non-load-bearing
+// knobs; RefreshInterval is validated (> 0 when Enabled) so a typo
+// fails boot rather than silently busy-looping.
+type ManagedDNSFeeds struct {
+	// Enabled gates the leader-only managed-feed loop. Default false.
+	// THREAT_INTEL_ENABLED.
+	Enabled bool
+	// RefreshInterval is the cadence of the feed refresh loop. Defaults
+	// to 1h. Only consulted when Enabled. THREAT_INTEL_REFRESH_INTERVAL.
+	RefreshInterval time.Duration
+	// SigningKeyHex is the hex-encoded Ed25519 signing key (32-byte seed
+	// or 64-byte expanded). When empty the control plane logs a loud
+	// warning and signs with an EPHEMERAL key (bundles then only verify
+	// within this process lifetime), mirroring the compliance-evidence
+	// fallback. THREAT_INTEL_SIGNING_KEY_HEX.
+	SigningKeyHex string
+	// KeyID labels the signing key in the published envelope so the edge
+	// consumer can select the matching pinned verifying key from its
+	// trust store. THREAT_INTEL_KEY_ID.
+	KeyID string
+	// Subject overrides the NATS subject the signed bundle is published
+	// on. Empty applies the pipeline default
+	// (sng.platform.policy.threatintel.dns.v1). THREAT_INTEL_SUBJECT.
+	Subject string
+	// ReputationURLs are upstream exact-match known-bad FQDN lists. Each
+	// becomes a reputation source. THREAT_INTEL_REPUTATION_URLS (CSV).
+	ReputationURLs []string
+	// CategoryFeeds maps a category name to its upstream domain-list
+	// URL. Configured as a CSV of `category=url` pairs.
+	// THREAT_INTEL_CATEGORY_FEEDS.
+	CategoryFeeds map[string]string
+	// HTTPTimeout bounds a single feed fetch. Defaults to 30s.
+	// THREAT_INTEL_HTTP_TIMEOUT.
+	HTTPTimeout time.Duration
+	// MaxFeedBytes caps a single feed response. Zero applies the
+	// pipeline default (64 MiB). THREAT_INTEL_MAX_FEED_BYTES.
+	MaxFeedBytes int64
 }
 
 // Log carries structured-logging configuration.
@@ -1592,6 +1646,17 @@ func Load() (Config, error) {
 			StaleFactor:          getFloatLenient("THREATINTEL_STALE_FACTOR", 3),
 			HealthInterval:       getDuration("THREATINTEL_HEALTH_INTERVAL", time.Minute),
 		},
+		ManagedDNSFeeds: ManagedDNSFeeds{
+			// Enabled is parsed strictly below (default-OFF feature flag).
+			RefreshInterval: getDuration("THREAT_INTEL_REFRESH_INTERVAL", time.Hour),
+			SigningKeyHex:   getStr("THREAT_INTEL_SIGNING_KEY_HEX", ""),
+			KeyID:           getStr("THREAT_INTEL_KEY_ID", ""),
+			Subject:         getStr("THREAT_INTEL_SUBJECT", ""),
+			ReputationURLs:  splitCSV(getStr("THREAT_INTEL_REPUTATION_URLS", "")),
+			CategoryFeeds:   parseKeyedURLs(getStr("THREAT_INTEL_CATEGORY_FEEDS", "")),
+			HTTPTimeout:     getDuration("THREAT_INTEL_HTTP_TIMEOUT", 30*time.Second),
+			MaxFeedBytes:    int64(getIntLenient("THREAT_INTEL_MAX_FEED_BYTES", 0)),
+		},
 	}
 
 	// Critical numeric settings: re-parse with the strict helpers
@@ -1796,6 +1861,12 @@ func Load() (Config, error) {
 		{"CASB_NOOPS_AUTO_ENFORCE", false, &cfg.CASB.NoOpsAutoEnforce},
 		{"MOBILE_AUTH_AUTO_PROVISION_USERS", true, &cfg.MobileAuth.AutoProvisionUsers},
 		{"IDP_DIRECTORY_SYNC_ENABLED", false, &cfg.MobileAuth.DirectorySyncEnabled},
+		// Managed DNS threat-intel feed pipeline. DEFAULT-OFF: the
+		// leader-only loop is only registered when this is explicitly
+		// enabled. Parsed strictly so a typo fails boot rather than
+		// silently leaving the pipeline off when an operator meant to
+		// turn it on.
+		{"THREAT_INTEL_ENABLED", false, &cfg.ManagedDNSFeeds.Enabled},
 		{"METRICS_ENABLED", true, &cfg.Metrics.Enabled},
 		{"POP_REBALANCE_ENABLED", true, &cfg.PoP.RebalanceEnabled},
 		// Per-tenant activity tracking. Default ON: it is the writer
@@ -2189,6 +2260,14 @@ func (c Config) validate() error {
 	if c.MobileAuth.DirectorySyncEnabled && c.MobileAuth.DirectorySyncInterval <= 0 {
 		return fmt.Errorf("IDP_DIRECTORY_SYNC_INTERVAL must be > 0 when IDP_DIRECTORY_SYNC_ENABLED=true, got %s", c.MobileAuth.DirectorySyncInterval)
 	}
+	// Managed DNS threat-intel feed pipeline: when enabled its refresh
+	// cadence must be positive (a <= 0 interval would otherwise be
+	// silently overridden by the service's DefaultRefreshInterval rather
+	// than the cadence the operator chose). Only enforced when the
+	// pipeline is enabled — the default-off path ignores the interval.
+	if c.ManagedDNSFeeds.Enabled && c.ManagedDNSFeeds.RefreshInterval <= 0 {
+		return fmt.Errorf("THREAT_INTEL_REFRESH_INTERVAL must be > 0 when THREAT_INTEL_ENABLED=true, got %s", c.ManagedDNSFeeds.RefreshInterval)
+	}
 	// Likewise, a <= 0 discovery-cache TTL would silently fall back to
 	// the service's 24h default rather than the configured value.
 	if c.MobileAuth.DiscoveryCacheTTL <= 0 {
@@ -2340,6 +2419,41 @@ func getStr(key, def string) string {
 		return v
 	}
 	return def
+}
+
+// parseKeyedURLs parses a CSV of `key=value` pairs into a map, used for
+// the THREAT_INTEL_CATEGORY_FEEDS knob (`ads=https://…,gambling=https://…`).
+// Whitespace around keys / values is trimmed; entries without a `=` or
+// with an empty key / value are skipped (lenient: a single malformed
+// pair never poisons the whole map). On the first `=` only, so values
+// containing `=` (query strings) survive. Returns nil for empty input.
+//
+// The comma is the pair separator, so a value (feed URL) must not
+// contain a raw comma; percent-encode it as %2C. In practice feed URLs
+// don't carry literal commas, and this keeps the knob a simple CSV
+// rather than requiring a quoting scheme.
+func parseKeyedURLs(in string) map[string]string {
+	pairs := splitCSV(in)
+	if len(pairs) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(pairs))
+	for _, pair := range pairs {
+		k, v, ok := strings.Cut(pair, "=")
+		if !ok {
+			continue
+		}
+		k = strings.TrimSpace(k)
+		v = strings.TrimSpace(v)
+		if k == "" || v == "" {
+			continue
+		}
+		out[k] = v
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // getIntLenient parses an integer env var, falling back to def on
