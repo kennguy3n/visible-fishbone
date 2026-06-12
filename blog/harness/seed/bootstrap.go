@@ -152,8 +152,9 @@ func bootstrapFixtures(ctx context.Context, operatorID string) error {
 	// naturally the earliest event in each tenant's trail. audit_log is
 	// RLS-FORCEd, so the per-tenant GUC is set before each write, and the
 	// NOT EXISTS guard keeps reruns idempotent.
-	auditTenantIDs := make([]string, 0, len(fleet.All())+1)
-	for _, t := range fleet.All() {
+	allTenants := fleet.All()
+	auditTenantIDs := make([]string, 0, len(allTenants)+1)
+	for _, t := range allTenants {
 		auditTenantIDs = append(auditTenantIDs, t.ID)
 	}
 	auditTenantIDs = append(auditTenantIDs, fleet.PlatformTenantID)
@@ -181,7 +182,7 @@ func bootstrapFixtures(ctx context.Context, operatorID string) error {
 	// downstream harnesses, so surface it loudly rather than producing
 	// payloads keyed on an unexpected id).
 	expectedID := map[string]string{fleet.PlatformTenantSlug: fleet.PlatformTenantID}
-	for _, t := range fleet.All() {
+	for _, t := range allTenants {
 		expectedID[t.Slug] = t.ID
 	}
 	for slug, want := range expectedID {
@@ -194,7 +195,7 @@ func bootstrapFixtures(ctx context.Context, operatorID string) error {
 		}
 	}
 
-	logf("bootstrap: platform_admin granted to operator %s; %d canonical tenants + MSP pinned", operatorID, len(fleet.All()))
+	logf("bootstrap: platform_admin granted to operator %s; %d canonical tenants + MSP pinned", operatorID, len(allTenants))
 	return nil
 }
 
