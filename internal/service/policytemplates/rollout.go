@@ -94,10 +94,11 @@ type RolloutOutcome struct {
 	// GraphHash is the tenant's baseline hash after a successful apply
 	// (empty on failure).
 	GraphHash string `json:"graph_hash,omitempty"`
-	// RolledBack is set on a failed tenant whose prior baseline was
-	// restored (or never touched), i.e. the tenant is guaranteed not to
-	// be left in a partially-applied state. It is false for a failed
-	// tenant that had no prior baseline (nothing to roll back to).
+	// RolledBack reports that a failed tenant is in a clean (not
+	// partially-applied) state: either its prior baseline was restored,
+	// or it had no baseline to begin with and none was left behind. It
+	// is only false when a failed tenant's prior baseline could not be
+	// restored (the restore write itself errored).
 	RolledBack bool `json:"rolled_back,omitempty"`
 	// Error is the failure message (empty on success).
 	Error string `json:"error,omitempty"`
