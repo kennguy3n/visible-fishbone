@@ -96,6 +96,14 @@ type tenantSpec struct {
 	region       string
 	tier         string
 	relationship string // owner | co_manager
+	// country (ISO-3166 alpha-2) + industry drive the smart-default
+	// policy-template engine: applyPolicyTemplate resolves them to a
+	// compliance regime (us-baseline | uk-dpa | eu-gdpr | ca-pipeda |
+	// au-privacy) and renders a jurisdiction-correct baseline graph.
+	// Leave country empty to skip the smart-default apply (e.g. for a
+	// residency region the packaged engine does not yet model, like SG).
+	country      string
+	industry     string
 	sites        []siteSpec
 	devices      []deviceSpec
 	dlpTemplates []string // template ids to apply (pci-dss, hipaa, ...)
@@ -134,8 +142,8 @@ type playbookSpec struct {
 func scenarioTenants() []tenantSpec {
 	return []tenantSpec{
 		{
-			name: "Acme Retail Group", slug: "acme-retail", region: "us-east",
-			tier: "enterprise", relationship: "owner",
+			name: "Acme Retail Group", slug: "acme-retail", region: "us-east-1",
+			tier: "enterprise", relationship: "owner", country: "US", industry: "retail",
 			sites: []siteSpec{
 				{"Acme HQ — Dallas", "hub"},
 				{"Distribution Center — Memphis", "hub"},
@@ -184,8 +192,8 @@ func scenarioTenants() []tenantSpec {
 			},
 		},
 		{
-			name: "Globex Health Systems", slug: "globex-health", region: "us-west",
-			tier: "enterprise", relationship: "owner",
+			name: "Globex Health Systems", slug: "globex-health", region: "us-west-2",
+			tier: "enterprise", relationship: "owner", country: "US", industry: "healthcare",
 			sites: []siteSpec{
 				{"Globex Main Hospital — Seattle", "hub"},
 				{"Outpatient Clinic — Bellevue", "branch"},
@@ -233,8 +241,8 @@ func scenarioTenants() []tenantSpec {
 			},
 		},
 		{
-			name: "Initech Financial", slug: "initech-financial", region: "eu-central",
-			tier: "professional", relationship: "co_manager",
+			name: "Initech Financial", slug: "initech-financial", region: "eu-central-1",
+			tier: "professional", relationship: "co_manager", country: "DE", industry: "finance",
 			sites: []siteSpec{
 				{"Initech HQ — Frankfurt", "hub"},
 				{"Trading Floor — London", "branch"},
@@ -267,8 +275,12 @@ func scenarioTenants() []tenantSpec {
 			},
 		},
 		{
-			name: "Umbrella Logistics", slug: "umbrella-logistics", region: "ap-southeast",
-			tier: "starter", relationship: "owner",
+			// Singapore residency. The packaged smart-default engine does not
+			// yet model SG (an honest non-goal), so country is left empty and
+			// no baseline is auto-applied; APAC residency DLP is still covered
+			// via the pdpa-singapore DLP template below.
+			name: "Umbrella Logistics", slug: "umbrella-logistics", region: "ap-southeast-1",
+			tier: "starter", relationship: "owner", industry: "general",
 			sites: []siteSpec{
 				{"Umbrella HQ — Singapore", "hub"},
 				{"Warehouse — Jakarta", "branch"},
@@ -277,11 +289,149 @@ func scenarioTenants() []tenantSpec {
 				{"umbrella-ops-01", "windows", map[string]any{"disk_encrypted": true}},
 				{"umbrella-wh-android-01", "android", map[string]any{"mdm_enrolled": true}},
 			},
-			dlpTemplates: []string{},
+			dlpTemplates: []string{"pdpa-singapore"},
 			browser:      []browserSpec{{"Block malware/phishing", "malware", "block", "site"}},
 			casb:         []casbSpec{{"google", "Umbrella Google Workspace"}},
 			health:       69, components: map[string]int{"policy": 64, "posture": 70, "patch": 66, "identity": 75},
 			integrations: []integrationSpec{{"syslog", "Umbrella rsyslog"}},
+		},
+		{
+			name: "Britannia Robotics", slug: "britannia-robotics", region: "eu-west-2",
+			tier: "enterprise", relationship: "owner", country: "GB", industry: "technology",
+			sites: []siteSpec{
+				{"Britannia HQ — London", "hub"},
+				{"Smart Factory — Manchester", "hub"},
+				{"R&D Lab — Bristol", "branch"},
+				{"Field Engineers — Leeds", "home_office"},
+				{"Azure UK-South VPC", "cloud_only"},
+			},
+			devices: []deviceSpec{
+				{"brit-eng-ws-01", "windows", map[string]any{"disk_encrypted": true, "firewall_enabled": true}},
+				{"brit-eng-mbp-02", "macos", map[string]any{"disk_encrypted": true}},
+				{"brit-plc-gw-01", "linux", map[string]any{"disk_encrypted": true, "firewall_enabled": true}},
+				{"brit-rnd-ws-03", "windows", map[string]any{"disk_encrypted": true, "screen_lock": true}},
+			},
+			dlpTemplates: []string{"uk-dpa-2018", "secrets-credentials"},
+			browser: []browserSpec{
+				{"Isolate uncategorized sites", "uncategorized", "rbi", "group"},
+				{"Block file-sharing (IP exfil)", "file_sharing", "block", "group"},
+			},
+			casb:   []casbSpec{{"m365", "Britannia Microsoft 365"}, {"salesforce", "Britannia Salesforce"}},
+			health: 84, components: map[string]int{"policy": 88, "posture": 82, "patch": 80, "identity": 85},
+			integrations: []integrationSpec{{"siem_webhook", "Britannia Elastic SIEM"}},
+			playbooks: []playbookSpec{
+				{
+					name:        "Quarantine source-code exfil",
+					description: "Block an outbound transfer that trips the secrets/credentials classifier and require an engineering-lead sign-off before release.",
+					trigger:     "dlp.violation && dlp.template == 'secrets-credentials'",
+					steps: []map[string]any{
+						{"action": "block_transfer"},
+						{"action": "require_approval", "role": "security_admin"},
+						{"action": "notify", "channel": "soc", "severity": "high"},
+					},
+					enabled: true,
+				},
+			},
+		},
+		{
+			name: "Maple Health Network", slug: "maple-health", region: "ca-central-1",
+			tier: "professional", relationship: "co_manager", country: "CA", industry: "healthcare",
+			sites: []siteSpec{
+				{"Maple HQ — Toronto", "hub"},
+				{"Community Clinic — Vancouver", "branch"},
+				{"Diagnostics — Montreal", "branch"},
+				{"EHR Cloud (PIPEDA)", "cloud_only"},
+			},
+			devices: []deviceSpec{
+				{"maple-clin-ws-01", "windows", map[string]any{"disk_encrypted": true, "screen_lock": true}},
+				{"maple-nurse-ipad-01", "ios", map[string]any{"disk_encrypted": true, "mdm_enrolled": true}},
+				{"maple-lab-linux-01", "linux", map[string]any{"disk_encrypted": true, "firewall_enabled": true}},
+			},
+			dlpTemplates: []string{"hipaa"},
+			browser: []browserSpec{
+				{"Isolate webmail (PHI exfil)", "webmail", "rbi", "group"},
+				{"Block malware/phishing", "malware", "block", "site"},
+			},
+			casb:   []casbSpec{{"google", "Maple Google Workspace"}},
+			health: 78, components: map[string]int{"policy": 82, "posture": 75, "patch": 71, "identity": 83},
+			integrations: []integrationSpec{{"servicenow", "Maple ServiceNow ITSM"}},
+			playbooks: []playbookSpec{
+				{
+					name:        "Isolate PHI exfil over webmail",
+					description: "Route the session to remote browser isolation when the PHI classifier fires on a webmail upload, then alert the privacy officer.",
+					trigger:     "dlp.violation && dlp.classifier == 'phi' && app.category == 'webmail'",
+					steps: []map[string]any{
+						{"action": "isolate_browser", "mode": "rbi"},
+						{"action": "notify", "channel": "privacy_officer", "severity": "high"},
+					},
+					enabled: true,
+				},
+			},
+		},
+		{
+			name: "Outback Retail Co", slug: "outback-retail", region: "ap-southeast-2",
+			tier: "professional", relationship: "owner", country: "AU", industry: "retail",
+			sites: []siteSpec{
+				{"Outback HQ — Sydney", "hub"},
+				{"Distribution Center — Melbourne", "hub"},
+				{"Store #07 — Perth", "branch"},
+				{"Store #12 — Brisbane", "branch"},
+				{"E-commerce Cloud VPC", "cloud_only"},
+			},
+			devices: []deviceSpec{
+				{"outback-pos-07-01", "linux", map[string]any{"disk_encrypted": true, "firewall_enabled": true}},
+				{"outback-pos-12-01", "linux", map[string]any{"disk_encrypted": true, "firewall_enabled": true}},
+				{"outback-mgr-win-01", "windows", map[string]any{"disk_encrypted": true}},
+			},
+			dlpTemplates: []string{"australia-privacy-act", "pci-dss"},
+			browser: []browserSpec{
+				{"Block gambling at stores", "gambling", "block", "site"},
+				{"Isolate uncategorized sites", "uncategorized", "rbi", "group"},
+			},
+			casb:   []casbSpec{{"m365", "Outback Microsoft 365"}, {"slack", "Outback Slack"}},
+			health: 80, components: map[string]int{"policy": 84, "posture": 78, "patch": 76, "identity": 82},
+			integrations: []integrationSpec{{"siem_webhook", "Outback Splunk HEC"}},
+		},
+		{
+			name: "Lumière Légal", slug: "lumiere-legal", region: "eu-west-3",
+			tier: "professional", relationship: "co_manager", country: "FR", industry: "legal",
+			sites: []siteSpec{
+				{"Lumière HQ — Paris", "hub"},
+				{"Annexe — Lyon", "branch"},
+				{"Remote Counsel", "home_office"},
+			},
+			devices: []deviceSpec{
+				{"lumiere-counsel-mbp-01", "macos", map[string]any{"disk_encrypted": true}},
+				{"lumiere-paralegal-win-01", "windows", map[string]any{"disk_encrypted": true, "screen_lock": true}},
+			},
+			dlpTemplates: []string{"gdpr"},
+			browser: []browserSpec{
+				{"Isolate all external browsing", "uncategorized", "rbi", "group"},
+				{"Block social media (privilege risk)", "social_media", "block", "group"},
+			},
+			casb:   []casbSpec{{"m365", "Lumière Microsoft 365"}, {"salesforce", "Lumière Salesforce"}},
+			health: 82, components: map[string]int{"policy": 86, "posture": 80, "patch": 78, "identity": 84},
+			integrations: []integrationSpec{{"jira", "Lumière Jira SecOps"}},
+		},
+		{
+			name: "Nordic EduCloud", slug: "nordic-educloud", region: "eu-north-1",
+			tier: "starter", relationship: "owner", country: "SE", industry: "education",
+			sites: []siteSpec{
+				{"Nordic HQ — Stockholm", "hub"},
+				{"Campus Network — Uppsala", "branch"},
+			},
+			devices: []deviceSpec{
+				{"nordic-faculty-ws-01", "windows", map[string]any{"disk_encrypted": true}},
+				{"nordic-lab-linux-01", "linux", map[string]any{"firewall_enabled": true}},
+			},
+			dlpTemplates: []string{"gdpr"},
+			browser: []browserSpec{
+				{"Block adult content (campus AUP)", "adult_content", "block", "site"},
+				{"Block malware/phishing", "malware", "block", "site"},
+			},
+			casb:   []casbSpec{{"google", "Nordic Google Workspace"}},
+			health: 74, components: map[string]int{"policy": 78, "posture": 70, "patch": 68, "identity": 79},
+			integrations: []integrationSpec{{"syslog", "Nordic rsyslog"}},
 		},
 	}
 }
@@ -314,6 +464,15 @@ func seedTenant(tid string, t tenantSpec) map[string]any {
 		}
 	}
 	res["dlp_policies"] = dlp
+
+	// Smart-default compliance baseline from (industry, country). Skipped
+	// when country is empty (a residency region the packaged engine does
+	// not yet model, e.g. SG).
+	if t.country != "" && t.industry != "" {
+		if regime := applyPolicyTemplate(tid, t.industry, t.country); regime != "" {
+			res["policy_template_regime"] = regime
+		}
+	}
 
 	br := 0
 	for _, b := range t.browser {
@@ -527,6 +686,27 @@ func dlpTemplateName(tid, templateID string) string {
 				return it.Name
 			}
 		}
+	}
+	return ""
+}
+
+// applyPolicyTemplate materialises the smart-default compliance baseline
+// for a tenant from its (industry, country) coordinates. The control
+// plane resolves country -> regime (us-baseline | uk-dpa | eu-gdpr |
+// ca-pipeda | au-privacy), renders the jurisdiction-correct Policy-Graph
+// (baseline/global + industry/<x> + compliance/<regime>), persists it as
+// the tenant's applied baseline and compiles it. Idempotent: the baseline
+// is upserted per tenant, so re-applying the same selection neither errors
+// nor bumps anything spuriously. Returns the resolved regime for the seed
+// summary, or "" on failure.
+func applyPolicyTemplate(tid, industry, country string) string {
+	body := map[string]any{"industry": industry, "country": country}
+	var out struct {
+		Regime      string   `json:"regime"`
+		TemplateIDs []string `json:"template_ids"`
+	}
+	if doJSON("POST", fmt.Sprintf("/api/v1/tenants/%s/policy-templates/apply", tid), body, &out) {
+		return out.Regime
 	}
 	return ""
 }
@@ -830,18 +1010,39 @@ func createWebhook(tid, url string, events []string) {
 // namedItemExists reports whether a tenant-scoped collection already has an
 // item whose `field` equals `val`. Used to make creates that lack a natural
 // uniqueness constraint idempotent across reruns.
+//
+// The seed authenticates with a global platform-admin token (no tenant_id
+// claim), so some collection endpoints return rows across every tenant. We
+// therefore filter to the queried tenant via the row's own tenant_id before
+// matching — otherwise a same-named item in a different tenant (e.g. the
+// "HIPAA — PHI Detection" DLP policy shared by several healthcare tenants)
+// would falsely look "already present" and the create would be skipped.
 func namedItemExists(tid, sub, field, val string) bool {
 	var list struct {
 		Items []map[string]any `json:"items"`
 	}
 	if doJSON("GET", fmt.Sprintf("/api/v1/tenants/%s/%s", tid, sub), nil, &list) {
 		for _, it := range list.Items {
+			if !rowBelongsToTenant(it, tid) {
+				continue
+			}
 			if s, ok := it[field].(string); ok && s == val {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// rowBelongsToTenant reports whether a listed row is scoped to tid. Rows
+// that carry no tenant_id field (a few collections omit it) are treated as
+// belonging to the queried tenant, since the request path is already
+// tenant-scoped.
+func rowBelongsToTenant(row map[string]any, tid string) bool {
+	if v, ok := row["tenant_id"].(string); ok && v != "" {
+		return v == tid
+	}
+	return true
 }
 
 func loadTenantsBySlug() map[string]string {
@@ -909,10 +1110,18 @@ func doJSON(method, path string, body any, out any) bool {
 // than only what this run happened to create.
 func listCount(tid, sub string) int {
 	var list struct {
-		Items []json.RawMessage `json:"items"`
+		Items []map[string]any `json:"items"`
 	}
 	if doJSON("GET", fmt.Sprintf("/api/v1/tenants/%s/%s", tid, sub), nil, &list) {
-		return len(list.Items)
+		// The global token can surface cross-tenant rows; count only those
+		// scoped to tid so the summary reflects this tenant's true state.
+		n := 0
+		for _, it := range list.Items {
+			if rowBelongsToTenant(it, tid) {
+				n++
+			}
+		}
+		return n
 	}
 	return 0
 }

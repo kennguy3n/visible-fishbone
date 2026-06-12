@@ -49,6 +49,12 @@ var canonicalTenantID = map[string]string{
 	"globex-health":      "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
 	"initech-financial":  "b6520bda-e7bb-4af9-9c53-7b0051eae65b",
 	"umbrella-logistics": "0c8d2d9d-896d-45b1-8001-6a6776f832b9",
+	// Multi-country / multi-industry expansion (GB, CA, AU, FR, SE).
+	"britannia-robotics": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c",
+	"maple-health":       "cef9c934-507c-4adc-985b-48f3cbe274b0",
+	"outback-retail":     "37619610-53b4-4eab-87f9-45ba902d30c2",
+	"lumiere-legal":      "890486df-98bd-482b-85a8-af361706676f",
+	"nordic-educloud":    "8c93e8b9-5710-4f3a-9981-6d2c558bb78f",
 }
 
 const (
