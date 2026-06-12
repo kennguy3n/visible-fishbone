@@ -225,6 +225,13 @@ func (s *Service) ExecuteRollout(ctx context.Context, tenantIDs []uuid.UUID, sel
 	}
 
 	for _, tid := range tids {
+		// Stop fanning out if the caller has gone away: every remaining
+		// rolloutOne would only fail at the repo layer with the same
+		// context error, so an early exit avoids reporting a tail of
+		// misleading per-tenant failures.
+		if err := ctx.Err(); err != nil {
+			return result, err
+		}
 		outcome := s.rolloutOne(ctx, tid, resolved)
 		switch outcome.Status {
 		case RolloutStatusApplied:

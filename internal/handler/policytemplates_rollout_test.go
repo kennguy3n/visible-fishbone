@@ -1,12 +1,23 @@
 package handler_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
 
 	"github.com/google/uuid"
+
+	"github.com/kennguy3n/visible-fishbone/internal/handler"
 )
+
+// stubTemplateAuthorizer is a fixed-answer RBAC seam for exercising the
+// roll-out permission gate.
+type stubTemplateAuthorizer struct{ allow bool }
+
+func (s stubTemplateAuthorizer) HasPermission(_ context.Context, _ uuid.UUID, _ string) (bool, error) {
+	return s.allow, nil
+}
 
 func TestPolicyTemplateHandler_Options(t *testing.T) {
 	t.Parallel()
@@ -141,5 +152,33 @@ func TestPolicyTemplateHandler_RolloutInvalidInput(t *testing.T) {
 				t.Fatalf("%s: expected 400, got %d: %s", tc.name, rec.Code, rec.Body.String())
 			}
 		})
+	}
+}
+
+func TestPolicyTemplateHandler_RolloutAuthorization(t *testing.T) {
+	t.Parallel()
+	body := map[string]any{
+		"industry":   "finance",
+		"country":    "DE",
+		"tenant_ids": []string{uuid.NewString()},
+	}
+
+	// A wired authorizer that denies the permission gates both the
+	// preview (policy:read) and the execute (policy:write) with 403,
+	// before any roll-out work happens.
+	denied, _, deniedToken := newPolicyTemplateTestRouter(t, handler.WithPolicyTemplateAuthorizer(stubTemplateAuthorizer{allow: false}))
+	for _, path := range []string{"/api/v1/policy-templates/rollout/preview", "/api/v1/policy-templates/rollout"} {
+		rec := doJSON(t, denied, http.MethodPost, path, deniedToken, body)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("%s: expected 403 when permission denied, got %d: %s", path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// A wired authorizer that grants the permission lets the roll-out
+	// proceed (the create fans out to the single fresh tenant).
+	allowed, _, allowedToken := newPolicyTemplateTestRouter(t, handler.WithPolicyTemplateAuthorizer(stubTemplateAuthorizer{allow: true}))
+	rec := doJSON(t, allowed, http.MethodPost, "/api/v1/policy-templates/rollout", allowedToken, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200 when permission granted, got %d: %s", rec.Code, rec.Body.String())
 	}
 }

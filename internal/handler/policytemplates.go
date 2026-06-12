@@ -1,13 +1,26 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/service/policytemplates"
+)
+
+// Permissions gating the cross-tenant roll-out surface. They follow the
+// rbac "resource:action" grammar (a platform/tenant admin's wildcard
+// grant satisfies them); a roll-out writes policy baselines across many
+// tenants at once, so it reuses the policy read/write permissions.
+// Defined here (not in the rbac package) so this change does not edit
+// shared rbac code.
+const (
+	permPolicyTemplateRead  = "policy:read"
+	permPolicyTemplateWrite = "policy:write"
 )
 
 // PolicyTemplateHandler exposes the smart-default security baseline
@@ -19,12 +32,69 @@ import (
 // because the catalog is the same fleet-wide; the resolve/apply/read
 // routes are tenant-scoped via the standard {tenant_id} path segment.
 type PolicyTemplateHandler struct {
-	svc *policytemplates.Service
+	svc   *policytemplates.Service
+	authz PolicyTemplateAuthorizer
+}
+
+// PolicyTemplateAuthorizer is the narrow RBAC seam the cross-tenant
+// roll-out routes gate on. It is satisfied by *rbac.Service.HasPermission.
+// Optional: a nil authorizer leaves the routes ungated (minimum-wiring/
+// tests); production wires it so only operators holding the policy
+// permissions can preview or execute a fleet-wide roll-out.
+type PolicyTemplateAuthorizer interface {
+	HasPermission(ctx context.Context, userID uuid.UUID, permission string) (bool, error)
+}
+
+// PolicyTemplateOption customises a PolicyTemplateHandler.
+type PolicyTemplateOption func(*PolicyTemplateHandler)
+
+// WithPolicyTemplateAuthorizer gates the cross-tenant roll-out routes
+// behind an RBAC permission check: policy:read for the preview and
+// policy:write for the execute. Without it the routes are authenticated
+// but not role-gated. Production wiring always supplies one.
+func WithPolicyTemplateAuthorizer(authz PolicyTemplateAuthorizer) PolicyTemplateOption {
+	return func(h *PolicyTemplateHandler) {
+		if authz != nil {
+			h.authz = authz
+		}
+	}
 }
 
 // NewPolicyTemplateHandler wires the handler over the service.
-func NewPolicyTemplateHandler(svc *policytemplates.Service) *PolicyTemplateHandler {
-	return &PolicyTemplateHandler{svc: svc}
+func NewPolicyTemplateHandler(svc *policytemplates.Service, opts ...PolicyTemplateOption) *PolicyTemplateHandler {
+	h := &PolicyTemplateHandler{svc: svc}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
+}
+
+// authorize enforces the RBAC permission for a cross-tenant roll-out
+// route. It returns true (proceed) when no authorizer is wired. With one
+// wired it requires an authenticated user identity (401) holding the
+// permission (403), mirroring the rollout/MSP permission gates.
+func (h *PolicyTemplateHandler) authorize(w http.ResponseWriter, r *http.Request, permission string) bool {
+	if h.authz == nil {
+		return true
+	}
+	userID := middleware.UserIDFromContext(r.Context())
+	if userID == uuid.Nil {
+		WriteError(w, http.StatusUnauthorized, "unauthenticated",
+			"policy-template roll-out requires an authenticated user identity")
+		return false
+	}
+	allowed, err := h.authz.HasPermission(r.Context(), userID, permission)
+	if err != nil {
+		WriteError(w, http.StatusInternalServerError, "authorization_failed",
+			"failed to evaluate roll-out authorization")
+		return false
+	}
+	if !allowed {
+		WriteError(w, http.StatusForbidden, "forbidden",
+			"credentials do not authorise this roll-out operation")
+		return false
+	}
+	return true
 }
 
 // Register attaches the policy-template routes.
@@ -91,6 +161,9 @@ func parseTenantIDs(w http.ResponseWriter, raw []string) ([]uuid.UUID, bool) {
 // rolloutPreview returns the target baseline plus the per-tenant diff
 // for every selected tenant, without writing anything.
 func (h *PolicyTemplateHandler) rolloutPreview(w http.ResponseWriter, r *http.Request) {
+	if !h.authorize(w, r, permPolicyTemplateRead) {
+		return
+	}
 	var req templateRolloutRequest
 	if !DecodeJSON(w, r, &req) {
 		return
@@ -113,6 +186,9 @@ func (h *PolicyTemplateHandler) rolloutPreview(w http.ResponseWriter, r *http.Re
 // the body (status=failed), not surfaced as a request-level error;
 // only a bad selection or malformed request is a 4xx.
 func (h *PolicyTemplateHandler) rollout(w http.ResponseWriter, r *http.Request) {
+	if !h.authorize(w, r, permPolicyTemplateWrite) {
+		return
+	}
 	var req templateRolloutRequest
 	if !DecodeJSON(w, r, &req) {
 		return

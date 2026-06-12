@@ -17,7 +17,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/policytemplates"
 )
 
-func newPolicyTemplateTestRouter(t *testing.T) (http.Handler, uuid.UUID, string) {
+func newPolicyTemplateTestRouter(t *testing.T, opts ...handler.PolicyTemplateOption) (http.Handler, uuid.UUID, string) {
 	t.Helper()
 	store := memory.NewStore()
 	tenantID := uuid.New()
@@ -42,7 +42,7 @@ func newPolicyTemplateTestRouter(t *testing.T) (http.Handler, uuid.UUID, string)
 	}
 	router := handler.NewRouter(handler.RouterDeps{
 		Config:          cfg,
-		PolicyTemplates: handler.NewPolicyTemplateHandler(svc),
+		PolicyTemplates: handler.NewPolicyTemplateHandler(svc, opts...),
 	})
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
