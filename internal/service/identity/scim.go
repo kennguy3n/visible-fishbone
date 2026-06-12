@@ -378,7 +378,16 @@ func (s *SCIMService) ListUsers(ctx context.Context, tenantID uuid.UUID, filter 
 	// IdP dedup lookup (`userName eq "x"`) O(1) and a 100K-user tenant
 	// from materialising every row to filter+slice it.
 	if expr != nil {
-		if simple, ok := pushdown(expr); ok {
+		// Only push a single clause down to the indexed repository query
+		// when its attribute is actually backed by a user column. A
+		// pushdownable operator (eq/co/sw) on an attribute the
+		// repository cannot index but the in-memory matcher can still
+		// evaluate — active, the bare `emails` path, name.* sub-paths,
+		// id — must fall through to the general path below. Otherwise
+		// the pushdown resolves it to "no backing column" and wrongly
+		// returns an empty page for filters IdPs really send, e.g.
+		// Okta/Entra's `active eq "true"` or `emails eq "x@y.z"`.
+		if simple, ok := pushdown(expr); ok && userFilterPushdownable(simple.Attribute) {
 			return s.listUsersPushdown(ctx, tenantID, &simple, startIndex, count)
 		}
 	} else {
@@ -494,6 +503,18 @@ func scimUserSearchFilter(parsed *SCIMFilter) (repository.UserSearchFilter, bool
 		return repository.UserSearchFilter{}, false
 	}
 	return repository.UserSearchFilter{Field: field, Op: op, Value: parsed.Value}, true
+}
+
+// userFilterPushdownable reports whether a single-clause filter on attr
+// can be resolved by the repository's indexed SearchUsers. Exactly the
+// attributes backed by a user column (userName/email, emails.value,
+// displayName, externalId) qualify. Every other attribute the in-memory
+// matcher can still evaluate (active, the bare `emails` path, name.*,
+// id) is handled by the general list path, so a pushdownable operator
+// on one of them is never silently resolved to an empty page.
+func userFilterPushdownable(attr string) bool {
+	_, ok := scimAttrToUserField(attr)
+	return ok
 }
 
 // scimAttrToUserField maps a SCIM filter attribute to the user column
@@ -628,15 +649,27 @@ func (s *SCIMService) PatchGroup(ctx context.Context, tenantID uuid.UUID, groupI
 				}
 			}
 		case "remove":
-			if canonicalAttr(op.Path) == "members" {
+			switch {
+			case canonicalAttr(op.Path) == "members":
+				// Microsoft Entra shape: remove a value-array of members
+				// under the plain `members` path. An empty value here is
+				// a no-op (RFC 7644 leaves an unfiltered members remove
+				// implementation-defined; we never drop the whole group).
 				members := extractMembers(op.Value)
 				for _, m := range members {
-					uid := uuidFromString(m.Value)
-					if uid == uuid.Nil {
-						continue
+					if rerr := s.revokeGroupMember(ctx, groupID, m.Value); rerr != nil {
+						return SCIMGroup{}, rerr
 					}
-					if err := s.roles.RevokeRole(ctx, uid, groupID, nil); err != nil && !errors.Is(err, repository.ErrNotFound) {
-						return SCIMGroup{}, fmt.Errorf("remove member %s: %w", m.Value, err)
+				}
+			default:
+				// Okta shape: a valuePath selects the single member to
+				// remove, e.g. `members[value eq "<id>"]`. Without
+				// parsing it the offboarding PATCH is silently dropped
+				// and the user keeps the group's role — a real
+				// de-provisioning gap — so handle it explicitly.
+				if memberID, ok := memberValuePathTarget(op.Path); ok {
+					if rerr := s.revokeGroupMember(ctx, groupID, memberID); rerr != nil {
+						return SCIMGroup{}, rerr
 					}
 				}
 			}
@@ -857,6 +890,49 @@ func applyUserReplace(u *repository.User, op SCIMPatchOp) {
 // user attribute is removable today; this remains the extension point
 // for ones that are clearable through a plain Update.
 func applyUserRemove(_ *repository.User, _ SCIMPatchOp) {}
+
+// revokeGroupMember removes one member from a group by user id. A
+// non-UUID id is ignored (the same lenient handling the add path uses),
+// and an already-absent assignment is not an error so a replayed or
+// duplicate removal stays idempotent.
+func (s *SCIMService) revokeGroupMember(ctx context.Context, groupID uuid.UUID, memberID string) error {
+	uid := uuidFromString(memberID)
+	if uid == uuid.Nil {
+		return nil
+	}
+	if err := s.roles.RevokeRole(ctx, uid, groupID, nil); err != nil && !errors.Is(err, repository.ErrNotFound) {
+		return fmt.Errorf("remove member %s: %w", memberID, err)
+	}
+	return nil
+}
+
+// memberValuePathTarget extracts the member id from a SCIM PATCH
+// valuePath of the form `members[value eq "<id>"]` (RFC 7644 §3.5.2.2).
+// Okta removes a group member with this path shape rather than Entra's
+// {"path":"members","value":[...]} form, so recognising it is what lets
+// an Okta-driven offboarding actually revoke the role. The attribute
+// and operator are matched case-insensitively and a leading core-schema
+// URN is tolerated (via canonicalAttr); any other shape returns false.
+func memberValuePathTarget(path string) (string, bool) {
+	p := canonicalAttr(path)
+	open := strings.IndexByte(p, '[')
+	if open < 0 || !strings.HasSuffix(p, "]") {
+		return "", false
+	}
+	if strings.TrimSpace(p[:open]) != "members" {
+		return "", false
+	}
+	inner := strings.TrimSpace(p[open+1 : len(p)-1])
+	const prefix = "value eq "
+	if !strings.HasPrefix(inner, prefix) {
+		return "", false
+	}
+	val := strings.Trim(strings.TrimSpace(strings.TrimPrefix(inner, prefix)), `"`)
+	if val == "" {
+		return "", false
+	}
+	return val, true
+}
 
 func extractMembers(val any) []SCIMGroupMember {
 	v, ok := val.([]any)
