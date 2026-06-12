@@ -240,7 +240,7 @@ impl DlpEngine {
         // the stored struct's field to the authoritative `ai_app_policy`
         // it is paired with. Without this, `current_policy().ai_app`
         // could report a detector config the engine is not running.
-        policy.ai_app = ai_app_policy.clone();
+        policy.ai_app.clone_from(&ai_app_policy);
         let ai_app = build_ai_app(ai_app_policy.as_ref(), max_scan_bytes, &model)?;
         self.state.store(Arc::new(EngineState {
             policy,
@@ -289,7 +289,7 @@ impl DlpEngine {
         // `current_policy().ai_app` and `ai_app_policy()` can never
         // disagree (the caller already passes them consistent, but this
         // makes the invariant hold structurally for any future caller).
-        policy.ai_app = ai_app_policy.clone();
+        policy.ai_app.clone_from(&ai_app_policy);
         let ai_app = build_ai_app(ai_app_policy.as_ref(), max_scan_bytes, &model)?;
         self.state.store(Arc::new(EngineState {
             policy,

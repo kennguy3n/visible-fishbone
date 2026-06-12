@@ -215,6 +215,14 @@ fn bootstrap_bundle_body() -> Vec<u8> {
 /// Panics if called from outside a tokio runtime context,
 /// because the telemetry-bridge `tokio::spawn` requires
 /// one.
+//
+// Allow `clippy::too_many_lines`: this is the agent's single
+// linear boot/wiring sequence. Each numbered step constructs one
+// subsystem in a strict boot order, with inline rationale that is
+// only meaningful in sequence; mechanically splitting it into
+// helpers purely to satisfy the line counter would scatter that
+// boot-order context and hurt readability rather than help it.
+#[allow(clippy::too_many_lines)]
 pub fn build_agent(cli: &Cli, cfg: &AgentConfig) -> Result<BuiltAgent, AgentBuildError> {
     // Refuse unsupported backends up front so the operator
     // gets a clear error before any subsystem starts
@@ -365,14 +373,9 @@ pub fn build_agent(cli: &Cli, cfg: &AgentConfig) -> Result<BuiltAgent, AgentBuil
     // 8. Endpoint DLP — opt-in; `None` unless `[dlp] enabled`. Shares
     //    the engine built above so the bundle publisher and the
     //    channel interceptors operate on the same live policy.
-    let dlp = match &dlp_engine {
-        Some(engine) => Some(build_dlp_subsystem(
-            &cfg.dlp,
-            telemetry.pipeline_handle(),
-            Arc::clone(engine),
-        )?),
-        None => None,
-    };
+    let dlp = dlp_engine.as_ref().map(|engine| {
+        build_dlp_subsystem(&cfg.dlp, telemetry.pipeline_handle(), Arc::clone(engine))
+    });
 
     // Register subsystems onto the builder we created above.
     // Boot order matters: telemetry + comms first so producer
@@ -434,7 +437,7 @@ fn build_dlp_subsystem(
     cfg: &crate::config::DlpConfig,
     telemetry: sng_telemetry::PipelineHandle,
     engine: Arc<DlpEngine>,
-) -> Result<Arc<DlpSubsystem>, AgentBuildError> {
+) -> Arc<DlpSubsystem> {
     let mut interceptors: Vec<Arc<dyn ChannelInterceptor>> = Vec::new();
     // File-write channel: native edge-triggered watcher over the
     // configured sensitive directories (each per-OS backend falls back
@@ -447,13 +450,13 @@ fn build_dlp_subsystem(
     // own config flag so an operator can pare the channel set down.
     push_native_interceptors(cfg, &mut interceptors);
 
-    Ok(Arc::new(DlpSubsystem::new(
+    Arc::new(DlpSubsystem::new(
         engine,
         interceptors,
         Arc::new(TracingDlpSink),
         telemetry,
         cfg.idle_sleep,
-    )))
+    ))
 }
 
 /// Build the file-write interceptor for the host OS. On the three
