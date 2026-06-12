@@ -349,8 +349,8 @@ func (s *Slack) scanChannelHistory(
 				continue
 			}
 			content := []byte(msg.Text)
-			if max := opts.MaxBytesPerObject; max > 0 && int64(len(content)) > max {
-				content = content[:max]
+			if limit := opts.MaxBytesPerObject; limit > 0 && int64(len(content)) > limit {
+				content = content[:limit]
 			}
 			obj := casb.ContentObject{
 				ID:          channelID + ":" + msg.TS,
