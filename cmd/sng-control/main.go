@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -76,6 +77,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy"
 	"github.com/kennguy3n/visible-fishbone/internal/service/tenant"
 	"github.com/kennguy3n/visible-fishbone/internal/service/terraform"
+	"github.com/kennguy3n/visible-fishbone/internal/service/threatintel"
 	"github.com/kennguy3n/visible-fishbone/internal/service/troubleshoot"
 	"github.com/kennguy3n/visible-fishbone/internal/service/troubleshoot/checks"
 	"github.com/kennguy3n/visible-fishbone/internal/service/webhook"
@@ -450,6 +452,32 @@ func run() error {
 	if evidenceScheduler != nil {
 		go elector.RunIfLeader(rootCtx, "compliance-evidence", evidenceScheduler.Run)
 		logger.Info("sng-control: compliance evidence scheduler registered (runs on leader only)")
+	}
+
+	// Managed DNS threat-intel feed pipeline. DEFAULT-OFF: only wired
+	// when THREAT_INTEL_ENABLED=true. It is a singleton background
+	// workload — only the leader fetches the upstream feeds, signs the
+	// bundle, and publishes it over NATS — so a multi-replica deployment
+	// produces exactly one signed bundle per refresh interval rather
+	// than one per replica (and does not hammer upstreams N-fold).
+	// RunIfLeader blocks until rootCtx is cancelled, so it runs in its
+	// own goroutine; Run does an immediate warm-up refresh on entry so a
+	// freshly-elected leader publishes without waiting a full interval.
+	if cfg.ManagedDNSFeeds.Enabled {
+		threatIntelSvc, err := buildThreatIntelPipeline(&cfg, js, logger)
+		if err != nil {
+			return fmt.Errorf("build managed threat-intel pipeline: %w", err)
+		}
+		interval := cfg.ManagedDNSFeeds.RefreshInterval
+		go elector.RunIfLeader(rootCtx, "threatintel-feed-sync", func(ctx context.Context) {
+			threatIntelSvc.Run(ctx, interval)
+		})
+		logger.Info("sng-control: managed threat-intel feed pipeline enabled (runs on leader only)",
+			slog.Duration("refresh_interval", interval),
+			slog.Int("reputation_sources", len(cfg.ManagedDNSFeeds.ReputationURLs)),
+			slog.Int("category_sources", len(cfg.ManagedDNSFeeds.CategoryFeeds)))
+	} else {
+		logger.Info("sng-control: managed threat-intel feed pipeline disabled (THREAT_INTEL_ENABLED=false)")
 	}
 
 	// Shadow-IT auto-discovery: the telemetry consumer feeds every
@@ -2837,6 +2865,100 @@ const (
 	envEvidenceS3Bucket   = "COMPLIANCE_EVIDENCE_S3_BUCKET"
 	envEvidenceS3Prefix   = "COMPLIANCE_EVIDENCE_S3_PREFIX"
 )
+
+// natsBundlePublisher adapts the JetStream *sngnats.Publisher to the
+// threatintel.BundlePublisher seam: the pipeline only needs a
+// subject + bytes publish, and the adapter applies the canonical SNG
+// headers / retry / dedup policy the rest of the control plane uses.
+type natsBundlePublisher struct {
+	pub *sngnats.Publisher
+}
+
+// PublishBundle implements threatintel.BundlePublisher.
+func (p natsBundlePublisher) PublishBundle(ctx context.Context, subject string, data []byte) error {
+	return p.pub.Publish(ctx, subject, data, sngnats.PublishOptions{})
+}
+
+// buildThreatIntelPipeline wires the managed DNS threat-intel feed
+// pipeline (internal/service/threatintel): the Ed25519 signer, the set
+// of HTTP feed sources derived from the configured upstream URLs, and
+// the NATS bundle publisher. Only called when THREAT_INTEL_ENABLED is
+// true. Resilient to a partially-configured environment in the same
+// spirit as the evidence automation: an unset signing key falls back to
+// a loudly-logged ephemeral key (bundles then only verify within this
+// process lifetime) so dev/test still boots.
+func buildThreatIntelPipeline(cfg *config.Config, js jetstream.JetStream, logger *slog.Logger) (*threatintel.Service, error) {
+	mf := cfg.ManagedDNSFeeds
+
+	signer, err := threatIntelSigner(mf.SigningKeyHex, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	httpClient := &http.Client{Timeout: mf.HTTPTimeout}
+	newFetcher := func(rawURL string) *threatintel.HTTPFetcher {
+		return &threatintel.HTTPFetcher{
+			URL:      rawURL,
+			Client:   httpClient,
+			MaxBytes: mf.MaxFeedBytes,
+		}
+	}
+
+	var sources []threatintel.Source
+	for _, rawURL := range mf.ReputationURLs {
+		sources = append(sources, threatintel.Source{
+			Name:    "reputation:" + rawURL,
+			Kind:    threatintel.KindReputation,
+			Fetcher: newFetcher(rawURL),
+		})
+	}
+	// Sort the category keys so source ordering (and therefore log /
+	// telemetry output) is deterministic across boots; the produced
+	// bundle is canonical regardless, but stable ordering aids triage.
+	categories := make([]string, 0, len(mf.CategoryFeeds))
+	for cat := range mf.CategoryFeeds {
+		categories = append(categories, cat)
+	}
+	sort.Strings(categories)
+	for _, cat := range categories {
+		sources = append(sources, threatintel.Source{
+			Name:     "category:" + cat,
+			Kind:     threatintel.KindCategory,
+			Category: cat,
+			Fetcher:  newFetcher(mf.CategoryFeeds[cat]),
+		})
+	}
+
+	publisher := natsBundlePublisher{pub: sngnats.NewPublisher(js, &cfg.NATS, cfg.AppName+"/threatintel")}
+
+	return threatintel.NewService(sources, signer, publisher,
+		threatintel.WithLogger(logger),
+		threatintel.WithSubject(mf.Subject),
+		threatintel.WithKeyID(mf.KeyID),
+	)
+}
+
+// threatIntelSigner builds the Ed25519 signer for the managed DNS feed
+// pipeline from configured key material, or falls back to an ephemeral
+// key with a loud warning when unset.
+func threatIntelSigner(signingKeyHex string, logger *slog.Logger) (*threatintel.Signer, error) {
+	raw := strings.TrimSpace(signingKeyHex)
+	if raw == "" {
+		logger.Warn("threatintel: no signing key configured; generating an EPHEMERAL key — published bundles will not verify against a pinned edge key across restarts",
+			slog.String("env", "THREAT_INTEL_SIGNING_KEY_HEX"))
+		return threatintel.GenerateSigner()
+	}
+	key, err := hex.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode THREAT_INTEL_SIGNING_KEY_HEX: %w", err)
+	}
+	signer, err := threatintel.NewSigner(key)
+	if err != nil {
+		return nil, fmt.Errorf("threatintel signing key: %w", err)
+	}
+	logger.Info("threatintel: signing key loaded from configuration")
+	return signer, nil
+}
 
 // buildEvidenceAutomation wires the SOC2 evidence collector, signer,
 // archive object store and scheduler. It is intentionally resilient to

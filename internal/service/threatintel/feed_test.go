@@ -1,0 +1,79 @@
+package threatintel
+
+import (
+	"reflect"
+	"strings"
+	"testing"
+)
+
+func TestNormalizeDomain(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain", "Evil.Example.com", "evil.example.com"},
+		{"trailing dot", "evil.example.", "evil.example"},
+		{"wildcard prefix", "*.ads.example", "ads.example"},
+		{"surrounding space", "  evil.example  ", "evil.example"},
+		{"single label rejected", "localhost", ""},
+		{"empty rejected", "", ""},
+		{"url rejected", "http://evil.example/path", ""},
+		{"has path rejected", "evil.example/x", ""},
+		{"has port rejected", "evil.example:8080", ""},
+		{"has at rejected", "user@evil.example", ""},
+		{"ipv4 rejected", "1.2.3.4", ""},
+		{"numeric tld rejected", "foo.123", ""},
+		{"underscore label allowed", "_dmarc.example.com", "_dmarc.example.com"},
+		{"leading digit label", "3vil.example.com", "3vil.example.com"},
+		{"unicode rejected", "evíl.example", ""},
+		{"overlong label rejected", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.example", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := normalizeDomain(tc.in); got != tc.want {
+				t.Fatalf("normalizeDomain(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestParseDomainList(t *testing.T) {
+	raw := []byte(strings.Join([]string{
+		"# comment line",
+		"; another comment",
+		"",
+		"   ",
+		"evil.example",
+		"0.0.0.0 ads.example       # inline comment",
+		"127.0.0.1\ttracker.example",
+		"*.gambling.example",
+		"GoodCaps.Example",
+		"http://skip.example/x",
+		"localhost",
+		"1.2.3.4",
+		"dup.example",
+		"dup.example",
+	}, "\n"))
+
+	got := parseDomainList(raw)
+	want := []string{
+		"evil.example",
+		"ads.example",
+		"tracker.example",
+		"gambling.example",
+		"goodcaps.example",
+		// localhost / url / ipv4 dropped
+		"dup.example",
+		"dup.example", // dedup is deferred to bundle assembly
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseDomainList mismatch:\n got=%v\nwant=%v", got, want)
+	}
+}
+
+func TestParseDomainListEmpty(t *testing.T) {
+	if got := parseDomainList([]byte("# only comments\n\n   \n")); len(got) != 0 {
+		t.Fatalf("expected no domains, got %v", got)
+	}
+}
