@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
@@ -172,7 +173,7 @@ func (sf *Salesforce) ListActivity(ctx context.Context, config json.RawMessage, 
 	}
 	events := make([]casb.ActivityEvent, 0, len(result.Records))
 	for _, r := range result.Records {
-		ts, _ := time.Parse(time.RFC3339, r.CreatedDate)
+		ts := parseSalesforceTime(r.CreatedDate)
 		events = append(events, casb.ActivityEvent{
 			ID:        r.ID,
 			Actor:     r.CreatedBy.Name,
@@ -222,6 +223,31 @@ func (sf *Salesforce) AssessPosture(_ context.Context, _ json.RawMessage, _ []by
 // paths stay in lockstep.
 const salesforceAPIVersion = "v60.0"
 
+// parseSalesforceTime parses a Salesforce datetime. The REST API emits
+// ISO-8601 with a colon-less zone offset and millisecond precision
+// (e.g. "2025-06-01T10:00:00.000+0000"), which does NOT match
+// time.RFC3339 ("...Z07:00") — parsing with RFC3339 would silently
+// yield the zero time and defeat the modified-time (Since) filter. The
+// native layout is tried first, with RFC3339 variants as a fallback for
+// any field that arrives in the canonical form. A zero time is returned
+// for unparseable input.
+func parseSalesforceTime(s string) time.Time {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{
+		"2006-01-02T15:04:05.000-0700",
+		"2006-01-02T15:04:05-0700",
+		time.RFC3339,
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t.UTC()
+		}
+	}
+	return time.Time{}
+}
+
 // ScanContent implements casb.ContentInspector for Salesforce: it
 // queries the latest version of every file stored as a ContentVersion
 // and streams its bytes (bounded to opts.MaxBytesPerObject) for DLP
@@ -265,7 +291,7 @@ func (sf *Salesforce) ScanContent(
 			return err
 		}
 		for _, r := range page.Records {
-			modified, _ := time.Parse(time.RFC3339, r.LastModified)
+			modified := parseSalesforceTime(r.LastModified)
 			name := r.Title
 			if r.FileExtension != "" {
 				name = r.Title + "." + r.FileExtension

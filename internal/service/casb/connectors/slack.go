@@ -373,7 +373,10 @@ func (s *Slack) scanChannelHistory(
 				return err
 			}
 		}
-		if out.ResponseMetadata.NextCursor == "" {
+		// Stop when Slack signals no further pages OR omits the cursor.
+		// Checking both guards against an infinite loop if a future API
+		// response ever returned has_more=true with an empty cursor.
+		if !out.HasMore || out.ResponseMetadata.NextCursor == "" {
 			break
 		}
 		cursor = out.ResponseMetadata.NextCursor

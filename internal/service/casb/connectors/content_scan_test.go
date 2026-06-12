@@ -649,4 +649,13 @@ func TestSalesforce_ScanContent(t *testing.T) {
 	if o.ID != "cv1" || o.Name != "secrets.txt" || string(o.Content) != "ssn payload" {
 		t.Fatalf("object = %+v", o)
 	}
+	// LastModifiedDate ("2025-06-01T10:00:00.000+0000") must parse via the
+	// Salesforce-specific layout; RFC3339 would silently yield zero time
+	// and break the defense-in-depth Since filter.
+	if o.ModifiedAt.IsZero() {
+		t.Fatal("ModifiedAt is zero — Salesforce timestamp not parsed")
+	}
+	if got, want := o.ModifiedAt.UTC().Format(time.RFC3339), "2025-06-01T10:00:00Z"; got != want {
+		t.Fatalf("ModifiedAt = %s, want %s", got, want)
+	}
 }

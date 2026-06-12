@@ -355,6 +355,31 @@ func (m *M365) ScanContent(
 	return nil
 }
 
+// m365MaxFolders bounds how many folders a single OneDrive scan will
+// descend into, mirroring Box's boxMaxFolders so a pathologically
+// deep/wide drive cannot grow the BFS queue without limit. The object
+// budget (ContentScanOptions.MaxObjects) bounds files independently.
+const m365MaxFolders = 10000
+
+// sameGraphOrigin reports whether a follow-on URL (an @odata.nextLink
+// returned inside a Graph response) is rooted at the same scheme+host as
+// the connector's configured Graph base. Graph always returns nextLinks
+// on its own host; rejecting anything else prevents a tampered or
+// MITM'd response from redirecting an authenticated (Bearer) request at
+// an attacker- or internal-controlled endpoint (SSRF / token exfil),
+// matching the SSRF care taken for tenant-supplied base URLs elsewhere.
+func sameGraphOrigin(base, next string) bool {
+	b, err := url.Parse(base)
+	if err != nil {
+		return false
+	}
+	n, err := url.Parse(next)
+	if err != nil {
+		return false
+	}
+	return n.Scheme == b.Scheme && strings.EqualFold(n.Host, b.Host)
+}
+
 // listDriveUserIDs returns the ids of users whose OneDrive should be
 // scanned. Graph caps /users at ~100 rows per page, so it must follow
 // @odata.nextLink to enumerate every user — otherwise a tenant with
@@ -377,6 +402,9 @@ func (m *M365) listDriveUserIDs(ctx context.Context, token string) ([]string, er
 		}
 		for _, u := range result.Value {
 			ids = append(ids, u.ID)
+		}
+		if result.NextLink != "" && !sameGraphOrigin(m.graphBase, result.NextLink) {
+			return nil, fmt.Errorf("m365: refusing off-origin @odata.nextLink %q", result.NextLink)
 		}
 		endpoint = result.NextLink
 	}
@@ -408,6 +436,7 @@ func (m *M365) scanUserDrive(
 	root := fmt.Sprintf("%s/users/%s/drive/root/children?$select=id,name,size,lastModifiedDateTime,folder,file",
 		m.graphBase, url.PathEscape(userID))
 	queue := []string{root}
+	foldersQueued := 0
 	for len(queue) > 0 {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -439,9 +468,12 @@ func (m *M365) scanUserDrive(
 		}
 		for _, it := range page.Value {
 			if it.Folder != nil {
-				queue = append(queue, fmt.Sprintf(
-					"%s/users/%s/drive/items/%s/children?$select=id,name,size,lastModifiedDateTime,folder,file",
-					m.graphBase, url.PathEscape(userID), url.PathEscape(it.ID)))
+				if foldersQueued < m365MaxFolders {
+					foldersQueued++
+					queue = append(queue, fmt.Sprintf(
+						"%s/users/%s/drive/items/%s/children?$select=id,name,size,lastModifiedDateTime,folder,file",
+						m.graphBase, url.PathEscape(userID), url.PathEscape(it.ID)))
+				}
 				continue
 			}
 			if it.File == nil {
@@ -474,6 +506,19 @@ func (m *M365) scanUserDrive(
 			}
 		}
 		if page.NextLink != "" {
+			if !sameGraphOrigin(m.graphBase, page.NextLink) {
+				// Off-origin pagination link: skip this user (recording
+				// the anomaly) rather than following it with the Bearer
+				// token or aborting the whole tenant scan.
+				if yerr := yield(ctx, casb.ContentObject{
+					ID:       "user:" + userID,
+					Owner:    userID,
+					FetchErr: fmt.Errorf("refusing off-origin @odata.nextLink %q", page.NextLink),
+				}); yerr != nil {
+					return yerr
+				}
+				return nil
+			}
 			queue = append(queue, page.NextLink)
 		}
 	}
