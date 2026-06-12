@@ -47,6 +47,72 @@ func TestMergeIntent_EmptyKindContract(t *testing.T) {
 	}
 }
 
+// TestMergeEntityRef covers the extend-only contract: the model can
+// fill an empty reference and extend an anchored single token to a
+// multi-word name, but can never swap an anchored reference for an
+// unrelated entity. The accepted reference is lowercased to match the
+// all-lowercase deterministic tokenizer.
+func TestMergeEntityRef(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		det    string
+		llmRaw string
+		want   string
+	}{
+		{"fill empty", "", "Salesforce", "salesforce"},
+		{"fill empty multiword", "", "Google Drive", "google drive"},
+		{"fill empty trims punctuation+space", "", "  salesforce? ", "salesforce"},
+		{"extend anchored token", "google", "Google Drive", "google drive"},
+		{"extend collapses interior whitespace", "google", "Google   Drive", "google drive"},
+		{"fill empty collapses interior whitespace", "", "Google   Drive", "google drive"},
+		{"extend case-insensitive", "john", "John Smith", "john smith"},
+		{"keep det when llm empty", "alice", "", "alice"},
+		{"keep det when same single token", "salesforce", "salesforce", "salesforce"},
+		{"reject swap to unrelated entity", "alice", "attacker", "alice"},
+		{"reject multiword that does not start with anchor", "alice", "bob smith", "alice"},
+		{"reject when only first word differs", "drive", "google drive", "drive"},
+	}
+	for _, tc := range cases {
+		if got := mergeEntityRef(tc.det, tc.llmRaw); got != tc.want {
+			t.Errorf("%s: mergeEntityRef(%q, %q) = %q, want %q", tc.name, tc.det, tc.llmRaw, got, tc.want)
+		}
+	}
+}
+
+// TestNLQueryEngine_LLMExtendsMultiWordEntity verifies the model
+// materially improves entity resolution end-to-end: a question whose
+// deterministic tokenizer anchors a single-token app ref ("google")
+// is extended to the model's "google drive", while a hostile attempt
+// to swap the user is rejected and routing stays deterministic.
+func TestNLQueryEngine_LLMExtendsMultiWordEntity(t *testing.T) {
+	t.Parallel()
+	llm := &nlQueryStubLLM{
+		text:    `{"user_ref":"attacker","app_ref":"Google Drive","device_ref":"laptop1"}`,
+		modelID: "test-model",
+	}
+	engine := NewNLQueryEngine(llm)
+	parse, err := engine.ParseIntent(context.Background(), "can user alice access app google from device laptop1?")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !parse.AIGenerated || !parse.LLMValidJSON {
+		t.Fatalf("expected ai_generated+valid JSON, got %+v", parse)
+	}
+	// Anchored "google" is extended to the model's multi-word name.
+	if parse.Intent.AppRef != "google drive" {
+		t.Fatalf("AppRef = %q, want %q (model extends the anchored token)", parse.Intent.AppRef, "google drive")
+	}
+	// The model cannot swap the deterministically anchored user.
+	if parse.Intent.UserRef != "alice" {
+		t.Fatalf("UserRef = %q, want alice (anchored ref must not be swapped)", parse.Intent.UserRef)
+	}
+	// Routing stays deterministic.
+	if !parse.Intent.isVerdictKind() {
+		t.Fatalf("kind = %q, want a verdict kind", parse.Intent.Kind)
+	}
+}
+
 func TestNLQueryEngine_StructuredParsing(t *testing.T) {
 	t.Parallel()
 	engine := NewNLQueryEngine(nil)
