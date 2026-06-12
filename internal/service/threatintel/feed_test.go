@@ -77,3 +77,23 @@ func TestParseDomainListEmpty(t *testing.T) {
 		t.Fatalf("expected no domains, got %v", got)
 	}
 }
+
+// TestParseDomainListMultiField covers lines carrying more than one
+// token: multi-alias hosts-file rows and "domain + trailing metadata"
+// rows must keep every genuine domain rather than only the last field.
+func TestParseDomainListMultiField(t *testing.T) {
+	raw := []byte(strings.Join([]string{
+		"0.0.0.0 primary.example alias.example",   // multi-alias hosts row
+		"evil.example 1700000000",                 // domain + trailing counter
+		"127.0.0.1 a.example b.example c.example", // three aliases
+	}, "\n"))
+	got := parseDomainList(raw)
+	want := []string{
+		"primary.example", "alias.example",
+		"evil.example",
+		"a.example", "b.example", "c.example",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("multi-field parse mismatch:\n got=%v\nwant=%v", got, want)
+	}
+}

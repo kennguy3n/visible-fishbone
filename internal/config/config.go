@@ -2427,6 +2427,11 @@ func getStr(key, def string) string {
 // with an empty key / value are skipped (lenient: a single malformed
 // pair never poisons the whole map). On the first `=` only, so values
 // containing `=` (query strings) survive. Returns nil for empty input.
+//
+// The comma is the pair separator, so a value (feed URL) must not
+// contain a raw comma; percent-encode it as %2C. In practice feed URLs
+// don't carry literal commas, and this keeps the knob a simple CSV
+// rather than requiring a quoting scheme.
 func parseKeyedURLs(in string) map[string]string {
 	pairs := splitCSV(in)
 	if len(pairs) == 0 {

@@ -32,10 +32,10 @@
 //! in at apply time, exactly as [`crate::CategoryDb`] already models it.
 
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicI64, Ordering};
 
 use base64::Engine as _;
 use ed25519_dalek::{Signature, VerifyingKey};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::category::{Category, CategoryAction, CategoryDb};
@@ -290,7 +290,16 @@ pub struct AppliedFeed {
 #[derive(Debug)]
 pub struct ManagedFeedApplier {
     verifier: FeedVerifier,
-    last_serial: AtomicI64,
+    // Guards the serial-check + filter-mutation as one critical section.
+    // Verification is pure and runs outside this lock; only the
+    // anti-replay check and the hot-swap into the live filters are
+    // serialized, so two concurrent appliers can never interleave such
+    // that an older-serial bundle overwrites a newer one's data while
+    // the recorded serial advances. apply is a cold path (one bundle
+    // per refresh interval), so holding the lock across the two
+    // ArcSwap stores is free in practice. i64::MIN means "nothing
+    // applied yet".
+    last_serial: Mutex<i64>,
 }
 
 impl ManagedFeedApplier {
@@ -301,14 +310,14 @@ impl ManagedFeedApplier {
     pub fn new(verifier: FeedVerifier) -> Self {
         Self {
             verifier,
-            last_serial: AtomicI64::new(i64::MIN),
+            last_serial: Mutex::new(i64::MIN),
         }
     }
 
     /// The highest serial applied so far, or `None` if none has been.
     #[must_use]
     pub fn last_serial(&self) -> Option<i64> {
-        let v = self.last_serial.load(Ordering::Acquire);
+        let v = *self.last_serial.lock();
         if v == i64::MIN { None } else { Some(v) }
     }
 
@@ -330,31 +339,30 @@ impl ManagedFeedApplier {
     ) -> Result<AppliedFeed, FeedBundleError> {
         let bundle = self.verifier.verify(signed)?;
 
-        // Reserve this serial under monotonicity before mutating the
-        // filters: a CAS loop means concurrent appliers (or a redelivery
-        // racing the first apply) settle on exactly one winner and the
-        // loser sees StaleSerial rather than double-applying.
-        loop {
-            let last = self.last_serial.load(Ordering::Acquire);
-            if bundle.serial <= last {
-                return Err(FeedBundleError::StaleSerial {
-                    got: bundle.serial,
-                    last,
-                });
-            }
-            if self
-                .last_serial
-                .compare_exchange(last, bundle.serial, Ordering::AcqRel, Ordering::Acquire)
-                .is_ok()
-            {
-                break;
-            }
+        // Hold the serial lock across BOTH the anti-replay check and the
+        // filter hot-swap. This is the critical section: if the check
+        // and the mutation were separate (e.g. a lock-free CAS that only
+        // guards the counter), two concurrent appliers carrying
+        // different serials could both pass the check and then race on
+        // the ArcSwap stores, letting a slower older-serial thread
+        // overwrite a newer bundle's data while the recorded serial
+        // still shows the higher value — a silent rollback that persists
+        // until a serial past the high-water mark arrives. Serializing
+        // the whole block makes the highest-serial bundle always the
+        // last writer and the loser observe StaleSerial.
+        let mut last_serial = self.last_serial.lock();
+        if bundle.serial <= *last_serial {
+            return Err(FeedBundleError::StaleSerial {
+                got: bundle.serial,
+                last: *last_serial,
+            });
         }
 
         let db = bundle.category_db(actions.clone());
         let categories = db.categories.len();
         category.replace_database(db);
         reputation.replace_entries(bundle.reputation_names());
+        *last_serial = bundle.serial;
 
         Ok(AppliedFeed {
             serial: bundle.serial,

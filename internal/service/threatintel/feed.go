@@ -175,8 +175,16 @@ type Source struct {
 // commercial / community feeds publish. Malformed rows are dropped
 // rather than failing the whole batch.
 //
-// De-duplication and sorting are deferred to bundle assembly so the
-// canonical signed bytes are stable regardless of source ordering.
+// Every whitespace-separated field on a line is run through
+// normalizeDomain and the valid ones are kept. This handles the
+// one-domain-per-line, hosts-file ("0.0.0.0 evil.example" — the leading
+// IP is rejected by normalizeDomain), multi-alias hosts-file
+// ("0.0.0.0 a.example b.example"), and "domain + trailing metadata"
+// ("evil.example 1700000000") shapes uniformly: non-domain tokens (IPs,
+// counters, CSV artifacts) fail the validity gate and drop out while
+// every genuine domain on the line is captured. De-duplication and
+// sorting are deferred to bundle assembly so the canonical signed bytes
+// are stable regardless of source ordering.
 func parseDomainList(raw []byte) []string {
 	// Pre-size generously: most feeds are one domain per line.
 	out := make([]string, 0, 256)
@@ -192,12 +200,10 @@ func parseDomainList(raw []byte) []string {
 				continue
 			}
 		}
-		// Hosts-file format: the domain is the last whitespace-separated
-		// field ("0.0.0.0 evil.example" / "127.0.0.1\tevil.example").
-		fields := strings.Fields(line)
-		candidate := fields[len(fields)-1]
-		if d := normalizeDomain(candidate); d != "" {
-			out = append(out, d)
+		for _, field := range strings.Fields(line) {
+			if d := normalizeDomain(field); d != "" {
+				out = append(out, d)
+			}
 		}
 	}
 	return out
