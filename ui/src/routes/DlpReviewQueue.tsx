@@ -12,7 +12,6 @@ import {
   Card,
   Stat,
   AsyncBoundary,
-  StatusBadge,
   Badge,
   EmptyState,
   EmptyIllustration,
@@ -22,7 +21,14 @@ import { DataTable, type Column } from "@/components/DataTable";
 import { Modal } from "@/components/Modal";
 import { RequireTenant } from "@/components/RequireTenant";
 import { useToast } from "@/components/Toast";
-import { formatDateTime, formatRelative, formatPct, titleCase, type Tone } from "@/lib/format";
+import {
+  formatDateTime,
+  formatRelative,
+  formatPct,
+  titleCase,
+  statusTone,
+  type Tone,
+} from "@/lib/format";
 import type {
   DlpReviewEvent,
   DlpReviewState,
@@ -84,6 +90,22 @@ function severityTone(sev: DlpSeverity): Tone {
   }
 }
 
+// "dismissed" is a noise-disposal action, so render its state badge muted
+// (neutral) rather than the "info" tone the shared statusTone helper falls back
+// to. Scoped to this page on purpose — editing statusTone would recolor status
+// badges across every other surface that uses it.
+function reviewStateTone(state: DlpReviewState): Tone {
+  return state === "dismissed" ? "neutral" : statusTone(state);
+}
+
+function ReviewStateBadge({ state }: { state: DlpReviewState }) {
+  return (
+    <Badge tone={reviewStateTone(state)} dot>
+      {titleCase(state)}
+    </Badge>
+  );
+}
+
 // Column definitions are static (each `cell` reads only its row argument), so
 // they live at module scope rather than being rebuilt on every render.
 const QUEUE_COLUMNS: Column<DlpReviewEvent>[] = [
@@ -103,7 +125,7 @@ const QUEUE_COLUMNS: Column<DlpReviewEvent>[] = [
   },
   { header: "Confidence", cell: (e) => formatPct(e.confidence) },
   { header: "Findings", cell: (e) => <FindingKinds event={e} /> },
-  { header: "State", cell: (e) => <StatusBadge status={e.state} /> },
+  { header: "State", cell: (e) => <ReviewStateBadge state={e.state} /> },
   { header: "Created", cell: (e) => formatRelative(e.created_at) },
 ];
 
@@ -421,7 +443,7 @@ function ReviewDetail({
             <dl className="kv">
               <dt>State</dt>
               <dd>
-                <StatusBadge status={e.state} />
+                <ReviewStateBadge state={e.state} />
               </dd>
               <dt>Destination app</dt>
               <dd className="mono">{e.destination_app}</dd>
