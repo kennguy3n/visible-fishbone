@@ -1969,7 +1969,7 @@ func buildRouter(
 			}
 			return h
 		}(),
-		PolicyTemplates:   handler.NewPolicyTemplateHandler(policyTemplateSvc),
+		PolicyTemplates:   handler.NewPolicyTemplateHandler(policyTemplateSvc, handler.WithPolicyTemplateAuthorizer(rbacSvc)),
 		MSP:               handler.NewMSPHandler(mspRepo, bulkSvc, brandingResolver, rbacSvc),
 		AI:                aiHandler,
 		SCIM:              handler.NewSCIMHandler(scimSvc),

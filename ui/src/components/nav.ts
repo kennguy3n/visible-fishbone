@@ -22,6 +22,7 @@ export const NAV: NavGroup[] = [
     items: [
       { label: "Dashboard", to: "/", icon: "dashboard" },
       { label: "Get started", to: "/onboarding", icon: "rocket" },
+      { label: "Guided onboarding", to: "/onboarding/guided", icon: "rocket" },
       { label: "Tenants", to: "/tenants", icon: "tenants" },
       { label: "Sites", to: "/sites", icon: "sites" },
       { label: "Devices", to: "/devices", icon: "devices" },
@@ -31,6 +32,7 @@ export const NAV: NavGroup[] = [
     label: "Security policy",
     items: [
       { label: "Policy editor", to: "/policy", icon: "policy" },
+      { label: "Cross-tenant roll-out", to: "/policy/rollout", icon: "templates" },
       { label: "Network policies", to: "/network-policies", icon: "network" },
       { label: "DLP", to: "/dlp", icon: "dlp" },
       { label: "DLP review queue", to: "/dlp/review-queue", icon: "flag" },

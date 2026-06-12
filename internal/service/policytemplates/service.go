@@ -129,16 +129,7 @@ func (s *Service) Apply(ctx context.Context, tenantID uuid.UUID, sel Selection) 
 		return AppliedTemplate{}, err
 	}
 
-	applied := AppliedTemplate{
-		TenantID:    tenantID,
-		Industry:    string(resolved.Selection.Industry),
-		Country:     string(resolved.Selection.Country),
-		Regime:      string(resolved.Regime),
-		TemplateIDs: resolved.TemplateIDs,
-		GraphHash:   resolved.GraphHash,
-		Graph:       resolved.GraphJSON,
-		Version:     GraphVersion,
-	}
+	applied := appliedFromResolved(tenantID, resolved)
 	stored, err := s.repo.UpsertApplied(ctx, applied)
 	if err != nil {
 		return AppliedTemplate{}, err

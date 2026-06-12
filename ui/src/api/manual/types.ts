@@ -393,3 +393,118 @@ export interface SimulationResponse {
   started_at: string;
   finished_at: string;
 }
+
+// --- Policy templates (smart-default security baselines) -------------------
+// Mirror the Go wire structs in internal/handler/policytemplates.go and the
+// roll-out types in internal/service/policytemplates/rollout.go. The
+// baseline catalog + apply path and the cross-tenant roll-out are not yet in
+// api/openapi.yaml, so the console talks to them through these hand types.
+
+export interface PolicyTemplateSelection {
+  industry: string;
+  country: string;
+}
+
+export interface PolicyTemplateCatalogItem {
+  id: string;
+  kind: string; // baseline | industry | compliance
+  name: string;
+  description: string;
+  industry?: string;
+  regime?: string;
+}
+
+export interface PolicyTemplateIndustryOption {
+  industry: string;
+  name: string;
+  template_id: string;
+}
+
+export interface PolicyTemplateCountryOption {
+  country: string;
+  regime: string;
+}
+
+export interface PolicyTemplateOptions {
+  industries: PolicyTemplateIndustryOption[];
+  countries: PolicyTemplateCountryOption[];
+}
+
+export interface AppliedPolicyTemplate {
+  tenant_id: string;
+  industry: string;
+  country: string;
+  regime: string;
+  template_ids: string[];
+  graph_hash: string;
+  graph: unknown;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PolicyTemplatePreview {
+  selection: PolicyTemplateSelection;
+  regime: string;
+  template_ids: string[];
+  graph_hash: string;
+  graph: unknown;
+}
+
+export type RolloutAction = "create" | "update" | "noop";
+
+export interface RolloutAppliedSummary {
+  industry: string;
+  country: string;
+  regime: string;
+  template_ids: string[];
+  graph_hash: string;
+  version: number;
+}
+
+export interface RolloutTargetDiff {
+  tenant_id: string;
+  action: RolloutAction;
+  current?: RolloutAppliedSummary;
+}
+
+export interface RolloutPreview {
+  selection: PolicyTemplateSelection;
+  regime: string;
+  template_ids: string[];
+  graph_hash: string;
+  targets: RolloutTargetDiff[];
+}
+
+export type RolloutStatus =
+  | "applied"
+  | "unchanged"
+  | "failed"
+  | "cancelled";
+
+export interface RolloutOutcome {
+  tenant_id: string;
+  status: RolloutStatus;
+  prior_hash?: string;
+  graph_hash?: string;
+  rolled_back?: boolean;
+  error?: string;
+}
+
+export interface RolloutResult {
+  selection: PolicyTemplateSelection;
+  regime: string;
+  template_ids: string[];
+  graph_hash: string;
+  outcomes: RolloutOutcome[];
+  applied: number;
+  unchanged: number;
+  failed: number;
+  cancelled: number;
+}
+
+export interface RolloutRequest {
+  industry: string;
+  country: string;
+  tenant_ids: string[];
+}

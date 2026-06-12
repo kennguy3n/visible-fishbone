@@ -8,6 +8,7 @@ import {
   useQueryClient,
   type UseQueryResult,
 } from "@tanstack/react-query";
+import { isAxiosError } from "axios";
 import { sngRequest } from "@/api/http-client";
 import type {
   BudgetOverride,
@@ -36,6 +37,14 @@ import type {
   TenantCostReport,
   UsageHistoryResponse,
   UsageResponse,
+  AppliedPolicyTemplate,
+  PolicyTemplateCatalogItem,
+  PolicyTemplateOptions,
+  PolicyTemplatePreview,
+  PolicyTemplateSelection,
+  RolloutPreview,
+  RolloutRequest,
+  RolloutResult,
 } from "./types";
 
 const base = (tenantId: string) => `/tenants/${tenantId}`;
@@ -513,5 +522,114 @@ export function useDecideApproval(tenantId: string) {
       }),
     onSuccess: () =>
       qc.invalidateQueries({ queryKey: ["playbooks", "approvals", tenantId] }),
+  });
+}
+
+// --- Policy templates (baselines + cross-tenant roll-out) ------------------
+
+export function usePolicyTemplateOptions(): UseQueryResult<PolicyTemplateOptions> {
+  return useQuery({
+    queryKey: ["policy-templates", "options"],
+    queryFn: ({ signal }) =>
+      sngRequest<PolicyTemplateOptions>({
+        method: "GET",
+        url: `/policy-templates/options`,
+        signal,
+      }),
+    // The selection vocabulary is immutable for a given build; keep it
+    // cached so the picker and wizard don't refetch on every mount.
+    staleTime: Infinity,
+  });
+}
+
+export function usePolicyTemplateCatalog(): UseQueryResult<
+  ListEnvelope<PolicyTemplateCatalogItem>
+> {
+  return useQuery({
+    queryKey: ["policy-templates", "catalog"],
+    queryFn: ({ signal }) =>
+      sngRequest<ListEnvelope<PolicyTemplateCatalogItem>>({
+        method: "GET",
+        url: `/policy-templates`,
+        signal,
+      }),
+    staleTime: Infinity,
+  });
+}
+
+/** The tenant's currently-applied baseline, or null when none is applied. */
+export function useAppliedPolicyTemplate(
+  tenantId: string,
+): UseQueryResult<AppliedPolicyTemplate | null> {
+  return useQuery({
+    queryKey: ["policy-templates", "applied", tenantId],
+    queryFn: ({ signal }) =>
+      sngRequest<AppliedPolicyTemplate>({
+        method: "GET",
+        url: `${base(tenantId)}/policy-templates/applied`,
+        signal,
+      }).catch((err: unknown) => {
+        // 404 simply means the tenant has no baseline yet — surface it as
+        // null rather than an error so the wizard can show an empty state.
+        if (isAxiosError(err) && err.response?.status === 404) {
+          return null;
+        }
+        throw err;
+      }),
+    enabled: !!tenantId,
+  });
+}
+
+export function useApplyPolicyTemplate(tenantId: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (selection: PolicyTemplateSelection) =>
+      sngRequest<AppliedPolicyTemplate>({
+        method: "POST",
+        url: `${base(tenantId)}/policy-templates/apply`,
+        data: selection,
+      }),
+    onSuccess: () =>
+      qc.invalidateQueries({
+        queryKey: ["policy-templates", "applied", tenantId],
+      }),
+  });
+}
+
+export function usePreviewPolicyTemplate(tenantId: string) {
+  return useMutation({
+    mutationFn: (selection: PolicyTemplateSelection) =>
+      sngRequest<PolicyTemplatePreview>({
+        method: "POST",
+        url: `${base(tenantId)}/policy-templates/preview`,
+        data: selection,
+      }),
+  });
+}
+
+export function usePreviewPolicyRollout() {
+  return useMutation({
+    mutationFn: (body: RolloutRequest) =>
+      sngRequest<RolloutPreview>({
+        method: "POST",
+        url: `/policy-templates/rollout/preview`,
+        data: body,
+      }),
+  });
+}
+
+export function useExecutePolicyRollout() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: RolloutRequest) =>
+      sngRequest<RolloutResult>({
+        method: "POST",
+        url: `/policy-templates/rollout`,
+        data: body,
+      }),
+    onSuccess: () =>
+      // A roll-out touches many tenants' applied baselines; drop the
+      // whole applied-baseline cache so any open per-tenant view refetches.
+      qc.invalidateQueries({ queryKey: ["policy-templates", "applied"] }),
   });
 }

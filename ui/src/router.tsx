@@ -9,6 +9,8 @@ import { Login } from "@/routes/Login";
 import { OidcCallback } from "@/routes/OidcCallback";
 import { Dashboard } from "@/routes/Dashboard";
 import { Onboarding } from "@/routes/Onboarding";
+import { GuidedOnboarding } from "@/routes/GuidedOnboarding";
+import { PolicyRollout } from "@/routes/PolicyRollout";
 import { Tenants } from "@/routes/Tenants";
 import { Sites } from "@/routes/Sites";
 import { Devices } from "@/routes/Devices";
@@ -68,10 +70,12 @@ const page = <P extends string>(path: P, component: () => JSX.Element) =>
 const appRoutes = [
   page("/", Dashboard),
   page("/onboarding", Onboarding),
+  page("/onboarding/guided", GuidedOnboarding),
   page("/tenants", Tenants),
   page("/sites", Sites),
   page("/devices", Devices),
   page("/policy", Policy),
+  page("/policy/rollout", PolicyRollout),
   page("/network-policies", NetworkPolicies),
   page("/dlp", Dlp),
   page("/dlp/review-queue", DlpReviewQueue),

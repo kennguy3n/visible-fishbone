@@ -17,7 +17,30 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/policytemplates"
 )
 
-func newPolicyTemplateTestRouter(t *testing.T) (http.Handler, uuid.UUID, string) {
+const policyTemplateTestJWTSecret = "test-jwt-secret-key"
+
+// signPolicyTemplateToken mints a signed HS256 token for the test
+// router. A "tenant_id" claim binds the caller to that tenant (the
+// per-tenant routes and the cross-tenant scope check observe it);
+// omit it to model a platform/global operator with no tenant binding.
+func signPolicyTemplateToken(t *testing.T, claims jwt.MapClaims) string {
+	t.Helper()
+	claims["iss"] = "sng-control"
+	claims["aud"] = "sng-control"
+	claims["iat"] = time.Now().Unix()
+	claims["exp"] = time.Now().Add(5 * time.Minute).Unix()
+	if _, ok := claims["sub"]; !ok {
+		claims["sub"] = uuid.NewString()
+	}
+	signed, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).
+		SignedString([]byte(policyTemplateTestJWTSecret))
+	if err != nil {
+		t.Fatalf("sign jwt: %v", err)
+	}
+	return signed
+}
+
+func newPolicyTemplateTestRouter(t *testing.T, opts ...handler.PolicyTemplateOption) (http.Handler, uuid.UUID, string) {
 	t.Helper()
 	store := memory.NewStore()
 	tenantID := uuid.New()
@@ -31,10 +54,9 @@ func newPolicyTemplateTestRouter(t *testing.T) (http.Handler, uuid.UUID, string)
 
 	svc := policytemplates.New(memory.NewPolicyTemplateRepository(), nil)
 
-	jwtSecret := "test-jwt-secret-key"
 	cfg := &config.Config{
 		Auth: config.Auth{
-			JWTSecret:    jwtSecret,
+			JWTSecret:    policyTemplateTestJWTSecret,
 			JWTIssuer:    "sng-control",
 			JWTAudience:  "sng-control",
 			APIKeyHeader: "X-SNG-API-Key",
@@ -42,21 +64,13 @@ func newPolicyTemplateTestRouter(t *testing.T) (http.Handler, uuid.UUID, string)
 	}
 	router := handler.NewRouter(handler.RouterDeps{
 		Config:          cfg,
-		PolicyTemplates: handler.NewPolicyTemplateHandler(svc),
+		PolicyTemplates: handler.NewPolicyTemplateHandler(svc, opts...),
 	})
 
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"iss":       "sng-control",
-		"aud":       "sng-control",
-		"sub":       uuid.NewString(),
-		"tenant_id": tenantID.String(),
-		"iat":       time.Now().Unix(),
-		"exp":       time.Now().Add(5 * time.Minute).Unix(),
-	})
-	signed, err := token.SignedString([]byte(jwtSecret))
-	if err != nil {
-		t.Fatalf("sign jwt: %v", err)
-	}
+	// A tenant-bound token: fine for the per-tenant routes, and the
+	// cross-tenant tests that need a platform operator mint their own
+	// token without a tenant_id claim.
+	signed := signPolicyTemplateToken(t, jwt.MapClaims{"tenant_id": tenantID.String()})
 	return router, tenantID, signed
 }
 
