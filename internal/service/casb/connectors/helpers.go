@@ -180,6 +180,17 @@ func getJSON(ctx context.Context, client HTTPDoer, userAgent, prefix, endpoint, 
 // maxBytes <= 0 is treated as "no caller cap" and falls back to a
 // hard 64 MiB ceiling so a misconfigured caller can never trigger an
 // unbounded read.
+//
+// Redirects: the injected HTTPDoer (an *http.Client) follows redirects
+// with Go's default policy, which strips the Authorization header on a
+// cross-host hop. This is the desired behaviour for the providers that
+// 302 a content download to a CDN — Box (/files/{id}/content) and M365
+// (/drive/items/{id}/content) embed their own auth in the pre-signed
+// redirect target, so the Bearer is correctly not leaked off-origin. A
+// connector whose content endpoint same-host-redirects to another
+// Bearer-protected URL would therefore see a 401; none of the current
+// connectors do, but a future one must fetch the final URL directly
+// rather than relying on a redirect to carry the token.
 func fetchContent(
 	ctx context.Context,
 	client HTTPDoer,
