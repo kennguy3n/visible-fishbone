@@ -199,9 +199,20 @@ async fn main() {
     }
     if sel.wild {
         eprintln!("running wild malware efficacy (sng-swg YARA, noisy corpus under load)...");
-        functions.extend(wild::run_malware());
+        // The wild drivers saturate an OS-thread pool for seconds; run them on
+        // the blocking pool so they never stall a tokio worker (idiomatic even
+        // though this harness drives the drivers sequentially).
+        functions.extend(
+            tokio::task::spawn_blocking(wild::run_malware)
+                .await
+                .expect("wild malware driver panicked"),
+        );
         eprintln!("running wild DLP efficacy (sng-dlp classifier, noisy corpus under load)...");
-        functions.extend(wild::run_dlp());
+        functions.extend(
+            tokio::task::spawn_blocking(wild::run_dlp)
+                .await
+                .expect("wild DLP driver panicked"),
+        );
         eprintln!("running wild IPS efficacy (sng-ips + suricata, concurrent load)...");
         functions.push(wild::run_ips().await);
     }

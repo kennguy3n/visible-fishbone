@@ -389,8 +389,8 @@ pub fn run_malware() -> Vec<FunctionReport> {
         Ok(c) => c,
         Err(e) => {
             return vec![
-                untested("malware_wild", &e),
-                untested("malware_fpr_load", &e),
+                untested("malware_wild", "sng-swg", &e),
+                untested("malware_fpr_load", "sng-swg", &e),
             ]
         }
     };
@@ -399,8 +399,8 @@ pub fn run_malware() -> Vec<FunctionReport> {
         Err(e) => {
             let msg = format!("YaraEngine build failed: {e}");
             return vec![
-                untested("malware_wild", &msg),
-                untested("malware_fpr_load", &msg),
+                untested("malware_wild", "sng-swg", &msg),
+                untested("malware_fpr_load", "sng-swg", &msg),
             ];
         }
     };
@@ -449,14 +449,22 @@ pub fn run_malware() -> Vec<FunctionReport> {
 pub fn run_dlp() -> Vec<FunctionReport> {
     let corpus = match load_corpus() {
         Ok(c) => c,
-        Err(e) => return vec![untested("dlp_wild", &e), untested("dlp_fpr_load", &e)],
+        Err(e) => {
+            return vec![
+                untested("dlp_wild", "sng-dlp", &e),
+                untested("dlp_fpr_load", "sng-dlp", &e),
+            ]
+        }
     };
     let rules: Vec<DlpRule> = DLP_DETECTORS.iter().map(|p| dlp_rule(p)).collect();
     let classifier = match ContentClassifier::compile(&rules) {
         Ok(c) => c,
         Err(e) => {
             let msg = format!("ContentClassifier compile failed: {e}");
-            return vec![untested("dlp_wild", &msg), untested("dlp_fpr_load", &msg)];
+            return vec![
+                untested("dlp_wild", "sng-dlp", &msg),
+                untested("dlp_fpr_load", "sng-dlp", &msg),
+            ];
         }
     };
     let meta = ContentMetadata::default();
@@ -552,12 +560,7 @@ fn wild_features(engine: &str) -> Vec<Feature> {
     }]
 }
 
-fn untested(function: &str, reason: &str) -> FunctionReport {
-    let crate_name = if function.starts_with("dlp") {
-        "sng-dlp"
-    } else {
-        "sng-swg"
-    };
+fn untested(function: &str, crate_name: &str, reason: &str) -> FunctionReport {
     FunctionReport::untested(function, crate_name, Kind::Detection, reason).with_informational()
 }
 
