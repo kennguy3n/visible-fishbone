@@ -179,7 +179,7 @@ func (r *TenantMigrationRepository) Update(ctx context.Context, tenantID uuid.UU
 	}
 	// Bump the optimistic-lock counter so the next write must present
 	// this new version (mirrors `version = version + 1` in Postgres).
-	cur.Version = cur.Version + 1
+	cur.Version++
 	cur.UpdatedAt = r.s.clock()
 	r.s.tenantMigrations[cur.ID] = cloneTenantMigration(cur)
 	return cloneTenantMigration(cur), nil

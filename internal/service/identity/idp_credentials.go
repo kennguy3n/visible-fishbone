@@ -93,11 +93,7 @@ func (v *CredentialVault) Put(ctx context.Context, tenantID, configID uuid.UUID,
 	if cred.Token == "" {
 		return fmt.Errorf("%w: directory credential token is required", repository.ErrInvalidArgument)
 	}
-	plaintext, err := json.Marshal(sealedCredential{
-		BaseURL: cred.BaseURL,
-		Token:   cred.Token,
-		Subject: cred.Subject,
-	})
+	plaintext, err := json.Marshal(sealedCredential(cred))
 	if err != nil {
 		return fmt.Errorf("marshal directory credential: %w", err)
 	}
@@ -154,7 +150,7 @@ func (v *CredentialVault) Resolve(ctx context.Context, tenantID uuid.UUID, cfg r
 	if err := json.Unmarshal(plaintext, &sc); err != nil {
 		return DirectoryCredential{}, fmt.Errorf("decode directory credential: %w", err)
 	}
-	return DirectoryCredential{BaseURL: sc.BaseURL, Token: sc.Token, Subject: sc.Subject}, nil
+	return DirectoryCredential(sc), nil
 }
 
 // Ensure CredentialVault satisfies the resolver contract the
