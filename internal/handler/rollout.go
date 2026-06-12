@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -257,10 +258,22 @@ func pathCapability(w http.ResponseWriter, r *http.Request) (rollout.Capability,
 	c := rollout.Capability(raw)
 	if !c.Valid() {
 		WriteError(w, http.StatusBadRequest, "invalid_param",
-			"capability must be one of: clamav_swg, noops_autoenforce, idp_directory_sync")
+			"capability must be one of: "+knownCapabilities())
 		return "", false
 	}
 	return c, true
+}
+
+// knownCapabilities renders the governed capabilities as a comma-separated
+// list, derived from rollout.AllCapabilities() so the error message stays
+// in sync automatically when a capability is added.
+func knownCapabilities() string {
+	caps := rollout.AllCapabilities()
+	names := make([]string, len(caps))
+	for i, c := range caps {
+		names[i] = string(c)
+	}
+	return strings.Join(names, ", ")
 }
 
 // rolloutActor derives a stable, non-PII actor id for the transition

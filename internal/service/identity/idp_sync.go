@@ -438,9 +438,13 @@ func (s *SyncService) SyncTenant(ctx context.Context, tenantID uuid.UUID) (SyncR
 		if err := s.syncConfig(ctx, tenantID, cfg, &report); err != nil {
 			report.Errors = append(report.Errors,
 				fmt.Errorf("provider %s (%s): %w", cfg.ProviderType, cfg.IssuerURL, err))
-			// A config that could not be read is one failed observation
-			// with no user behind it; fold it into the monitor sample space.
-			report.MonitorErrorSamples++
+			if report.DryRun {
+				// A config that could not be read is one failed observation
+				// with no user behind it; fold it into the monitor sample
+				// space (only meaningful in dry-run, where it joins the
+				// auto-rollback denominator).
+				report.MonitorErrorSamples++
+			}
 		}
 	}
 
