@@ -6,6 +6,9 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
@@ -28,6 +31,10 @@ type Slack struct {
 	client    HTTPDoer
 	userAgent string
 	baseURL   string
+	// webBaseURL hosts the Slack Web API methods (conversations.*),
+	// which live under slack.com/api rather than the api.slack.com host
+	// the SCIM/audit endpoints use. Overridable for testing.
+	webBaseURL string
 }
 
 // NewSlack constructs a Slack CASB connector.
@@ -38,7 +45,12 @@ func NewSlack(client HTTPDoer, userAgent string) *Slack {
 	if userAgent == "" {
 		userAgent = "sng-control/0.1 (+casb/slack)"
 	}
-	return &Slack{client: client, userAgent: userAgent, baseURL: "https://api.slack.com"}
+	return &Slack{
+		client:     client,
+		userAgent:  userAgent,
+		baseURL:    "https://api.slack.com",
+		webBaseURL: "https://slack.com",
+	}
 }
 
 func (s *Slack) Type() repository.CASBConnectorType {
@@ -214,6 +226,165 @@ func (s *Slack) AssessPosture(_ context.Context, _ json.RawMessage, _ []byte) (c
 		RiskScore:  score,
 		AssessedAt: now,
 	}, nil
+}
+
+// slackPageLimit bounds Slack Web API page sizes for the
+// conversations.* listings the content scan walks.
+const slackPageLimit = 200
+
+// ScanContent implements casb.ContentInspector for Slack: it walks
+// every channel the token can see and streams each message's text as a
+// ContentObject for DLP classification. Slack message *text* is the
+// natural inspection target — it is already present in the
+// conversations.history payload, so no second per-object fetch (and no
+// url_private SSRF surface) is involved. Channels and history are both
+// cursor-paged so no workspace is buffered whole, and the per-object
+// byte cap trims any pathologically large message.
+func (s *Slack) ScanContent(
+	ctx context.Context,
+	_ json.RawMessage,
+	secret []byte,
+	opts casb.ContentScanOptions,
+	yield func(context.Context, casb.ContentObject) error,
+) error {
+	token, err := parseSlackToken(secret)
+	if err != nil {
+		return err
+	}
+	channels, err := s.listChannels(ctx, token)
+	if err != nil {
+		return err
+	}
+	for _, ch := range channels {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := s.scanChannelHistory(ctx, token, ch.ID, ch.Name, opts, yield); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type slackChannel struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+}
+
+func (s *Slack) listChannels(ctx context.Context, token string) ([]slackChannel, error) {
+	var channels []slackChannel
+	cursor := ""
+	for {
+		endpoint := fmt.Sprintf(
+			"%s/api/conversations.list?types=public_channel,private_channel&limit=%d",
+			s.webBaseURL, slackPageLimit)
+		if cursor != "" {
+			endpoint += "&cursor=" + url.QueryEscape(cursor)
+		}
+		var out struct {
+			OK               bool           `json:"ok"`
+			Error            string         `json:"error"`
+			Channels         []slackChannel `json:"channels"`
+			ResponseMetadata struct {
+				NextCursor string `json:"next_cursor"`
+			} `json:"response_metadata"`
+		}
+		if err := getJSON(ctx, s.client, s.userAgent, "slack", endpoint, token, &out); err != nil {
+			return nil, err
+		}
+		if !out.OK {
+			return nil, fmt.Errorf("slack: conversations.list: %s", out.Error)
+		}
+		channels = append(channels, out.Channels...)
+		if out.ResponseMetadata.NextCursor == "" {
+			break
+		}
+		cursor = out.ResponseMetadata.NextCursor
+	}
+	return channels, nil
+}
+
+func (s *Slack) scanChannelHistory(
+	ctx context.Context,
+	token, channelID, channelName string,
+	opts casb.ContentScanOptions,
+	yield func(context.Context, casb.ContentObject) error,
+) error {
+	cursor := ""
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		endpoint := fmt.Sprintf("%s/api/conversations.history?channel=%s&limit=%d",
+			s.webBaseURL, url.QueryEscape(channelID), slackPageLimit)
+		if !opts.Since.IsZero() {
+			endpoint += fmt.Sprintf("&oldest=%d", opts.Since.Unix())
+		}
+		if cursor != "" {
+			endpoint += "&cursor=" + url.QueryEscape(cursor)
+		}
+		var out struct {
+			OK       bool   `json:"ok"`
+			Error    string `json:"error"`
+			Messages []struct {
+				Type    string `json:"type"`
+				Subtype string `json:"subtype"`
+				TS      string `json:"ts"`
+				User    string `json:"user"`
+				Text    string `json:"text"`
+			} `json:"messages"`
+			HasMore          bool `json:"has_more"`
+			ResponseMetadata struct {
+				NextCursor string `json:"next_cursor"`
+			} `json:"response_metadata"`
+		}
+		if err := getJSON(ctx, s.client, s.userAgent, "slack", endpoint, token, &out); err != nil {
+			return err
+		}
+		if !out.OK {
+			return fmt.Errorf("slack: conversations.history: %s", out.Error)
+		}
+		for _, msg := range out.Messages {
+			if msg.Text == "" {
+				continue
+			}
+			content := []byte(msg.Text)
+			if max := opts.MaxBytesPerObject; max > 0 && int64(len(content)) > max {
+				content = content[:max]
+			}
+			obj := casb.ContentObject{
+				ID:          channelID + ":" + msg.TS,
+				Name:        fmt.Sprintf("#%s @%s", channelName, msg.TS),
+				Owner:       msg.User,
+				ContentType: "text/plain",
+				SizeBytes:   int64(len(msg.Text)),
+				ModifiedAt:  slackTSToTime(msg.TS),
+				Content:     content,
+			}
+			if err := yield(ctx, obj); err != nil {
+				return err
+			}
+		}
+		if out.ResponseMetadata.NextCursor == "" {
+			break
+		}
+		cursor = out.ResponseMetadata.NextCursor
+	}
+	return nil
+}
+
+// slackTSToTime converts a Slack message timestamp ("1234567890.000200")
+// to a time.Time. A malformed ts yields the zero time.
+func slackTSToTime(ts string) time.Time {
+	sec := ts
+	if i := strings.IndexByte(ts, '.'); i >= 0 {
+		sec = ts[:i]
+	}
+	n, err := strconv.ParseInt(sec, 10, 64)
+	if err != nil {
+		return time.Time{}
+	}
+	return time.Unix(n, 0).UTC()
 }
 
 func parseSlackToken(secret []byte) (string, error) {

@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -118,6 +120,46 @@ func doJSON(client HTTPDoer, userAgent, prefix string, req *http.Request, out an
 	return nil
 }
 
+// parseInt64 parses a base-10 integer string, returning 0 for empty
+// or unparseable input. Used for provider size fields that arrive as
+// strings (e.g. Google Drive v3's `size`).
+func parseInt64(s string) int64 {
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// contentTypeFromName resolves the MIME type for a fetched object.
+// It prefers a meaningful Content-Type reported by the provider,
+// falls back to a guess from the file name's extension, and finally
+// to the generic octet-stream so the DLP classifier always receives a
+// non-empty content type. A generic/blank reported type does not
+// suppress the extension guess (Box, for instance, serves downloads as
+// application/octet-stream regardless of the real type).
+func contentTypeFromName(reported, name string) string {
+	reported = strings.TrimSpace(reported)
+	// Strip any "; charset=..." parameter for the genericness check
+	// while preserving the original (with charset) when we keep it.
+	base := reported
+	if i := strings.IndexByte(base, ';'); i >= 0 {
+		base = strings.TrimSpace(base[:i])
+	}
+	if reported != "" && base != "" && base != "application/octet-stream" && base != "binary/octet-stream" {
+		return reported
+	}
+	if ext := name[strings.LastIndexByte(name, '.')+1:]; ext != "" && ext != name {
+		if guess := mime.TypeByExtension("." + strings.ToLower(ext)); guess != "" {
+			return guess
+		}
+	}
+	if reported != "" {
+		return reported
+	}
+	return "application/octet-stream"
+}
+
 // getJSON is the common GET+Bearer+decode path.
 func getJSON(ctx context.Context, client HTTPDoer, userAgent, prefix, endpoint, token string, out any) error {
 	req, err := newJSONRequest(ctx, http.MethodGet, endpoint, nil)
@@ -126,6 +168,59 @@ func getJSON(ctx context.Context, client HTTPDoer, userAgent, prefix, endpoint, 
 	}
 	bearer(req, token)
 	return doJSON(client, userAgent, prefix, req, out)
+}
+
+// fetchContent performs a GET + Bearer request and returns the
+// response body bounded to maxBytes, plus the response Content-Type.
+// It is the single choke point the content-inspection (DLP retro-scan)
+// path uses to pull an object's bytes, so the byte cap that protects
+// the control plane from pulling an unbounded blob into memory is
+// enforced identically across every connector.
+//
+// maxBytes <= 0 is treated as "no caller cap" and falls back to a
+// hard 64 MiB ceiling so a misconfigured caller can never trigger an
+// unbounded read.
+func fetchContent(
+	ctx context.Context,
+	client HTTPDoer,
+	userAgent, prefix, endpoint, token string,
+	maxBytes int64,
+) (data []byte, contentType string, err error) {
+	const hardCeiling = 64 << 20
+	if maxBytes <= 0 || maxBytes > hardCeiling {
+		maxBytes = hardCeiling
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("%s: %w", prefix, err)
+	}
+	bearer(req, token)
+	if req.Header.Get("User-Agent") == "" {
+		req.Header.Set("User-Agent", userAgent)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("%s: %s %s: %w", prefix, req.Method, req.URL.Path, err)
+	}
+	defer func() {
+		// Drain a bounded remainder so a keep-alive connection can be
+		// reused, then close.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxErrorBody))
+		_ = resp.Body.Close()
+	}()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxErrorBody))
+		return nil, "", fmt.Errorf("%s: %s %s returned %d: %s",
+			prefix, req.Method, req.URL.Path, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	// Read at most maxBytes; any overflow is dropped by the limiter.
+	// The DLP classifier scans a prefix, which is sufficient for the
+	// pattern/fingerprint detectors and keeps memory bounded.
+	data, err = io.ReadAll(io.LimitReader(resp.Body, maxBytes))
+	if err != nil {
+		return nil, "", fmt.Errorf("%s: read content: %w", prefix, err)
+	}
+	return data, resp.Header.Get("Content-Type"), nil
 }
 
 // getJSONBasic is the common GET + HTTP Basic auth + decode path used

@@ -30,6 +30,13 @@ type Service struct {
 	plugins    PluginRegistry
 	logger     *slog.Logger
 	nowFunc    func() time.Time
+
+	// classifier and inspectionEnabled arm the optional API-CASB
+	// content-inspection path (content_inspection.go). They are nil/
+	// false unless WithContentInspection is supplied, keeping content
+	// scanning default-OFF.
+	classifier        ContentClassifier
+	inspectionEnabled bool
 }
 
 // New constructs a ready-to-use CASB service.
@@ -40,6 +47,7 @@ func New(
 	audit repository.AuditLogRepository,
 	plugins PluginRegistry,
 	logger *slog.Logger,
+	opts ...Option,
 ) *Service {
 	if logger == nil {
 		logger = slog.Default()
@@ -47,7 +55,7 @@ func New(
 	if plugins == nil {
 		plugins = PluginRegistry{}
 	}
-	return &Service{
+	svc := &Service{
 		connectors: connectors,
 		apps:       apps,
 		posture:    posture,
@@ -56,6 +64,10 @@ func New(
 		logger:     logger,
 		nowFunc:    func() time.Time { return time.Now().UTC() },
 	}
+	for _, opt := range opts {
+		opt(svc)
+	}
+	return svc
 }
 
 // SetClock overrides the wall clock for tests.

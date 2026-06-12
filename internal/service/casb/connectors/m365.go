@@ -320,6 +320,167 @@ func (m *M365) checkGuestAccessPolicy(ctx context.Context, token string) casb.Po
 	return casb.PostureCheck{Name: "guest_access_policy", Status: casb.CheckStatusFail, Evidence: "guest invitations allowed from: " + result.AllowInvitesFrom}
 }
 
+// ScanContent implements casb.ContentInspector for Microsoft 365: it
+// enumerates each user's OneDrive and streams the content of every
+// file (bounded to opts.MaxBytesPerObject) for DLP classification.
+// Drives are walked breadth-first via Graph's driveItem children
+// listing with @odata.nextLink paging so the file set is never
+// buffered, and content is fetched through the Graph /content endpoint
+// (using the tenant's own token) rather than the response's
+// pre-authenticated @microsoft.graph.downloadUrl — the latter is an
+// opaque CDN URL we would otherwise have to trust as a fetch target.
+func (m *M365) ScanContent(
+	ctx context.Context,
+	config json.RawMessage,
+	secret []byte,
+	opts casb.ContentScanOptions,
+	yield func(context.Context, casb.ContentObject) error,
+) error {
+	token, err := m.getToken(ctx, config, secret)
+	if err != nil {
+		return err
+	}
+	users, err := m.listDriveUserIDs(ctx, token)
+	if err != nil {
+		return err
+	}
+	for _, uid := range users {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := m.scanUserDrive(ctx, token, uid, opts, yield); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// listDriveUserIDs returns the ids of users whose OneDrive should be
+// scanned. It reuses the same /users listing the discovery path uses.
+func (m *M365) listDriveUserIDs(ctx context.Context, token string) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
+		m.graphBase+"/users?$select=id", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("User-Agent", m.userAgent)
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("m365: list drive users failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("m365: list drive users returned %d: %s", resp.StatusCode, body)
+	}
+	var result struct {
+		Value []struct {
+			ID string `json:"id"`
+		} `json:"value"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("m365: decode drive users: %w", err)
+	}
+	ids := make([]string, 0, len(result.Value))
+	for _, u := range result.Value {
+		ids = append(ids, u.ID)
+	}
+	return ids, nil
+}
+
+type graphDriveItem struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	Size         int64  `json:"size"`
+	LastModified string `json:"lastModifiedDateTime"`
+	Folder       *struct {
+		ChildCount int `json:"childCount"`
+	} `json:"folder"`
+	File *struct {
+		MimeType string `json:"mimeType"`
+	} `json:"file"`
+}
+
+// scanUserDrive walks one user's OneDrive breadth-first. A missing
+// drive (404 — user never provisioned OneDrive) is skipped rather than
+// failing the whole scan.
+func (m *M365) scanUserDrive(
+	ctx context.Context,
+	token, userID string,
+	opts casb.ContentScanOptions,
+	yield func(context.Context, casb.ContentObject) error,
+) error {
+	root := fmt.Sprintf("%s/users/%s/drive/root/children?$select=id,name,size,lastModifiedDateTime,folder,file",
+		m.graphBase, url.PathEscape(userID))
+	queue := []string{root}
+	for len(queue) > 0 {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		endpoint := queue[0]
+		queue = queue[1:]
+		var page struct {
+			Value    []graphDriveItem `json:"value"`
+			NextLink string           `json:"@odata.nextLink"`
+		}
+		if err := getJSON(ctx, m.client, m.userAgent, "m365", endpoint, token, &page); err != nil {
+			if isM365NotFound(err) {
+				continue
+			}
+			return err
+		}
+		for _, it := range page.Value {
+			if it.Folder != nil {
+				queue = append(queue, fmt.Sprintf(
+					"%s/users/%s/drive/items/%s/children?$select=id,name,size,lastModifiedDateTime,folder,file",
+					m.graphBase, url.PathEscape(userID), url.PathEscape(it.ID)))
+				continue
+			}
+			if it.File == nil {
+				continue
+			}
+			modified, _ := time.Parse(time.RFC3339, it.LastModified)
+			if !opts.Since.IsZero() && !modified.IsZero() && modified.Before(opts.Since) {
+				continue
+			}
+			content, ctype, err := fetchContent(ctx, m.client, m.userAgent, "m365",
+				fmt.Sprintf("%s/users/%s/drive/items/%s/content",
+					m.graphBase, url.PathEscape(userID), url.PathEscape(it.ID)),
+				token, opts.MaxBytesPerObject)
+			if err != nil {
+				return err
+			}
+			reported := ctype
+			if it.File.MimeType != "" {
+				reported = it.File.MimeType
+			}
+			obj := casb.ContentObject{
+				ID:          it.ID,
+				Name:        it.Name,
+				Owner:       userID,
+				ContentType: contentTypeFromName(reported, it.Name),
+				SizeBytes:   it.Size,
+				ModifiedAt:  modified,
+				Content:     content,
+			}
+			if err := yield(ctx, obj); err != nil {
+				return err
+			}
+		}
+		if page.NextLink != "" {
+			queue = append(queue, page.NextLink)
+		}
+	}
+	return nil
+}
+
+// isM365NotFound reports whether a doJSON/getJSON error wraps a Graph
+// 404, used to skip users without a provisioned drive.
+func isM365NotFound(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "returned 404")
+}
+
 func (m *M365) getToken(ctx context.Context, config json.RawMessage, secret []byte) (string, error) {
 	var cfg M365Config
 	if err := json.Unmarshal(config, &cfg); err != nil {
