@@ -1,10 +1,77 @@
 {
   "items": [
     {
-      "created_at": "2026-06-10T16:05:23.170444Z",
+      "created_at": "2026-06-12T00:56:21.084987Z",
+      "description": "Route the session to remote browser isolation when the PHI classifier fires on a webmail upload, then alert the privacy officer.",
+      "enabled": true,
+      "id": "2687db3c-b9fa-4896-bf57-ab7921f96810",
+      "name": "Isolate PHI exfil over webmail",
+      "steps": [
+        {
+          "action": "isolate_browser",
+          "mode": "rbi"
+        },
+        {
+          "action": "notify",
+          "channel": "privacy_officer",
+          "severity": "high"
+        }
+      ],
+      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0",
+      "trigger_condition": "dlp.violation && dlp.classifier == 'phi' && app.category == 'webmail'",
+      "updated_at": "2026-06-12T00:56:21.084987Z"
+    },
+    {
+      "created_at": "2026-06-12T00:54:56.983597Z",
+      "description": "Block an outbound transfer that trips the secrets/credentials classifier and require an engineering-lead sign-off before release.",
+      "enabled": true,
+      "id": "652f9691-fc78-42a6-907c-175a59d34539",
+      "name": "Quarantine source-code exfil",
+      "steps": [
+        {
+          "action": "block_transfer"
+        },
+        {
+          "action": "require_approval",
+          "role": "security_admin"
+        },
+        {
+          "action": "notify",
+          "channel": "soc",
+          "severity": "high"
+        }
+      ],
+      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c",
+      "trigger_condition": "dlp.violation && dlp.template == 'secrets-credentials'",
+      "updated_at": "2026-06-12T00:54:56.983597Z"
+    },
+    {
+      "created_at": "2026-06-11T04:40:15.75041Z",
+      "description": "Open a SecOps ticket and notify the cost owner when a tenant's URL-category lookup run rate exceeds 2x its trailing baseline.",
+      "enabled": true,
+      "id": "a25cebf1-d0af-468f-bee8-f7525cd9c9aa",
+      "name": "Throttle anomalous URL-category surge",
+      "steps": [
+        {
+          "action": "notify",
+          "channel": "finops",
+          "severity": "warning"
+        },
+        {
+          "action": "open_ticket",
+          "priority": "P3",
+          "system": "jira"
+        }
+      ],
+      "tenant_id": "b6520bda-e7bb-4af9-9c53-7b0051eae65b",
+      "trigger_condition": "anomaly.meter == 'url_cat_lookups' && anomaly.ratio > 2.0",
+      "updated_at": "2026-06-11T04:40:15.75041Z"
+    },
+    {
+      "created_at": "2026-06-11T04:40:15.524527Z",
       "description": "Step up to re-authentication and revoke the active ZTNA session when an impossible-travel anomaly is detected for a clinician identity.",
       "enabled": false,
-      "id": "62901f40-afde-4ece-ab63-22eabd6be6f3",
+      "id": "4abeb357-5189-4812-a737-1a85689bcff3",
       "name": "Revoke access on impossible travel",
       "steps": [
         {
@@ -22,13 +89,13 @@
       ],
       "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
       "trigger_condition": "alert.type == 'impossible_travel'",
-      "updated_at": "2026-06-10T16:05:23.170444Z"
+      "updated_at": "2026-06-11T04:40:15.524527Z"
     },
     {
-      "created_at": "2026-06-10T16:05:23.164449Z",
+      "created_at": "2026-06-11T04:40:15.520468Z",
       "description": "Route the session to remote browser isolation when the PHI classifier fires on a webmail upload, then alert the privacy officer.",
       "enabled": true,
-      "id": "78296e97-60d5-4bd0-8e07-7d485d06f722",
+      "id": "ec67aaef-51b5-496d-8425-d52128ee48e6",
       "name": "Isolate PHI exfil over webmail",
       "steps": [
         {
@@ -48,7 +115,56 @@
       ],
       "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
       "trigger_condition": "dlp.violation && dlp.classifier == 'phi' && app.category == 'webmail'",
-      "updated_at": "2026-06-10T16:05:23.164449Z"
+      "updated_at": "2026-06-11T04:40:15.520468Z"
+    },
+    {
+      "created_at": "2026-06-11T04:40:15.269631Z",
+      "description": "Block an outbound transfer that trips the PCI-DSS DLP classifier and require an analyst sign-off before release.",
+      "enabled": true,
+      "id": "39336b62-33a0-4464-a8b9-a9f3fe186338",
+      "name": "Quarantine PCI cardholder-data exfil",
+      "steps": [
+        {
+          "action": "block_transfer"
+        },
+        {
+          "action": "require_approval",
+          "role": "security_admin"
+        },
+        {
+          "action": "notify",
+          "channel": "soc"
+        }
+      ],
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+      "trigger_condition": "dlp.violation && dlp.template == 'pci-dss'",
+      "updated_at": "2026-06-11T04:40:15.269631Z"
+    },
+    {
+      "created_at": "2026-06-11T04:40:15.265575Z",
+      "description": "Isolate a point-of-sale device when the edge raises a critical malware verdict, then notify the SOC and open a ticket.",
+      "enabled": true,
+      "id": "4ee9dbad-ef37-423b-8d50-7b8588103cb3",
+      "name": "Contain malware-flagged POS endpoint",
+      "steps": [
+        {
+          "action": "isolate_device",
+          "target": "alert.device_id"
+        },
+        {
+          "action": "notify",
+          "channel": "soc",
+          "severity": "critical"
+        },
+        {
+          "action": "open_ticket",
+          "priority": "P1",
+          "system": "splunk"
+        }
+      ],
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+      "trigger_condition": "alert.severity == 'critical' && alert.category == 'malware'",
+      "updated_at": "2026-06-11T04:40:15.265575Z"
     }
   ],
   "next_cursor": ""

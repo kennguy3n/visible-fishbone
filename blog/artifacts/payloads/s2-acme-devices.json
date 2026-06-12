@@ -1,58 +1,370 @@
 {
   "items": [
     {
-      "created_at": "2026-06-10T16:05:22.864108Z",
-      "id": "4bbfd1b4-1a64-496c-bb58-5b7144c99ac7",
+      "created_at": "2026-06-12T00:54:57.741023Z",
+      "id": "d6990171-79d2-47c9-9911-9c5593cb8240",
+      "name": "nordic-lab-linux-01",
+      "platform": "linux",
+      "posture": {
+        "firewall_enabled": true
+      },
+      "public_key_ed25519": "vw/oneR405xzqA9RvxshlQdx7jk5gDGE3WfGSkfLxak=",
+      "status": "pending",
+      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f",
+      "updated_at": "2026-06-12T00:54:57.741023Z"
+    },
+    {
+      "created_at": "2026-06-12T00:54:57.729839Z",
+      "id": "8d8f379a-67e1-4968-98e4-2275094c228d",
+      "name": "nordic-faculty-ws-01",
+      "platform": "windows",
+      "posture": {
+        "disk_encrypted": true
+      },
+      "public_key_ed25519": "OGvRPESCk7ckPUXZDBYfQSP9N2XcMIpHJ2nHuiasa/8=",
+      "status": "pending",
+      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f",
+      "updated_at": "2026-06-12T00:54:57.729839Z"
+    },
+    {
+      "created_at": "2026-06-12T00:54:57.516407Z",
+      "id": "8719875a-cc90-43f4-a11d-fb8674e74191",
+      "name": "lumiere-paralegal-win-01",
+      "platform": "windows",
+      "posture": {
+        "disk_encrypted": true,
+        "screen_lock": true
+      },
+      "public_key_ed25519": "Ji6Fn+0Muhi6rYfuEqASixzKxDgufwsZMZDyRXcO6js=",
+      "status": "pending",
+      "tenant_id": "890486df-98bd-482b-85a8-af361706676f",
+      "updated_at": "2026-06-12T00:54:57.516407Z"
+    },
+    {
+      "created_at": "2026-06-12T00:54:57.505768Z",
+      "id": "6f020a09-9181-40e9-b0f6-73c07e3163db",
+      "name": "lumiere-counsel-mbp-01",
+      "platform": "macos",
+      "posture": {
+        "disk_encrypted": true
+      },
+      "public_key_ed25519": "xuQJuMIqt01eEbmxkxLT8FdG+pPchpIZkiUipl8v6gE=",
+      "status": "pending",
+      "tenant_id": "890486df-98bd-482b-85a8-af361706676f",
+      "updated_at": "2026-06-12T00:54:57.505768Z"
+    },
+    {
+      "created_at": "2026-06-12T00:54:57.29464Z",
+      "id": "a6cb7e22-f7c5-41f2-9840-8b0937485d46",
+      "name": "outback-mgr-win-01",
+      "platform": "windows",
+      "posture": {
+        "disk_encrypted": true
+      },
+      "public_key_ed25519": "tfEedwLpIyvDW5OpARkR0RXe4++PzHYPvOKeNSde85Q=",
+      "status": "pending",
+      "tenant_id": "37619610-53b4-4eab-87f9-45ba902d30c2",
+      "updated_at": "2026-06-12T00:54:57.29464Z"
+    },
+    {
+      "created_at": "2026-06-12T00:54:57.283899Z",
+      "id": "daea18fe-6ba1-412f-85b8-5f981c05f65f",
+      "name": "outback-pos-12-01",
+      "platform": "linux",
+      "posture": {
+        "disk_encrypted": true,
+        "firewall_enabled": true
+      },
+      "public_key_ed25519": "fWbd4UU+U9v0AiBF14jq30vpOOe3GyKLswn70/40ZmM=",
+      "status": "pending",
+      "tenant_id": "37619610-53b4-4eab-87f9-45ba902d30c2",
+      "updated_at": "2026-06-12T00:54:57.283899Z"
+    },
+    {
+      "created_at": "2026-06-12T00:54:57.27268Z",
+      "id": "1fdabdb5-b315-4b68-993c-6c878bd7d220",
+      "name": "outback-pos-07-01",
+      "platform": "linux",
+      "posture": {
+        "disk_encrypted": true,
+        "firewall_enabled": true
+      },
+      "public_key_ed25519": "cVXwrrQaOZDROIzhavnHQoJYkHmR2vLh+iHWK9gyKJA=",
+      "status": "pending",
+      "tenant_id": "37619610-53b4-4eab-87f9-45ba902d30c2",
+      "updated_at": "2026-06-12T00:54:57.27268Z"
+    },
+    {
+      "created_at": "2026-06-12T00:54:57.057124Z",
+      "id": "24233139-6281-4306-81d3-22105cc0618f",
+      "name": "maple-lab-linux-01",
+      "platform": "linux",
+      "posture": {
+        "disk_encrypted": true,
+        "firewall_enabled": true
+      },
+      "public_key_ed25519": "cncp1yWpqJM5FlQsJVXDo0bgYJlPD0RyBc6k+eS5wHE=",
+      "status": "pending",
+      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0",
+      "updated_at": "2026-06-12T00:54:57.057124Z"
+    },
+    {
+      "created_at": "2026-06-12T00:54:57.045752Z",
+      "id": "f6c1002f-1682-4add-abc2-d506d9109aed",
+      "name": "maple-nurse-ipad-01",
+      "platform": "ios",
+      "posture": {
+        "disk_encrypted": true,
+        "mdm_enrolled": true
+      },
+      "public_key_ed25519": "KiG1EyHwyKuwnShKYSdNqJxdWgP9K92nICeNdqsTXjA=",
+      "status": "pending",
+      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0",
+      "updated_at": "2026-06-12T00:54:57.045752Z"
+    },
+    {
+      "created_at": "2026-06-12T00:54:57.03493Z",
+      "id": "5ffb7f2e-f169-44a5-9840-440a50aa701f",
+      "name": "maple-clin-ws-01",
+      "platform": "windows",
+      "posture": {
+        "disk_encrypted": true,
+        "screen_lock": true
+      },
+      "public_key_ed25519": "nAG/Rj7yaMVcHg5FLs2mS05H2oBWawcemzzckRuWFK0=",
+      "status": "pending",
+      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0",
+      "updated_at": "2026-06-12T00:54:57.03493Z"
+    },
+    {
+      "created_at": "2026-06-12T00:54:56.79047Z",
+      "id": "feb48b7c-ba48-431f-9fcc-5afa0df4c217",
+      "name": "brit-rnd-ws-03",
+      "platform": "windows",
+      "posture": {
+        "disk_encrypted": true,
+        "screen_lock": true
+      },
+      "public_key_ed25519": "IHODO5v2zlWnFbI5ZFQH2A/oANWUgksbJ6E6hZxggAY=",
+      "status": "pending",
+      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c",
+      "updated_at": "2026-06-12T00:54:56.79047Z"
+    },
+    {
+      "created_at": "2026-06-12T00:54:56.778797Z",
+      "id": "eb504bc0-5533-447e-863e-f6860076c1bd",
+      "name": "brit-plc-gw-01",
+      "platform": "linux",
+      "posture": {
+        "disk_encrypted": true,
+        "firewall_enabled": true
+      },
+      "public_key_ed25519": "VuE80q/cri443p0/+5/r3+cYK3dyEVi9XLHdRgBucHQ=",
+      "status": "pending",
+      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c",
+      "updated_at": "2026-06-12T00:54:56.778797Z"
+    },
+    {
+      "created_at": "2026-06-12T00:54:56.768428Z",
+      "id": "1369ae5a-19bb-40b3-bf02-cbc19a5eee7e",
+      "name": "brit-eng-mbp-02",
+      "platform": "macos",
+      "posture": {
+        "disk_encrypted": true
+      },
+      "public_key_ed25519": "acNYuLWfrQvjKvnp3/zzfklY6sBzPBF3zxR6m2upCT0=",
+      "status": "pending",
+      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c",
+      "updated_at": "2026-06-12T00:54:56.768428Z"
+    },
+    {
+      "created_at": "2026-06-12T00:54:56.75828Z",
+      "id": "949ce860-de46-4b96-8247-d13ee0af622d",
+      "name": "brit-eng-ws-01",
+      "platform": "windows",
+      "posture": {
+        "disk_encrypted": true,
+        "firewall_enabled": true
+      },
+      "public_key_ed25519": "sQZZwx7IS8gXIs5cq/+OCFCGMjN/ULHGZezMGXAfL4Y=",
+      "status": "pending",
+      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c",
+      "updated_at": "2026-06-12T00:54:56.75828Z"
+    },
+    {
+      "created_at": "2026-06-11T04:40:15.810376Z",
+      "id": "33fa089f-6d97-4e0a-955d-73d3d27e9473",
+      "name": "umbrella-wh-android-01",
+      "platform": "android",
+      "posture": {
+        "mdm_enrolled": true
+      },
+      "public_key_ed25519": "djrnn2D1Ue70DFzF2F7i8maHv2r3J5G4dh84uSQ6/po=",
+      "status": "pending",
+      "tenant_id": "0c8d2d9d-896d-45b1-8001-6a6776f832b9",
+      "updated_at": "2026-06-11T04:40:15.810376Z"
+    },
+    {
+      "created_at": "2026-06-11T04:40:15.798605Z",
+      "id": "e6e7a458-78ba-4ac4-88e9-9e2b2ff0030c",
+      "name": "umbrella-ops-01",
+      "platform": "windows",
+      "posture": {
+        "disk_encrypted": true
+      },
+      "public_key_ed25519": "R5p0zNUtl8mLcGs9WLuZ4BMUxomtnWI+gU6/rLzSrBg=",
+      "status": "pending",
+      "tenant_id": "0c8d2d9d-896d-45b1-8001-6a6776f832b9",
+      "updated_at": "2026-06-11T04:40:15.798605Z"
+    },
+    {
+      "created_at": "2026-06-11T04:40:15.597428Z",
+      "id": "2b00d74a-49a6-4df7-9f3c-de20e5321970",
+      "name": "initech-analyst-mbp",
+      "platform": "macos",
+      "posture": {
+        "disk_encrypted": true
+      },
+      "public_key_ed25519": "VzyZaks7omlGvuh38o8A87wja6nctV1a6GSCtEUasKA=",
+      "status": "pending",
+      "tenant_id": "b6520bda-e7bb-4af9-9c53-7b0051eae65b",
+      "updated_at": "2026-06-11T04:40:15.597428Z"
+    },
+    {
+      "created_at": "2026-06-11T04:40:15.585997Z",
+      "id": "55e9b3d3-a241-463f-b88c-36e88e32aecb",
+      "name": "initech-trader-02",
+      "platform": "windows",
+      "posture": {
+        "disk_encrypted": true
+      },
+      "public_key_ed25519": "7giEvNL7ZVzimVvlEHZ4eBGmZQw4ODfDUAGYDsYvQKA=",
+      "status": "pending",
+      "tenant_id": "b6520bda-e7bb-4af9-9c53-7b0051eae65b",
+      "updated_at": "2026-06-11T04:40:15.585997Z"
+    },
+    {
+      "created_at": "2026-06-11T04:40:15.576142Z",
+      "id": "2c5251f7-968b-406e-b01b-8593d828a78e",
+      "name": "initech-trader-01",
+      "platform": "windows",
+      "posture": {
+        "disk_encrypted": true
+      },
+      "public_key_ed25519": "DFtaf0ePMqBAaZkYmJJeL2i9Dwt4eNSF/2ePgCLh5WI=",
+      "status": "pending",
+      "tenant_id": "b6520bda-e7bb-4af9-9c53-7b0051eae65b",
+      "updated_at": "2026-06-11T04:40:15.576142Z"
+    },
+    {
+      "created_at": "2026-06-11T04:40:15.367339Z",
+      "id": "2aa50ab3-4c37-45d2-b4f2-caf1f615737a",
+      "name": "globex-nurse-ipad-01",
+      "platform": "ios",
+      "posture": {
+        "disk_encrypted": true,
+        "mdm_enrolled": true
+      },
+      "public_key_ed25519": "+qWZ+Smto7Fu6s8y4ZB092kh3e6HdnaWX3s93Xn5KI0=",
+      "status": "pending",
+      "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
+      "updated_at": "2026-06-11T04:40:15.367339Z"
+    },
+    {
+      "created_at": "2026-06-11T04:40:15.356595Z",
+      "id": "a4f93a4d-f149-4d03-9a14-d3d459766afe",
+      "name": "globex-radiology-01",
+      "platform": "linux",
+      "posture": {
+        "disk_encrypted": true,
+        "firewall_enabled": true
+      },
+      "public_key_ed25519": "U7zzER7x5myvA0AespOAeHBNtRA1/MW3VmUGIQnWJy0=",
+      "status": "pending",
+      "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
+      "updated_at": "2026-06-11T04:40:15.356595Z"
+    },
+    {
+      "created_at": "2026-06-11T04:40:15.3452Z",
+      "id": "d1270ad0-863c-43d1-9072-39467db93f13",
+      "name": "globex-clin-ws-02",
+      "platform": "windows",
+      "posture": {
+        "disk_encrypted": true,
+        "screen_lock": true
+      },
+      "public_key_ed25519": "g2CPNf/xQCDqCiP7yJ5DcsY2r0NtlAJu0b4wMmwwfDI=",
+      "status": "pending",
+      "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
+      "updated_at": "2026-06-11T04:40:15.3452Z"
+    },
+    {
+      "created_at": "2026-06-11T04:40:15.333475Z",
+      "id": "bec25d3f-931c-4898-b7b4-8543139b624e",
+      "name": "globex-clin-ws-01",
+      "platform": "windows",
+      "posture": {
+        "disk_encrypted": true,
+        "screen_lock": true
+      },
+      "public_key_ed25519": "d4RR30BssnWPEkmTvUbsMXXSe/qUhAW2WG+bZx0piuE=",
+      "status": "pending",
+      "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
+      "updated_at": "2026-06-11T04:40:15.333475Z"
+    },
+    {
+      "created_at": "2026-06-11T04:40:15.092033Z",
+      "id": "f6046ef9-1ebe-42e3-81fa-b2dcceb07f32",
       "name": "acme-mgr-laptop-02",
       "platform": "macos",
       "posture": {
         "disk_encrypted": true
       },
-      "public_key_ed25519": "fK7lL2WEUd33V0E8tjcU2d/cagMfPqUbkKYf/NeVBdI=",
+      "public_key_ed25519": "+fTb10dNgYaDTRlTPIHvy/Z8HjnfKXQjLxeLaHv1g5k=",
       "status": "pending",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-10T16:05:22.864108Z"
+      "updated_at": "2026-06-11T04:40:15.092033Z"
     },
     {
-      "created_at": "2026-06-10T16:05:22.852556Z",
-      "id": "3d7a1f3f-6b2f-470e-a8dc-eec29a499c6f",
+      "created_at": "2026-06-11T04:40:15.081587Z",
+      "id": "2696122a-946e-4ede-bb63-0ec6e40996eb",
       "name": "acme-mgr-laptop-01",
       "platform": "windows",
       "posture": {
         "disk_encrypted": true
       },
-      "public_key_ed25519": "g5Cwit7/7uUeEAyOLinRF7MRDwa5opWtgXH23RwK+kM=",
+      "public_key_ed25519": "1gzIBDcZ5at5qpKVEpAlHppmX9h//GXHz/IMmHXsxuo=",
       "status": "pending",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-10T16:05:22.852556Z"
+      "updated_at": "2026-06-11T04:40:15.081587Z"
     },
     {
-      "created_at": "2026-06-10T16:05:22.841548Z",
-      "id": "3948419b-18cc-4d62-8b98-c539aea5eac4",
+      "created_at": "2026-06-11T04:40:15.071312Z",
+      "id": "a87908ba-6dba-46b6-8c95-8801bfa57bb3",
       "name": "acme-pos-204-01",
       "platform": "linux",
       "posture": {
         "disk_encrypted": true,
         "firewall_enabled": true
       },
-      "public_key_ed25519": "tGzd7s8g1EXmP9SmvfVnLdRySDCikdRVNGneUa0WA7c=",
+      "public_key_ed25519": "I5GHyj6ggnxCxoI3WGaZWwW+PiY9vDE2y6nm333v3mY=",
       "status": "pending",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-10T16:05:22.841548Z"
+      "updated_at": "2026-06-11T04:40:15.071312Z"
     },
     {
-      "created_at": "2026-06-10T16:05:22.829832Z",
-      "id": "68b5f38f-e33e-4a66-b7d0-726036bcfcf8",
+      "created_at": "2026-06-11T04:40:15.060523Z",
+      "id": "66b7e6fa-ff5f-4557-818c-3b2a76bbfe8e",
       "name": "acme-pos-118-01",
       "platform": "linux",
       "posture": {
         "disk_encrypted": true,
         "firewall_enabled": true
       },
-      "public_key_ed25519": "HGupKlBLVTMH15FYFrQmui188wioFBz3XydmnrtouXo=",
+      "public_key_ed25519": "nMEkYlDuK/8dawQouiohmd8jDfYu0Wj4P1AfQyodi1Y=",
       "status": "pending",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-10T16:05:22.829832Z"
+      "updated_at": "2026-06-11T04:40:15.060523Z"
     }
   ],
   "next_cursor": ""

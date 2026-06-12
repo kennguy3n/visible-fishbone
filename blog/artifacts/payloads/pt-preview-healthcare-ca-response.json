@@ -1,0 +1,544 @@
+{
+  "graph": {
+    "default_action": "deny",
+    "rules": [
+      {
+        "description": "DLP deny on detector \"canada_sin\" (high sensitivity)",
+        "domain": "dlp",
+        "id": "pt-dlp-deny-canada_sin",
+        "predicates": [
+          {
+            "match": {
+              "dlp_detector": "canada_sin",
+              "sensitivity": "high"
+            },
+            "name": "dlp:canada_sin"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "DLP deny on detector \"icd10\" (high sensitivity)",
+        "domain": "dlp",
+        "id": "pt-dlp-deny-icd10",
+        "predicates": [
+          {
+            "match": {
+              "dlp_detector": "icd10",
+              "sensitivity": "high"
+            },
+            "name": "dlp:icd10"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "DLP deny on detector \"mrn\" (high sensitivity)",
+        "domain": "dlp",
+        "id": "pt-dlp-deny-mrn",
+        "predicates": [
+          {
+            "match": {
+              "dlp_detector": "mrn",
+              "sensitivity": "high"
+            },
+            "name": "dlp:mrn"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "DLP inspect on detector \"phone\" (medium sensitivity)",
+        "domain": "dlp",
+        "id": "pt-dlp-inspect-phone",
+        "predicates": [
+          {
+            "match": {
+              "dlp_detector": "phone",
+              "sensitivity": "medium"
+            },
+            "name": "dlp:phone"
+          }
+        ],
+        "verb": "inspect"
+      },
+      {
+        "description": "DLP log on detector \"email\" (low sensitivity)",
+        "domain": "dlp",
+        "id": "pt-dlp-log-email",
+        "predicates": [
+          {
+            "match": {
+              "dlp_detector": "email",
+              "sensitivity": "low"
+            },
+            "name": "dlp:email"
+          }
+        ],
+        "verb": "log"
+      },
+      {
+        "description": "deny \"adult.content\" on the dns plane",
+        "domain": "dns",
+        "id": "pt-dns-deny-adult.content",
+        "predicates": [
+          {
+            "match": {
+              "category": "adult.content"
+            },
+            "name": "category:adult.content"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny \"anonymizer\" on the dns plane",
+        "domain": "dns",
+        "id": "pt-dns-deny-anonymizer",
+        "predicates": [
+          {
+            "match": {
+              "category": "anonymizer"
+            },
+            "name": "category:anonymizer"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny \"drugs\" on the dns plane",
+        "domain": "dns",
+        "id": "pt-dns-deny-drugs",
+        "predicates": [
+          {
+            "match": {
+              "category": "drugs"
+            },
+            "name": "category:drugs"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny \"gambling\" on the dns plane",
+        "domain": "dns",
+        "id": "pt-dns-deny-gambling",
+        "predicates": [
+          {
+            "match": {
+              "category": "gambling"
+            },
+            "name": "category:gambling"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny \"security.hacking\" on the dns plane",
+        "domain": "dns",
+        "id": "pt-dns-deny-security.hacking",
+        "predicates": [
+          {
+            "match": {
+              "category": "security.hacking"
+            },
+            "name": "category:security.hacking"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny \"security.threat\" on the dns plane",
+        "domain": "dns",
+        "id": "pt-dns-deny-security.threat",
+        "predicates": [
+          {
+            "match": {
+              "category": "security.threat"
+            },
+            "name": "category:security.threat"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny \"violence\" on the dns plane",
+        "domain": "dns",
+        "id": "pt-dns-deny-violence",
+        "predicates": [
+          {
+            "match": {
+              "category": "violence"
+            },
+            "name": "category:violence"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "allow HTTPS egress (tcp/443)",
+        "domain": "ngfw",
+        "id": "pt-fw-allow-tcp-443",
+        "predicates": [
+          {
+            "match": {
+              "dst_port": 443,
+              "protocol": "tcp"
+            },
+            "name": "port:tcp/443"
+          }
+        ],
+        "verb": "allow"
+      },
+      {
+        "description": "allow DNS over TCP egress (tcp/53)",
+        "domain": "ngfw",
+        "id": "pt-fw-allow-tcp-53",
+        "predicates": [
+          {
+            "match": {
+              "dst_port": 53,
+              "protocol": "tcp"
+            },
+            "name": "port:tcp/53"
+          }
+        ],
+        "verb": "allow"
+      },
+      {
+        "description": "allow SMTP submission (STARTTLS) egress (tcp/587)",
+        "domain": "ngfw",
+        "id": "pt-fw-allow-tcp-587",
+        "predicates": [
+          {
+            "match": {
+              "dst_port": 587,
+              "protocol": "tcp"
+            },
+            "name": "port:tcp/587"
+          }
+        ],
+        "verb": "allow"
+      },
+      {
+        "description": "allow IMAPS egress (tcp/993)",
+        "domain": "ngfw",
+        "id": "pt-fw-allow-tcp-993",
+        "predicates": [
+          {
+            "match": {
+              "dst_port": 993,
+              "protocol": "tcp"
+            },
+            "name": "port:tcp/993"
+          }
+        ],
+        "verb": "allow"
+      },
+      {
+        "description": "allow POP3S egress (tcp/995)",
+        "domain": "ngfw",
+        "id": "pt-fw-allow-tcp-995",
+        "predicates": [
+          {
+            "match": {
+              "dst_port": 995,
+              "protocol": "tcp"
+            },
+            "name": "port:tcp/995"
+          }
+        ],
+        "verb": "allow"
+      },
+      {
+        "description": "allow DNS egress (udp/53)",
+        "domain": "ngfw",
+        "id": "pt-fw-allow-udp-53",
+        "predicates": [
+          {
+            "match": {
+              "dst_port": 53,
+              "protocol": "udp"
+            },
+            "name": "port:udp/53"
+          }
+        ],
+        "verb": "allow"
+      },
+      {
+        "description": "deny MS-RPC egress (tcp/135)",
+        "domain": "ngfw",
+        "id": "pt-fw-deny-tcp-135",
+        "predicates": [
+          {
+            "match": {
+              "dst_port": 135,
+              "protocol": "tcp"
+            },
+            "name": "port:tcp/135"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny NetBIOS session egress (tcp/139)",
+        "domain": "ngfw",
+        "id": "pt-fw-deny-tcp-139",
+        "predicates": [
+          {
+            "match": {
+              "dst_port": 139,
+              "protocol": "tcp"
+            },
+            "name": "port:tcp/139"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny FTP egress (tcp/21)",
+        "domain": "ngfw",
+        "id": "pt-fw-deny-tcp-21",
+        "predicates": [
+          {
+            "match": {
+              "dst_port": 21,
+              "protocol": "tcp"
+            },
+            "name": "port:tcp/21"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny Telnet egress (tcp/23)",
+        "domain": "ngfw",
+        "id": "pt-fw-deny-tcp-23",
+        "predicates": [
+          {
+            "match": {
+              "dst_port": 23,
+              "protocol": "tcp"
+            },
+            "name": "port:tcp/23"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny SMTP cleartext egress (tcp/25)",
+        "domain": "ngfw",
+        "id": "pt-fw-deny-tcp-25",
+        "predicates": [
+          {
+            "match": {
+              "dst_port": 25,
+              "protocol": "tcp"
+            },
+            "name": "port:tcp/25"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny RDP egress (tcp/3389)",
+        "domain": "ngfw",
+        "id": "pt-fw-deny-tcp-3389",
+        "predicates": [
+          {
+            "match": {
+              "dst_port": 3389,
+              "protocol": "tcp"
+            },
+            "name": "port:tcp/3389"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny SMB egress (tcp/445)",
+        "domain": "ngfw",
+        "id": "pt-fw-deny-tcp-445",
+        "predicates": [
+          {
+            "match": {
+              "dst_port": 445,
+              "protocol": "tcp"
+            },
+            "name": "port:tcp/445"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny VNC egress (tcp/5900)",
+        "domain": "ngfw",
+        "id": "pt-fw-deny-tcp-5900",
+        "predicates": [
+          {
+            "match": {
+              "dst_port": 5900,
+              "protocol": "tcp"
+            },
+            "name": "port:tcp/5900"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny NetBIOS name egress (udp/137)",
+        "domain": "ngfw",
+        "id": "pt-fw-deny-udp-137",
+        "predicates": [
+          {
+            "match": {
+              "dst_port": 137,
+              "protocol": "udp"
+            },
+            "name": "port:udp/137"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny NetBIOS datagram egress (udp/138)",
+        "domain": "ngfw",
+        "id": "pt-fw-deny-udp-138",
+        "predicates": [
+          {
+            "match": {
+              "dst_port": 138,
+              "protocol": "udp"
+            },
+            "name": "port:udp/138"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny \"adult.content\" on the swg plane",
+        "domain": "swg",
+        "id": "pt-swg-deny-adult.content",
+        "predicates": [
+          {
+            "match": {
+              "category": "adult.content"
+            },
+            "name": "category:adult.content"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny \"anonymizer\" on the swg plane",
+        "domain": "swg",
+        "id": "pt-swg-deny-anonymizer",
+        "predicates": [
+          {
+            "match": {
+              "category": "anonymizer"
+            },
+            "name": "category:anonymizer"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny \"drugs\" on the swg plane",
+        "domain": "swg",
+        "id": "pt-swg-deny-drugs",
+        "predicates": [
+          {
+            "match": {
+              "category": "drugs"
+            },
+            "name": "category:drugs"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny \"gambling\" on the swg plane",
+        "domain": "swg",
+        "id": "pt-swg-deny-gambling",
+        "predicates": [
+          {
+            "match": {
+              "category": "gambling"
+            },
+            "name": "category:gambling"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny \"security.hacking\" on the swg plane",
+        "domain": "swg",
+        "id": "pt-swg-deny-security.hacking",
+        "predicates": [
+          {
+            "match": {
+              "category": "security.hacking"
+            },
+            "name": "category:security.hacking"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny \"security.threat\" on the swg plane",
+        "domain": "swg",
+        "id": "pt-swg-deny-security.threat",
+        "predicates": [
+          {
+            "match": {
+              "category": "security.threat"
+            },
+            "name": "category:security.threat"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "deny \"violence\" on the swg plane",
+        "domain": "swg",
+        "id": "pt-swg-deny-violence",
+        "predicates": [
+          {
+            "match": {
+              "category": "violence"
+            },
+            "name": "category:violence"
+          }
+        ],
+        "verb": "deny"
+      },
+      {
+        "description": "log \"social.media\" on the swg plane",
+        "domain": "swg",
+        "id": "pt-swg-log-social.media",
+        "predicates": [
+          {
+            "match": {
+              "category": "social.media"
+            },
+            "name": "category:social.media"
+          }
+        ],
+        "verb": "log"
+      }
+    ],
+    "version": 1
+  },
+  "graph_hash": "b26ea28c9efa2856c2783033fdee14aeff581eeb2a5602e527eb77e85bc1bb47",
+  "regime": "ca-pipeda",
+  "selection": {
+    "country": "CA",
+    "industry": "healthcare"
+  },
+  "template_ids": [
+    "baseline/global",
+    "industry/healthcare",
+    "compliance/ca-pipeda"
+  ]
+}

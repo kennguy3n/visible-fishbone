@@ -4,12 +4,108 @@
       "action": "share",
       "app_id": "google_workspace",
       "conditions": {},
-      "created_at": "2026-06-10T16:05:22Z",
+      "created_at": "2026-06-11T04:40:15Z",
       "enabled": true,
-      "id": "0c2039ea-dddb-4aa2-b2c7-b971802affe9",
+      "id": "1f49fe3a-45f0-45ae-a18e-7d7f7dd488ad",
+      "priority": 40,
+      "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
+      "updated_at": "2026-06-11T04:40:15Z",
+      "verdict": "log"
+    },
+    {
+      "action": "share",
+      "app_id": "google_workspace",
+      "conditions": {},
+      "created_at": "2026-06-12T00:56:21Z",
+      "enabled": true,
+      "id": "592fbb53-3920-42c6-9aa9-c0c13974c10c",
+      "priority": 40,
+      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f",
+      "updated_at": "2026-06-12T00:56:21Z",
+      "verdict": "log"
+    },
+    {
+      "action": "share",
+      "app_id": "google_workspace",
+      "conditions": {},
+      "created_at": "2026-06-11T04:40:15Z",
+      "enabled": true,
+      "id": "6de75b21-ce13-45b2-a163-64c154e82eda",
+      "priority": 40,
+      "tenant_id": "b6520bda-e7bb-4af9-9c53-7b0051eae65b",
+      "updated_at": "2026-06-11T04:40:15Z",
+      "verdict": "log"
+    },
+    {
+      "action": "share",
+      "app_id": "google_workspace",
+      "conditions": {},
+      "created_at": "2026-06-12T00:56:20Z",
+      "enabled": true,
+      "id": "7e941d00-ad89-4843-a4d8-6ff6dbaec055",
+      "priority": 40,
+      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c",
+      "updated_at": "2026-06-12T00:56:20Z",
+      "verdict": "log"
+    },
+    {
+      "action": "share",
+      "app_id": "google_workspace",
+      "conditions": {},
+      "created_at": "2026-06-12T00:56:21Z",
+      "enabled": true,
+      "id": "89fd59d6-4c79-48f0-a1c4-678a7b4aa1da",
+      "priority": 40,
+      "tenant_id": "37619610-53b4-4eab-87f9-45ba902d30c2",
+      "updated_at": "2026-06-12T00:56:21Z",
+      "verdict": "log"
+    },
+    {
+      "action": "share",
+      "app_id": "google_workspace",
+      "conditions": {},
+      "created_at": "2026-06-11T04:40:15Z",
+      "enabled": true,
+      "id": "8fc417e4-fac7-4e64-b586-45a9c9ab844b",
       "priority": 40,
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-10T16:05:22Z",
+      "updated_at": "2026-06-11T04:40:15Z",
+      "verdict": "log"
+    },
+    {
+      "action": "share",
+      "app_id": "google_workspace",
+      "conditions": {},
+      "created_at": "2026-06-11T04:40:15Z",
+      "enabled": true,
+      "id": "92f0d3c0-a386-4edb-9da3-48a13d560bf2",
+      "priority": 40,
+      "tenant_id": "0c8d2d9d-896d-45b1-8001-6a6776f832b9",
+      "updated_at": "2026-06-11T04:40:15Z",
+      "verdict": "log"
+    },
+    {
+      "action": "share",
+      "app_id": "google_workspace",
+      "conditions": {},
+      "created_at": "2026-06-12T00:56:21Z",
+      "enabled": true,
+      "id": "96a1e163-c0ec-4367-9431-4b5a6ec816be",
+      "priority": 40,
+      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0",
+      "updated_at": "2026-06-12T00:56:21Z",
+      "verdict": "log"
+    },
+    {
+      "action": "share",
+      "app_id": "google_workspace",
+      "conditions": {},
+      "created_at": "2026-06-12T00:56:21Z",
+      "enabled": true,
+      "id": "d2d1e0c8-33e2-43f1-a195-645bf2afa6a8",
+      "priority": 40,
+      "tenant_id": "890486df-98bd-482b-85a8-af361706676f",
+      "updated_at": "2026-06-12T00:56:21Z",
       "verdict": "log"
     },
     {
@@ -18,12 +114,124 @@
       "conditions": {
         "file_type": "csv"
       },
-      "created_at": "2026-06-10T16:05:22Z",
+      "created_at": "2026-06-11T04:40:15Z",
       "enabled": true,
-      "id": "81119dbf-1145-4d76-b2f2-ac5f9753585b",
+      "id": "21cbbd19-cf5d-47b7-b3e7-aef759a7eeec",
+      "priority": 30,
+      "tenant_id": "0c8d2d9d-896d-45b1-8001-6a6776f832b9",
+      "updated_at": "2026-06-11T04:40:15Z",
+      "verdict": "block"
+    },
+    {
+      "action": "download",
+      "app_id": "salesforce",
+      "conditions": {
+        "file_type": "csv"
+      },
+      "created_at": "2026-06-11T04:40:15Z",
+      "enabled": true,
+      "id": "2f73e697-01db-4dce-9bee-d8aff32f95eb",
+      "priority": 30,
+      "tenant_id": "b6520bda-e7bb-4af9-9c53-7b0051eae65b",
+      "updated_at": "2026-06-11T04:40:15Z",
+      "verdict": "block"
+    },
+    {
+      "action": "download",
+      "app_id": "salesforce",
+      "conditions": {
+        "file_type": "csv"
+      },
+      "created_at": "2026-06-12T00:56:21Z",
+      "enabled": true,
+      "id": "3e5024e5-326d-4f21-93b3-d008ac444599",
+      "priority": 30,
+      "tenant_id": "890486df-98bd-482b-85a8-af361706676f",
+      "updated_at": "2026-06-12T00:56:21Z",
+      "verdict": "block"
+    },
+    {
+      "action": "download",
+      "app_id": "salesforce",
+      "conditions": {
+        "file_type": "csv"
+      },
+      "created_at": "2026-06-12T00:56:21Z",
+      "enabled": true,
+      "id": "59f26df5-64fb-454c-b6fe-e44f3798f655",
+      "priority": 30,
+      "tenant_id": "37619610-53b4-4eab-87f9-45ba902d30c2",
+      "updated_at": "2026-06-12T00:56:21Z",
+      "verdict": "block"
+    },
+    {
+      "action": "download",
+      "app_id": "salesforce",
+      "conditions": {
+        "file_type": "csv"
+      },
+      "created_at": "2026-06-12T00:56:21Z",
+      "enabled": true,
+      "id": "6fc0b2f5-baa7-4a9f-8fb7-747cd86ffc1f",
+      "priority": 30,
+      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f",
+      "updated_at": "2026-06-12T00:56:21Z",
+      "verdict": "block"
+    },
+    {
+      "action": "download",
+      "app_id": "salesforce",
+      "conditions": {
+        "file_type": "csv"
+      },
+      "created_at": "2026-06-11T04:40:15Z",
+      "enabled": true,
+      "id": "780f3160-f704-4a86-b27a-99da479fe221",
+      "priority": 30,
+      "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
+      "updated_at": "2026-06-11T04:40:15Z",
+      "verdict": "block"
+    },
+    {
+      "action": "download",
+      "app_id": "salesforce",
+      "conditions": {
+        "file_type": "csv"
+      },
+      "created_at": "2026-06-11T04:40:15Z",
+      "enabled": true,
+      "id": "8110b8e7-369c-42ac-a284-808f09def822",
       "priority": 30,
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-10T16:05:22Z",
+      "updated_at": "2026-06-11T04:40:15Z",
+      "verdict": "block"
+    },
+    {
+      "action": "download",
+      "app_id": "salesforce",
+      "conditions": {
+        "file_type": "csv"
+      },
+      "created_at": "2026-06-12T00:56:20Z",
+      "enabled": true,
+      "id": "f0a81000-6261-4c03-919d-e670a226bd86",
+      "priority": 30,
+      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c",
+      "updated_at": "2026-06-12T00:56:20Z",
+      "verdict": "block"
+    },
+    {
+      "action": "download",
+      "app_id": "salesforce",
+      "conditions": {
+        "file_type": "csv"
+      },
+      "created_at": "2026-06-12T00:56:21Z",
+      "enabled": true,
+      "id": "ff80b75a-0986-4078-919c-834e8c7aee8a",
+      "priority": 30,
+      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0",
+      "updated_at": "2026-06-12T00:56:21Z",
       "verdict": "block"
     },
     {
@@ -32,12 +240,124 @@
       "conditions": {
         "size_threshold": 10000000
       },
-      "created_at": "2026-06-10T16:05:22Z",
+      "created_at": "2026-06-11T04:40:15Z",
       "enabled": true,
-      "id": "cb111eef-68c8-45ee-9acc-356e19299102",
+      "id": "0ea1f59d-04c8-4f54-8872-4bcdca938b1d",
+      "priority": 20,
+      "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
+      "updated_at": "2026-06-11T04:40:15Z",
+      "verdict": "log"
+    },
+    {
+      "action": "upload",
+      "app_id": "m365",
+      "conditions": {
+        "size_threshold": 10000000
+      },
+      "created_at": "2026-06-12T00:56:21Z",
+      "enabled": true,
+      "id": "1483d020-5ead-4619-acc7-0c73a7da6174",
+      "priority": 20,
+      "tenant_id": "890486df-98bd-482b-85a8-af361706676f",
+      "updated_at": "2026-06-12T00:56:21Z",
+      "verdict": "log"
+    },
+    {
+      "action": "upload",
+      "app_id": "m365",
+      "conditions": {
+        "size_threshold": 10000000
+      },
+      "created_at": "2026-06-12T00:56:20Z",
+      "enabled": true,
+      "id": "5871b46a-6c17-4225-b953-9901f129f79c",
+      "priority": 20,
+      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c",
+      "updated_at": "2026-06-12T00:56:20Z",
+      "verdict": "log"
+    },
+    {
+      "action": "upload",
+      "app_id": "m365",
+      "conditions": {
+        "size_threshold": 10000000
+      },
+      "created_at": "2026-06-12T00:56:21Z",
+      "enabled": true,
+      "id": "5d1fabcf-0236-4645-8ab1-9578ea3d0645",
+      "priority": 20,
+      "tenant_id": "37619610-53b4-4eab-87f9-45ba902d30c2",
+      "updated_at": "2026-06-12T00:56:21Z",
+      "verdict": "log"
+    },
+    {
+      "action": "upload",
+      "app_id": "m365",
+      "conditions": {
+        "size_threshold": 10000000
+      },
+      "created_at": "2026-06-12T00:56:21Z",
+      "enabled": true,
+      "id": "5fd625ec-e196-4060-a9ad-c72aedb52683",
+      "priority": 20,
+      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f",
+      "updated_at": "2026-06-12T00:56:21Z",
+      "verdict": "log"
+    },
+    {
+      "action": "upload",
+      "app_id": "m365",
+      "conditions": {
+        "size_threshold": 10000000
+      },
+      "created_at": "2026-06-11T04:40:15Z",
+      "enabled": true,
+      "id": "98594219-a8e7-47c5-bc2e-38b4bbbe65e3",
       "priority": 20,
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-10T16:05:22Z",
+      "updated_at": "2026-06-11T04:40:15Z",
+      "verdict": "log"
+    },
+    {
+      "action": "upload",
+      "app_id": "m365",
+      "conditions": {
+        "size_threshold": 10000000
+      },
+      "created_at": "2026-06-11T04:40:15Z",
+      "enabled": true,
+      "id": "9b55c553-6917-47fa-b7e1-47518823e259",
+      "priority": 20,
+      "tenant_id": "b6520bda-e7bb-4af9-9c53-7b0051eae65b",
+      "updated_at": "2026-06-11T04:40:15Z",
+      "verdict": "log"
+    },
+    {
+      "action": "upload",
+      "app_id": "m365",
+      "conditions": {
+        "size_threshold": 10000000
+      },
+      "created_at": "2026-06-12T00:56:21Z",
+      "enabled": true,
+      "id": "c2508eec-0566-4fe7-9955-eabacfe18e7f",
+      "priority": 20,
+      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0",
+      "updated_at": "2026-06-12T00:56:21Z",
+      "verdict": "log"
+    },
+    {
+      "action": "upload",
+      "app_id": "m365",
+      "conditions": {
+        "size_threshold": 10000000
+      },
+      "created_at": "2026-06-11T04:40:15Z",
+      "enabled": true,
+      "id": "d20544ff-2da7-4631-8be2-2c5f8bc56184",
+      "priority": 20,
+      "tenant_id": "0c8d2d9d-896d-45b1-8001-6a6776f832b9",
+      "updated_at": "2026-06-11T04:40:15Z",
       "verdict": "log"
     },
     {
@@ -46,12 +366,124 @@
       "conditions": {
         "label_match": "confidential"
       },
-      "created_at": "2026-06-10T16:05:22Z",
+      "created_at": "2026-06-11T04:40:15Z",
       "enabled": true,
-      "id": "cfe0f7a0-c372-48bf-8a40-44c6b5d010a0",
+      "id": "0440570e-866e-45b5-a08e-ea6e1a44b22c",
       "priority": 10,
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-10T16:05:22Z",
+      "updated_at": "2026-06-11T04:40:15Z",
+      "verdict": "block"
+    },
+    {
+      "action": "share",
+      "app_id": "m365",
+      "conditions": {
+        "label_match": "confidential"
+      },
+      "created_at": "2026-06-12T00:56:21Z",
+      "enabled": true,
+      "id": "48dacc36-141f-474a-9ebd-18649fb80cf4",
+      "priority": 10,
+      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0",
+      "updated_at": "2026-06-12T00:56:21Z",
+      "verdict": "block"
+    },
+    {
+      "action": "share",
+      "app_id": "m365",
+      "conditions": {
+        "label_match": "confidential"
+      },
+      "created_at": "2026-06-12T00:56:21Z",
+      "enabled": true,
+      "id": "565ce7f8-800c-47f0-8c57-2f24ebd40f7e",
+      "priority": 10,
+      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f",
+      "updated_at": "2026-06-12T00:56:21Z",
+      "verdict": "block"
+    },
+    {
+      "action": "share",
+      "app_id": "m365",
+      "conditions": {
+        "label_match": "confidential"
+      },
+      "created_at": "2026-06-12T00:56:20Z",
+      "enabled": true,
+      "id": "8af71f93-de1c-4bc6-860c-be9ee2d77848",
+      "priority": 10,
+      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c",
+      "updated_at": "2026-06-12T00:56:20Z",
+      "verdict": "block"
+    },
+    {
+      "action": "share",
+      "app_id": "m365",
+      "conditions": {
+        "label_match": "confidential"
+      },
+      "created_at": "2026-06-11T04:40:15Z",
+      "enabled": true,
+      "id": "97a75b17-ab30-4e92-90f8-34856f69c12c",
+      "priority": 10,
+      "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
+      "updated_at": "2026-06-11T04:40:15Z",
+      "verdict": "block"
+    },
+    {
+      "action": "share",
+      "app_id": "m365",
+      "conditions": {
+        "label_match": "confidential"
+      },
+      "created_at": "2026-06-11T04:40:15Z",
+      "enabled": true,
+      "id": "ab6e077d-bc9a-4d0c-bb2a-388bb348bd39",
+      "priority": 10,
+      "tenant_id": "b6520bda-e7bb-4af9-9c53-7b0051eae65b",
+      "updated_at": "2026-06-11T04:40:15Z",
+      "verdict": "block"
+    },
+    {
+      "action": "share",
+      "app_id": "m365",
+      "conditions": {
+        "label_match": "confidential"
+      },
+      "created_at": "2026-06-12T00:56:21Z",
+      "enabled": true,
+      "id": "b2de0008-e927-44a5-94c7-3586d913e0cc",
+      "priority": 10,
+      "tenant_id": "890486df-98bd-482b-85a8-af361706676f",
+      "updated_at": "2026-06-12T00:56:21Z",
+      "verdict": "block"
+    },
+    {
+      "action": "share",
+      "app_id": "m365",
+      "conditions": {
+        "label_match": "confidential"
+      },
+      "created_at": "2026-06-11T04:40:15Z",
+      "enabled": true,
+      "id": "d3a3f7fc-1d37-4d86-8cc4-71fedb812f86",
+      "priority": 10,
+      "tenant_id": "0c8d2d9d-896d-45b1-8001-6a6776f832b9",
+      "updated_at": "2026-06-11T04:40:15Z",
+      "verdict": "block"
+    },
+    {
+      "action": "share",
+      "app_id": "m365",
+      "conditions": {
+        "label_match": "confidential"
+      },
+      "created_at": "2026-06-12T00:56:21Z",
+      "enabled": true,
+      "id": "d518b143-f477-45ff-8a36-33b8472a1bd1",
+      "priority": 10,
+      "tenant_id": "37619610-53b4-4eab-87f9-45ba902d30c2",
+      "updated_at": "2026-06-12T00:56:21Z",
       "verdict": "block"
     }
   ]

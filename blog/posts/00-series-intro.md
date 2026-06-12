@@ -1,12 +1,15 @@
 # ShieldNet Gateway, measured: a SASE platform walked end-to-end
 
-> **Post 0 of 8 — the series intro and the honesty contract.**
+> **Post 0 of 9 — the series intro and the honesty contract.**
 >
-> This is an engineering blog series, not a launch announcement. Over eight
-> posts we stand up ShieldNet Gateway (SNG) from a clean database, seed four
-> realistic tenants under one MSP, and walk seven executive scenarios through
-> the *real* product — the Go control plane, the React console, the Rust edge
-> crates, the Postgres RLS isolation model, and the metering/cost engine.
+> This is an engineering blog series, not a launch announcement. Over nine
+> posts we stand up ShieldNet Gateway (SNG) from a clean database, seed a
+> **nine-tenant fleet spanning seven countries and eight industries** under one
+> MSP, and walk the *real* product — the Go control plane, the React console,
+> the Rust edge crates, the Postgres RLS isolation model, and the metering/cost
+> engine. Post 8 is this cycle's capstone: the six operator scenarios
+> (**route / allow / block / prioritise / throttle / threat-protection**) walked
+> as real typed policies, with every figure re-measured on this dev VM.
 > Every screenshot is of a live, seeded, error-free page. Every payload is a
 > verbatim capture from a running control plane. Every efficacy number comes
 > from a harness that drives the actual enforcement code.
@@ -56,14 +59,14 @@ rules govern every figure:
    cloud-native rows (Zscaler) are the only directly comparable ones, and we
    lean on those for the honest comparison.
 
-3. **Screenshots are of real, seeded, error-free pages.** Before any capture we
-   audited all 31 console routes across all four tenants for load/console
-   errors. Three routes (DLP, Browser protection, Terraform) were genuinely
-   broken — missing Postgres repositories, never wired into the router — and we
-   fixed them properly ([PR #116](https://github.com/kennguy3n/visible-fishbone/pull/116))
-   rather than screenshotting around them. The console also got a full
-   design-system pass ([PR #117](https://github.com/kennguy3n/visible-fishbone/pull/117))
-   so the screenshots reflect the product, not a prototype.
+3. **Screenshots are of real, seeded, error-free pages.** Every capture in this
+   series is a live console route against the seeded nine-tenant fleet. Where a
+   surface is populated only by the real enforcement path and has no "create"
+   API (the DLP review queue), we seed deterministic rows that mirror exactly
+   the redacted shape the real producer writes, and we say so
+   ([`blog/harness/seed/dlp_review_seed.sql`](../harness/seed/dlp_review_seed.sql),
+   noted in [`../artifacts/scenarios.md`](../artifacts/scenarios.md)). We do not
+   screenshot loading spinners or error states.
 
 4. **The critique is honest.** Every post ends with a "where we fall short"
    section, and Post 7 carries a consolidated, evidence-based competitive
@@ -72,41 +75,57 @@ rules govern every figure:
 
 ## What shipped this cycle (and what's actually wired)
 
-This refresh folds six new capabilities into the series — and applies rule 3 to
-them honestly. Most are code-complete and tested on `main` but **not yet wired
-into the running control plane** (a single integration PR is staged for that), so
-the evidence for them is real engine output and passing tests, not live console
-screenshots claiming production enforcement:
+Last refresh, six new capabilities were *code-complete but not yet wired* into
+the running control plane. This cycle the wiring landed: PRs **#172, #176–#183**
+are merged into `main`. The honest distinction now is **wired vs. default-ON** —
+the new enforcement surfaces ship behind default-OFF feature gates so an upgrade
+is behaviourally inert until an operator opts in. That is the production-correct
+posture (no surprise enforcement on upgrade), and it is what the screenshots and
+payloads in this series reflect.
 
-| Capability | Lands in | PR | Live in console? |
+| Capability | Lands in | PR | Status on `main` |
 | --- | --- | --- | --- |
-| Activity-tiered dormancy | Post 2, 7 | #154 | No — tested, planner not started in `main` |
-| ClamAV INSTREAM content scan | Post 5 | #156 | No — OFF by default, constructor-gated |
-| Safe-browsing / category filtering | Post 5 | #156 | No — staged for integration |
-| Shadow-IT NoOps (classify/recommend/audit) | Post 5 | #159, #172 | Real engine output captured; runtime wiring in #172 |
-| Coach-first AI-app DLP + HITL review queue | Post 5, 6 | #158 | No console API for the queue yet |
-| Self-hosted Bonsai-8B Q2_0 bake | Post 6, 7 | #155 | Deploy artifact; needs prism-branch kernels |
+| CASB shadow-IT NoOps (classify/recommend/audit) | Post 5 | [#172](https://github.com/kennguy3n/visible-fishbone/pull/172) | Wired — real engine output captured via `blog/harness/casb` |
+| DLP review-queue operator API | Post 5, 6 | [#176](https://github.com/kennguy3n/visible-fishbone/pull/176) | Wired — console queue live (Post 8 screenshot) |
+| IdP directory sync | Post 4 | [#177](https://github.com/kennguy3n/visible-fishbone/pull/177) | Wired, default-OFF (`IDP_DIRECTORY_SYNC_ENABLED`) |
+| ClamAV INSTREAM + safe-browsing (ext-authz listener) | Post 5 | [#178](https://github.com/kennguy3n/visible-fishbone/pull/178) | Wired, default-OFF (constructor-gated, fail-open when off) |
+| DLP review-queue console UI | Post 5, 6 | [#179](https://github.com/kennguy3n/visible-fishbone/pull/179) | Wired — live `/dlp/review-queue` page |
+| SCIM / IdP de-provisioning hardening | Post 4 | [#180](https://github.com/kennguy3n/visible-fishbone/pull/180) | Wired — deactivation revokes live ZTNA sessions |
+| Multi-queue NIC wire-throughput benchmark | Post 8 | [#181](https://github.com/kennguy3n/visible-fishbone/pull/181) | Harness — single-stream floor vs multi-queue ceiling |
+| DLP detector breadth (+ES/IT/NL/PL/BE) + AI-app exfil wired | Post 5 | [#182](https://github.com/kennguy3n/visible-fishbone/pull/182) | Wired — also fixed 3 real validator bugs |
+| ZTNA continuous re-evaluation (`ReevalLoop`) | Post 4 | [#183](https://github.com/kennguy3n/visible-fishbone/pull/183) | Wired, default-OFF (`ztna.reeval_enabled`) |
 
-A buyer-facing companion series (`business/`) walks the same six as
+A buyer-facing companion series (`business/`) walks the headline capabilities as
 persona + jobs-to-be-done journeys.
 
 ## The cast (seeded data)
 
-One MSP, **Northwind Managed Security**, manages four tenants spanning three
-service tiers — so every screenshot shows real tenant-shaped data, and the
-tier differences are visible (a starter tenant genuinely has fewer features
-turned on than an enterprise one):
+One MSP manages a **nine-tenant fleet spanning seven countries and eight
+industries** across three service tiers — so every screenshot shows real
+tenant-shaped data, the tier differences are visible (a starter tenant genuinely
+has fewer features turned on than an enterprise one), and **data-residency +
+jurisdiction-correct compliance baselines** show up across five regimes. The
+seed harness pins every tenant to a canonical UUID so payloads and screenshots
+stay reproducible across reseeds (`blog/harness/seed`, idempotent).
 
-| Tenant | Tier | Vertical | Sites | Devices |
-| --- | --- | --- | ---: | ---: |
-| Acme Retail Group | enterprise | retail / PCI | 6 | 4 |
-| Globex Health Systems | enterprise | healthcare / HIPAA | 5 | 4 |
-| Initech Financial | professional | finance | 3 | 3 |
-| Umbrella Logistics | starter | logistics | 2 | 2 |
+| Tenant | Country | Industry | Tier | Compliance regime | Sites | Devices |
+| --- | --- | --- | --- | --- | ---: | ---: |
+| Acme Retail Group | US | retail / PCI | enterprise | us-baseline | 6 | 4 |
+| Globex Health Systems | US | healthcare / HIPAA | enterprise | us-baseline | 5 | 4 |
+| Britannia Robotics | GB | technology | enterprise | uk-dpa | 5 | 4 |
+| Initech Financial | DE | finance | professional | eu-gdpr | 3 | 3 |
+| Maple Health Network | CA | healthcare | professional | ca-pipeda | 4 | 3 |
+| Outback Retail Co | AU | retail | professional | au-privacy | 5 | 3 |
+| Lumière Légal | FR | legal | professional | eu-gdpr | 3 | 2 |
+| Nordic EduCloud | SE | education | starter | eu-gdpr | 2 | 2 |
+| Umbrella Logistics | SG | logistics | starter | (default) | 2 | 2 |
 
-Acme is the richest tenant and the one most posts walk through; Umbrella is the
-deliberately-sparse one we use to show honest empty states; Initech carries the
-one credible cost anomaly in the dataset (more in Post 7).
+That's **35 sites and 27 devices across five compliance regimes** (us-baseline,
+uk-dpa, eu-gdpr, ca-pipeda, au-privacy). Acme is the richest tenant and the one
+most posts walk through; Umbrella is the deliberately-sparse one we use to show
+honest empty states; the smart-default policy-template engine renders each
+tenant's `(industry, country)` coordinates into a jurisdiction-correct baseline
+graph (Post 8).
 
 ## The personas
 
@@ -128,6 +147,10 @@ one credible cost anomaly in the dataset (more in Post 7).
 6. **AI-assisted, verifier-checked operations** (S6) — the model deep-dive.
 7. **Prove the spend and the posture** (S7) — cost, compliance, and the
    consolidated competitive critique.
+8. **Six scenarios on one dev VM** — route / allow / block / prioritise /
+   throttle / threat-protection walked as real typed policies, with the
+   efficacy + throughput benchmarks re-measured on this VM and an honest
+   competitor read.
 
 Every post follows the same shape: business context → the scenario walked in the
 UI with real screenshots → the real data behind it → how it works under the hood

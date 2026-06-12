@@ -1,5 +1,5 @@
 {
-  "created_at": "2026-06-10T16:05:22.898433Z",
+  "created_at": "2026-06-12T01:01:44.541721Z",
   "graph": {
     "default_action": "deny",
     "edges": [
@@ -42,6 +42,10 @@
       {
         "source": "saas-m365",
         "target": "sdwan"
+      },
+      {
+        "source": "rt-voip",
+        "target": "sdwan"
       }
     ],
     "nodes": [
@@ -64,6 +68,10 @@
       {
         "id": "saas-m365",
         "label": "M365 SaaS"
+      },
+      {
+        "id": "rt-voip",
+        "label": "Real-time VoIP/UC"
       },
       {
         "id": "ngfw",
@@ -109,6 +117,9 @@
       },
       {
         "name": "saas-m365"
+      },
+      {
+        "name": "rt-voip"
       }
     ],
     "rules": [
@@ -183,11 +194,29 @@
         "verb": "deny"
       },
       {
-        "description": "Steer M365 SaaS onto the interactive class",
+        "description": "Prioritise: steer M365 SaaS onto the business-critical SLA class (<=50ms latency, <=0.1% loss)",
         "domain": "sdwan",
         "id": "sdwan-steer-saas",
+        "params": {
+          "max_latency_ms": 50,
+          "max_loss_pct": 0.1,
+          "sla_class": "business-critical"
+        },
         "predicate_refs": [
           "saas-m365"
+        ],
+        "verb": "steer"
+      },
+      {
+        "description": "Prioritise: steer real-time VoIP/UC onto the latency/jitter-sensitive class (<=15ms jitter)",
+        "domain": "sdwan",
+        "id": "sdwan-steer-voip",
+        "params": {
+          "max_jitter_ms": 15,
+          "sla_class": "real-time"
+        },
+        "predicate_refs": [
+          "rt-voip"
         ],
         "verb": "steer"
       },
@@ -248,8 +277,8 @@
       }
     ]
   },
-  "id": "b70aebd7-7706-40ca-b8e7-c18b8d5e9c30",
+  "id": "c38877dc-829f-4b3c-8ded-2e1ea1b31189",
   "is_draft": false,
   "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-  "version": 1
+  "version": 2
 }

@@ -2,9 +2,16 @@
   "ai_generated": false,
   "confidence": 0.7,
   "evaluation_mode": "compiled-bundle",
-  "explanation": "Verdict \"inspect\" from tenant policy graph b70aebd7-7706-40ca-b8e7-c18b8d5e9c30 (v1) for user=finance, app=private-apps. Note: user-subject rules were not evaluated — user identity is not represented in the synthesized access envelope, so this verdict reflects only app/device and default-action matching.",
+  "explanation": "Verdict \"inspect\" from tenant policy graph c38877dc-829f-4b3c-8ded-2e1ea1b31189 (v2) for user=finance, app=private-apps. Note: user-subject rules were not evaluated — the named user could not be resolved to a tenant directory identity, so this verdict reflects only app/device and default-action matching.",
+  "intent": {
+    "action": "access",
+    "app_ref": "private-apps",
+    "kind": "policy_verdict",
+    "user_ref": "finance"
+  },
   "matched_rules": [
-    "policy-graph:b70aebd7-7706-40ca-b8e7-c18b8d5e9c30@v1"
+    "policy-graph:c38877dc-829f-4b3c-8ded-2e1ea1b31189@v2"
   ],
+  "query_kind": "policy_verdict",
   "verdict": "inspect"
 }

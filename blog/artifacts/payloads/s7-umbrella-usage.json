@@ -1,93 +1,93 @@
 {
-  "generated_at": "2026-06-10T16:05:34.631594772Z",
+  "generated_at": "2026-06-12T01:03:34.895087259Z",
   "lines": [
     {
       "hard_exceeded": false,
       "hard_limit": 1000000,
       "meter": "llm_tokens_used",
       "period": "monthly",
-      "projected": 599995,
+      "projected": 554056,
       "projected_hard_exceeded": false,
       "projected_soft_exceeded": false,
       "soft_exceeded": false,
       "soft_limit": 800000,
-      "used": 193409
+      "used": 203969
     },
     {
       "hard_exceeded": false,
       "hard_limit": 1000,
       "meter": "llm_calls",
       "period": "monthly",
-      "projected": 599,
+      "projected": 555,
       "projected_hard_exceeded": false,
       "projected_soft_exceeded": false,
       "soft_exceeded": false,
       "soft_limit": 800,
-      "used": 193
+      "used": 204
     },
     {
       "hard_exceeded": false,
       "hard_limit": 100000,
       "meter": "url_cat_lookups",
       "period": "daily",
-      "projected": 6000,
+      "projected": 0,
       "projected_hard_exceeded": false,
       "projected_soft_exceeded": false,
       "soft_exceeded": false,
       "soft_limit": 80000,
-      "used": 4023
+      "used": 0
     },
     {
       "hard_exceeded": false,
       "meter": "malware_scans",
       "period": "daily",
-      "projected": 200,
+      "projected": 0,
       "projected_hard_exceeded": false,
       "projected_soft_exceeded": false,
       "soft_exceeded": false,
-      "used": 134
+      "used": 0
     },
     {
       "hard_exceeded": false,
       "meter": "clickhouse_rows_written",
       "period": "monthly",
-      "projected": 19999831,
+      "projected": 18468519,
       "projected_hard_exceeded": false,
       "projected_soft_exceeded": false,
       "soft_exceeded": false,
-      "used": 6446972
+      "used": 6798972
     },
     {
       "hard_exceeded": false,
       "meter": "s3_bytes_archived",
       "period": "monthly",
-      "projected": 59999494434,
+      "projected": 55405556270,
       "projected_hard_exceeded": false,
       "projected_soft_exceeded": false,
       "soft_exceeded": false,
-      "used": 19340916465
+      "used": 20396916305
     },
     {
       "hard_exceeded": false,
       "meter": "bandwidth_proxied_bytes",
       "period": "monthly",
-      "projected": 299997472170,
+      "projected": 277027781347,
       "projected_hard_exceeded": false,
       "projected_soft_exceeded": false,
       "soft_exceeded": false,
-      "used": 96704582325
+      "used": 101984581525
     },
     {
       "hard_exceeded": false,
       "hard_limit": 5000000,
       "meter": "policy_evaluations",
       "period": "daily",
-      "projected": 2999636,
+      "projected": 0,
       "projected_hard_exceeded": false,
       "projected_soft_exceeded": false,
       "soft_exceeded": false,
       "soft_limit": 4000000,
-      "used": 2011375
+      "used": 0
     }
   ],
   "tenant_id": "0c8d2d9d-896d-45b1-8001-6a6776f832b9"

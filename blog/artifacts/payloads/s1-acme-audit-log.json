@@ -1,97 +1,683 @@
 {
   "items": [
     {
+      "action": "policy.compiled",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T01:01:46.167104Z",
+      "details": {
+        "graph_id": "3b81cf33-8359-48be-9ae2-8de33cf47745",
+        "graph_version": 2,
+        "targets": [
+          "edge",
+          "endpoint",
+          "cloud",
+          "mobile"
+        ]
+      },
+      "id": "66de6aac-2448-4aa3-a358-c2883117dfe6",
+      "resource_id": "3b81cf33-8359-48be-9ae2-8de33cf47745",
+      "resource_type": "policy_graph",
+      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
+    },
+    {
+      "action": "policy.graph_updated",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T01:01:46.05173Z",
+      "details": {},
+      "id": "23b7920e-37ac-4c45-b1a3-489ece9e9cec",
+      "resource_id": "3b81cf33-8359-48be-9ae2-8de33cf47745",
+      "resource_type": "policy_graph",
+      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
+    },
+    {
+      "action": "policy.compiled",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T01:01:45.992374Z",
+      "details": {
+        "graph_id": "aa34ffb0-c287-44cc-a58c-befab716c4b7",
+        "graph_version": 2,
+        "targets": [
+          "edge",
+          "endpoint",
+          "cloud",
+          "mobile"
+        ]
+      },
+      "id": "7955cbf7-9a7c-46bd-ba42-454a0ef2cc79",
+      "resource_id": "aa34ffb0-c287-44cc-a58c-befab716c4b7",
+      "resource_type": "policy_graph",
+      "tenant_id": "890486df-98bd-482b-85a8-af361706676f"
+    },
+    {
+      "action": "policy.graph_updated",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T01:01:45.878843Z",
+      "details": {},
+      "id": "bd677e7b-3770-4a30-9ba9-75ddf96e682b",
+      "resource_id": "aa34ffb0-c287-44cc-a58c-befab716c4b7",
+      "resource_type": "policy_graph",
+      "tenant_id": "890486df-98bd-482b-85a8-af361706676f"
+    },
+    {
+      "action": "policy.compiled",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T01:01:45.819441Z",
+      "details": {
+        "graph_id": "43a4206a-bb8d-46fc-940c-652cd47743ae",
+        "graph_version": 2,
+        "targets": [
+          "edge",
+          "endpoint",
+          "cloud",
+          "mobile"
+        ]
+      },
+      "id": "db67cca6-022e-4440-8d38-296c2e27794b",
+      "resource_id": "43a4206a-bb8d-46fc-940c-652cd47743ae",
+      "resource_type": "policy_graph",
+      "tenant_id": "37619610-53b4-4eab-87f9-45ba902d30c2"
+    },
+    {
+      "action": "policy.graph_updated",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T01:01:45.694018Z",
+      "details": {},
+      "id": "4b68fc72-1472-48ec-a0cd-c1da34b9d405",
+      "resource_id": "43a4206a-bb8d-46fc-940c-652cd47743ae",
+      "resource_type": "policy_graph",
+      "tenant_id": "37619610-53b4-4eab-87f9-45ba902d30c2"
+    },
+    {
+      "action": "policy.compiled",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T01:01:45.620376Z",
+      "details": {
+        "graph_id": "113a2e61-3515-47a3-abbd-1694fb82811b",
+        "graph_version": 2,
+        "targets": [
+          "edge",
+          "endpoint",
+          "cloud",
+          "mobile"
+        ]
+      },
+      "id": "d3fb555e-b390-4f69-a702-e70e036e1eee",
+      "resource_id": "113a2e61-3515-47a3-abbd-1694fb82811b",
+      "resource_type": "policy_graph",
+      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0"
+    },
+    {
+      "action": "policy.graph_updated",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T01:01:45.507325Z",
+      "details": {},
+      "id": "5c8f0b98-c4c1-4c9e-9801-1ed399435b48",
+      "resource_id": "113a2e61-3515-47a3-abbd-1694fb82811b",
+      "resource_type": "policy_graph",
+      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0"
+    },
+    {
+      "action": "policy.compiled",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T01:01:45.438282Z",
+      "details": {
+        "graph_id": "d4b47136-cc9e-474a-a964-718d455732b6",
+        "graph_version": 2,
+        "targets": [
+          "edge",
+          "endpoint",
+          "cloud",
+          "mobile"
+        ]
+      },
+      "id": "19dd9e92-248d-4e53-9d24-acec45ef7fa0",
+      "resource_id": "d4b47136-cc9e-474a-a964-718d455732b6",
+      "resource_type": "policy_graph",
+      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
+    },
+    {
+      "action": "policy.graph_updated",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T01:01:45.321055Z",
+      "details": {},
+      "id": "b89a06e9-1cb4-4445-8b8f-393a4f934cf1",
+      "resource_id": "d4b47136-cc9e-474a-a964-718d455732b6",
+      "resource_type": "policy_graph",
+      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
+    },
+    {
+      "action": "policy.compiled",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T01:01:45.245732Z",
+      "details": {
+        "graph_id": "f317f39a-5319-415d-9564-36677a603a16",
+        "graph_version": 2,
+        "targets": [
+          "edge",
+          "endpoint",
+          "cloud",
+          "mobile"
+        ]
+      },
+      "id": "2188e4de-01c3-4d07-bebc-bc9fe88122f5",
+      "resource_id": "f317f39a-5319-415d-9564-36677a603a16",
+      "resource_type": "policy_graph",
+      "tenant_id": "0c8d2d9d-896d-45b1-8001-6a6776f832b9"
+    },
+    {
+      "action": "policy.graph_updated",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T01:01:45.129884Z",
+      "details": {},
+      "id": "9d019d09-1315-43bc-8763-22f0f413b44c",
+      "resource_id": "f317f39a-5319-415d-9564-36677a603a16",
+      "resource_type": "policy_graph",
+      "tenant_id": "0c8d2d9d-896d-45b1-8001-6a6776f832b9"
+    },
+    {
+      "action": "policy.compiled",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T01:01:45.06751Z",
+      "details": {
+        "graph_id": "0ba66a48-f633-4b4c-a17d-d3fa6cc4793f",
+        "graph_version": 2,
+        "targets": [
+          "edge",
+          "endpoint",
+          "cloud",
+          "mobile"
+        ]
+      },
+      "id": "87b008a5-13ba-4b6c-aa2e-6ede2ebc5106",
+      "resource_id": "0ba66a48-f633-4b4c-a17d-d3fa6cc4793f",
+      "resource_type": "policy_graph",
+      "tenant_id": "b6520bda-e7bb-4af9-9c53-7b0051eae65b"
+    },
+    {
+      "action": "policy.graph_updated",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T01:01:44.951005Z",
+      "details": {},
+      "id": "f3502201-8c19-4335-a035-8e17b72050be",
+      "resource_id": "0ba66a48-f633-4b4c-a17d-d3fa6cc4793f",
+      "resource_type": "policy_graph",
+      "tenant_id": "b6520bda-e7bb-4af9-9c53-7b0051eae65b"
+    },
+    {
+      "action": "policy.compiled",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T01:01:44.882866Z",
+      "details": {
+        "graph_id": "dbac8b48-923b-4c49-b2ab-0befc43e2ad1",
+        "graph_version": 2,
+        "targets": [
+          "edge",
+          "endpoint",
+          "cloud",
+          "mobile"
+        ]
+      },
+      "id": "c4ff7e5a-320a-44d2-aef7-85f953e3f10f",
+      "resource_id": "dbac8b48-923b-4c49-b2ab-0befc43e2ad1",
+      "resource_type": "policy_graph",
+      "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a"
+    },
+    {
+      "action": "policy.graph_updated",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T01:01:44.765553Z",
+      "details": {},
+      "id": "77160fd0-dc18-4b6a-bfad-8907e7023de1",
+      "resource_id": "dbac8b48-923b-4c49-b2ab-0befc43e2ad1",
+      "resource_type": "policy_graph",
+      "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a"
+    },
+    {
+      "action": "policy.compiled",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T01:01:44.685585Z",
+      "details": {
+        "graph_id": "c38877dc-829f-4b3c-8ded-2e1ea1b31189",
+        "graph_version": 2,
+        "targets": [
+          "edge",
+          "endpoint",
+          "cloud",
+          "mobile"
+        ]
+      },
+      "id": "57ff6949-0f3a-4e5b-be4c-c365b591511d",
+      "resource_id": "c38877dc-829f-4b3c-8ded-2e1ea1b31189",
+      "resource_type": "policy_graph",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "policy.graph_updated",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T01:01:44.546114Z",
+      "details": {},
+      "id": "454de2de-47b7-44c0-94ae-10ad74ed208c",
+      "resource_id": "c38877dc-829f-4b3c-8ded-2e1ea1b31189",
+      "resource_type": "policy_graph",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "action": "casb.connector_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:57:13.714289Z",
+      "details": {
+        "name": "Lumière Salesforce",
+        "type": "salesforce"
+      },
+      "id": "73552f11-c696-48e3-afe0-dbb70c50d249",
+      "resource_id": "e3d463db-e078-496d-bc35-776f95adb290",
+      "resource_type": "casb_connector",
+      "tenant_id": "890486df-98bd-482b-85a8-af361706676f"
+    },
+    {
+      "action": "casb.connector_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:57:13.529464Z",
+      "details": {
+        "name": "Britannia Salesforce",
+        "type": "salesforce"
+      },
+      "id": "3600b1bf-3b06-43cb-b882-eabc0c3885d6",
+      "resource_id": "c575dc8e-1272-4647-9617-efc7dc3bd083",
+      "resource_type": "casb_connector",
+      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
+    },
+    {
+      "action": "casb.connector_deleted",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:57:04.900562Z",
+      "details": {},
+      "id": "cf109949-a291-41ac-902b-ab68e0e11c77",
+      "resource_id": "6f9d8486-7a63-4479-9920-0f2c03e13274",
+      "resource_type": "casb_connector",
+      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
+    },
+    {
+      "action": "casb.connector_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:46.953731Z",
+      "details": {
+        "name": "probe-salesforce",
+        "type": "salesforce"
+      },
+      "id": "04ee284d-42a8-429b-9fed-526633b1632c",
+      "resource_id": "6f9d8486-7a63-4479-9920-0f2c03e13274",
+      "resource_type": "casb_connector",
+      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
+    },
+    {
+      "action": "apikey.create",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:21.326762Z",
+      "details": {
+        "name": "edge-bootstrap",
+        "subject": "svc:edge"
+      },
+      "id": "d42fffc0-0695-43bb-ac30-d1b83f501724",
+      "resource_id": "52ca2e2e-eb50-4d4a-873c-fb942351e6ec",
+      "resource_type": "tenant_api_key",
+      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:21.313966Z",
+      "details": {
+        "action": "share",
+        "app_id": "google_workspace",
+        "verdict": "log"
+      },
+      "id": "d09fa92e-6b49-4397-aa1d-65e97a4d80f4",
+      "resource_id": "592fbb53-3920-42c6-9aa9-c0c13974c10c",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:21.310158Z",
+      "details": {
+        "action": "download",
+        "app_id": "salesforce",
+        "verdict": "block"
+      },
+      "id": "9cf0fa1f-640f-4ab6-8ee4-7c5038dd2391",
+      "resource_id": "6fc0b2f5-baa7-4a9f-8fb7-747cd86ffc1f",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:21.306132Z",
+      "details": {
+        "action": "upload",
+        "app_id": "m365",
+        "verdict": "log"
+      },
+      "id": "bc10445c-d86d-47f8-887d-995060a26322",
+      "resource_id": "5fd625ec-e196-4060-a9ad-c72aedb52683",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:21.302424Z",
+      "details": {
+        "action": "share",
+        "app_id": "m365",
+        "verdict": "block"
+      },
+      "id": "5e187d8d-4490-40dc-bd96-03099b87588d",
+      "resource_id": "565ce7f8-800c-47f0-8c57-2f24ebd40f7e",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
+    },
+    {
+      "action": "apikey.create",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:21.254684Z",
+      "details": {
+        "name": "edge-bootstrap",
+        "subject": "svc:edge"
+      },
+      "id": "4b61eac4-2e0d-47c8-bbd9-f6806f08c7dd",
+      "resource_id": "6e1a0d63-5bb7-47c2-a50f-aa9f1a9ec891",
+      "resource_type": "tenant_api_key",
+      "tenant_id": "890486df-98bd-482b-85a8-af361706676f"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:21.241797Z",
+      "details": {
+        "action": "share",
+        "app_id": "google_workspace",
+        "verdict": "log"
+      },
+      "id": "85db0741-0f2c-437f-9733-9030d16308dc",
+      "resource_id": "d2d1e0c8-33e2-43f1-a195-645bf2afa6a8",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "890486df-98bd-482b-85a8-af361706676f"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:21.238239Z",
+      "details": {
+        "action": "download",
+        "app_id": "salesforce",
+        "verdict": "block"
+      },
+      "id": "69ee654a-1ece-48e3-9f57-80312fd192d0",
+      "resource_id": "3e5024e5-326d-4f21-93b3-d008ac444599",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "890486df-98bd-482b-85a8-af361706676f"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:21.234392Z",
+      "details": {
+        "action": "upload",
+        "app_id": "m365",
+        "verdict": "log"
+      },
+      "id": "441e4587-a914-4e25-bc71-43fe82743c6d",
+      "resource_id": "1483d020-5ead-4619-acc7-0c73a7da6174",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "890486df-98bd-482b-85a8-af361706676f"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:21.230346Z",
+      "details": {
+        "action": "share",
+        "app_id": "m365",
+        "verdict": "block"
+      },
+      "id": "c0703d2b-c06b-4c68-931e-172c160d325b",
+      "resource_id": "b2de0008-e927-44a5-94c7-3586d913e0cc",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "890486df-98bd-482b-85a8-af361706676f"
+    },
+    {
+      "action": "apikey.create",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:21.179224Z",
+      "details": {
+        "name": "edge-bootstrap",
+        "subject": "svc:edge"
+      },
+      "id": "8b58cc3a-aaca-4fcc-a146-beb923c68243",
+      "resource_id": "38fb14c1-56c6-4c08-8116-9e5b61d00bb3",
+      "resource_type": "tenant_api_key",
+      "tenant_id": "37619610-53b4-4eab-87f9-45ba902d30c2"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:21.167487Z",
+      "details": {
+        "action": "share",
+        "app_id": "google_workspace",
+        "verdict": "log"
+      },
+      "id": "c1c495d5-40ce-4935-8b54-2914a65c6f00",
+      "resource_id": "89fd59d6-4c79-48f0-a1c4-678a7b4aa1da",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "37619610-53b4-4eab-87f9-45ba902d30c2"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:21.163665Z",
+      "details": {
+        "action": "download",
+        "app_id": "salesforce",
+        "verdict": "block"
+      },
+      "id": "be641e44-c098-4d9d-8abb-d07297ee0235",
+      "resource_id": "59f26df5-64fb-454c-b6fe-e44f3798f655",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "37619610-53b4-4eab-87f9-45ba902d30c2"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:21.159932Z",
+      "details": {
+        "action": "upload",
+        "app_id": "m365",
+        "verdict": "log"
+      },
+      "id": "6f85ab3e-b455-4a6d-82ae-985f242e4664",
+      "resource_id": "5d1fabcf-0236-4645-8ab1-9578ea3d0645",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "37619610-53b4-4eab-87f9-45ba902d30c2"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:21.155493Z",
+      "details": {
+        "action": "share",
+        "app_id": "m365",
+        "verdict": "block"
+      },
+      "id": "7e0df467-8581-4280-9db7-e5eb1372a0bf",
+      "resource_id": "d518b143-f477-45ff-8a36-33b8472a1bd1",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "37619610-53b4-4eab-87f9-45ba902d30c2"
+    },
+    {
+      "action": "apikey.create",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:21.093694Z",
+      "details": {
+        "name": "edge-bootstrap",
+        "subject": "svc:edge"
+      },
+      "id": "5ba446a9-f5af-48d6-9ae4-76a69e427ec9",
+      "resource_id": "2ad716db-65d3-48f6-89ee-08f4f7726411",
+      "resource_type": "tenant_api_key",
+      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:21.077388Z",
+      "details": {
+        "action": "share",
+        "app_id": "google_workspace",
+        "verdict": "log"
+      },
+      "id": "c90ac450-8f10-47f4-aecb-fe25e3c5fa02",
+      "resource_id": "96a1e163-c0ec-4367-9431-4b5a6ec816be",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:21.073804Z",
+      "details": {
+        "action": "download",
+        "app_id": "salesforce",
+        "verdict": "block"
+      },
+      "id": "0a71a7e5-04b3-485d-a491-dd9c72778860",
+      "resource_id": "ff80b75a-0986-4078-919c-834e8c7aee8a",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:21.070455Z",
+      "details": {
+        "action": "upload",
+        "app_id": "m365",
+        "verdict": "log"
+      },
+      "id": "00f5843e-3e78-4c0a-afd5-f862294bb150",
+      "resource_id": "c2508eec-0566-4fe7-9955-eabacfe18e7f",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:21.06677Z",
+      "details": {
+        "action": "share",
+        "app_id": "m365",
+        "verdict": "block"
+      },
+      "id": "f3ca5935-2697-4920-8c64-d2ec84ff0281",
+      "resource_id": "48dacc36-141f-474a-9ebd-18649fb80cf4",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0"
+    },
+    {
+      "action": "apikey.create",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:21.012558Z",
+      "details": {
+        "name": "edge-bootstrap",
+        "subject": "svc:edge"
+      },
+      "id": "85d3678a-68b1-49b4-b9ae-d3a4bcc5fb2a",
+      "resource_id": "6e4b939f-92f2-4556-ae36-5bd3cf6820e3",
+      "resource_type": "tenant_api_key",
+      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:20.993799Z",
+      "details": {
+        "action": "share",
+        "app_id": "google_workspace",
+        "verdict": "log"
+      },
+      "id": "e745e21d-8588-44a4-9d8c-0e092d988577",
+      "resource_id": "7e941d00-ad89-4843-a4d8-6ff6dbaec055",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:20.989717Z",
+      "details": {
+        "action": "download",
+        "app_id": "salesforce",
+        "verdict": "block"
+      },
+      "id": "7ba04253-5d00-447a-afc4-b2207f07677e",
+      "resource_id": "f0a81000-6261-4c03-919d-e670a226bd86",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:20.98578Z",
+      "details": {
+        "action": "upload",
+        "app_id": "m365",
+        "verdict": "log"
+      },
+      "id": "0ecacf1b-3dad-4c29-bbca-568b98866263",
+      "resource_id": "5871b46a-6c17-4225-b953-9901f129f79c",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
+    },
+    {
+      "action": "casb.inline_rule_created",
+      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+      "created_at": "2026-06-12T00:56:20.980958Z",
+      "details": {
+        "action": "share",
+        "app_id": "m365",
+        "verdict": "block"
+      },
+      "id": "a483817b-69a5-4135-bc1d-7e41f18452e0",
+      "resource_id": "8af71f93-de1c-4bc6-860c-be9ee2d77848",
+      "resource_type": "casb_inline_rule",
+      "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
+    },
+    {
       "action": "webhook.endpoint_created",
       "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.986197Z",
+      "created_at": "2026-06-12T00:54:57.915815Z",
       "details": {
         "events": [
           "alert.created",
           "device.enrolled",
           "dlp.violation"
         ],
-        "url": "https://hooks.example.com/sng/acme-retail"
+        "url": "https://hooks.example.com/sng/nordic-educloud"
       },
-      "id": "8757046d-69ce-4ec3-b098-08ba5cb2f751",
-      "resource_id": "ce85d528-c538-4f50-a595-8f460c61d746",
+      "id": "3d768cae-f4c1-4dec-b685-e9056adfe324",
+      "resource_id": "cc7b0d63-01a8-4a17-8659-6c807f121712",
       "resource_type": "webhook_endpoint",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "apikey.create",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.979987Z",
-      "details": {
-        "name": "edge-bootstrap",
-        "subject": "svc:edge"
-      },
-      "id": "9a03551c-099a-445f-b631-a65e72e45c3e",
-      "resource_id": "29015ca5-ef15-41e2-bc6c-5475a992cc59",
-      "resource_type": "tenant_api_key",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.951626Z",
-      "details": {
-        "action": "share",
-        "app_id": "google_workspace",
-        "verdict": "log"
-      },
-      "id": "278efc11-46de-491b-929c-7fc1da08b3d0",
-      "resource_id": "0c2039ea-dddb-4aa2-b2c7-b971802affe9",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.946789Z",
-      "details": {
-        "action": "download",
-        "app_id": "salesforce",
-        "verdict": "block"
-      },
-      "id": "27b14c35-5508-4fd9-ad4a-df716c999b18",
-      "resource_id": "81119dbf-1145-4d76-b2f2-ac5f9753585b",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.939544Z",
-      "details": {
-        "action": "upload",
-        "app_id": "m365",
-        "verdict": "log"
-      },
-      "id": "3da6b3c2-35b4-40b3-949e-39fbf734fb2b",
-      "resource_id": "cb111eef-68c8-45ee-9acc-356e19299102",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "casb.inline_rule_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.934976Z",
-      "details": {
-        "action": "share",
-        "app_id": "m365",
-        "verdict": "block"
-      },
-      "id": "56b283e9-a9bd-4502-8234-75e8b75f58c8",
-      "resource_id": "cfe0f7a0-c372-48bf-8a40-44c6b5d010a0",
-      "resource_type": "casb_inline_rule",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
     },
     {
       "action": "policy.compiled",
       "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.926983Z",
+      "created_at": "2026-06-12T00:54:57.897355Z",
       "details": {
-        "graph_id": "b70aebd7-7706-40ca-b8e7-c18b8d5e9c30",
+        "graph_id": "a7a495ee-a73c-4d15-83ca-ed8e661dcfe7",
         "graph_version": 1,
         "targets": [
           "edge",
@@ -100,240 +686,21 @@
           "mobile"
         ]
       },
-      "id": "217365b5-260e-4d69-8c7e-b826d3a23e24",
-      "resource_id": "b70aebd7-7706-40ca-b8e7-c18b8d5e9c30",
+      "id": "f9463999-6b86-479b-b172-c03323267ea2",
+      "resource_id": "a7a495ee-a73c-4d15-83ca-ed8e661dcfe7",
       "resource_type": "policy_graph",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "policy.signing_key_created",
-      "created_at": "2026-06-10T16:05:22.908723Z",
-      "details": {
-        "algorithm": "ed25519",
-        "key_id": "ceefd70fe46a4f30",
-        "public_key": "50e3d90ac42237fbd763c4889c258b3cf3ea726a21c3b092e548b6336504c331",
-        "status": "active"
-      },
-      "id": "583ab2c0-4dae-4409-9b92-110c877bc1b3",
-      "resource_id": "b428df45-ee80-4ebf-854c-124977fbe401",
-      "resource_type": "policy_signing_key",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
     },
     {
       "action": "policy.graph_updated",
       "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.90136Z",
+      "created_at": "2026-06-12T00:54:57.772171Z",
       "details": {},
-      "id": "607ca2cc-4e79-4fdd-8d8a-bd8d1f0f4cd5",
-      "resource_id": "b70aebd7-7706-40ca-b8e7-c18b8d5e9c30",
+      "id": "0739ed1b-5cc6-4556-913c-4d903955be65",
+      "resource_id": "a7a495ee-a73c-4d15-83ca-ed8e661dcfe7",
       "resource_type": "policy_graph",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "integration.connector_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.893646Z",
-      "details": {
-        "events": null,
-        "name": "Acme Splunk HEC",
-        "type": "siem_webhook"
-      },
-      "id": "b0032ddc-601d-4ad3-9b09-d941df5155ef",
-      "resource_id": "207c7c61-661a-400d-9e68-7f0709d06436",
-      "resource_type": "integration_connector",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "casb.connector_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.888769Z",
-      "details": {
-        "name": "Acme Slack",
-        "type": "slack"
-      },
-      "id": "32b5f216-5aec-4138-ac4a-d30aefbf9f5c",
-      "resource_id": "dbc99aca-8b9d-4ea2-b230-1b4a11628cbf",
-      "resource_type": "casb_connector",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "casb.connector_created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.884822Z",
-      "details": {
-        "name": "Acme Microsoft 365",
-        "type": "m365"
-      },
-      "id": "a3e5bb07-2697-422f-9b4e-b66caf178698",
-      "resource_id": "0503e451-4c41-482d-969b-89d5df6221c5",
-      "resource_type": "casb_connector",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "browser_policy.created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.880122Z",
-      "details": {},
-      "id": "01f6f475-49cb-4c8c-9c17-c80b2cd1fc5b",
-      "resource_id": "2b95249f-ddcd-45f3-b6a8-1ce007c0f919",
-      "resource_type": "browser_policy",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "browser_policy.created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.875977Z",
-      "details": {},
-      "id": "80a9b3a7-f738-4419-a725-23160505693a",
-      "resource_id": "b213920c-b6de-40ce-8b3c-3278dab5429d",
-      "resource_type": "browser_policy",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "device.enrolled",
-      "created_at": "2026-06-10T16:05:22.865855Z",
-      "details": {},
-      "id": "20e1467b-3d16-4132-8315-82f8c6d6fb13",
-      "resource_id": "4bbfd1b4-1a64-496c-bb58-5b7144c99ac7",
-      "resource_type": "device",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "claim_token.created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.8601Z",
-      "details": {},
-      "id": "fce0e2bf-34d6-41a9-8e9d-652df2560047",
-      "resource_id": "0827fe30-189e-4fdb-a252-3338cbbf3024",
-      "resource_type": "claim_token",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "device.enrolled",
-      "created_at": "2026-06-10T16:05:22.854379Z",
-      "details": {},
-      "id": "6b6b512e-57db-4b00-a970-c2c9efd4d1c3",
-      "resource_id": "3d7a1f3f-6b2f-470e-a8dc-eec29a499c6f",
-      "resource_type": "device",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "claim_token.created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.848709Z",
-      "details": {},
-      "id": "ffca1a2f-8c90-4eb1-9905-42f4870095e0",
-      "resource_id": "9fbbae68-8565-4511-aaee-8ec0951f7f06",
-      "resource_type": "claim_token",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "device.enrolled",
-      "created_at": "2026-06-10T16:05:22.84333Z",
-      "details": {},
-      "id": "4395b458-20d4-4628-9cb4-50e84bb354f9",
-      "resource_id": "3948419b-18cc-4d62-8b98-c539aea5eac4",
-      "resource_type": "device",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "claim_token.created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.837736Z",
-      "details": {},
-      "id": "59e8e20c-d900-43e0-a1b4-efd15e26397b",
-      "resource_id": "e0d1a439-092e-4366-b567-0330c51fd280",
-      "resource_type": "claim_token",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "device.enrolled",
-      "created_at": "2026-06-10T16:05:22.831999Z",
-      "details": {},
-      "id": "e0c83ac9-98da-46f1-8b3f-94e483275df5",
-      "resource_id": "68b5f38f-e33e-4a66-b7d0-726036bcfcf8",
-      "resource_type": "device",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "claim_token.created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.824331Z",
-      "details": {},
-      "id": "f33f39ea-7ef3-48ee-8cdd-853c825948a8",
-      "resource_id": "a1d34afb-7ad3-4cdd-bde5-a0eb3674f3f2",
-      "resource_type": "claim_token",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "site.created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.817507Z",
-      "details": {},
-      "id": "f99f90a6-5a35-4c71-88b2-4c94d9951f05",
-      "resource_id": "7ce824bf-81fc-4c65-8b05-3044c48158c4",
-      "resource_type": "site",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "site.created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.813144Z",
-      "details": {},
-      "id": "2a0d423b-f6af-4a13-a3b6-9a3a6460182d",
-      "resource_id": "632e3701-6fd6-4fbd-b83b-aa325535d184",
-      "resource_type": "site",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "site.created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.808711Z",
-      "details": {},
-      "id": "adeb7cad-9b1f-4410-b127-2a05471eccbe",
-      "resource_id": "b2e0192b-4133-4a1a-9326-2713e4c2c44e",
-      "resource_type": "site",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "site.created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.804689Z",
-      "details": {},
-      "id": "26bffc23-4d67-4b2b-adb8-a5edc1fe45d5",
-      "resource_id": "dd672612-a749-4077-82bf-b8edf57921aa",
-      "resource_type": "site",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "site.created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.8006Z",
-      "details": {},
-      "id": "d9edd103-dc8a-4206-8358-a4b82d87f2d2",
-      "resource_id": "7b015e02-ebbe-4b99-852e-1f65ccc06dfe",
-      "resource_type": "site",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "site.created",
-      "actor_id": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
-      "created_at": "2026-06-10T16:05:22.795653Z",
-      "details": {},
-      "id": "ace4be60-38e1-462b-90bf-ea04d81811ba",
-      "resource_id": "372eed32-5af4-4459-889c-97e3cb544d59",
-      "resource_type": "site",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
-    },
-    {
-      "action": "tenant.created",
-      "created_at": "2026-06-10T16:05:21.795653Z",
-      "details": {},
-      "id": "fb2e9ea6-ea37-4fea-ad93-75c6de3c894c",
-      "resource_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "resource_type": "tenant",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+      "tenant_id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
     }
   ],
-  "next_cursor": ""
+  "next_cursor": "eyJ0IjoiMjAyNi0wNi0xMlQwMDo1NDo1Ny43NzIxNzFaIiwiaSI6IjA3MzllZDFiLTVjYzYtNDU1Ni05MTNjLTRkOTAzOTU1YmU2NSJ9"
 }

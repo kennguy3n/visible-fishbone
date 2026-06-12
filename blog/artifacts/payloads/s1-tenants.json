@@ -1,17 +1,75 @@
 {
   "items": [
     {
-      "created_at": "2026-06-10T16:05:22.757199000Z",
+      "created_at": "2026-06-12T00:54:56.404597000Z",
+      "id": "cef9c934-507c-4adc-985b-48f3cbe274b0",
+      "name": "Maple Health Network",
+      "region": "ca-central-1",
+      "settings": {},
+      "slug": "maple-health",
+      "status": "active",
+      "tier": "professional",
+      "updated_at": "2026-06-12T00:54:56.404597000Z"
+    },
+    {
+      "created_at": "2026-06-12T00:54:56.404597000Z",
+      "id": "8c93e8b9-5710-4f3a-9981-6d2c558bb78f",
+      "msp_id": "b47fb518-f336-4449-82b0-bd33a1f36833",
+      "name": "Nordic EduCloud",
+      "region": "eu-north-1",
+      "settings": {},
+      "slug": "nordic-educloud",
+      "status": "active",
+      "tier": "starter",
+      "updated_at": "2026-06-12T01:01:46.022211000Z"
+    },
+    {
+      "created_at": "2026-06-12T00:54:56.404597000Z",
+      "id": "890486df-98bd-482b-85a8-af361706676f",
+      "name": "Lumière Légal",
+      "region": "eu-west-3",
+      "settings": {},
+      "slug": "lumiere-legal",
+      "status": "active",
+      "tier": "professional",
+      "updated_at": "2026-06-12T00:54:56.404597000Z"
+    },
+    {
+      "created_at": "2026-06-12T00:54:56.404597000Z",
+      "id": "37619610-53b4-4eab-87f9-45ba902d30c2",
+      "msp_id": "b47fb518-f336-4449-82b0-bd33a1f36833",
+      "name": "Outback Retail Co",
+      "region": "ap-southeast-2",
+      "settings": {},
+      "slug": "outback-retail",
+      "status": "active",
+      "tier": "professional",
+      "updated_at": "2026-06-12T01:01:45.648762000Z"
+    },
+    {
+      "created_at": "2026-06-12T00:54:56.404597000Z",
+      "id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c",
+      "msp_id": "b47fb518-f336-4449-82b0-bd33a1f36833",
+      "name": "Britannia Robotics",
+      "region": "eu-west-2",
+      "settings": {},
+      "slug": "britannia-robotics",
+      "status": "active",
+      "tier": "enterprise",
+      "updated_at": "2026-06-12T01:01:45.276509000Z"
+    },
+    {
+      "created_at": "2026-06-11T04:40:14.976713000Z",
       "id": "f79e9245-24eb-4573-b9f9-7e5b34fd7056",
       "name": "ShieldNet Platform",
       "settings": {},
       "slug": "platform",
       "status": "active",
       "tier": "enterprise",
-      "updated_at": "2026-06-10T16:05:22.757199000Z"
+      "updated_at": "2026-06-11T04:40:14.976713000Z"
     },
     {
-      "created_at": "2026-06-10T16:05:22.757199000Z",
+      "created_at": "2026-06-11T04:40:14.976713000Z",
       "id": "b6520bda-e7bb-4af9-9c53-7b0051eae65b",
       "name": "Initech Financial",
       "region": "eu-central",
@@ -19,10 +77,10 @@
       "slug": "initech-financial",
       "status": "active",
       "tier": "professional",
-      "updated_at": "2026-06-10T16:05:22.757199000Z"
+      "updated_at": "2026-06-11T04:40:14.976713000Z"
     },
     {
-      "created_at": "2026-06-10T16:05:22.757199000Z",
+      "created_at": "2026-06-11T04:40:14.976713000Z",
       "id": "92112770-7c0a-410b-b0f4-09dde70e063a",
       "msp_id": "b47fb518-f336-4449-82b0-bd33a1f36833",
       "name": "Acme Retail Group",
@@ -31,10 +89,10 @@
       "slug": "acme-retail",
       "status": "active",
       "tier": "enterprise",
-      "updated_at": "2026-06-10T16:05:22.787582000Z"
+      "updated_at": "2026-06-12T01:01:44.502781000Z"
     },
     {
-      "created_at": "2026-06-10T16:05:22.757199000Z",
+      "created_at": "2026-06-11T04:40:14.976713000Z",
       "id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
       "msp_id": "b47fb518-f336-4449-82b0-bd33a1f36833",
       "name": "Globex Health Systems",
@@ -43,10 +101,10 @@
       "slug": "globex-health",
       "status": "active",
       "tier": "enterprise",
-      "updated_at": "2026-06-10T16:05:23.002109000Z"
+      "updated_at": "2026-06-12T01:01:44.720177000Z"
     },
     {
-      "created_at": "2026-06-10T16:05:22.757199000Z",
+      "created_at": "2026-06-11T04:40:14.976713000Z",
       "id": "0c8d2d9d-896d-45b1-8001-6a6776f832b9",
       "msp_id": "b47fb518-f336-4449-82b0-bd33a1f36833",
       "name": "Umbrella Logistics",
@@ -55,7 +113,7 @@
       "slug": "umbrella-logistics",
       "status": "active",
       "tier": "starter",
-      "updated_at": "2026-06-10T16:05:23.369247000Z"
+      "updated_at": "2026-06-12T01:01:45.102323000Z"
     }
   ]
 }
