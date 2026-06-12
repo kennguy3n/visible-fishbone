@@ -63,11 +63,11 @@ Initech's URL-category lookups, captured at
 
 ```json
 { "meter": "url_cat_lookups", "baseline_monthly_usd": 72.31,
-  "projected_monthly_usd": 224.97, "ratio": 3.111,
+  "projected_monthly_usd": 224.77, "ratio": 3.1083,
   "baseline_months": 5, "severity": "warning" }
 ```
 
-A 3.11× run-rate over a 5-month baseline — flagged `warning`, not screamed as
+A 3.11× run-rate over a 5-month baseline (`ratio` 3.1083) — flagged `warning`, not screamed as
 critical. Acme's anomalies file, by contrast, is empty (the control). That
 restraint is the point: an anomaly detector that flags everything is noise. This
 is the detector firing on real seeded history — it only works *because* the seed
