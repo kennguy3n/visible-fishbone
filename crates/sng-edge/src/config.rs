@@ -565,12 +565,35 @@ pub struct ZtnaConfig {
     /// evaluations. Default: 1024.
     #[serde(default = "default_ztna_max_inflight")]
     pub max_inflight: usize,
+    /// Master gate for the continuous re-evaluation loop
+    /// (`sng_ztna::ReevalLoop`). When **false** (the default) the
+    /// re-eval subsystem is inert: it never spawns the sweep, never
+    /// touches the session tracker, and the appliance behaves
+    /// byte-for-byte as it did before the loop was wired in. An
+    /// operator opts in by setting this true, mirroring the
+    /// default-off discipline of `swg.ext_authz_enabled`.
+    #[serde(default)]
+    pub reeval_enabled: bool,
+    /// Optional edge-local override of the sweep cadence, in
+    /// milliseconds. **0** (the default) means follow the
+    /// control-plane bundle's `ZtnaPolicy::reeval_interval_ms`,
+    /// re-read live each cycle so a bundle reload retunes the
+    /// cadence without a restart — the recommended posture. A
+    /// non-zero value pins the cadence to the operator's edge
+    /// config instead, independent of the bundle. Only consulted
+    /// when [`Self::reeval_enabled`] is true.
+    #[serde(default)]
+    pub reeval_interval_ms: u64,
 }
 
 impl Default for ZtnaConfig {
     fn default() -> Self {
         Self {
             max_inflight: default_ztna_max_inflight(),
+            // Default OFF / inert: continuous re-evaluation is an
+            // explicit operator opt-in (see field docs).
+            reeval_enabled: false,
+            reeval_interval_ms: 0,
         }
     }
 }

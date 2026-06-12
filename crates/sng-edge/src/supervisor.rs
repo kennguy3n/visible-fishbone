@@ -35,7 +35,12 @@
 //! 7. [`crate::subsystems::SwgSubsystem`] — Envoy subprocess
 //!    manager. Same enable semantics as IPS.
 //! 8. [`crate::subsystems::ZtnaSubsystem`] — synchronous ZTNA
-//!    evaluator.
+//!    evaluator, paired with
+//!    [`crate::subsystems::ZtnaReevalSubsystem`] — the continuous
+//!    re-evaluation loop registered right after it. That loop is
+//!    default-off (idles unless `ztna.reeval_enabled` is set) and
+//!    shares the evaluator's `ZtnaService` so it re-uses the exact
+//!    access decision rather than re-implementing it.
 //! 9. [`crate::subsystems::SdwanSubsystem`] — synchronous SD-WAN
 //!    steering evaluator.
 //! 10. [`crate::subsystems::UpdaterSubsystem`] — self-update
@@ -53,6 +58,7 @@ use crate::subsystems::{
     telemetry::TelemetryBuildError,
     updater::UpdaterSubsystemError,
     ztna::ZtnaSubsystem,
+    ztna_reeval::ZtnaReevalSubsystem,
 };
 use sng_comms::PolicyTrustStore;
 use sng_core::envelope::Platform;
@@ -61,7 +67,7 @@ use sng_core::{
     SupervisorRunError,
 };
 use sng_telemetry::TelemetryEvent;
-use sng_ztna::ZtnaServiceConfig;
+use sng_ztna::{SessionTracker, ZtnaServiceConfig};
 use std::sync::Arc;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -142,6 +148,10 @@ pub struct BuiltEdge {
     pub ext_authz: Arc<ExtAuthzSubsystem>,
     /// ZTNA adapter.
     pub ztna: Arc<ZtnaSubsystem>,
+    /// ZTNA continuous re-evaluation adapter. Default-off; idles
+    /// unless `ztna.reeval_enabled` is set. Shares the
+    /// `ZtnaService` with [`Self::ztna`].
+    pub ztna_reeval: Arc<ZtnaReevalSubsystem>,
     /// SD-WAN adapter.
     pub sdwan: Arc<SdwanSubsystem>,
     /// HA adapter. No-op when `[ha]` is disabled.
@@ -159,7 +169,7 @@ impl std::fmt::Debug for BuiltEdge {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BuiltEdge")
             .field("supervisor", &"Supervisor { .. }")
-            .field("subsystems", &12_usize)
+            .field("subsystems", &13_usize)
             .finish_non_exhaustive()
     }
 }
@@ -352,7 +362,36 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
     let ztna_cfg = ZtnaServiceConfig {
         max_sessions: cfg.ztna.max_inflight,
     };
-    let ztna = Arc::new(ZtnaSubsystem::new(ztna_cfg, telemetry_tx.clone()));
+    // Session store shared by the two halves of continuous-adaptive-
+    // trust: the access-path producer (`ZtnaSubsystem::open_session`)
+    // records a grant per allowed session, and the re-eval loop sweeps
+    // the same store. It is only wired when `ztna.reeval_enabled` is
+    // set — when off, the producer is handed no tracker, so it records
+    // nothing and the access path is byte-for-byte unchanged.
+    let ztna_sessions = Arc::new(SessionTracker::new());
+    let ztna = {
+        let ztna = ZtnaSubsystem::new(ztna_cfg, telemetry_tx.clone());
+        let ztna = if cfg.ztna.reeval_enabled {
+            ztna.with_session_tracker(Arc::clone(&ztna_sessions))
+        } else {
+            ztna
+        };
+        Arc::new(ztna)
+    };
+
+    // 8b. ZTNA continuous re-evaluation. Shares the synchronous
+    //     evaluator's `ZtnaService` so the loop re-uses the exact
+    //     access decision rather than re-implementing it, and the
+    //     `ztna_sessions` tracker the producer above records into so it
+    //     re-evaluates exactly the live sessions. Default-off
+    //     (`ztna.reeval_enabled = false`): until an operator opts in the
+    //     subsystem idles, never spawning the sweep, and the producer is
+    //     handed no tracker, so an upgrade is behaviourally inert.
+    let ztna_reeval = Arc::new(ZtnaReevalSubsystem::with_tracker(
+        Arc::clone(ztna.service()),
+        &cfg.ztna,
+        ztna_sessions,
+    ));
 
     // 9. SD-WAN.
     let sdwan = Arc::new(SdwanSubsystem::new(&cfg.sdwan, telemetry_tx));
@@ -378,6 +417,7 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
     builder = builder.with_subsystem(Arc::clone(&swg));
     builder = builder.with_subsystem(Arc::clone(&ext_authz));
     builder = builder.with_subsystem(Arc::clone(&ztna));
+    builder = builder.with_subsystem(Arc::clone(&ztna_reeval));
     builder = builder.with_subsystem(Arc::clone(&sdwan));
     builder = builder.with_subsystem(Arc::clone(&ha));
     builder = builder.with_subsystem(Arc::clone(&updater));
@@ -395,6 +435,7 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
         swg,
         ext_authz,
         ztna,
+        ztna_reeval,
         sdwan,
         ha,
         updater,
@@ -507,6 +548,7 @@ pub async fn run_edge(cli: Cli, cfg: EdgeConfig) -> Result<SupervisorReport, Edg
         swg,
         ext_authz,
         ztna,
+        ztna_reeval,
         sdwan,
         ha,
         updater,
@@ -523,6 +565,7 @@ pub async fn run_edge(cli: Cli, cfg: EdgeConfig) -> Result<SupervisorReport, Edg
     drop(swg);
     drop(ext_authz);
     drop(ztna);
+    drop(ztna_reeval);
     drop(sdwan);
     drop(ha);
     drop(updater);
