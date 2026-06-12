@@ -12,6 +12,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/postgres"
 	"github.com/kennguy3n/visible-fishbone/internal/service/casb"
+	"github.com/kennguy3n/visible-fishbone/internal/service/rollout"
 	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy"
 )
 
@@ -387,5 +388,87 @@ func TestBuildDigest_SummariseAndAdvanceCursor(t *testing.T) {
 	}
 	if d2.Actions != 0 {
 		t.Fatalf("second digest actions = %d, want 0 (cursor advanced)", d2.Actions)
+	}
+}
+
+// stubAutoEnforceGate is a scripted AutoEnforceGate for the staged-
+// enablement wiring tests.
+type stubAutoEnforceGate struct {
+	state   rollout.State
+	managed bool
+}
+
+func (g stubAutoEnforceGate) GateState(context.Context, uuid.UUID, rollout.Capability) (rollout.State, bool) {
+	return g.state, g.managed
+}
+
+// A tenant the framework does not yet manage (no rollout row) must keep
+// the legacy auto-enforce behavior: wiring the gate cannot silently
+// disable auto-enforce for tenants that were already protected by the
+// config flag. This is the regression Devin Review flagged.
+func TestNoOps_UnmanagedTenantKeepsLegacyAutoEnforce(t *testing.T) {
+	fx := newEngineFixture(t)
+	fx.enforcer.created = true
+	fx.engine.SetEnforcer(fx.enforcer)
+	fx.engine.SetRolloutGate(stubAutoEnforceGate{state: rollout.StateOff, managed: false})
+	tid := fx.newTenant(t)
+	ctx := context.Background()
+
+	devices := 50
+	app := repository.CASBDiscoveredApp{Name: "Telegram", Category: "messaging", ActiveDeviceCount: &devices}
+	fx.engine.OnAppDiscovered(ctx, tid, app, casb.AppDiscoveryMeta{Domains: []string{"telegram.org"}})
+
+	actions, _ := fx.store.ListActions(ctx, tid, 10)
+	if len(actions) != 1 || actions[0].Mode != casb.ActionModeAuto || !actions[0].Applied {
+		t.Fatalf("unmanaged tenant must auto-apply (legacy); got %+v", actions)
+	}
+	if fx.enforcer.callCount() != 1 {
+		t.Fatalf("enforcer calls = %d, want 1 (legacy auto-enforce)", fx.enforcer.callCount())
+	}
+}
+
+// A MANAGED tenant explicitly at off must NOT auto-enforce: the operator
+// has opted into the staged progression and chosen off.
+func TestNoOps_ManagedOffDisablesAutoEnforce(t *testing.T) {
+	fx := newEngineFixture(t)
+	fx.enforcer.created = true
+	fx.engine.SetEnforcer(fx.enforcer)
+	fx.engine.SetRolloutGate(stubAutoEnforceGate{state: rollout.StateOff, managed: true})
+	tid := fx.newTenant(t)
+	ctx := context.Background()
+
+	devices := 50
+	app := repository.CASBDiscoveredApp{Name: "Telegram", Category: "messaging", ActiveDeviceCount: &devices}
+	fx.engine.OnAppDiscovered(ctx, tid, app, casb.AppDiscoveryMeta{Domains: []string{"telegram.org"}})
+
+	actions, _ := fx.store.ListActions(ctx, tid, 10)
+	if len(actions) != 1 || actions[0].Mode != casb.ActionModeRecommend || actions[0].Applied {
+		t.Fatalf("managed-off tenant must recommend only; got %+v", actions)
+	}
+	if fx.enforcer.callCount() != 0 {
+		t.Fatalf("enforcer calls = %d, want 0 (auto-enforce disabled)", fx.enforcer.callCount())
+	}
+}
+
+// A MANAGED tenant in monitor dry-runs: it records the would-have auto
+// action as a recommendation but enforces nothing.
+func TestNoOps_ManagedMonitorDryRuns(t *testing.T) {
+	fx := newEngineFixture(t)
+	fx.enforcer.created = true
+	fx.engine.SetEnforcer(fx.enforcer)
+	fx.engine.SetRolloutGate(stubAutoEnforceGate{state: rollout.StateMonitor, managed: true})
+	tid := fx.newTenant(t)
+	ctx := context.Background()
+
+	devices := 50
+	app := repository.CASBDiscoveredApp{Name: "Telegram", Category: "messaging", ActiveDeviceCount: &devices}
+	fx.engine.OnAppDiscovered(ctx, tid, app, casb.AppDiscoveryMeta{Domains: []string{"telegram.org"}})
+
+	actions, _ := fx.store.ListActions(ctx, tid, 10)
+	if len(actions) != 1 || actions[0].Mode != casb.ActionModeRecommend || actions[0].Applied {
+		t.Fatalf("monitor tenant must dry-run (recommend, not applied); got %+v", actions)
+	}
+	if fx.enforcer.callCount() != 0 {
+		t.Fatalf("enforcer calls = %d, want 0 (monitor dry-run)", fx.enforcer.callCount())
 	}
 }
