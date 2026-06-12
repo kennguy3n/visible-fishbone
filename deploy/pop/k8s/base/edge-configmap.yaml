@@ -1,0 +1,24 @@
+# PLACEHOLDER edge identity/config. Replace the all-zero UUIDs per PoP in
+# overlays/pop-*/edge.toml (configMapGenerator). Reference schema:
+# crates/sng-edge/src/config.rs (EdgeConfig). This base value exists only
+# so the base renders standalone; overlays override it.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sng-edge-config
+data:
+  edge.toml: |
+    [identity]
+    tenant_id = "00000000-0000-0000-0000-000000000000"
+    device_id = "00000000-0000-0000-0000-000000000000"
+    site_id   = "00000000-0000-0000-0000-000000000000"
+
+    [ips]
+    enable = true
+    interface = "eth0"
+    rule_file_path = "/var/lib/sng/ips/sng.rules"
+    staging_dir    = "/var/lib/sng/ips"
+    runtime = "ids"
+
+    [swg]
+    config_path = "/var/lib/sng/swg/envoy.yaml"

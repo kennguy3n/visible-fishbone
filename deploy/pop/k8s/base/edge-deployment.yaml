@@ -1,0 +1,93 @@
+# ShieldNet Gateway — edge appliance, cloud-PoP form (kustomize base).
+#
+# This is the kustomize/GitOps-native equivalent of the cloud-PoP form
+# of the Helm chart at deploy/helm/sng-edge (Deployment, health probes,
+# hardened securityContext). Use whichever your platform standardises
+# on — the multi-PoP composition (this directory's overlays + the
+# front-door under deploy/pop/frontdoor) is the same either way.
+#
+# Region-specific values (region-group label, replica count, the
+# anycast VIP the front-door targets, and the edge.toml identity) are
+# set per-PoP in overlays/pop-*/.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sng-edge
+  labels:
+    app.kubernetes.io/name: sng-edge
+    app.kubernetes.io/component: edge
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: sng-edge
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: sng-edge
+        app.kubernetes.io/component: edge
+    spec:
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        fsGroup: 65532
+      containers:
+        - name: sng-edge
+          image: ghcr.io/kennguy3n/sng-edge:0.1.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--config"
+            - "/etc/sng-edge/edge.toml"
+            - "--health-bind"
+            - "0.0.0.0:9119"
+          ports:
+            - name: health
+              containerPort: 9119
+              protocol: TCP
+          # Health endpoints exposed by the edge supervisor's health
+          # aggregator (crates/sng-edge). /readyz gates traffic; /healthz
+          # gates restarts.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+              add: ["NET_ADMIN", "NET_RAW"]
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 1Gi
+          volumeMounts:
+            - name: config
+              mountPath: /etc/sng-edge
+              readOnly: true
+            - name: var-lib-sng
+              mountPath: /var/lib/sng
+            - name: run-sng
+              mountPath: /run/sng
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: sng-edge-config
+        - name: var-lib-sng
+          emptyDir: {}
+        - name: run-sng
+          emptyDir: {}
+        - name: tmp
+          emptyDir: {}

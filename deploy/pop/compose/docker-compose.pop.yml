@@ -1,0 +1,77 @@
+# ShieldNet Gateway — runnable local multi-PoP topology simulation.
+#
+# Brings up TWO PoP edge stand-ins in different region-groups (SEA, DACH)
+# behind a single front-door, so the cross-region *failover* behaviour
+# described in docs/pop-topology.md can be observed on one host with no
+# proprietary image and no DNS/BGP fabric.
+#
+#   client ──▶ frontdoor (:18080) ──▶ pop-sea-edge   (primary)
+#                                  └▶ pop-dach-edge  (backup / failover)
+#
+# Validate (no daemon needed):  docker compose -f docker-compose.pop.yml config
+# Run:                          docker compose -f docker-compose.pop.yml up -d
+# Observe steady state:         curl -s localhost:18080/        -> "PoP sea ..."
+# Force failover:               docker compose -f docker-compose.pop.yml \
+#                                 exec pop-sea-edge nginx -s stop
+#                               curl -s localhost:18080/        -> "PoP dach ..."
+#
+# PRODUCTION: replace each pop-*-edge service's `image` + `environment`
+# block with the real edge appliance, e.g.
+#     image: ghcr.io/kennguy3n/sng-edge:0.1.0
+#     command: ["--config", "/etc/sng-edge/edge.toml",
+#               "--health-bind", "0.0.0.0:9119"]
+# and point the front-door upstreams at port 9119 (/readyz, /healthz).
+# In a real fleet the front-door is NOT this proxy — it is GeoDNS or
+# anycast (deploy/pop/frontdoor/). See docs/pop-topology.md.
+
+services:
+  pop-sea-edge:
+    image: nginx:1.27-alpine
+    container_name: sng-pop-sea-edge
+    environment:
+      POP_NAME: sea
+      POP_REGION: SEA
+    volumes:
+      - ./edge/templates:/etc/nginx/templates:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  pop-dach-edge:
+    image: nginx:1.27-alpine
+    container_name: sng-pop-dach-edge
+    environment:
+      POP_NAME: dach
+      POP_REGION: DACH
+    volumes:
+      - ./edge/templates:/etc/nginx/templates:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/readyz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+  frontdoor:
+    image: nginx:1.27-alpine
+    container_name: sng-pop-frontdoor
+    depends_on:
+      pop-sea-edge:
+        condition: service_healthy
+      pop-dach-edge:
+        condition: service_healthy
+    volumes:
+      - ./frontdoor.conf:/etc/nginx/conf.d/default.conf:ro
+    # Bind to loopback only — this is a local dev simulation, not an
+    # internet-facing front-door (mirrors the root docker-compose.yml).
+    ports:
+      - "127.0.0.1:18080:8080"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s

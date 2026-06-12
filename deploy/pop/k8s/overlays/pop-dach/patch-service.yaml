@@ -1,0 +1,11 @@
+# Pin this PoP's load balancer to its anycast VIP / EIP allocation. The
+# front-door (anycast announce or GeoDNS A-record) resolves to this
+# address. REPLACE with the DACH PoP's real allocation.
+apiVersion: v1
+kind: Service
+metadata:
+  name: sng-edge
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-eip-allocations: "eipalloc-REPLACE_DACH"
+    sng/anycast-vip: "203.0.113.20"   # TEST-NET-3 placeholder; replace
+    sng/region-group: "DACH"

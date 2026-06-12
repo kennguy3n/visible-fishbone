@@ -1,0 +1,48 @@
+# ShieldNet Gateway — anycast front-door: BIRD BGP speaker (template).
+#
+# Rendered per PoP (Terraform templatefile() or any templating tool). Each
+# PoP runs a BGP speaker that announces the SAME anycast prefix to the
+# upstream/IX routers; the internet's BGP best-path then delivers each
+# client to its topologically nearest PoP. Failover is route withdrawal:
+# when the edge stops passing /readyz the announce is withdrawn (see
+# health-withdraw.sh) and BGP reconverges onto the remaining PoPs.
+#
+# Placeholders (replace per PoP / per deployment):
+#   ${router_id}      - this speaker's router-id (its own unicast IP)
+#   ${local_asn}      - YOUR ASN (you must own/lease it + the prefix)
+#   ${anycast_prefix} - the anycast prefix you announce, e.g. 203.0.113.0/24
+#   ${peer_ip}        - upstream/IX BGP neighbour address
+#   ${peer_asn}       - upstream/IX neighbour ASN
+
+router id ${router_id};
+
+log syslog all;
+
+protocol device {
+  scan time 10;
+}
+
+# The anycast VIP is configured on a loopback/dummy interface on every
+# PoP. This protocol pulls that route into BIRD's table so it can be
+# announced. `sng_announce` is toggled by the health sidecar.
+protocol static sng_announce {
+  ipv4;
+  route ${anycast_prefix} blackhole;
+}
+
+# eBGP session to the upstream/IX. We announce ONLY the anycast prefix and
+# accept nothing (the PoP does not need a full table for anycast egress;
+# adjust if you steer egress via BGP too).
+protocol bgp upstream {
+  local as ${local_asn};
+  neighbor ${peer_ip} as ${peer_asn};
+
+  ipv4 {
+    # Export only our anycast prefix; reject everything else.
+    export filter {
+      if net = ${anycast_prefix} then accept;
+      reject;
+    };
+    import none;
+  };
+}
