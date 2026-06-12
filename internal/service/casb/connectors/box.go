@@ -228,7 +228,21 @@ func (b *Box) ScanContent(
 		for offset := 0; ; offset += boxItemPageLimit {
 			items, total, err := b.listFolderItems(ctx, token, folderID, offset)
 			if err != nil {
-				return err
+				if ctx.Err() != nil {
+					return err
+				}
+				// A transient error listing one folder (e.g. a 5xx or a
+				// 403 on a folder we cannot read) must not abort the
+				// whole enterprise tree scan. Record it and move on to
+				// the next folder, mirroring the per-user resilience in
+				// the M365 and Google connectors.
+				if yerr := yield(ctx, casb.ContentObject{
+					ID:       "folder:" + folderID,
+					FetchErr: fmt.Errorf("list folder items: %w", err),
+				}); yerr != nil {
+					return yerr
+				}
+				break
 			}
 			for _, it := range items {
 				switch it.Type {

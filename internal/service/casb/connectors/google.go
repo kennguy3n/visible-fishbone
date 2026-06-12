@@ -430,7 +430,10 @@ func (g *Google) scanUserDrive(
 		}
 		q := "trashed = false"
 		if !opts.Since.IsZero() {
-			q += fmt.Sprintf(" and modifiedTime > '%s'", opts.Since.UTC().Format(time.RFC3339))
+			// Since is inclusive ("at or after"); use >= so a file modified
+			// at exactly the boundary (e.g. the previous scan's completion
+			// timestamp) is not silently dropped.
+			q += fmt.Sprintf(" and modifiedTime >= '%s'", opts.Since.UTC().Format(time.RFC3339))
 		}
 		endpoint := fmt.Sprintf(
 			"%s/drive/v3/files?corpora=user&pageSize=100&q=%s&fields=%s",
@@ -444,7 +447,18 @@ func (g *Google) scanUserDrive(
 			NextPageToken string            `json:"nextPageToken"`
 		}
 		if err := getJSON(ctx, g.client, g.userAgent, "google", endpoint, token, &page); err != nil {
-			return err
+			if ctx.Err() != nil {
+				return err
+			}
+			// A transient Drive listing error (e.g. a 500) for one user
+			// must not abort the whole org scan. Record it and move on to
+			// the next user, mirroring the per-user resilience used for
+			// token-exchange failures and the M365 connector.
+			return yield(ctx, casb.ContentObject{
+				ID:       "user:" + owner,
+				Owner:    owner,
+				FetchErr: fmt.Errorf("list drive files: %w", err),
+			})
 		}
 		for _, f := range page.Files {
 			// Skip folders and shortcuts: they carry no inspectable bytes.

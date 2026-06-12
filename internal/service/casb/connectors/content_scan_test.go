@@ -203,6 +203,48 @@ func TestBox_ScanContent_FetchErrorIsResilient(t *testing.T) {
 	}
 }
 
+func TestBox_ScanContent_FolderListErrorIsResilient(t *testing.T) {
+	// Subfolder 900's item listing 500s. The scan must record a
+	// per-folder FetchErr and still yield the root file rather than abort
+	// the whole enterprise tree.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/oauth2/token"):
+			json.NewEncoder(w).Encode(map[string]any{"access_token": "box-tok"})
+		case r.URL.Path == "/2.0/folders/0/items":
+			json.NewEncoder(w).Encode(map[string]any{
+				"total_count": 2,
+				"entries": []map[string]any{
+					{"id": "100", "name": "root.txt", "type": "file", "size": 2, "modified_at": "2025-06-01T10:00:00Z"},
+					{"id": "900", "name": "sub", "type": "folder"},
+				},
+			})
+		case r.URL.Path == "/2.0/folders/900/items":
+			http.Error(w, `{"message":"internal"}`, http.StatusInternalServerError)
+		case r.URL.Path == "/2.0/files/100/content":
+			w.Write([]byte("hi"))
+		default:
+			http.Error(w, "not found", http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	b, cfg, sec := newTestBox(srv)
+
+	var c scanCollector
+	if err := b.ScanContent(context.Background(), cfg, sec, casb.ContentScanOptions{}, c.yield); err != nil {
+		t.Fatalf("ScanContent should not abort on a single folder 500, got: %v", err)
+	}
+	root, ok := c.byID("100")
+	if !ok || string(root.Content) != "hi" {
+		t.Fatalf("root file not scanned: %+v", root)
+	}
+	bad, ok := c.byID("folder:900")
+	if !ok || bad.FetchErr == nil {
+		t.Fatalf("expected FetchErr placeholder for folder 900, got %+v", bad)
+	}
+}
+
 // --- M365 ----------------------------------------------------------------
 
 func m365ScanServer(t *testing.T) *httptest.Server {
@@ -500,6 +542,76 @@ func TestGoogle_ScanContent_PerUserTokenFailureResilient(t *testing.T) {
 	bad, ok := c.byID("user:bad@co.com")
 	if !ok || bad.FetchErr == nil {
 		t.Fatalf("expected FetchErr placeholder for bad@co.com, got %+v", bad)
+	}
+}
+
+func TestGoogle_ScanContent_SinceUsesInclusiveBound(t *testing.T) {
+	// The Drive query must use modifiedTime >= (inclusive) so a file
+	// modified at exactly the Since boundary is not dropped.
+	fx := newGoogleSAFixture(t)
+	var driveQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/token"):
+			json.NewEncoder(w).Encode(map[string]any{"access_token": "minted-access-token", "expires_in": 3600})
+		case strings.Contains(r.URL.Path, "/admin/directory/v1/users"):
+			json.NewEncoder(w).Encode(map[string]any{"users": []map[string]any{{"primaryEmail": "alice@co.com"}}})
+		case strings.HasSuffix(r.URL.Path, "/drive/v3/files"):
+			driveQuery = r.URL.Query().Get("q")
+			json.NewEncoder(w).Encode(map[string]any{"files": []map[string]any{}})
+		default:
+			http.Error(w, "not found: "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	g := NewGoogle(srv.Client(), "test-ua")
+	g.baseURL = srv.URL
+	g.driveBaseURL = srv.URL
+	g.tokenURL = srv.URL + "/token"
+	cfg, sec := googleTestCfg(t, fx)
+
+	var c scanCollector
+	since := time.Date(2025, 6, 1, 10, 0, 0, 0, time.UTC)
+	if err := g.ScanContent(context.Background(), cfg, sec, casb.ContentScanOptions{Since: since}, c.yield); err != nil {
+		t.Fatalf("ScanContent: %v", err)
+	}
+	if !strings.Contains(driveQuery, "modifiedTime >= '2025-06-01T10:00:00Z'") {
+		t.Fatalf("Drive query = %q, want inclusive modifiedTime >= bound", driveQuery)
+	}
+}
+
+func TestGoogle_ScanContent_ListErrorResilient(t *testing.T) {
+	// The Drive file listing 500s. The scan must record a per-user
+	// FetchErr and return cleanly rather than aborting the org scan.
+	fx := newGoogleSAFixture(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/token"):
+			json.NewEncoder(w).Encode(map[string]any{"access_token": "minted-access-token", "expires_in": 3600})
+		case strings.Contains(r.URL.Path, "/admin/directory/v1/users"):
+			json.NewEncoder(w).Encode(map[string]any{"users": []map[string]any{{"primaryEmail": "alice@co.com"}}})
+		case strings.HasSuffix(r.URL.Path, "/drive/v3/files"):
+			http.Error(w, `{"error":"backend error"}`, http.StatusInternalServerError)
+		default:
+			http.Error(w, "not found: "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	g := NewGoogle(srv.Client(), "test-ua")
+	g.baseURL = srv.URL
+	g.driveBaseURL = srv.URL
+	g.tokenURL = srv.URL + "/token"
+	cfg, sec := googleTestCfg(t, fx)
+
+	var c scanCollector
+	if err := g.ScanContent(context.Background(), cfg, sec, casb.ContentScanOptions{}, c.yield); err != nil {
+		t.Fatalf("ScanContent should record the listing error, got: %v", err)
+	}
+	bad, ok := c.byID("user:alice@co.com")
+	if !ok || bad.FetchErr == nil {
+		t.Fatalf("expected FetchErr placeholder for alice@co.com, got %+v", bad)
 	}
 }
 
