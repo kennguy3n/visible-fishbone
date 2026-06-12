@@ -3,9 +3,14 @@
 #
 # Why llama.cpp and not Ollama for Q2_0: the Q2_0 (ternary) format is not
 # in mainline llama.cpp / Ollama yet. It is provided by the prism fork
-# (PrismML-Eng/llama.cpp). This image pins that fork to a commit and bakes
+# (kennguy3n/llama.cpp). This image pins that fork to a commit and bakes
 # the checksum-verified GGUF into the final layer, so a fresh container
 # serves the exact weights with zero runtime egress.
+#
+# The pinned commit carries the prism 4x4 AVX2 repack GEMM kernel: on an
+# AVX2 host the runtime gate (avx2 && !avx512) registers it for prefill,
+# which dropped the harness's end-to-end query latency ~7.6x (p50 67.8s ->
+# 8.9s) vs the older single-row path. See deploy/ollama/README.md.
 #
 # Build (context = repo root, so the verify script is in scope):
 #   docker build -f deploy/ollama/Dockerfile.llamacpp -t sng-bonsai-q2:local .
@@ -31,9 +36,10 @@
 
 # --- Stage 1: build llama-server from the pinned prism fork ---------------
 FROM debian:bookworm-slim AS build
-ARG LLAMACPP_REPO=https://github.com/PrismML-Eng/llama.cpp.git
-# prism branch HEAD; bump deliberately and re-test when adopting new kernels.
-ARG LLAMACPP_COMMIT=9b98ac8a421c556a111d9cc3e4010bc65fc08113
+ARG LLAMACPP_REPO=https://github.com/kennguy3n/llama.cpp.git
+# prism branch HEAD; bump deliberately and re-run the validation harness when
+# adopting new kernels. This commit adds the Q1_0_g128 4x4 AVX2 repack GEMM.
+ARG LLAMACPP_COMMIT=d6cea6ec1b8c7b10d5ed528a74b65dc6b8f02dee
 RUN apt-get update && apt-get install -y --no-install-recommends \
       git build-essential cmake ca-certificates libcurl4-openssl-dev \
     && rm -rf /var/lib/apt/lists/*

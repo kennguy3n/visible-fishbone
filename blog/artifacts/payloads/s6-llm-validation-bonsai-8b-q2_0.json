@@ -1,11 +1,11 @@
 {
-  "generated_at": "2026-06-12T05:50:53.977223255Z",
-  "git_sha": "9bf82891d5eebabe751b7748189529c9c8d51490",
-  "endpoint": "http://127.0.0.1:8081/v1/chat/completions",
+  "generated_at": "2026-06-12T07:12:45.556981824Z",
+  "git_sha": "5bcd168c13f4e87c62d587b3e7b0c51762f6fd7f",
+  "endpoint": "http://127.0.0.1:8090/v1/chat/completions",
   "model": "Ternary-Bonsai-8B",
-  "hardware": "8 vCPU AMD EPYC 7763 (AVX2/FMA, no AVX-512/VNNI), 31 GiB RAM, CPU-only -ngl 0, cloud dev VM",
+  "hardware": "8 vCPU AMD EPYC 7763 (AVX2/FMA/F16C, no AVX-512/VNNI), 31 GiB RAM, CPU-only -ngl 0, cloud dev VM",
   "quant": "Q2_0",
-  "note": "CPU-bound on a commodity dev VM: the prism Q2_0 ternary CPU kernels run ~1 token/s on AVX2-only hardware, so single-query latencies are minutes, not the sub-second numbers a GPU or AVX-512/VNNI host would post. Fallback-agreement and all deterministic invariants are model-independent and remain the load-bearing claim; the latency figures are an honest floor for this hardware, not a target.",
+  "note": "Served by the turnkey deploy/ollama/Dockerfile.llamacpp image itself (sng-bonsai-q2, llama-server fingerprint b1-d6cea6e, system_info REPACK=1, file type Q1_0_g128) — a portable, redistributable build (GGML_NATIVE=OFF, static AVX2; no host-specific instructions). Built from the prism ternary kernels at kennguy3n/llama.cpp@d6cea6ec. On this same AVX2-only dev VM, running the same 20-query harness, end-to-end query latency dropped from p50 67.8s to ~9s (~7x) versus the older single-row Q2_0 path (PrismML-Eng/llama.cpp@9b98ac8). The win is the fork's 4x4 AVX2 repack GEMM, which these short intent-parse queries are prefill-dominated by (prefill ~7.4 tok/s vs ~1.0 before); single-token generation GEMV stays on the scalar AVX2 path. CPU-only floor, no GPU/AVX-512. Fallback-agreement and all deterministic invariants are model-independent and remain the load-bearing claim.",
   "live_inference": true,
   "query_count": 20,
   "parse_success_rate": 1,
@@ -15,9 +15,9 @@
   "fallback_agreement_rate": 1,
   "ai_generated_correctness": 1,
   "raw_parse_agreement_rate": 1,
-  "latency_p50_ms": 67793,
-  "latency_p95_ms": 77013,
-  "latency_p99_ms": 77461,
+  "latency_p50_ms": 8948,
+  "latency_p95_ms": 10793,
+  "latency_p99_ms": 12177,
   "queries": [
     {
       "question": "Can app salesforce.com be reached from device laptop1?",
@@ -34,7 +34,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 70718
+      "latency_ms": 9954
     },
     {
       "question": "Can app evil.com be reached from device laptop2?",
@@ -51,7 +51,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 67793
+      "latency_ms": 9226
     },
     {
       "question": "Can app internal.corp be reached from device kiosk9?",
@@ -68,7 +68,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 68764
+      "latency_ms": 9657
     },
     {
       "question": "Can user alice access app salesforce.com from device laptop1?",
@@ -85,7 +85,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 68664
+      "latency_ms": 9338
     },
     {
       "question": "show blocked traffic for user alice in the last 24h",
@@ -102,7 +102,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 62327
+      "latency_ms": 8692
     },
     {
       "question": "show blocked traffic for user bob since last week",
@@ -119,7 +119,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 54524
+      "latency_ms": 8658
     },
     {
       "question": "list blocked connections for user carol in the last 7 days",
@@ -136,7 +136,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 69592
+      "latency_ms": 8398
     },
     {
       "question": "report blocked traffic for dave today",
@@ -153,7 +153,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 51728
+      "latency_ms": 7039
     },
     {
       "question": "what changed since last week",
@@ -170,7 +170,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 56902
+      "latency_ms": 7849
     },
     {
       "question": "what has changed since yesterday",
@@ -187,7 +187,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 57197
+      "latency_ms": 7666
     },
     {
       "question": "what changed in the last 7 days",
@@ -204,7 +204,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 71027
+      "latency_ms": 8948
     },
     {
       "question": "what configuration changed since last month",
@@ -221,7 +221,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 65914
+      "latency_ms": 8675
     },
     {
       "question": "compare policy versions",
@@ -238,7 +238,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 66978
+      "latency_ms": 8796
     },
     {
       "question": "compare policy versions 3 and 5",
@@ -255,7 +255,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 77461
+      "latency_ms": 9773
     },
     {
       "question": "compare policy v2 and v5",
@@ -272,7 +272,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 66448
+      "latency_ms": 12177
     },
     {
       "question": "diff policy versions 7 and 8",
@@ -289,7 +289,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 67205
+      "latency_ms": 9146
     },
     {
       "question": "which devices failed posture in 24h",
@@ -306,7 +306,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 72368
+      "latency_ms": 9618
     },
     {
       "question": "show devices failing posture checks today",
@@ -323,7 +323,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 74968
+      "latency_ms": 8933
     },
     {
       "question": "which devices failed posture in the last 7 days",
@@ -340,7 +340,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 72155
+      "latency_ms": 9369
     },
     {
       "question": "list devices that failed posture since yesterday",
@@ -357,7 +357,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 77013
+      "latency_ms": 10793
     }
   ]
 }
