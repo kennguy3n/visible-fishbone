@@ -2529,6 +2529,7 @@ dependencies = [
  "serde",
  "serde_bytes",
  "serde_json",
+ "sha2",
  "sng-core",
  "sng-dlp",
  "sng-dns",
