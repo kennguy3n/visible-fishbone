@@ -58,7 +58,7 @@ endpoints a human operator would, so every row is enforcement-path-authentic.
 | Nordic EduCloud | starter | SE (eu-north-1) | education | ≈53.9 |
 | Lumière Légal | professional | FR (eu-west-3) | legal | ≈55.3 |
 | Outback Retail | professional | AU (ap-southeast-2) | retail | ≈49.3 |
-| Initech Financial | professional | EU (eu-central-1) | financial | ≈14.8 |
+| Initech Financial | professional | EU (eu-central) | financial | ≈14.8 |
 | Maple Health | professional | CA (ca-central-1) | health | ≈−14.8 |
 
 ## 4. Rollout staging exercised (off→monitor→enforce)
@@ -122,7 +122,7 @@ endpoints a human operator would, so every row is enforcement-path-authentic.
 | §5 NoOps/ClamAV/safe-browsing not wired | **wired (staged)** | `new-casb-noops-shadow-it.png`, `rollout-*-states.json` |
 | §5 NER 6 classes / no fingerprinting | **expanded (C2)** | 21 jurisdictions + EDM + fingerprints (#209), `s5-acme-dlp-fingerprint-*` |
 | §6 stand-in model not 8B | **measured** | `s6-llm-validation-bonsai-8b-q2_0.json` (p50 8.9s / p95 10.8s, 100%) |
-| §7 cost report 4-tenant | **fleet-wide** | `s7-admin-cost-report.json` 9 tenants, 50.3% fleet margin (Maple −15.1% underwater) |
+| §7 cost report 4-tenant | **fleet-wide** | `s7-admin-cost-report.json` 9 tenants, ≈50% fleet margin (Maple ≈−14.8% underwater) |
 | §7 global PoP network | **honest gap** | `deploy/pop/` reference topology + `docs/pop-topology.md` ("software you operate, not a rented network") — the one genuinely unclosed competitive gap |
 
 ## 8. Known honest gaps (carry into the rewrite unchanged)
