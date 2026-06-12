@@ -512,6 +512,30 @@ pub enum ZtnaDecisionReason {
     /// Deny — identity not registered with the identity
     /// provider.
     IdentityNotFound,
+    /// Deny — no user subject was present on the request at
+    /// all, so the identity-derived gates (group
+    /// entitlement, MFA freshness) could not be evaluated.
+    ///
+    /// This is the **explicit degraded verdict**: the
+    /// evaluator still ran every device + context check it
+    /// could (tenant, geo / network / time, device tags,
+    /// posture freshness + sufficiency) and they passed, but
+    /// the access decision cannot be *completed* without a
+    /// verified user subject. Deny-by-default
+    /// ([module docs](self)) makes this a deny rather than a
+    /// device-only allow, and the dedicated reason keeps the
+    /// degradation honest on the wire — a dashboard can tell
+    /// "no user subject was supplied" apart from "a user id
+    /// was supplied but is unknown" ([`Self::IdentityNotFound`]).
+    ///
+    /// Distinguished from [`Self::IdentityNotFound`]:
+    /// `IdentityNotFound` means a concrete `user_id` was
+    /// presented but missed the identity provider;
+    /// `IdentityAbsent` means there was no user subject to
+    /// resolve in the first place. Both deny; the split lets
+    /// operators see degraded-by-design traffic separately
+    /// from a genuine identity miss.
+    IdentityAbsent,
     /// Deny — identity's MFA timestamp is older than
     /// `policy.mfa_max_age_ms`.
     MfaStale,
@@ -557,6 +581,7 @@ impl ZtnaDecisionReason {
             Self::DevicePostureStale => "device_posture_stale",
             Self::DevicePostureInsufficient => "device_posture_insufficient",
             Self::IdentityNotFound => "identity_not_found",
+            Self::IdentityAbsent => "identity_absent",
             Self::MfaStale => "mfa_stale",
             Self::NotEntitled => "not_entitled",
             Self::TenantMismatch => "tenant_mismatch",
@@ -616,12 +641,16 @@ impl ZtnaDecisionReason {
 pub enum PostureResult {
     /// The posture check ran and the device satisfied
     /// the app's [`PostureRequirement`]. Set on the
-    /// allow path and on any deny that occurred after
-    /// the posture check passed (none today — the
-    /// evaluator currently denies immediately when the
-    /// posture check fails — but the variant exists so
-    /// a future check ordered after posture can produce
-    /// a `(deny, Pass)` decision).
+    /// allow path and on a deny that occurred *after* the
+    /// posture check passed — today that is the explicit
+    /// degraded verdict
+    /// ([`ZtnaDecisionReason::IdentityAbsent`]): a request
+    /// whose device + context + posture all pass but which
+    /// carries no user subject is denied with the posture
+    /// outcome recorded as `Pass`, so a dashboard sees a
+    /// `(deny, pass)` row whose reason names the missing
+    /// identity signal rather than mislabelling it a posture
+    /// failure.
     Pass,
     /// The posture check ran and the device failed it
     /// — either because the attestation was stale
@@ -954,11 +983,27 @@ pub struct EvaluationInputs<'a> {
     /// [`crate::device::DeviceTrustProvider`]; if not
     /// found, the orchestrator builds a deny directly.
     pub device: &'a DeviceTrust,
-    /// The user's identity record. The orchestrator
-    /// resolves this via the
-    /// [`crate::identity::IdentityProvider`]; if not
-    /// found, the orchestrator builds a deny directly.
-    pub identity: &'a UserIdentity,
+    /// The verified user subject the request is acting as,
+    /// when one is present.
+    ///
+    /// `Some(identity)` is the **full user-subject** path:
+    /// the orchestrator resolved a [`UserIdentity`] (groups
+    /// / MFA freshness / tenant / tags) via the
+    /// [`crate::identity::IdentityProvider`] (or threaded it
+    /// inline from the IdP / mTLS chain), so the evaluator
+    /// exercises every identity-derived gate — group
+    /// entitlement, MFA freshness, user-tag conditions, and
+    /// the identity half of the tenant guard.
+    ///
+    /// `None` is the **explicit degraded** path: no user
+    /// subject was available. The evaluator runs every
+    /// device + context check it still can and then, rather
+    /// than silently allowing on device alone, denies with
+    /// [`ZtnaDecisionReason::IdentityAbsent`] (deny-by-default
+    /// — the identity-gated portion of the decision could not
+    /// be completed). See [`evaluate_policy`] for the exact
+    /// ordering.
+    pub identity: Option<&'a UserIdentity>,
     /// Monotonic millisecond timestamp the orchestrator
     /// captured when the request arrived. Used for the
     /// MFA + posture freshness checks (and, interpreted
@@ -984,12 +1029,26 @@ pub struct EvaluationInputs<'a> {
 /// deny paths short-circuit without computing later
 /// signals.
 ///
+/// # User subject: full vs. degraded
+///
+/// `inputs.identity` carries the verified user subject when
+/// one is present. With `Some(identity)` the evaluator runs
+/// the **full** path including the identity-derived gates
+/// (steps 3-4); with `None` it runs the **degraded**
+/// device-only path — every check that does not need a
+/// subject still runs, and if they all pass the request is
+/// denied with [`ZtnaDecisionReason::IdentityAbsent`] rather
+/// than allowed on device alone (deny-by-default). The
+/// identity-gated steps are simply skipped, never faked.
+///
 /// Steps:
 ///
 /// 1. **Tenant match.** The policy belongs to one
-///    tenant; the device and the identity must both
-///    belong to the same tenant. Cross-tenant requests
-///    are denied without further checks.
+///    tenant; the device must belong to it, and — when a
+///    subject is present — the subject's tenant must match
+///    too. Cross-tenant requests are denied without further
+///    checks. (A subjectless request can only have its
+///    device tenant checked here.)
 /// 2. **Access conditions.** The app's
 ///    [`AccessConditions`] gate the request on
 ///    geography ([`ZtnaDecisionReason::GeoBlocked`]),
@@ -999,14 +1058,17 @@ pub struct EvaluationInputs<'a> {
 ///    and device / user tags
 ///    ([`ZtnaDecisionReason::TagMismatch`]). Runs after
 ///    the tenant guard but before entitlement so a
-///    context failure short-circuits the group lookup.
-/// 3. **Identity entitlement.** If the app has a non-
-///    empty `required_groups` set, the user's groups
-///    must intersect it. Otherwise the user is
+///    context failure short-circuits the group lookup. The
+///    user-tag conditions are only evaluated when a subject
+///    is present; a subjectless request that would have
+///    failed them is instead denied at step 6.
+/// 3. **Identity entitlement** *(subject only)*. If the app
+///    has a non-empty `required_groups` set, the user's
+///    groups must intersect it. Otherwise the user is
 ///    `not_entitled`.
-/// 4. **MFA freshness.** The user's `mfa_at_ms` must
-///    be within the effective MFA budget of `now_ms` —
-///    the app's
+/// 4. **MFA freshness** *(subject only)*. The user's
+///    `mfa_at_ms` must be within the effective MFA budget of
+///    `now_ms` — the app's
 ///    [`App::mfa_max_age_override_ms`] when set, else
 ///    `policy.mfa_max_age_ms`.
 /// 5. **Device posture freshness.** The device's
@@ -1014,17 +1076,19 @@ pub struct EvaluationInputs<'a> {
 ///    `policy.device_posture_max_age_ms` of `now_ms`.
 /// 6. **Device posture sufficiency.** The device's
 ///    posture must satisfy the app's
-///    [`PostureRequirement`].
+///    [`PostureRequirement`]. If everything up to here
+///    passes, the verdict is `allow` when a subject was
+///    present, or a [`ZtnaDecisionReason::IdentityAbsent`]
+///    deny when it was not.
 ///
 /// On every deny the [`ZtnaDecision::posture_result`]
 /// field reflects whether the posture check ran and
 /// what it found:
 ///
-/// - [`PostureResult::Pass`] — only on the allow path
-///   (the evaluator currently denies immediately on a
-///   posture failure, so a `(deny, Pass)` decision is
-///   unreachable today but the variant is reserved for
-///   future checks ordered after posture).
+/// - [`PostureResult::Pass`] — on the allow path, and on
+///   the [`ZtnaDecisionReason::IdentityAbsent`] degraded
+///   deny (device + context + posture all passed; only the
+///   user subject was missing).
 /// - [`PostureResult::Fail`] — on denies in steps 5-6
 ///   ([`ZtnaDecisionReason::DevicePostureStale`] and
 ///   [`ZtnaDecisionReason::DevicePostureInsufficient`]),
@@ -1063,9 +1127,13 @@ pub fn evaluate_policy(policy: &ZtnaPolicy, inputs: EvaluationInputs<'_>) -> Ztn
     } = inputs;
 
     // 1. Tenant guard. Cross-tenant requests never
-    // proceed past this gate.
+    // proceed past this gate. The device tenant is always
+    // checked; the subject tenant is checked only when a
+    // subject is present (a subjectless request has no
+    // identity tenant to compare).
     if !policy.tenant_id.is_empty()
-        && (device.tenant_id != policy.tenant_id || identity.tenant_id != policy.tenant_id)
+        && (device.tenant_id != policy.tenant_id
+            || identity.is_some_and(|i| i.tenant_id != policy.tenant_id))
     {
         return ZtnaDecision::deny(
             ZtnaDecisionReason::TenantMismatch,
@@ -1092,39 +1160,52 @@ pub fn evaluate_policy(policy: &ZtnaPolicy, inputs: EvaluationInputs<'_>) -> Ztn
             PostureResult::NotEvaluated,
         );
     }
-    let tags_ok = conditions
+    // The user-tag conditions are identity-derived, so they
+    // are only enforced when a subject is present. A
+    // subjectless request that an app's user-tag conditions
+    // would have failed is not allowed regardless: it is
+    // denied at the identity gate (step 6) below.
+    let device_tags_ok = conditions
         .device_tag_conditions
         .iter()
-        .all(|c| c.matches(&device.tags))
-        && conditions
+        .all(|c| c.matches(&device.tags));
+    let user_tags_ok = identity.is_none_or(|i| {
+        conditions
             .user_tag_conditions
             .iter()
-            .all(|c| c.matches(&identity.tags));
-    if !tags_ok {
+            .all(|c| c.matches(&i.tags))
+    });
+    if !(device_tags_ok && user_tags_ok) {
         return ZtnaDecision::deny(ZtnaDecisionReason::TagMismatch, PostureResult::NotEvaluated);
     }
 
-    // 3. Group entitlement. Empty `required_groups`
-    // means "any authenticated user", consistent with
-    // the catalog's documented semantics.
-    if !app.required_groups.is_empty() {
-        let entitled = app
-            .required_groups
-            .iter()
-            .any(|g| identity.groups.contains(g));
-        if !entitled {
-            return ZtnaDecision::deny(
-                ZtnaDecisionReason::NotEntitled,
-                PostureResult::NotEvaluated,
-            );
+    // 3-4. Identity-derived gates. Group entitlement and MFA
+    // freshness can only be evaluated against a present
+    // subject; the subjectless degraded path skips them and
+    // is denied at step 6 after the device-posture checks.
+    if let Some(identity) = identity {
+        // 3. Group entitlement. Empty `required_groups`
+        // means "any authenticated user", consistent with
+        // the catalog's documented semantics.
+        if !app.required_groups.is_empty() {
+            let entitled = app
+                .required_groups
+                .iter()
+                .any(|g| identity.groups.contains(g));
+            if !entitled {
+                return ZtnaDecision::deny(
+                    ZtnaDecisionReason::NotEntitled,
+                    PostureResult::NotEvaluated,
+                );
+            }
         }
-    }
 
-    // 4. MFA freshness. A per-app override tightens (or
-    // loosens) the policy-global budget for this app.
-    let mfa_max_age_ms = app.mfa_max_age_override_ms.unwrap_or(policy.mfa_max_age_ms);
-    if !identity.mfa_fresh(now_ms, mfa_max_age_ms) {
-        return ZtnaDecision::deny(ZtnaDecisionReason::MfaStale, PostureResult::NotEvaluated);
+        // 4. MFA freshness. A per-app override tightens (or
+        // loosens) the policy-global budget for this app.
+        let mfa_max_age_ms = app.mfa_max_age_override_ms.unwrap_or(policy.mfa_max_age_ms);
+        if !identity.mfa_fresh(now_ms, mfa_max_age_ms) {
+            return ZtnaDecision::deny(ZtnaDecisionReason::MfaStale, PostureResult::NotEvaluated);
+        }
     }
 
     // 5. Device posture freshness.
@@ -1140,7 +1221,17 @@ pub fn evaluate_policy(policy: &ZtnaPolicy, inputs: EvaluationInputs<'_>) -> Ztn
         );
     }
 
-    ZtnaDecision::allow()
+    // Every device + context + posture check passed. With a
+    // verified subject the identity gates (steps 3-4) also
+    // passed, so the request is allowed. Without one the
+    // decision cannot be completed: deny explicitly with
+    // `IdentityAbsent` rather than allow on device alone,
+    // recording that posture *was* evaluated and passed.
+    if identity.is_some() {
+        ZtnaDecision::allow()
+    } else {
+        ZtnaDecision::deny(ZtnaDecisionReason::IdentityAbsent, PostureResult::Pass)
+    }
 }
 
 #[cfg(test)]
@@ -1198,7 +1289,7 @@ mod tests {
         EvaluationInputs {
             app: a,
             device: d,
-            identity: u,
+            identity: Some(u),
             now_ms,
             source_country: None,
             network_type: NetworkType::Unknown,
@@ -1219,7 +1310,7 @@ mod tests {
         EvaluationInputs {
             app: a,
             device: d,
-            identity: u,
+            identity: Some(u),
             now_ms,
             source_country,
             network_type,
@@ -1484,6 +1575,112 @@ mod tests {
         let u = user("anything-else", &[], now());
         let dec = evaluate_policy(&p, inputs(&a, &d, &u, now()));
         assert!(dec.allow);
+    }
+
+    /// Inputs with no user subject — the explicit degraded path.
+    fn degraded_inputs<'a>(a: &'a App, d: &'a DeviceTrust, now_ms: u64) -> EvaluationInputs<'a> {
+        EvaluationInputs {
+            app: a,
+            device: d,
+            identity: None,
+            now_ms,
+            source_country: None,
+            network_type: NetworkType::Unknown,
+        }
+    }
+
+    #[test]
+    fn degraded_no_subject_denies_identity_absent_when_device_passes() {
+        // No subject, but every device + posture check passes: the
+        // verdict is an explicit `IdentityAbsent` deny, NOT a
+        // device-only allow. Posture is recorded as Pass so the wire
+        // shows it *was* evaluated — only the subject was missing.
+        let p = policy("t1");
+        let a = app("wiki", PostureRequirement::BASIC, &["eng"]);
+        let d = device("t1", DevicePosture::pristine(now()));
+        let dec = evaluate_policy(&p, degraded_inputs(&a, &d, now()));
+        assert!(!dec.allow);
+        assert_eq!(dec.reason, ZtnaDecisionReason::IdentityAbsent);
+        assert_eq!(dec.posture_result, PostureResult::Pass);
+    }
+
+    #[test]
+    fn degraded_no_subject_surfaces_posture_insufficient() {
+        // The degraded path never masks a real device failure: an
+        // insufficient posture denies on its own reason, ahead of
+        // the identity-absent verdict.
+        let p = policy("t1");
+        let a = app("admin", PostureRequirement::STRICT, &[]);
+        let mut posture = DevicePosture::pristine(now());
+        posture.antimalware_running = false;
+        let d = device("t1", posture);
+        let dec = evaluate_policy(&p, degraded_inputs(&a, &d, now()));
+        assert!(!dec.allow);
+        assert_eq!(dec.reason, ZtnaDecisionReason::DevicePostureInsufficient);
+        assert_eq!(dec.posture_result, PostureResult::Fail);
+    }
+
+    #[test]
+    fn degraded_no_subject_surfaces_cross_tenant_device() {
+        // The device tenant guard still runs without a subject; the
+        // subject tenant simply has nothing to compare.
+        let p = policy("t1");
+        let a = app("wiki", PostureRequirement::NONE, &[]);
+        let d = device("t-other", DevicePosture::pristine(now()));
+        let dec = evaluate_policy(&p, degraded_inputs(&a, &d, now()));
+        assert!(!dec.allow);
+        assert_eq!(dec.reason, ZtnaDecisionReason::TenantMismatch);
+    }
+
+    #[test]
+    fn degraded_no_subject_skips_group_gate_then_identity_absent() {
+        // A group-gated app cannot be evaluated against an absent
+        // subject; rather than denying `not_entitled` (which would
+        // imply we checked the user's groups), the degraded path
+        // skips the identity gates and denies `identity_absent`.
+        let p = policy("t1");
+        let a = app("payroll", PostureRequirement::BASIC, &["finance"]);
+        let d = device("t1", DevicePosture::pristine(now()));
+        let dec = evaluate_policy(&p, degraded_inputs(&a, &d, now()));
+        assert!(!dec.allow);
+        assert_eq!(dec.reason, ZtnaDecisionReason::IdentityAbsent);
+    }
+
+    #[test]
+    fn degraded_no_subject_skips_user_tag_conditions() {
+        // User-tag conditions are identity-derived: with no subject
+        // there are no user tags to test, so the access-conditions
+        // gate does not deny on them. The request still ends at the
+        // identity-absent verdict rather than passing on device alone.
+        let p = policy("t1");
+        let mut a = app("crm", PostureRequirement::NONE, &[]);
+        a.conditions.user_tag_conditions = vec![TagCondition {
+            key: "risk_tier".into(),
+            op: TagOp::NotEquals,
+            value: Some("elevated".into()),
+        }];
+        let d = device("t1", DevicePosture::pristine(now()));
+        let dec = evaluate_policy(&p, degraded_inputs(&a, &d, now()));
+        assert!(!dec.allow);
+        assert_eq!(dec.reason, ZtnaDecisionReason::IdentityAbsent);
+    }
+
+    #[test]
+    fn degraded_no_subject_still_enforces_device_tag_conditions() {
+        // Device-tag conditions are NOT identity-derived, so they
+        // still gate a subjectless request.
+        let p = policy("t1");
+        let mut a = app("crm", PostureRequirement::NONE, &[]);
+        a.conditions.device_tag_conditions = vec![TagCondition {
+            key: "managed".into(),
+            op: TagOp::Equals,
+            value: Some("true".into()),
+        }];
+        // Device lacks the `managed=true` tag.
+        let d = device("t1", DevicePosture::pristine(now()));
+        let dec = evaluate_policy(&p, degraded_inputs(&a, &d, now()));
+        assert!(!dec.allow);
+        assert_eq!(dec.reason, ZtnaDecisionReason::TagMismatch);
     }
 
     #[test]

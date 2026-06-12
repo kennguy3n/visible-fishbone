@@ -90,6 +90,48 @@ impl StaticIdentityProvider {
         self.by_user.store(Arc::new(table));
     }
 
+    /// Insert or update a single user subject, keyed by its
+    /// [`UserIdentity::user_id`].
+    ///
+    /// This is the per-subject feed the enforcement-plane
+    /// producer (`sng-edge`) uses to thread a *verified user
+    /// subject* — resolved from the IdP / mTLS chain, e.g.
+    /// via [`crate::oidc_identity::identity_from_claims`] —
+    /// into the table the access path and the continuous
+    /// re-evaluation loop both read. Where [`Self::replace`]
+    /// swaps the whole table for the control-plane IdP-sync
+    /// snapshot, `upsert` lets the data path register the
+    /// single subject it just authenticated without waiting
+    /// for the next bulk sync, so a real user's groups / MFA
+    /// freshness drive the verdict immediately rather than
+    /// degrading to [`crate::ZtnaDecisionReason::IdentityAbsent`].
+    ///
+    /// Copy-on-write: clones the current table, applies the
+    /// upsert, and stores the new `Arc`. In-flight readers
+    /// keep the snapshot they already loaded. This is an
+    /// off-request-path operation (the producer calls it when
+    /// a session authenticates, not per access evaluation),
+    /// so the clone cost is acceptable for the lock-free read
+    /// guarantee it preserves.
+    pub fn upsert(&self, user: UserIdentity) {
+        let mut table = HashMap::clone(&self.by_user.load());
+        table.insert(user.user_id.clone(), user);
+        self.by_user.store(Arc::new(table));
+    }
+
+    /// Remove a single user subject by id, returning `true`
+    /// if it was present. The mirror of [`Self::upsert`] for
+    /// the producer to forget a subject when its session ends
+    /// (so the re-eval loop stops resolving a stale subject).
+    pub fn remove(&self, user_id: &str) -> bool {
+        let mut table = HashMap::clone(&self.by_user.load());
+        let removed = table.remove(user_id).is_some();
+        if removed {
+            self.by_user.store(Arc::new(table));
+        }
+        removed
+    }
+
     /// Snapshot the live table.
     #[must_use]
     pub fn snapshot(&self) -> Arc<HashMap<String, UserIdentity>> {

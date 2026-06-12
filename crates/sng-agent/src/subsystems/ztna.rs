@@ -152,7 +152,13 @@ mod tests {
     #[tokio::test]
     async fn subsystem_start_waits_for_shutdown_and_returns_ok() {
         let (tx, _rx) = mpsc::channel(8);
-        let subsys = ZtnaSubsystem::new(ZtnaServiceConfig { max_sessions: 4 }, tx);
+        let subsys = ZtnaSubsystem::new(
+            ZtnaServiceConfig {
+                max_sessions: 4,
+                ..ZtnaServiceConfig::default()
+            },
+            tx,
+        );
         let (trigger, signal) = ShutdownTrigger::new();
         let handle = subsys.start(signal).await.expect("start");
         trigger.fire();
@@ -163,7 +169,13 @@ mod tests {
     #[tokio::test]
     async fn health_check_initially_reports_up_with_zero_evaluations() {
         let (tx, _rx) = mpsc::channel(8);
-        let subsys = ZtnaSubsystem::new(ZtnaServiceConfig { max_sessions: 4 }, tx);
+        let subsys = ZtnaSubsystem::new(
+            ZtnaServiceConfig {
+                max_sessions: 4,
+                ..ZtnaServiceConfig::default()
+            },
+            tx,
+        );
         let snap = subsys.check().await;
         assert_eq!(snap.status, HealthStatus::Up);
         assert!(
