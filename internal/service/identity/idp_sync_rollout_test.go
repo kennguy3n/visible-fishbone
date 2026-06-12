@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/google/uuid"
@@ -10,6 +11,20 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 	"github.com/kennguy3n/visible-fishbone/internal/service/rollout"
 )
+
+// perIssuerFactory hands out a distinct fake directory client per provider
+// issuer URL, so a multi-config tenant can mix a healthy provider with one
+// that fails to list users.
+type perIssuerFactory struct {
+	clients map[string]*fakeDirectoryClient
+}
+
+func (f perIssuerFactory) Build(cfg repository.IDPConfig, _ DirectoryCredential) (DirectoryClient, error) {
+	if c, ok := f.clients[cfg.IssuerURL]; ok {
+		return c, nil
+	}
+	return &fakeDirectoryClient{}, nil
+}
 
 // rolloutSyncFixture wires a SyncService to a real rollout.Service gate so
 // the staged-enablement seam is exercised end-to-end (not against a stub).
@@ -145,8 +160,9 @@ func TestSyncTenant_MonitorAutoRollsBackOnErrorBreach(t *testing.T) {
 		MinSamples:   1,
 	}))
 	f.transition(t, rollout.StateMonitor, false)
-	// One valid sample (UsersSeen=1) and one empty-email user (Errors=1):
-	// error_rate 1.0 > 0.1 over 1 sample breaches the threshold.
+	// One valid user (UsersSeen=1) and one empty-email entry. The empty
+	// entry is both an error and a sample (MonitorErrorSamples=1), so the
+	// rate is 1/(1+1)=0.5 > 0.1, which breaches over 2 coherent samples.
 	f.client.users = []DirectoryUser{
 		{ExternalID: "okta-1", Email: "alice@example.com", Active: true},
 		{ExternalID: "okta-broken", Email: "", Active: true},
@@ -194,5 +210,100 @@ func TestSyncTenant_MonitorHealthyDoesNotRollBack(t *testing.T) {
 	}
 	if report.State != string(rollout.StateMonitor) {
 		t.Fatalf("State = %q, want monitor (unchanged)", report.State)
+	}
+}
+
+// A provider that wholly fails to read (a config-level error, zero users
+// seen) must still auto-roll-back: the failed read is one errored sample,
+// so the rate is 1/1=100%. The earlier denominator of UsersSeen alone made
+// this divide by zero and escape rollback entirely — the coherence fix
+// Devin Review flagged.
+func TestSyncTenant_MonitorConfigErrorCountsAsSample(t *testing.T) {
+	f := newRolloutSyncFixture(t, rollout.WithThreshold(rollout.Threshold{
+		MaxErrorRate: 0.5,
+		MinSamples:   1,
+	}))
+	f.transition(t, rollout.StateMonitor, false)
+	// The only provider fails to list users: a config-level error with no
+	// user behind it. UsersSeen=0, MonitorErrorSamples=1, Errors=1.
+	f.client.err = errors.New("directory unreachable")
+
+	report, err := f.svc.SyncTenant(context.Background(), f.tid)
+	if err != nil {
+		t.Fatalf("SyncTenant: %v", err)
+	}
+	if report.UsersSeen != 0 || report.MonitorErrorSamples != 1 || len(report.Errors) != 1 {
+		t.Fatalf("want 0 seen / 1 error-sample / 1 error; got %+v", report)
+	}
+	if !report.AutoRolledBack {
+		t.Fatalf("a wholly-failing provider must roll back (rate 1/1); report=%+v", report)
+	}
+	if report.State != string(rollout.StateOff) {
+		t.Fatalf("post-rollback State = %q, want off", report.State)
+	}
+}
+
+// A single config-level failure beside healthy users must NOT breach a
+// threshold it would only cross if the failure were counted in the
+// numerator alone. Here the error joins the denominator too, keeping the
+// rate proportional. (Two configs: one fails to list, one returns users.)
+func TestSyncTenant_MonitorConfigErrorDoesNotInflateRate(t *testing.T) {
+	store := memory.NewStore()
+	tn, err := memory.NewTenantRepository(store).Create(context.Background(), repository.Tenant{
+		Name: "Coherent Rate", Slug: "coherent-rate", Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	configs := memory.NewIDPConfigRepository(store)
+	// Healthy provider: returns four active users.
+	if _, err := configs.Create(context.Background(), tn.ID, repository.IDPConfig{
+		ProviderType: repository.IDPProviderOkta, IssuerURL: "https://ok.okta.com", ClientID: "ok", Enabled: true,
+	}); err != nil {
+		t.Fatalf("seed healthy config: %v", err)
+	}
+	// Broken provider: fails to list users (one config-level error).
+	if _, err := configs.Create(context.Background(), tn.ID, repository.IDPConfig{
+		ProviderType: repository.IDPProviderMicrosoft365, IssuerURL: "https://bad.example.com", ClientID: "bad", Enabled: true,
+	}); err != nil {
+		t.Fatalf("seed broken config: %v", err)
+	}
+
+	gate, err := rollout.New(memory.NewCapabilityRolloutRepository(), rollout.WithThreshold(rollout.Threshold{
+		MaxErrorRate: 0.2, MinSamples: 1,
+	}))
+	if err != nil {
+		t.Fatalf("new rollout service: %v", err)
+	}
+	users := memory.NewUserRepository(store)
+	svc := NewSyncService(
+		configs, users, memory.NewRoleRepository(store), memory.NewAuditLogRepository(store),
+		singleTenant{id: tn.ID}, staticCreds{}, perIssuerFactory{
+			clients: map[string]*fakeDirectoryClient{
+				"https://ok.okta.com": {users: []DirectoryUser{
+					{ExternalID: "u1", Email: "a@x.com", Active: true},
+					{ExternalID: "u2", Email: "b@x.com", Active: true},
+					{ExternalID: "u3", Email: "c@x.com", Active: true},
+					{ExternalID: "u4", Email: "d@x.com", Active: true},
+				}},
+				"https://bad.example.com": {err: errors.New("directory unreachable")},
+			},
+		}, newCapturePublisher(), nil,
+	).WithRolloutGate(gate)
+	if _, err := gate.Transition(context.Background(), tn.ID, rollout.CapabilityIDPDirectorySync,
+		rollout.TransitionInput{To: rollout.StateMonitor, Actor: "op"}); err != nil {
+		t.Fatalf("transition: %v", err)
+	}
+
+	report, err := svc.SyncTenant(context.Background(), tn.ID)
+	if err != nil {
+		t.Fatalf("SyncTenant: %v", err)
+	}
+	// 1 error over (4 seen + 1 error-sample) = 0.2, which is NOT > 0.2.
+	if report.UsersSeen != 4 || report.MonitorErrorSamples != 1 || len(report.Errors) != 1 {
+		t.Fatalf("want 4 seen / 1 error-sample / 1 error; got %+v", report)
+	}
+	if report.AutoRolledBack {
+		t.Fatalf("one config failure beside 4 healthy users must not breach 20%%; report=%+v", report)
 	}
 }

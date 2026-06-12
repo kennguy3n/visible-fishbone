@@ -177,6 +177,17 @@ type SyncReport struct {
 	// automatically rolled the directory-sync capability back to off for
 	// this tenant. State then reflects the post-rollback state ("off").
 	AutoRolledBack bool
+	// MonitorErrorSamples counts dry-run error observations that did NOT
+	// increment UsersSeen: a provider config that could not be read at all
+	// (credential / client / list failure) or a directory entry with no
+	// email. The auto-rollback denominator is UsersSeen + MonitorErrorSamples
+	// so each such failure contributes to BOTH the numerator and the
+	// denominator of the monitor error rate. Without it, an errored
+	// observation would inflate the rate against a sample count it never
+	// joined (e.g. one config failure beside healthy users), and a provider
+	// that wholly fails (zero users, one error) would divide by zero and
+	// escape rollback entirely instead of reading as a 100% error rate.
+	MonitorErrorSamples int
 	// Errors are per-config / per-user failures that did not abort the
 	// whole tenant sync. The reconcile is best-effort: one provider or
 	// user failing must not stall the rest.
@@ -427,20 +438,28 @@ func (s *SyncService) SyncTenant(ctx context.Context, tenantID uuid.UUID) (SyncR
 		if err := s.syncConfig(ctx, tenantID, cfg, &report); err != nil {
 			report.Errors = append(report.Errors,
 				fmt.Errorf("provider %s (%s): %w", cfg.ProviderType, cfg.IssuerURL, err))
+			// A config that could not be read is one failed observation
+			// with no user behind it; fold it into the monitor sample space.
+			report.MonitorErrorSamples++
 		}
 	}
 
 	// Monitor-phase auto-rollback: feed the dry-run's observed error rate
-	// back to the framework. The directory-sync error signal is the share
-	// of seen users (or configs) that failed to process; deny-rate does
-	// not apply (a would-off-board is the expected outcome, not an error),
-	// so only the error-rate guardrail governs the rollback. If it breaches
-	// the configured threshold the gate rolls the capability back to off,
-	// preventing an operator from promoting a directory integration that is
-	// erroring under dry-run to enforce. It only ever acts in monitor and
-	// only moves the capability toward safety.
+	// back to the framework. An observation is one attempt to process a
+	// directory entry or read a provider: the denominator is the users seen
+	// PLUS the failures that had no user behind them (MonitorErrorSamples),
+	// so the numerator (every error) and denominator are in the same unit.
+	// Deny-rate does not apply (a would-off-board is the expected outcome,
+	// not an error), so only the error-rate guardrail governs the rollback.
+	// If it breaches the configured threshold the gate rolls the capability
+	// back to off, preventing an operator from promoting a directory
+	// integration that is erroring under dry-run to enforce. It only ever
+	// acts in monitor and only moves the capability toward safety.
 	if report.DryRun && s.rolloutGate != nil {
-		metrics := rollout.MonitorMetrics{Samples: report.UsersSeen, Errors: len(report.Errors)}
+		metrics := rollout.MonitorMetrics{
+			Samples: report.UsersSeen + report.MonitorErrorSamples,
+			Errors:  len(report.Errors),
+		}
 		rec, rolled, rbErr := s.rolloutGate.EvaluateAutoRollback(ctx, tenantID, rollout.CapabilityIDPDirectorySync, metrics)
 		switch {
 		case rbErr != nil:
@@ -590,6 +609,10 @@ func (s *SyncService) reconcileDryRun(dirUsers []DirectoryUser, localByEmail map
 		email := strings.ToLower(strings.TrimSpace(du.Email))
 		if email == "" {
 			report.Errors = append(report.Errors, fmt.Errorf("directory user %q has no email", du.ExternalID))
+			// An entry we could not process is one failed observation with
+			// no usable user behind it; fold it into the monitor sample
+			// space so it is not counted in the numerator alone.
+			report.MonitorErrorSamples++
 			continue
 		}
 		seen[email] = struct{}{}
