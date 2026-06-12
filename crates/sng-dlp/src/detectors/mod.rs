@@ -426,7 +426,7 @@ pub fn registry() -> &'static [JurisdictionDetector] {
             name: "finland_hetu",
             jurisdiction: "FI",
             title: "Finland Henkilötunnus (HETU)",
-            pattern: r"\b\d{6}[-+ABCDEFUVWXY]\d{3}[0-9A-Y]\b",
+            pattern: r"\b\d{6}[-+ABCDEFUVWXY]\d{3}[0-9A-Ya-y]\b",
             validator: Some(finland_hetu),
             context: &[
                 "henkilötunnus",
@@ -592,6 +592,25 @@ mod tests {
             assert!(!d.title.is_empty(), "{} has no title", d.name);
             assert!(!d.jurisdiction.is_empty(), "{} has no jurisdiction", d.name);
         }
+    }
+
+    #[test]
+    fn finland_hetu_regex_admits_lowercase_control_char() {
+        // The validator case-folds the control character, so the regex
+        // gate must too — otherwise a valid HETU with a lowercase control
+        // (e.g. `131052-308t`) is dropped before the validator sees it.
+        let d = detector("finland_hetu").expect("finland in registry");
+        let re = Regex::new(d.pattern).expect("valid regex");
+        assert!(
+            re.is_match("131052-308t"),
+            "lowercase control rejected by gate"
+        );
+        assert!(
+            re.is_match("131052-308T"),
+            "uppercase control rejected by gate"
+        );
+        let validate = d.validator.expect("finland has a validator");
+        assert!(validate("131052-308t") && validate("131052-308T"));
     }
 
     #[test]

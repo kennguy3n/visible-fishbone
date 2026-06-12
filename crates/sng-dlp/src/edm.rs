@@ -96,8 +96,13 @@ pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> Digest32 {
     // Keys longer than the block are first hashed down, per the spec.
     let mut block = [0u8; BLOCK];
     if key.len() > BLOCK {
-        let digest = Sha256::digest(key);
-        block[..EDM_HASH_LEN].copy_from_slice(&digest);
+        // Copy out of the `sha2` `GenericArray` (which we cannot zeroize
+        // in place without its zeroize feature) into a buffer we own,
+        // then wipe it: the hashed key is key-derived material.
+        let mut hashed = [0u8; EDM_HASH_LEN];
+        hashed.copy_from_slice(&Sha256::digest(key));
+        block[..EDM_HASH_LEN].copy_from_slice(&hashed);
+        hashed.zeroize();
     } else {
         block[..key.len()].copy_from_slice(key);
     }
@@ -112,7 +117,10 @@ pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> Digest32 {
     let mut inner = Sha256::new();
     inner.update(ipad);
     inner.update(msg);
-    let inner_digest = inner.finalize();
+    // `H(ipad || msg)` is key-derived; hold it in an owned buffer so it
+    // can be zeroized after it feeds the outer hash.
+    let mut inner_digest = [0u8; EDM_HASH_LEN];
+    inner_digest.copy_from_slice(&inner.finalize());
 
     let mut outer = Sha256::new();
     outer.update(opad);
@@ -121,10 +129,13 @@ pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> Digest32 {
     let mut out = [0u8; EDM_HASH_LEN];
     out.copy_from_slice(&outer.finalize());
 
-    // The pads embed the (key-derived) block; wipe the working copies.
+    // Wipe every key-derived working buffer we own. (The `sha2` hasher
+    // states for `inner`/`outer` are not `Zeroize` and are outside our
+    // control; the buffers above are the material we can guarantee.)
     block.zeroize();
     ipad.zeroize();
     opad.zeroize();
+    inner_digest.zeroize();
     out
 }
 
