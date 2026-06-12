@@ -16,7 +16,7 @@ series with all three.
 
 The Metering page turns raw usage meters into a buyer-facing view — eight metered
 dimensions per tenant, each with current usage, a **projected** period-end total,
-and a budget bar. Here's Acme, projecting **$1,047.59/mo** at **47.6% margin**:
+and a budget bar. Here's Acme, projecting **$1,063.54/mo** at **46.8% margin**:
 
 ![Metering & cost — Acme](../../artifacts/business/biz-09-metering-cost.png)
 
@@ -27,14 +27,14 @@ number Tom actually manages to:
 
 | Tenant | Tier | Projected cost/mo | Margin |
 | --- | --- | ---: | ---: |
-| Acme Retail Group | Enterprise | $1,047.59 | 47.6% |
-| Globex Health Systems | Enterprise | $658.69 | 67.0% |
-| Initech Financial | Professional | $418.97 | 16.0% |
-| Umbrella Logistics | Starter | $56.47 | 43.0% |
+| Acme Retail Group | Enterprise | $1,063.53 | 46.8% |
+| Globex Health Systems | Enterprise | $668.87 | 66.5% |
+| Initech Financial | Professional | $426.95 | 14.4% |
+| Umbrella Logistics | Starter | $57.29 | 42.1% |
 
 The **projection** is the feature: the engine extrapolates a partial-period run
 rate to a period-end total and flags "on track to breach" *before* the invoice,
-not after. Initech's thin 16% margin isn't a mystery — it's a visible run-rate
+not after. Initech's thin 14% margin isn't a mystery — it's a visible run-rate
 story Tom can act on before renewal.
 
 ## The structural cost advantage: zero idle cost + self-hosted AI

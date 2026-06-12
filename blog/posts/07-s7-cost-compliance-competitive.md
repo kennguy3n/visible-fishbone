@@ -34,19 +34,19 @@ steady-state period-end total:
 
 | meter | used | projected (period-end) |
 | --- | ---: | ---: |
-| llm_tokens_used | 3,868,183 | 11,999,899 |
-| llm_calls | 4,191 | 13,002 |
-| url_cat_lookups | 80,455 | 119,986 |
-| malware_scans | 3,352 | 4,999 |
-| clickhouse_rows_written | 96,704,582 | 299,997,478 |
-| s3_bytes_archived | 483.5 GB | ~1.50 TB |
-| bandwidth_proxied_bytes | 1.61 TB | ~5.00 TB |
-| policy_evaluations | 40,227,494 | 59,992,728 |
+| llm_tokens_used | 4,449,246 | 11,999,997 |
+| llm_calls | 4,820 | 13,000 |
+| url_cat_lookups | 14,774 | 119,999 |
+| malware_scans | 616 | 5,004 |
+| clickhouse_rows_written | 111,231,156 | 299,999,941 |
+| s3_bytes_archived | 556.2 GB | ~1.50 TB |
+| bandwidth_proxied_bytes | 1.85 TB | ~5.00 TB |
+| policy_evaluations | 7,386,934 | 59,998,911 |
 
 ### Projection is the feature
 
-`ProjectToPeriodEnd` is the inverse of the elapsed fraction: 27% through the
-month, a value of 100 projects to ~370. That's what powers "on-track to breach"
+`ProjectToPeriodEnd` is the inverse of the elapsed fraction: 37% through the
+month, a value of 100 projects to ~270. That's what powers "on-track to breach"
 visibility *before* the breach — the UI flags `projected_soft_exceeded` /
 `projected_hard_exceeded` so Tom sees the overage coming, not after the invoice.
 
@@ -59,7 +59,7 @@ Initech's URL-category lookups, captured at
 
 ```json
 { "meter": "url_cat_lookups", "baseline_monthly_usd": 72.31,
-  "projected_monthly_usd": 224.97, "ratio": 3.111,
+  "projected_monthly_usd": 225.01, "ratio": 3.1116,
   "baseline_months": 5, "severity": "warning" }
 ```
 
@@ -69,15 +69,15 @@ point: an anomaly detector that flags everything is noise.
 
 ### The margin story (for the MSP)
 
-The admin cost-report rolls up a **projected $2,216.43/mo** across the four
-tenants. Per-tenant gross margins (`margin_pct` from
+The admin cost-report rolls up a **projected $2,216.81/mo** of cost across the
+four tenants. Per-tenant gross margins (`margin_pct` from
 [`s7-admin-cost-report.json`](../artifacts/payloads/s7-admin-cost-report.json)):
 
 | tenant | tier | margin |
 | --- | --- | ---: |
 | Globex | enterprise | 66.5% |
 | Acme | enterprise | 46.8% |
-| Umbrella | starter | 42.3% |
+| Umbrella | starter | 42.1% |
 | Initech | professional | 14.4% |
 
 Initech's thinner margin is *because* of its url_cat surge — the anomaly and the
