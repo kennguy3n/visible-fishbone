@@ -13,8 +13,30 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
+	"github.com/kennguy3n/visible-fishbone/internal/service/rollout"
 	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy"
 )
+
+// RolloutGate is the staged-enablement seam for the IdP directory-sync
+// capability (#177, rollout.CapabilityIDPDirectorySync). SyncTenant
+// consults it per tenant so enabling directory sync is a rehearsed
+// monitor -> enforce progression rather than a binary flag:
+//
+//   - enforce — full sync: provision, reactivate, group-reconcile and
+//     off-board exactly as before.
+//   - monitor — dry-run: compute and report the would-have provisions /
+//     off-boards but mutate NOTHING (no user create/update, no
+//     revocation, no audit off-board row).
+//   - off     — the tenant is skipped entirely (no directory read, no
+//     mutation).
+//
+// The signature matches *rollout.Service.EffectiveState, which fails
+// closed to off on any read error, so an unreadable rollout state can
+// never silently off-board a tenant's users. A nil gate preserves the
+// legacy behavior (every tenant fully synced when the runner is wired).
+type RolloutGate interface {
+	EffectiveState(ctx context.Context, tenantID uuid.UUID, c rollout.Capability) rollout.State
+}
 
 // DefaultSyncInterval is how often the IdP sync runner reconciles every
 // tenant's directory when no explicit interval is configured.
@@ -123,6 +145,25 @@ type SyncReport struct {
 	UsersOffboarded  int
 	GroupsAssigned   int
 	GroupsRevoked    int
+	// State is the tenant's effective rollout state for the directory-sync
+	// capability this pass ("off", "monitor", or "enforce"). Empty when no
+	// rollout gate is wired (legacy full-sync behavior).
+	State string
+	// Skipped is true when the tenant was not synced at all because its
+	// rollout state was off (the fail-closed default). No directory read
+	// or mutation happened.
+	Skipped bool
+	// DryRun is true when the sync ran in monitor mode: the Would* counts
+	// below are populated and NO mutation (provision/offboard/revocation/
+	// audit) was performed. The UsersProvisioned / UsersOffboarded /
+	// Groups* counters stay zero in a dry run.
+	DryRun bool
+	// WouldProvision / WouldOffboard are the provisions / off-boards a
+	// monitor-mode (dry-run) pass would have performed had it been
+	// enforcing. They give an operator the blast radius of promoting the
+	// tenant to enforce.
+	WouldProvision int
+	WouldOffboard  int
 	// Errors are per-config / per-user failures that did not abort the
 	// whole tenant sync. The reconcile is best-effort: one provider or
 	// user failing must not stall the rest.
@@ -162,6 +203,11 @@ type SyncService struct {
 	// planner's cadence gate. Atomic because Run drives it but tests
 	// may invoke syncAll concurrently.
 	cycle atomic.Uint64
+
+	// rolloutGate gates directory sync through the staged-enablement
+	// framework (see RolloutGate). Optional: nil preserves the legacy
+	// full-sync-every-tenant behavior.
+	rolloutGate RolloutGate
 }
 
 // NewSyncService wires an IdP directory sync service.
@@ -206,6 +252,19 @@ func (s *SyncService) WithDormancyPlanner(planner *tenancy.SweepPlanner, activit
 	if planner != nil && activity != nil {
 		s.planner = planner
 		s.activity = activity
+	}
+	return s
+}
+
+// WithRolloutGate wires the staged-enablement gate for directory sync.
+// Once set, each tenant is synced per its rollout state for
+// CapabilityIDPDirectorySync: off skips the tenant, monitor dry-runs the
+// reconcile (no mutations), and enforce runs the full sync. A nil gate
+// is a no-op (legacy full-sync behavior retained), so wiring is
+// fail-safe. Returns the receiver for chaining at construction.
+func (s *SyncService) WithRolloutGate(gate RolloutGate) *SyncService {
+	if gate != nil {
+		s.rolloutGate = gate
 	}
 	return s
 }
@@ -304,6 +363,23 @@ func (s *SyncService) dueTenants(ctx context.Context, cycle int64) ([]uuid.UUID,
 func (s *SyncService) SyncTenant(ctx context.Context, tenantID uuid.UUID) (SyncReport, error) {
 	report := SyncReport{TenantID: tenantID}
 
+	// Staged-enablement gate: decide whether this tenant syncs at all,
+	// and if so whether it enforces or only dry-runs. With no gate wired
+	// the legacy full-sync behavior is preserved.
+	if s.rolloutGate != nil {
+		state := s.rolloutGate.EffectiveState(ctx, tenantID, rollout.CapabilityIDPDirectorySync)
+		report.State = string(state)
+		switch state {
+		case rollout.StateOff:
+			// Fail-closed default: do not read the directory or mutate
+			// anything for an off tenant.
+			report.Skipped = true
+			return report, nil
+		case rollout.StateMonitor:
+			report.DryRun = true
+		}
+	}
+
 	cfgs, err := s.configs.List(ctx, tenantID)
 	if err != nil {
 		return report, fmt.Errorf("list idp configs: %w", err)
@@ -356,6 +432,15 @@ func (s *SyncService) reconcile(ctx context.Context, tenantID uuid.UUID, dirUser
 	localByEmail := make(map[string]repository.User, len(locals))
 	for _, u := range locals {
 		localByEmail[strings.ToLower(u.Email)] = u
+	}
+
+	// Monitor (dry-run): compute the would-have provisions / off-boards
+	// and return WITHOUT building the role reconciler or taking any
+	// mutating action. Branching here keeps the dry run provably
+	// side-effect-free (no user/role writes, no revocation, no audit).
+	if report.DryRun {
+		s.reconcileDryRun(dirUsers, localByEmail, report)
+		return nil
 	}
 
 	// roleCtx caches the tenant's role table and tracks every role the
@@ -421,6 +506,58 @@ func (s *SyncService) reconcile(ctx context.Context, tenantID uuid.UUID, dirUser
 		s.offboard(ctx, tenantID, local, "idp_directory_absent", report)
 	}
 	return nil
+}
+
+// reconcileDryRun is the monitor-phase counterpart of reconcile: it
+// walks the same directory snapshot and local user set and counts the
+// provisions and off-boards the enforce path WOULD perform, without
+// mutating anything. The would-have arithmetic mirrors reconcile so the
+// reported blast radius is exactly what promoting the tenant to enforce
+// would do:
+//   - an active directory user with no active local match -> provision.
+//   - a deactivated directory user whose local user is still active ->
+//     off-board.
+//   - an active local user the directory no longer lists -> off-board.
+//
+// Group reconciliation and reactivation are not counted: they refine an
+// already-provisioned user rather than provisioning or off-boarding one,
+// so they do not change the off-board blast radius an operator weighs
+// before promoting to enforce.
+func (s *SyncService) reconcileDryRun(dirUsers []DirectoryUser, localByEmail map[string]repository.User, report *SyncReport) {
+	seen := make(map[string]struct{}, len(dirUsers))
+	for _, du := range dirUsers {
+		email := strings.ToLower(strings.TrimSpace(du.Email))
+		if email == "" {
+			report.Errors = append(report.Errors, fmt.Errorf("directory user %q has no email", du.ExternalID))
+			continue
+		}
+		seen[email] = struct{}{}
+		report.UsersSeen++
+
+		local, ok := localByEmail[email]
+		if !du.Active {
+			// Deactivated upstream: would off-board only a still-active
+			// local user (deactivating an already-inactive user is a no-op).
+			if ok && local.Status == repository.UserStatusActive {
+				report.WouldOffboard++
+			}
+			continue
+		}
+		if !ok {
+			report.WouldProvision++
+		}
+	}
+
+	// Active local users the directory no longer lists would be off-boarded.
+	for email, local := range localByEmail {
+		if _, ok := seen[email]; ok {
+			continue
+		}
+		if local.Status != repository.UserStatusActive {
+			continue
+		}
+		report.WouldOffboard++
+	}
 }
 
 // listLocalUsers pages the tenant's full user set via the repository

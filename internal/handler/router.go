@@ -38,6 +38,7 @@ type RouterDeps struct {
 	AI               *AIHandler
 	DLP              *DLPHandler
 	DLPReview        *DLPReviewHandler
+	Rollout          *RolloutHandler
 	SCIM             *SCIMHandler
 	Compliance       *ComplianceHandler
 	Playbook         *PlaybookHandler
@@ -194,6 +195,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.DLPReview != nil {
 		deps.DLPReview.Register(apiMux)
+	}
+	if deps.Rollout != nil {
+		deps.Rollout.Register(apiMux)
 	}
 	if deps.SCIM != nil {
 		deps.SCIM.Register(apiMux)

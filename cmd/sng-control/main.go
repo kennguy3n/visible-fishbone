@@ -67,6 +67,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/rbac"
 	"github.com/kennguy3n/visible-fishbone/internal/service/rbi"
 	"github.com/kennguy3n/visible-fishbone/internal/service/residency"
+	"github.com/kennguy3n/visible-fishbone/internal/service/rollout"
 	"github.com/kennguy3n/visible-fishbone/internal/service/sandbox"
 	"github.com/kennguy3n/visible-fishbone/internal/service/sandbox/providers"
 	"github.com/kennguy3n/visible-fishbone/internal/service/site"
@@ -1068,6 +1069,34 @@ func buildRouter(
 	appSvc.SetTenantRegionResolver(tenantRegionResolver{tenants: tenantRepo})
 	appSyncer := appdb.NewSyncer(appSvc, nil)
 	appRegHandler := handler.NewAppRegistryHandler(appSvc, nil, appSyncer)
+	// --- Staged-enablement (rollout) framework ------------------------
+	// Per-tenant, per-capability state machine (off -> monitor ->
+	// enforce) that turns flipping the default-OFF capability gates
+	// (ClamAV SWG #178, NoOps auto-enforce #172, IdP directory sync #177)
+	// from a binary flag into a rehearsed, observable progression. Every
+	// capability defaults to off and nothing auto-advances; the one
+	// automatic transition is a monitor-phase rollback to off when the
+	// configured error-rate guardrail is breached. The same service
+	// instance backs the operator API handler AND the per-capability
+	// gates below, so an operator's transition is read by the gate on the
+	// next request. See internal/service/rollout.
+	rolloutRepo := postgres.NewCapabilityRolloutRepository(store)
+	rolloutSvc, err := rollout.New(rolloutRepo,
+		rollout.WithLogger(logger),
+		rollout.WithThreshold(rollout.Threshold{
+			// Conservative monitor-phase auto-rollback guardrail: if a
+			// capability's dry-run errors on more than 5% of a
+			// statistically meaningful sample, the framework rolls it back
+			// to off rather than letting an operator promote a broken
+			// capability to enforce.
+			MaxErrorRate: 0.05,
+			MinSamples:   50,
+		}),
+	)
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("rollout framework: %w", err)
+	}
+
 	// Per-tenant shadow-IT NoOps engine (migration 061). It classifies
 	// each discovered app, records an immutable audit row and recommends
 	// (or, when NoOpsAutoEnforce is set, auto-applies only the narrow
@@ -1081,6 +1110,11 @@ func buildRouter(
 	casbNoOpsStore := postgres.NewCASBNoOpsStore(store)
 	appNoOpsEngine := casb.NewAppNoOpsEngine(casbNoOpsStore, casbAppRepo, tenantRepo, logger)
 	appNoOpsEngine.SetAuditLog(auditRepo)
+	// Gate NoOps auto-enforce (#172) through the staged-enablement
+	// framework: a discovered-app auto action is applied only for tenants
+	// whose noops_autoenforce rollout state is enforce; monitor dry-runs
+	// it (records the would-have action) and off/unreadable disables it.
+	appNoOpsEngine.SetRolloutGate(rolloutSvc)
 	// Activity-tiered reconcile cadence so the periodic sweep does not
 	// re-classify thousands of dormant trial tenants' inventories every
 	// interval. Active tenants are still visited every cycle; the planner
@@ -1658,7 +1692,14 @@ func buildRouter(
 			identity.DefaultDirectoryClientFactory{},
 			identity.NewNATSRevocationPublisher(natsAlertAdapter{p: telPub}),
 			logger,
-		).WithDormancyPlanner(&planner, tenantRepo)
+		).WithDormancyPlanner(&planner, tenantRepo).
+			// Gate directory sync (#177) through the staged-enablement
+			// framework: off skips a tenant entirely, monitor dry-runs the
+			// reconcile (reporting would-have provisions/off-boards but
+			// mutating nothing), and only enforce performs the full sync —
+			// so flipping directory sync on for a tenant never off-boards
+			// users until it has been rehearsed in monitor.
+			WithRolloutGate(rolloutSvc)
 		logger.Info("idp directory sync: enabled (leader-gated)",
 			slog.Duration("interval", cfg.MobileAuth.DirectorySyncInterval))
 	}
@@ -1949,6 +1990,7 @@ func buildRouter(
 		RBI:               handler.NewRBIHandler(rbiSvc),
 		DLP:               handler.NewDLPHandler(dlpSvc),
 		DLPReview:         handler.NewDLPReviewHandler(dlpReviewSvc),
+		Rollout:           handler.NewRolloutHandler(rolloutSvc),
 		Browser:           handler.NewBrowserHandler(browserSvc),
 		Terraform:         handler.NewTerraformHandler(terraformProvider),
 		APIKeyLookup:      apiKeySvc,
