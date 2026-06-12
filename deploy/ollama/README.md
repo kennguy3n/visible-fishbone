@@ -45,6 +45,37 @@ The owner-recommended artifact is the **Q2_0** (2-bit ternary) GGUF:
 > [`Dockerfile.llamacpp`](./Dockerfile.llamacpp). The default Ollama
 > `pull` path above still works for the registry's default-tag quant.
 
+### Kernel provenance — the pinned prism build
+
+The Q2_0 ternary kernels live in the prism fork of llama.cpp, and
+[`Dockerfile.llamacpp`](./Dockerfile.llamacpp) pins them by exact commit so
+the build is reproducible and the kernel dependency is resolved (not floating):
+
+| Field | Value |
+|---|---|
+| Repo | `https://github.com/PrismML-Eng/llama.cpp` (the prism fork) |
+| Commit | `9b98ac8a421c556a111d9cc3e4010bc65fc08113` |
+| Branch | on the fork's `prism` branch (the commit is an ancestor of `prism` HEAD) |
+| Provides | `GGML_TYPE_Q2_0` enum + CPU dequant/dot kernels (`ggml-cpu/`) |
+
+This commit was **build-verified end-to-end**: `llama-server` compiled from it
+(`-DGGML_NATIVE=OFF -DGGML_AVX2=ON -DGGML_FMA=ON`, CPU-only) loads the
+SHA-verified `Ternary-Bonsai-8B-Q2_0.gguf` (reported `n_params = 8.19B`,
+`n_ctx_train = 65536`) and answers `/v1/chat/completions` with valid JSON. The
+measured 8B run is published at
+[`blog/artifacts/payloads/s6-llm-validation-bonsai-8b-q2_0.json`](../../blog/artifacts/payloads/s6-llm-validation-bonsai-8b-q2_0.json)
+and walked in [Post 6](../../blog/posts/06-s6-ai-assisted-ops.md).
+
+> **Honest performance note.** The prism Q2_0 CPU kernels are correctness-first,
+> not yet SIMD-optimized for the ternary path. On an AVX2-only host (no
+> AVX-512/VNNI) they run at roughly **1 token/s**, so a single intent-parse
+> query is minutes, not milliseconds. That is fine for the assistant's
+> low-QPS, deterministic-first design (the LLM only augments entity extraction;
+> it never sits on the enforcement hot path), but size the host accordingly —
+> AVX-512/VNNI or a GPU build is materially faster. To bump the pin, change
+> `LLAMACPP_COMMIT` in `Dockerfile.llamacpp` and re-run the validation harness
+> before adopting it.
+
 ### 1. Download + verify the exact GGUF
 
 [`scripts/fetch-bonsai-gguf.sh`](../../scripts/fetch-bonsai-gguf.sh) pins
