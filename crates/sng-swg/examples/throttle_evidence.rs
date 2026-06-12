@@ -15,9 +15,11 @@
 //! Run with:
 //!   cargo run -p sng-swg --example throttle_evidence -- <out.json>
 
+use std::error::Error;
+
 use sng_swg::{Action, RateLimiter, Verdict};
 
-fn main() {
+fn main() -> Result<(), Box<dyn Error>> {
     let out = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "throttle-evidence.json".to_string());
@@ -49,7 +51,7 @@ fn main() {
     }
 
     let (bucket_key, retry_after) = first_reject
-        .expect("an 8-request burst against a 5-token bucket must reject at least once");
+        .ok_or("an 8-request burst against a 5-token bucket must reject at least once")?;
 
     // The verdict the ext-authz handler returns on the first shed
     // request — real crate type, real Serialize impl.
@@ -71,7 +73,8 @@ fn main() {
         },
     });
 
-    let json = serde_json::to_string_pretty(&artifact).expect("serialize");
-    std::fs::write(&out, json + "\n").expect("write artifact");
+    let json = serde_json::to_string_pretty(&artifact)?;
+    std::fs::write(&out, json + "\n")?;
     eprintln!("wrote throttle evidence -> {out}");
+    Ok(())
 }
