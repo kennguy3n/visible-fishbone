@@ -163,8 +163,12 @@ func run() error {
 		// deploy README can set them without flag plumbing.
 		gitSHA   = flag.String("git-sha", os.Getenv("GIT_SHA"), "git commit recorded in the report (provenance)")
 		hardware = flag.String("hardware", os.Getenv("SNG_LLM_HARDWARE"), "hardware description recorded in the report (provenance)")
-		quant    = flag.String("quant", os.Getenv("SNG_LLM_VARIANT"), "quantization recorded in the report (e.g. Q2_0)")
-		note     = flag.String("note", os.Getenv("SNG_LLM_NOTE"), "free-form provenance note recorded in the report")
+		// Named to match the deploy's existing SNG_LLM_VARIANT knob
+		// (Dockerfile.llamacpp / docker-compose.yml / fetch-bonsai-gguf.sh
+		// --variant) so one value flows through both the build and the
+		// report. It records the model variant, i.e. the quantization.
+		variant = flag.String("variant", os.Getenv("SNG_LLM_VARIANT"), "model variant/quantization recorded in the report (e.g. Q2_0)")
+		note    = flag.String("note", os.Getenv("SNG_LLM_NOTE"), "free-form provenance note recorded in the report")
 	)
 	flag.Parse()
 
@@ -217,7 +221,7 @@ func run() error {
 		Endpoint:      *endpoint,
 		Model:         resolvedModel,
 		Hardware:      strings.TrimSpace(*hardware),
-		Quant:         strings.TrimSpace(*quant),
+		Quant:         strings.TrimSpace(*variant),
 		Note:          strings.TrimSpace(*note),
 		LiveInference: live,
 		QueryCount:    len(queries),
@@ -553,7 +557,9 @@ func renderMarkdown(rep report) string {
 		fmt.Fprintf(&b, "\n\n")
 	}
 	if rep.Note != "" {
-		fmt.Fprintf(&b, "> %s\n\n", rep.Note)
+		// Prefix every line so a multi-line note stays a valid markdown
+		// blockquote rather than only quoting the first line.
+		fmt.Fprintf(&b, "> %s\n\n", strings.ReplaceAll(rep.Note, "\n", "\n> "))
 	}
 	fmt.Fprintf(&b, "## Summary\n\n")
 	fmt.Fprintf(&b, "| Metric | Value |\n|---|---|\n")
