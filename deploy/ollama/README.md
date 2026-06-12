@@ -45,6 +45,46 @@ The owner-recommended artifact is the **Q2_0** (2-bit ternary) GGUF:
 > [`Dockerfile.llamacpp`](./Dockerfile.llamacpp). The default Ollama
 > `pull` path above still works for the registry's default-tag quant.
 
+### Kernel provenance — the pinned prism build
+
+The Q2_0 ternary kernels live in the prism fork of llama.cpp, and
+[`Dockerfile.llamacpp`](./Dockerfile.llamacpp) pins them by exact commit so
+the build is reproducible and the kernel dependency is resolved (not floating):
+
+| Field | Value |
+|---|---|
+| Repo | `https://github.com/kennguy3n/llama.cpp` (the prism fork) |
+| Commit | `d6cea6ec1b8c7b10d5ed528a74b65dc6b8f02dee` |
+| Branch | the fork's `prism` branch HEAD |
+| Provides | prism ternary CPU kernels + the **`Q1_0_g128` 4×4 AVX2 repack GEMM** (`ggml-cpu/repack.cpp`, `arch/x86/`) |
+
+This commit was **build-verified end-to-end** with the *same flags the image
+ships* (`-DGGML_NATIVE=OFF`, static, CPU-only → AVX2/FMA/F16C on, AVX-512 off):
+`llama-server` loads the SHA-verified `Ternary-Bonsai-8B-Q2_0.gguf` (reported
+`n_params = 8.19B`, `n_ctx_train = 65536`) and answers `/v1/chat/completions`
+with valid JSON. The measured 8B run is published at
+[`blog/artifacts/payloads/s6-llm-validation-bonsai-8b-q2_0.json`](../../blog/artifacts/payloads/s6-llm-validation-bonsai-8b-q2_0.json)
+and walked in [Post 6](../../blog/posts/06-s6-ai-assisted-ops.md).
+
+> **Performance — the repack kernel, measured honestly.** This pin carries the
+> prism **4×4 AVX2 repack GEMM**. On an AVX2 host the runtime gate
+> (`avx2 && !avx512`) registers it automatically — no flags, no ops. On this
+> AVX2-only dev VM (8-vCPU EPYC 7763, no AVX-512/VNNI, CPU-only) it cut the
+> validation harness's end-to-end query latency **~7.6× — p50 67.8 s → 8.9 s**
+> against the same 20 queries, versus the older single-row path
+> (`PrismML-Eng/llama.cpp@9b98ac8`). The win is in prefill (GEMM) — `llama-bench`
+> reports `pp` ≈ **7.3 tok/s** vs ≈ 1.0 before — which dominates these short
+> intent-parse queries; single-token generation (GEMV) stays on the scalar AVX2
+> path (≈ 1.6 tok/s). A host-tuned `-march=native` build is faster still on
+> generation but is deliberately **not** baked into the redistributable image.
+> This is plenty for the assistant's low-QPS, deterministic-first design (the
+> LLM only augments entity extraction; it never sits on the enforcement hot
+> path); AVX-512/VNNI or a GPU build is faster again. For a heterogeneous fleet,
+> a `-DGGML_CPU_ALL_VARIANTS=ON -DGGML_BACKEND_DL=ON` build ships one binary that
+> runtime-selects the best per-host kernel (needs GCC 12+ for the AVX-512 path).
+> To bump the pin, change `LLAMACPP_COMMIT` in `Dockerfile.llamacpp` and re-run
+> the validation harness before adopting it.
+
 ### 1. Download + verify the exact GGUF
 
 [`scripts/fetch-bonsai-gguf.sh`](../../scripts/fetch-bonsai-gguf.sh) pins

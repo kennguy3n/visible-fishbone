@@ -170,7 +170,7 @@ For CI speed we serve `qwen2.5:0.5b` — a ~400 MB quantized model — as a fait
 cheap stand-in for the self-hosted Ternary-Bonsai-8B; the contract being
 validated (structured JSON intent + deterministic verification) is model-agnostic.
 
-Measured results, verbatim from
+CI results (the contract gate), verbatim from
 [`llm_validation/quality_report.json`](../artifacts/llm_validation/quality_report.json):
 
 | Metric | Result |
@@ -182,26 +182,80 @@ Measured results, verbatim from
 | Fallback agreement | 100% |
 | `ai_generated` correctness | 100% |
 | Raw-parse agreement vs deterministic ground truth | 100% |
-| Latency p50 / p95 / p99 | 890 / 1093 / 1093 ms (CPU) |
+| Latency p50 / p95 / p99 | 890 / 1093 / 1093 ms (CPU, 0.5B) |
 
 The headline number is the one that matters for the thesis: **fallback agreement
 is 100%.** Turning the model on did not change a single verdict the deterministic
 engine already computes — exactly what "AI proposes, the policy engine disposes"
 should mean in practice.
 
+### Now measured at 8B scale (not just the CI stand-in)
+
+Earlier drafts caveated that the published numbers were from the 0.5B CI
+stand-in, *not* the real 8B. That gap is now closed. We brought up the actual
+**Ternary-Bonsai-8B Q2_0** GGUF (`n_params = 8.19B`, the SHA-pinned
+`Ternary-Bonsai-8B-Q2_0.gguf`) on the turnkey
+[`Dockerfile.llamacpp`](../../deploy/ollama/Dockerfile.llamacpp) image and re-ran
+the *same* harness against it. The image is built from the pinned prism commit
+(`kennguy3n/llama.cpp@d6cea6e`, the `prism` branch HEAD; see
+[`deploy/ollama/README.md`](../../deploy/ollama/README.md)) — which carries the
+ternary CPU kernels **and** a 4×4 AVX2 repack GEMM that the runtime selects
+automatically on an AVX2 host. Results verbatim from
+[`s6-llm-validation-bonsai-8b-q2_0.json`](../artifacts/payloads/s6-llm-validation-bonsai-8b-q2_0.json):
+
+| Metric | Result (real 8B, Q2_0) |
+|---|---|
+| Queries | 20 |
+| Parse success rate (valid JSON) | 100% (20/20) |
+| Verifier pass rate | 100% |
+| Classification accuracy | 100% |
+| Verdict accuracy | 100% |
+| Fallback agreement | 100% |
+| `ai_generated` correctness | 100% |
+| Raw-parse agreement vs deterministic ground truth | 100% |
+| Latency p50 / p95 / p99 | **8.9 s / 10.8 s / 12.2 s** |
+
+**Honesty contract — read the latency in context.** This run was **CPU-bound on
+a dev VM**: an 8-vCPU AMD EPYC 7763 with **AVX2/FMA only (no AVX-512/VNNI)**,
+CPU-only (`-ngl 0`), served by the redistributable image (portable static AVX2,
+no host-specific instructions baked in). Those single-digit-second numbers are a
+**~7.6× improvement over our first 8B run** (p50 67.8 s → 8.9 s on the *same*
+hardware and the *same* 20 queries): the older pin
+(`PrismML-Eng/llama.cpp@9b98ac8`) used a single-row Q2_0 vec_dot at ~1 token/s,
+whereas this pin adds the prism **4×4 AVX2 repack GEMM**. These intent-parse
+queries are prefill-dominated, and prefill is exactly what the repack kernel
+accelerates (`llama-bench`: `pp` ≈ 7.4 tok/s vs ≈ 1.0 before); single-token
+generation still rides the scalar AVX2 GEMV path. They remain an honest *floor
+for this hardware*, not a production target — an AVX-512/VNNI host or a GPU build
+is faster again, and the assistant is low-QPS and deterministic-first by design
+(the LLM only augments free-form entity extraction and never sits on the
+enforcement hot path). What does *not* depend on the hardware — and is the
+load-bearing claim — is that every deterministic invariant held at 8B scale
+exactly as it did at 0.5B, and held identically across both kernels:
+**fallback agreement is 100%**, so turning the real 8B on (on either build)
+changed zero verdicts the deterministic engine already computes.
+
 ## Where we fall short
 
-- **CI validates a small stand-in model, not the 8B at scale.** The harness
-  proves the *contract* (valid JSON, flagged generation, verified verdicts,
-  fallback agreement) on live inference, but the published latency/quality
-  numbers are from a 0.5B model on a CPU runner. The 8B served on tenant
-  hardware will differ; the harness is built to re-run against it and publish
-  the same report.
+- **The 8B is validated, but the measured latency is still a CPU floor.** We now
+  run the contract (valid JSON, flagged generation, verified verdicts, fallback
+  agreement) against the *real* 8B and all of it holds — see the table above.
+  The repack kernel brought the dev-VM number down to ~9 s p50, but that is still
+  CPU-only on AVX2 hardware; an AVX-512/VNNI host or a GPU build will be lower
+  again, and we'd rather publish the honest CPU floor than estimate a number we
+  didn't run. Token *generation* in particular still uses the scalar GEMV path —
+  only prefill is repack-accelerated today.
 - **The pinned Q2_0 build needs custom kernels.** The 2-bit Q2_0 bake (#155)
   buys affordability, but the ternary kernels aren't in upstream llama.cpp /
   Ollama yet, so it runs on a prism-branch `llama-server` — not a stock binary.
-  We document that constraint in the Modelfile header rather than implying a
-  one-line `ollama pull` works today.
+  The dependency is now *pinned and build-verified*: `Dockerfile.llamacpp`
+  fixes `kennguy3n/llama.cpp@d6cea6e` (the `prism` branch HEAD), and that exact
+  commit, built with the image's own portable flags, compiles a `llama-server`
+  that loads the 8B Q2_0 GGUF, reports `REPACK = 1`, and serves valid JSON (the
+  run above). We document the constraint and the kernel provenance in the
+  Modelfile header and
+  [`deploy/ollama/README.md`](../../deploy/ollama/README.md) rather than implying
+  a one-line `ollama pull` works today.
 - **Intent parsing is deterministic-first by design.** The NL→query parser is a
   deterministic tokenizer that classifies intent, time windows and policy
   versions; it now spans a wider grammar (blocked-traffic, change-summary,

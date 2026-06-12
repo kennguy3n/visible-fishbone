@@ -10,7 +10,7 @@
 # │ The supported, turnkey Q2_0 server is llama.cpp llama-server — see       │
 # │ deploy/ollama/Dockerfile.llamacpp and docs/ai-model-setup.md. Use this   │
 # │ file ONLY with an Ollama built against the prism Q2_0 kernels            │
-# │ (PrismML-Eng/llama.cpp, `prism` branch). It is kept as a reference for   │
+# │ (kennguy3n/llama.cpp, `prism` branch). It is kept as a reference for     │
 # │ when those kernels land upstream.                                        │
 # └─────────────────────────────────────────────────────────────────────────┘
 #

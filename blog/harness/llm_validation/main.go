@@ -105,8 +105,12 @@ type queryReport struct {
 // report is the published quality document.
 type report struct {
 	GeneratedAt        time.Time     `json:"generated_at"`
+	GitSHA             string        `json:"git_sha,omitempty"`
 	Endpoint           string        `json:"endpoint"`
 	Model              string        `json:"model"`
+	Hardware           string        `json:"hardware,omitempty"`
+	Quant              string        `json:"quant,omitempty"`
+	Note               string        `json:"note,omitempty"`
 	LiveInference      bool          `json:"live_inference"`
 	QueryCount         int           `json:"query_count"`
 	ParseSuccessRate   float64       `json:"parse_success_rate"`
@@ -153,6 +157,18 @@ func run() error {
 		// discipline and has a configurable floor.
 		minParseSuccess = flag.Float64("min-parse-success", 0.75, "minimum LLM JSON parse success rate (live mode)")
 		flagJSON        = flag.Bool("json", false, "print the report JSON to stdout")
+		// Optional provenance, stamped verbatim into the report so a
+		// published artifact is self-describing (which build, what
+		// hardware, which quantization). Default from env so CI / the
+		// deploy README can set them without flag plumbing.
+		gitSHA   = flag.String("git-sha", os.Getenv("GIT_SHA"), "git commit recorded in the report (provenance)")
+		hardware = flag.String("hardware", os.Getenv("SNG_LLM_HARDWARE"), "hardware description recorded in the report (provenance)")
+		// Named to match the deploy's existing SNG_LLM_VARIANT knob
+		// (Dockerfile.llamacpp / docker-compose.yml / fetch-bonsai-gguf.sh
+		// --variant) so one value flows through both the build and the
+		// report. It records the model variant, i.e. the quantization.
+		variant = flag.String("variant", os.Getenv("SNG_LLM_VARIANT"), "model variant/quantization recorded in the report (e.g. Q2_0)")
+		note    = flag.String("note", os.Getenv("SNG_LLM_NOTE"), "free-form provenance note recorded in the report")
 	)
 	flag.Parse()
 
@@ -201,8 +217,12 @@ func run() error {
 
 	rep := report{
 		GeneratedAt:   time.Now().UTC(),
+		GitSHA:        strings.TrimSpace(*gitSHA),
 		Endpoint:      *endpoint,
 		Model:         resolvedModel,
+		Hardware:      strings.TrimSpace(*hardware),
+		Quant:         strings.TrimSpace(*variant),
+		Note:          strings.TrimSpace(*note),
 		LiveInference: live,
 		QueryCount:    len(queries),
 	}
@@ -523,6 +543,23 @@ func renderMarkdown(rep report) string {
 		fmt.Fprintf(&b, "Mode: **live inference** — model `%s` at `%s`.\n\n", rep.Model, rep.Endpoint)
 	} else {
 		fmt.Fprintf(&b, "Mode: **deterministic-only** (no `AI_LLM_ENDPOINT`); model-quality metrics are skipped.\n\n")
+	}
+	if rep.Quant != "" {
+		fmt.Fprintf(&b, "Quantization: `%s`. ", rep.Quant)
+	}
+	if rep.Hardware != "" {
+		fmt.Fprintf(&b, "Hardware: %s. ", rep.Hardware)
+	}
+	if rep.GitSHA != "" {
+		fmt.Fprintf(&b, "Build: `%s`. ", rep.GitSHA)
+	}
+	if rep.Quant != "" || rep.Hardware != "" || rep.GitSHA != "" {
+		fmt.Fprintf(&b, "\n\n")
+	}
+	if rep.Note != "" {
+		// Prefix every line so a multi-line note stays a valid markdown
+		// blockquote rather than only quoting the first line.
+		fmt.Fprintf(&b, "> %s\n\n", strings.ReplaceAll(rep.Note, "\n", "\n> "))
 	}
 	fmt.Fprintf(&b, "## Summary\n\n")
 	fmt.Fprintf(&b, "| Metric | Value |\n|---|---|\n")
