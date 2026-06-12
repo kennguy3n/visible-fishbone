@@ -41,6 +41,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
 use sng_dlp::{
     ContentClassifier, ContentMetadata, DlpChannel, DlpRule, PatternType, RuleAction, Severity,
 };
@@ -143,6 +144,19 @@ fn load_corpus() -> Result<Corpus, String> {
             raw.schema
         ));
     }
+    // Integrity gate: recompute the order-independent content fingerprint and
+    // compare it to the value the generator recorded. A partial write, a manual
+    // edit, or a tampered fixture would otherwise silently distort the efficacy
+    // numbers. Mismatch => refuse the corpus rather than report a wrong matrix.
+    let computed = fingerprint(&raw.entries);
+    if computed != raw.content_sha256 {
+        return Err(format!(
+            "wild corpus content_sha256 mismatch: file declares {declared} but entries hash to \
+             {computed} — the fixture is corrupt or out of date; regenerate with \
+             `go run ./blog/harness/wildcorpus`",
+            declared = raw.content_sha256,
+        ));
+    }
     let engine = base64::engine::general_purpose::STANDARD;
     let (mut yara, mut dlp) = (Vec::new(), Vec::new());
     for e in raw.entries {
@@ -169,6 +183,45 @@ fn load_corpus() -> Result<Corpus, String> {
         yara,
         dlp,
     })
+}
+
+/// Order-independent content fingerprint, byte-for-byte identical to the Go
+/// generator's `fingerprint` (blog/harness/wildcorpus): SHA-256 each entry's
+/// `label\0engine\0family\0payload_b64`, hex-encode, sort the digests, then
+/// roll a final SHA-256 over the sorted digest strings. Independent of the
+/// post-shuffle entry order, so a committed corpus verifies against a fresh
+/// `go run` regeneration regardless of ordering.
+fn fingerprint(entries: &[RawEntry]) -> String {
+    let mut digests: Vec<String> = entries
+        .iter()
+        .map(|e| {
+            let mut h = Sha256::new();
+            h.update(e.label.as_bytes());
+            h.update(b"\x00");
+            h.update(e.engine.as_bytes());
+            h.update(b"\x00");
+            h.update(e.family.as_bytes());
+            h.update(b"\x00");
+            h.update(e.payload_b64.as_bytes());
+            hex(&h.finalize())
+        })
+        .collect();
+    digests.sort();
+    let mut roll = Sha256::new();
+    for d in &digests {
+        roll.update(d.as_bytes());
+    }
+    hex(&roll.finalize())
+}
+
+/// Lowercase hex, matching Go's `encoding/hex.EncodeToString`.
+fn hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
 }
 
 // ===== sustained-load runner ===============================================
@@ -833,5 +886,47 @@ mod tests {
         // One of two eicar samples was (incorrectly) allowed.
         assert!(eicar.description.contains("1/2"));
         assert!(!eicar.correct);
+    }
+
+    fn raw(label: &str, engine: &str, family: &str, payload_b64: &str) -> RawEntry {
+        RawEntry {
+            label: label.into(),
+            engine: engine.into(),
+            family: family.into(),
+            desc: String::new(),
+            payload_b64: payload_b64.into(),
+        }
+    }
+
+    #[test]
+    fn fingerprint_is_order_independent_and_content_sensitive() {
+        let a = raw("malicious", "yara", "eicar", "QUJD");
+        let b = raw("benign", "dlp", "prose", "ZGVm");
+        let forward = fingerprint(&[
+            raw("malicious", "yara", "eicar", "QUJD"),
+            raw("benign", "dlp", "prose", "ZGVm"),
+        ]);
+        let reversed = fingerprint(&[b, a]);
+        assert_eq!(forward, reversed, "hash must not depend on entry order");
+        // Any payload change must move the fingerprint.
+        let tampered = fingerprint(&[
+            raw("malicious", "yara", "eicar", "QUJD"),
+            raw("benign", "dlp", "prose", "ZGVn"),
+        ]);
+        assert_ne!(forward, tampered, "a changed payload must change the hash");
+    }
+
+    #[test]
+    fn committed_corpus_passes_its_own_integrity_check() {
+        // Exercises the real fixture end-to-end: load_corpus() recomputes the
+        // fingerprint and compares it to the value the Go generator recorded,
+        // so this also proves the Rust and Go hashes agree byte-for-byte on the
+        // full 2k-entry corpus.
+        let corpus = load_corpus().expect("committed wild corpus must verify");
+        assert_eq!(
+            corpus.counts.total,
+            corpus.yara.len() + corpus.dlp.len(),
+            "lane split must cover every entry"
+        );
     }
 }

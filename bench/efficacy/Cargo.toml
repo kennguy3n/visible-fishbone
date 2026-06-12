@@ -54,6 +54,11 @@ serde_json = { version = "1", features = ["float_roundtrip"] }
 # sustained-load driver (`wild.rs`).
 base64 = "0.22"
 
+# Verify the committed wild corpus' content fingerprint at load time, matching
+# the order-independent SHA-256 the Go generator records (catches accidental
+# corruption / tampering before it distorts the efficacy numbers).
+sha2 = "0.10"
+
 # Async runtime — the SWG ext-authz decision path is async.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "io-util", "process"] }
 

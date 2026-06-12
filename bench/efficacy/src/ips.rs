@@ -106,6 +106,10 @@ pub(crate) async fn alerts_for_pcap(
         .args(["--set", "unix-command.enabled=no"])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
+        // Kill the child if this future is dropped (e.g. the wild IPS lane
+        // aborts in-flight tasks on its error path) so we never orphan a
+        // Suricata process still writing into a work dir about to be removed.
+        .kill_on_drop(true)
         .status()
         .await
         .map_err(|e| format!("failed to spawn suricata: {e}"))?;
