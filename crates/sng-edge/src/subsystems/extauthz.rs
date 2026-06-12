@@ -44,31 +44,75 @@ use sng_swg::{
     ExtAuthzHandlerBuilder, ExtAuthzListener, ExtAuthzListenerConfig, LocalCategoryDb, RateLimiter,
     StaticMalwareList, TelemetryEmitter, VerdictEvent,
 };
+use sng_telemetry::TelemetryEvent;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::mpsc;
 use tokio::task;
 
-/// Telemetry sink for the listener's handler. Forwards each verdict
-/// to the tracing subsystem at debug level. The richer integration —
-/// lifting [`VerdictEvent`] onto the shared telemetry pipeline via
-/// the existing [`sng_swg::telemetry::SwgEventSource`] `EventSource`
-/// impl — is intentionally out of scope for this default-off slice:
-/// it requires threading a producer-side pipeline source through the
-/// supervisor's telemetry wiring, which is a follow-up. Logging keeps
-/// the verdict stream observable without a half-built pipeline hook.
+/// Telemetry sink for the listener's handler. Publishes each ext-authz
+/// verdict into the shared edge telemetry pipeline.
+///
+/// Each verdict is lifted onto the same [`TelemetryEvent::Http`]
+/// envelope the canonical [`sng_swg::SwgEventSource`] produces and
+/// pushed onto the producer half of the pipeline channel — the exact
+/// `mpsc::Sender<TelemetryEvent>` bridge the DNS / ZTNA / SD-WAN
+/// producers use ([`crate::supervisor`]). The pipeline's strict
+/// redaction + identity enrichment then stamp the wire envelope, so an
+/// ext-authz verdict surfaces on the operator dashboard through the
+/// same dedup / redact / enrich / spool / batch path as every other
+/// event class — observable, not just debug-logged.
+///
+/// **No-PII posture.** Only [`VerdictEvent::http`] crosses onto the
+/// shared envelope; the per-request `tenant_id` / `principal_id` are
+/// deliberately dropped here, identical to
+/// [`sng_swg::SwgEventSource`]'s `recv`. The single-tenant edge wire
+/// contract is preserved (the pipeline's [`sng_telemetry::Enricher`]
+/// stamps the agent's bound identity) and no per-request identifier
+/// leaks onto the wire. The deny path's `&'static str` reason rides
+/// inside the normalised [`sng_core::events::HttpEvent`] exactly as the
+/// verdict layer produced it.
+///
+/// **Hot-path safety.** [`TelemetryEmitter::emit`] runs synchronously
+/// on the per-request verdict path Envoy is awaiting, so a full or
+/// closed pipeline channel drops the event (counted + logged) rather
+/// than blocking the verdict — the same drop-on-backpressure policy
+/// [`sng_swg::SwgEventSink`] uses.
 #[derive(Debug)]
-struct TracingVerdictEmitter;
+struct PipelineVerdictEmitter {
+    telemetry: mpsc::Sender<TelemetryEvent>,
+    /// Shared with the owning subsystem so dropped-event pressure is
+    /// surfaced on the health report rather than only in logs.
+    dropped: Arc<AtomicU64>,
+}
 
-impl TelemetryEmitter for TracingVerdictEmitter {
+impl PipelineVerdictEmitter {
+    fn new(telemetry: mpsc::Sender<TelemetryEvent>, dropped: Arc<AtomicU64>) -> Self {
+        Self { telemetry, dropped }
+    }
+}
+
+impl TelemetryEmitter for PipelineVerdictEmitter {
     fn emit(&self, event: VerdictEvent) {
-        tracing::debug!(
-            target: "sng_edge::ext_authz",
-            tenant = %event.tenant_id,
-            principal = %event.principal_id,
-            host = %event.http.host,
-            verdict = ?event.swg_verdict,
-            "ext_authz verdict"
-        );
+        // Forward only the normalised, no-PII HttpEvent onto the shared
+        // pipeline envelope (mirrors sng_swg::SwgEventSource::recv); the
+        // per-request tenant / principal never reach the wire.
+        if self
+            .telemetry
+            .try_send(TelemetryEvent::Http(event.http))
+            .is_err()
+        {
+            // Per-request hot path: never block the verdict on telemetry
+            // backpressure. Drop, count, and log so an operator can see
+            // sustained pipeline pressure on the health report.
+            let total = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+            tracing::warn!(
+                target: "sng_edge::ext_authz",
+                dropped_total = total,
+                "ext_authz telemetry channel full/closed — verdict event dropped"
+            );
+        }
     }
 }
 
@@ -83,6 +127,11 @@ pub struct ExtAuthzSubsystem {
     /// Human-readable description of the wired content-scan posture,
     /// surfaced on the health report.
     scanner_detail: String,
+    /// Count of verdict telemetry events the emitter dropped under
+    /// pipeline backpressure. Shared with the [`PipelineVerdictEmitter`]
+    /// and surfaced on the health report. Stays `0` when disabled
+    /// (no emitter is wired, so nothing is ever published).
+    telemetry_drops: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for ExtAuthzSubsystem {
@@ -92,6 +141,10 @@ impl std::fmt::Debug for ExtAuthzSubsystem {
             .field("socket", &self.listener_cfg.socket_path)
             .field("handler_set", &self.handler.is_some())
             .field("scanner", &self.scanner_detail)
+            .field(
+                "telemetry_drops",
+                &self.telemetry_drops.load(Ordering::Relaxed),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -101,20 +154,39 @@ impl ExtAuthzSubsystem {
     /// `ext_authz_enabled` is false the handler is not composed and
     /// the subsystem idles until shutdown; the listener socket is
     /// never bound, so Envoy keeps fail-opening exactly as before.
+    ///
+    /// `telemetry` is the producer half of the shared edge telemetry
+    /// pipeline channel (the same `mpsc::Sender<TelemetryEvent>` the
+    /// DNS / ZTNA / SD-WAN producers receive). When enabled, the
+    /// composed handler publishes each verdict through it via the
+    /// [`PipelineVerdictEmitter`]. When **disabled**, the sender is
+    /// dropped immediately and never used: no handler is composed, no
+    /// socket is bound, and nothing is ever emitted — behaviour is
+    /// byte-for-byte unchanged from before this subsystem existed.
     #[must_use]
-    pub fn new(cfg: &SwgConfig) -> Self {
+    pub fn new(cfg: &SwgConfig, telemetry: mpsc::Sender<TelemetryEvent>) -> Self {
         let listener_cfg = ExtAuthzListenerConfig::with_socket(cfg.ext_authz_socket.clone());
+        let telemetry_drops = Arc::new(AtomicU64::new(0));
         if !cfg.ext_authz_enabled {
+            // Drop the producer-side sender immediately: a disabled
+            // ext-authz surface holds no clone of the pipeline channel,
+            // so it can never keep the channel alive nor emit.
+            drop(telemetry);
             return Self {
                 enable: false,
                 listener_cfg,
                 handler: None,
                 scanner_detail: "disabled".into(),
+                telemetry_drops,
             };
         }
 
         let (scanner, scanner_detail) = build_scanner(cfg);
-        let handler = match build_handler(scanner) {
+        let emitter: Arc<dyn TelemetryEmitter> = Arc::new(PipelineVerdictEmitter::new(
+            telemetry,
+            Arc::clone(&telemetry_drops),
+        ));
+        let handler = match build_handler(scanner, emitter) {
             Ok(h) => Some(h),
             Err(e) => {
                 // The deps we feed the builder are always present, so
@@ -135,6 +207,7 @@ impl ExtAuthzSubsystem {
             listener_cfg,
             handler,
             scanner_detail,
+            telemetry_drops,
         }
     }
 
@@ -144,12 +217,24 @@ impl ExtAuthzSubsystem {
     pub fn socket_path(&self) -> &std::path::Path {
         &self.listener_cfg.socket_path
     }
+
+    /// Number of verdict telemetry events dropped under pipeline
+    /// backpressure since boot. Always `0` while disabled. Exposed for
+    /// diagnostics / tests and surfaced on the health report.
+    #[must_use]
+    pub fn telemetry_drops(&self) -> u64 {
+        self.telemetry_drops.load(Ordering::Relaxed)
+    }
 }
 
 /// Compose the verdict handler from the always-required deps plus the
 /// safe-browsing deny policy and (optionally) the content scanner.
+/// `telemetry` is the verdict emitter the composed handler invokes on
+/// every decision; the caller wires the pipeline-integrated
+/// [`PipelineVerdictEmitter`] here.
 fn build_handler(
     scanner: Option<Arc<dyn ContentScanner>>,
+    telemetry: Arc<dyn TelemetryEmitter>,
 ) -> Result<ExtAuthzHandler, sng_swg::SwgError> {
     let mut builder = ExtAuthzHandlerBuilder::new()
         // Empty seed sets — the policy bundle hot-swaps real rules in.
@@ -159,7 +244,7 @@ fn build_handler(
         // Effectively unlimited until a per-tenant rate policy lands,
         // so rate limiting never silently masks a verdict.
         .with_rate_limiter(RateLimiter::with_system_clock(1_000_000.0, 1_000_000.0))
-        .with_telemetry(Arc::new(TracingVerdictEmitter))
+        .with_telemetry(telemetry)
         // The opt-in safe-browsing baseline: deny the malware /
         // phishing / etc. category subtree out of the box.
         .with_deny_policy(CategoryDenyPolicy::safe_browsing_defaults());
@@ -273,9 +358,10 @@ impl HealthCheck for ExtAuthzSubsystem {
             name,
             status: HealthStatus::Up,
             detail: Some(format!(
-                "socket={}, {}",
+                "socket={}, {}, telemetry_drops={}",
                 self.listener_cfg.socket_path.display(),
-                self.scanner_detail
+                self.scanner_detail,
+                self.telemetry_drops.load(Ordering::Relaxed)
             )),
         }
     }
@@ -294,6 +380,32 @@ mod tests {
             ext_authz_socket: dir.join("ext_authz.sock"),
             ..SwgConfig::default()
         }
+    }
+
+    fn telemetry_channel() -> (mpsc::Sender<TelemetryEvent>, mpsc::Receiver<TelemetryEvent>) {
+        mpsc::channel(16)
+    }
+
+    /// Build a subsystem wired to a fresh telemetry channel, returning
+    /// the receiver so a test can assert what reached the pipeline.
+    fn new_sub(cfg: &SwgConfig) -> (ExtAuthzSubsystem, mpsc::Receiver<TelemetryEvent>) {
+        let (tx, rx) = telemetry_channel();
+        (ExtAuthzSubsystem::new(cfg, tx), rx)
+    }
+
+    fn sample_verdict_event() -> VerdictEvent {
+        use sng_swg::{RequestContext, Verdict as SwgVerdict};
+        let ctx = RequestContext {
+            tenant_id: "t1".into(),
+            principal_id: "p1".into(),
+            method: "get".into(),
+            scheme: "https".into(),
+            host: "example.com".into(),
+            path: "/".into(),
+            sni: Some("example.com".into()),
+            file_hash: None,
+        };
+        VerdictEvent::from_context(&ctx, SwgVerdict::allow_uncategorized())
     }
 
     #[test]
@@ -326,15 +438,55 @@ mod tests {
     #[test]
     fn disabled_has_no_handler_and_idles() {
         let dir = tempdir().unwrap();
-        let sub = ExtAuthzSubsystem::new(&base_cfg(dir.path()));
+        let (sub, _rx) = new_sub(&base_cfg(dir.path()));
         assert!(!sub.enable);
         assert!(sub.handler.is_none());
+    }
+
+    #[test]
+    fn emitter_publishes_no_pii_http_event_onto_pipeline() {
+        let (tx, mut rx) = telemetry_channel();
+        let drops = Arc::new(AtomicU64::new(0));
+        let emitter = PipelineVerdictEmitter::new(tx, Arc::clone(&drops));
+        emitter.emit(sample_verdict_event());
+        match rx.try_recv() {
+            Ok(TelemetryEvent::Http(http)) => {
+                assert_eq!(http.host, "example.com");
+                assert_eq!(http.verdict, sng_core::envelope::Verdict::Allow);
+                // status_code is request-side (Envoy stamps the wire
+                // response), so it is 0 — confirms the normalised shape.
+                assert_eq!(http.status_code, 0);
+            }
+            other => panic!("expected Http telemetry event, got {other:?}"),
+        }
+        assert_eq!(drops.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn emitter_drops_and_counts_when_pipeline_closed() {
+        let (tx, rx) = telemetry_channel();
+        // Closing the consumer makes every try_send fail — the hot path
+        // must drop + count rather than block or panic.
+        drop(rx);
+        let drops = Arc::new(AtomicU64::new(0));
+        let emitter = PipelineVerdictEmitter::new(tx, Arc::clone(&drops));
+        emitter.emit(sample_verdict_event());
+        emitter.emit(sample_verdict_event());
+        assert_eq!(drops.load(Ordering::Relaxed), 2);
     }
 
     #[tokio::test]
     async fn disabled_subsystem_idles_until_shutdown() {
         let dir = tempdir().unwrap();
-        let sub = ExtAuthzSubsystem::new(&base_cfg(dir.path()));
+        let (sub, mut rx) = new_sub(&base_cfg(dir.path()));
+        // The disabled subsystem dropped its sender clone in `new`, so
+        // the only producer is gone: the channel is closed and yields
+        // nothing. This is the byte-for-byte "emit nothing when off"
+        // guarantee at the wiring level.
+        assert!(
+            rx.recv().await.is_none(),
+            "disabled subsystem must hold no sender and emit nothing"
+        );
         let (trigger, signal) = ShutdownTrigger::new();
         let handle = <ExtAuthzSubsystem as Subsystem>::start(&sub, signal)
             .await
@@ -344,6 +496,7 @@ mod tests {
         let health = <ExtAuthzSubsystem as HealthCheck>::check(&sub).await;
         assert_eq!(health.status, HealthStatus::Up);
         assert!(health.detail.unwrap().contains("enabled=false"));
+        assert_eq!(sub.telemetry_drops(), 0);
         // The socket was never bound.
         assert!(!sub.socket_path().exists());
     }
@@ -355,7 +508,7 @@ mod tests {
             ext_authz_enabled: true,
             ..base_cfg(dir.path())
         };
-        let sub = ExtAuthzSubsystem::new(&cfg);
+        let (sub, _rx) = new_sub(&cfg);
         assert!(sub.enable);
         assert!(sub.handler.is_some());
         assert_eq!(sub.scanner_detail, "clamav=off");
@@ -370,7 +523,7 @@ mod tests {
             clamav_endpoint: "tcp://127.0.0.1:3310".into(),
             ..base_cfg(dir.path())
         };
-        let sub = ExtAuthzSubsystem::new(&cfg);
+        let (sub, _rx) = new_sub(&cfg);
         assert!(sub.handler.is_some());
         assert!(sub.scanner_detail.contains("clamav=on"));
         assert!(sub.scanner_detail.contains("127.0.0.1:3310"));
@@ -383,7 +536,7 @@ mod tests {
             ext_authz_enabled: true,
             ..base_cfg(dir.path())
         };
-        let sub = ExtAuthzSubsystem::new(&cfg);
+        let (sub, _rx) = new_sub(&cfg);
         let socket = sub.socket_path().to_path_buf();
         let (trigger, signal) = ShutdownTrigger::new();
         let handle = <ExtAuthzSubsystem as Subsystem>::start(&sub, signal)
@@ -426,5 +579,58 @@ mod tests {
         handle.await.unwrap().unwrap();
         // Socket unlinked on shutdown.
         assert!(!socket.exists());
+    }
+
+    #[tokio::test]
+    async fn enabled_listener_publishes_verdict_into_pipeline() {
+        let dir = tempdir().unwrap();
+        let cfg = SwgConfig {
+            ext_authz_enabled: true,
+            ..base_cfg(dir.path())
+        };
+        let (sub, mut rx) = new_sub(&cfg);
+        let socket = sub.socket_path().to_path_buf();
+        let (trigger, signal) = ShutdownTrigger::new();
+        let handle = <ExtAuthzSubsystem as Subsystem>::start(&sub, signal)
+            .await
+            .unwrap();
+
+        // Poll until the listener has bound the socket.
+        let mut bound = false;
+        for _ in 0..50 {
+            if socket.exists() {
+                bound = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(bound, "listener did not bind socket");
+
+        // Drive one request end-to-end through the listener.
+        let mut client = tokio::net::UnixStream::connect(&socket).await.unwrap();
+        let req = r#"{"headers":[[":method","get"],[":scheme","https"],[":path","/"],["host","example.com"],["x-sng-tenant","t1"],["x-sng-principal","p1"]]}"#;
+        let frame = format!(
+            "POST /ext_authz HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{}",
+            req.len(),
+            req
+        );
+        client.write_all(frame.as_bytes()).await.unwrap();
+        let mut tmp = [0u8; 1024];
+        let _ = client.read(&mut tmp).await.unwrap();
+
+        // The verdict reached the shared telemetry pipeline, normalised
+        // onto the no-PII HttpEvent envelope.
+        let ev = tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .expect("verdict telemetry within budget")
+            .expect("a telemetry event");
+        match ev {
+            TelemetryEvent::Http(http) => assert_eq!(http.host, "example.com"),
+            other => panic!("expected Http telemetry event, got {other:?}"),
+        }
+        assert_eq!(sub.telemetry_drops(), 0);
+
+        trigger.fire();
+        handle.await.unwrap().unwrap();
     }
 }

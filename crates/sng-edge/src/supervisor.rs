@@ -351,7 +351,7 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
     //     piece the SWG manager intentionally does not own. Reads
     //     the same `[swg]` slice; default-off so an upgrade is
     //     behaviourally inert until `swg.ext_authz_enabled` is set.
-    let ext_authz = Arc::new(ExtAuthzSubsystem::new(&cfg.swg));
+    let ext_authz = Arc::new(ExtAuthzSubsystem::new(&cfg.swg, telemetry_tx.clone()));
 
     // 8. ZTNA. The edge config's `max_inflight` maps onto
     //    ZtnaServiceConfig's `max_sessions` — both name the
