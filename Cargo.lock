@@ -3333,6 +3333,7 @@ dependencies = [
  "hex",
  "ort",
  "pretty_assertions",
+ "rand 0.8.6",
  "regex",
  "serde",
  "serde_json",
@@ -3343,6 +3344,7 @@ dependencies = [
  "tokio",
  "tracing",
  "unicode-normalization",
+ "zeroize",
 ]
 
 [[package]]

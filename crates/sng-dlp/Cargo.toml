@@ -57,6 +57,14 @@ aho-corasick = { workspace = true }
 # control plane's `norm.NFC`.
 unicode-normalization = { workspace = true }
 
+# Exact-Data-Match (`edm`) keeps only salted HMAC-SHA256 digests of a
+# tenant's sensitive records — never the plaintext. `zeroize` wipes the
+# transient normalized-plaintext buffers as soon as they are hashed at
+# registration time, and `rand` supplies cryptographically-random
+# per-dataset salts. Both are already workspace dependencies.
+zeroize = { workspace = true }
+rand = { workspace = true }
+
 # On-device ONNX inference for the ML-NER classifier
 # (`ml_classifier`). The signed policy bundle ships a small ONNX NER
 # head; `ort` runs it locally (no network) inside the inspection hot

@@ -26,6 +26,13 @@ pub enum PatternType {
     /// A SimHash document fingerprint — `pattern_data` is the
     /// 16-char hex of the registered 64-bit SimHash.
     Fingerprint,
+    /// An Exact-Data-Match against an operator-registered dataset of
+    /// sensitive records — `pattern_data` is the
+    /// [`crate::edm::EdmDataset`] id to match against. The dataset ships
+    /// in the policy as salted digests only (never plaintext); the
+    /// classifier fires this rule when the content contains any
+    /// registered record. See [`crate::edm`].
+    Edm,
     /// A Microsoft Information Protection sensitivity label —
     /// `pattern_data` is the label id to match against the content
     /// metadata's declared labels.
@@ -49,6 +56,7 @@ impl PatternType {
             Self::Regex => "regex",
             Self::Keyword => "keyword",
             Self::Fingerprint => "fingerprint",
+            Self::Edm => "edm",
             Self::MipLabel => "mip_label",
             Self::MlNer => "ml_ner",
         }
@@ -126,6 +134,7 @@ pub struct DlpRule {
     ///   name (`ssn_us`, `credit_card`, …).
     /// * `Keyword` — a comma-separated keyword dictionary.
     /// * `Fingerprint` — 16-char hex of the 64-bit SimHash.
+    /// * `Edm` — the [`crate::edm::EdmDataset`] id to match against.
     /// * `MipLabel` — the sensitivity label id.
     /// * `MlNer` — comma-separated entity classes to detect
     ///   (`person_name`, `address`, …).
