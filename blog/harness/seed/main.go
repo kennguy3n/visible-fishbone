@@ -837,6 +837,7 @@ func scenarioPolicyGraph() map[string]any {
 			{"name": "geo-sanctioned"},
 			{"name": "business-hours"},
 			{"name": "saas-m365"},
+			{"name": "rt-voip"},
 		},
 		"rules": []map[string]any{
 			{"id": "ngfw-allow-corp-apps", "domain": "ngfw", "verb": "allow",
@@ -862,7 +863,24 @@ func scenarioPolicyGraph() map[string]any {
 				"description":    "Deny access from sanctioned geographies"},
 			{"id": "sdwan-steer-saas", "domain": "sdwan", "verb": "steer",
 				"predicate_refs": []string{"saas-m365"},
-				"description":    "Steer M365 SaaS onto the interactive class"},
+				"description":    "Prioritise: steer M365 SaaS onto the business-critical SLA class (<=50ms latency, <=0.1% loss)",
+				// QoS class + SLA targets are carried as schema-extension
+				// fields; the typed Rule preserves them verbatim into
+				// Rule.Extra and re-emits them deterministically into the
+				// compiled SD-WAN bundle (class strings match the Rust
+				// SlaClass::as_str contract in crate::sla).
+				"params": map[string]any{
+					"sla_class":      "business-critical",
+					"max_latency_ms": 50,
+					"max_loss_pct":   0.1,
+				}},
+			{"id": "sdwan-steer-voip", "domain": "sdwan", "verb": "steer",
+				"predicate_refs": []string{"rt-voip"},
+				"description":    "Prioritise: steer real-time VoIP/UC onto the latency/jitter-sensitive class (<=15ms jitter)",
+				"params": map[string]any{
+					"sla_class":     "real-time",
+					"max_jitter_ms": 15,
+				}},
 			{"id": "dlp-inspect-uploads", "domain": "dlp", "verb": "inspect",
 				"subject_refs": []string{"managed-devices"},
 				"description":  "Inspect uploads from managed devices for regulated data"},
@@ -884,6 +902,7 @@ func scenarioPolicyGraph() map[string]any {
 			{"id": "guest-net", "label": "Guest network"},
 			{"id": "private-apps", "label": "Private apps"},
 			{"id": "saas-m365", "label": "M365 SaaS"},
+			{"id": "rt-voip", "label": "Real-time VoIP/UC"},
 			{"id": "ngfw", "label": "NGFW"},
 			{"id": "swg", "label": "Secure Web Gateway"},
 			{"id": "dns", "label": "DNS security"},
@@ -903,6 +922,7 @@ func scenarioPolicyGraph() map[string]any {
 			{"source": "ztna", "target": "private-apps"},
 			{"source": "saas-m365", "target": "inline_casb"},
 			{"source": "saas-m365", "target": "sdwan"},
+			{"source": "rt-voip", "target": "sdwan"},
 		},
 	}
 }

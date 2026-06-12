@@ -48,6 +48,18 @@ const initech = "b6520bda-e7bb-4af9-9c53-7b0051eae65b"
 // set with a mix of enabled and disabled automated-response runbooks.
 const globex = "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a"
 
+// Multi-country / multi-industry tenants — each resolves to a distinct
+// compliance regime via the smart-default policy-template engine, so
+// their applied baselines are the evidence for the jurisdiction story:
+//   britannia (GB) -> uk-dpa, maple (CA) -> ca-pipeda,
+//   outback   (AU) -> au-privacy, lumiere (FR) -> eu-gdpr.
+const (
+	britannia = "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
+	maple     = "cef9c934-507c-4adc-985b-48f3cbe274b0"
+	outback   = "37619610-53b4-4eab-87f9-45ba902d30c2"
+	lumiere   = "890486df-98bd-482b-85a8-af361706676f"
+)
+
 // postSpec captures a live POST response. Bodies are fixed so reruns
 // against the same seeded stack reproduce the same files.
 type postSpec struct {
@@ -100,6 +112,17 @@ func main() {
 		{"s6-acme-posture-report", "/api/v1/tenants/" + acme + "/ai/reports/posture"},
 		{"s6-acme-playbooks", "/api/v1/tenants/" + acme + "/playbooks"},
 		{"s6-globex-playbooks", "/api/v1/tenants/" + globex + "/playbooks"},
+		// Smart-default policy templates — global catalog + per-tenant
+		// applied baselines across five compliance regimes. These are the
+		// multi-country / multi-industry evidence: one (industry, country)
+		// selection compiles to a jurisdiction-correct baseline graph.
+		{"policy-templates-catalog", "/api/v1/policy-templates"},
+		{"pt-applied-acme-us-baseline", "/api/v1/tenants/" + acme + "/policy-templates/applied"},
+		{"pt-applied-initech-eu-gdpr", "/api/v1/tenants/" + initech + "/policy-templates/applied"},
+		{"pt-applied-britannia-uk-dpa", "/api/v1/tenants/" + britannia + "/policy-templates/applied"},
+		{"pt-applied-maple-ca-pipeda", "/api/v1/tenants/" + maple + "/policy-templates/applied"},
+		{"pt-applied-outback-au-privacy", "/api/v1/tenants/" + outback + "/policy-templates/applied"},
+		{"pt-applied-lumiere-eu-gdpr", "/api/v1/tenants/" + lumiere + "/policy-templates/applied"},
 		// S7 — cost / metering / compliance / integrations
 		{"s7-acme-usage", "/api/v1/tenants/" + acme + "/usage"},
 		{"s7-acme-usage-history", "/api/v1/tenants/" + acme + "/usage/history"},
@@ -148,6 +171,19 @@ func main() {
 			"s6-acme-nl-policy-query",
 			"/api/v1/tenants/" + acme + "/ai/query",
 			map[string]any{"question": "Can user finance access app private-apps from a managed device?"},
+		},
+		// Smart-default preview: the (industry, country) -> regime + graph
+		// resolution, captured as request/response pairs so the blog can
+		// show both sides of the deterministic baseline render.
+		{
+			"pt-preview-finance-de",
+			"/api/v1/tenants/" + initech + "/policy-templates/preview",
+			map[string]any{"industry": "finance", "country": "DE"},
+		},
+		{
+			"pt-preview-healthcare-ca",
+			"/api/v1/tenants/" + maple + "/policy-templates/preview",
+			map[string]any{"industry": "healthcare", "country": "CA"},
 		},
 	}
 	for _, p := range posts {
