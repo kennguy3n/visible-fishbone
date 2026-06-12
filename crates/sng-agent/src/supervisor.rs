@@ -302,77 +302,28 @@ pub fn build_agent(cli: &Cli, cfg: &AgentConfig) -> Result<BuiltAgent, AgentBuil
     };
     let ztna = Arc::new(ZtnaSubsystem::new(ztna_cfg, telemetry_tx));
 
-    // 5. PAL traffic capture.
-    let capture: Arc<dyn TrafficCapture> = match capture_backend {
-        PalBackend::InMemory => Arc::new(InMemoryCapture::new()),
-        // Already rejected above; the match is exhaustive
-        // so the compiler doesn't force a `_ => unreachable!()`
-        // arm that would hide a future variant.
-        PalBackend::Native => {
-            return Err(AgentBuildError::UnsupportedPalBackend {
-                selector: "capture",
-                backend: capture_backend,
-            });
-        }
-    };
-    let pal_capture = Arc::new(PalCaptureSubsystem::new(
-        &cfg.capture,
-        capture,
-        Arc::clone(policy_eval.engine()),
-        telemetry.pipeline_handle(),
-    ));
-
-    // 6. PAL posture collector.
-    let collector: Arc<dyn PostureCollector> = match posture_backend {
-        PalBackend::InMemory => Arc::new(UnknownPostureCollector),
-        PalBackend::Native => {
-            return Err(AgentBuildError::UnsupportedPalBackend {
-                selector: "posture",
-                backend: posture_backend,
-            });
-        }
-    };
-    let pal_posture = Arc::new(PalPostureSubsystem::new(
-        &cfg.posture,
-        collector,
+    // 5-7. PAL adapters (traffic capture, posture, tunnel),
+    //      built together. Backends were validated up front by
+    //      `resolve_pal_backends`.
+    let PalSubsystems {
+        capture: pal_capture,
+        posture: pal_posture,
+        tunnel: pal_tunnel,
+        desired_tunnels_tx,
+    } = build_pal_subsystems(
+        cfg,
         platform,
-        cfg.identity.device_id.to_string(),
-        telemetry.pipeline_handle(),
-    ));
-
-    // 7. PAL tunnel provider.
-    let provider: Arc<dyn TunnelProvider> = match tunnel_backend {
-        PalBackend::InMemory => Arc::new(InMemoryTunnelProvider::new()),
-        PalBackend::Native => {
-            return Err(AgentBuildError::UnsupportedPalBackend {
-                selector: "tunnel",
-                backend: tunnel_backend,
-            });
-        }
-    };
-    // Desired tunnel set is currently empty at boot — the
-    // control plane delivers the actual set in a follow-up
-    // PR (Tasks 25-27, end-to-end integration). The sender
-    // is kept on BuiltAgent so the watch channel is not
-    // dropped while the subsystem is still subscribed.
-    let (desired_tunnels_tx, desired_tunnels_rx) = watch::channel(Vec::new());
-    let pal_tunnel = Arc::new(PalTunnelSubsystem::new(
-        &cfg.tunnel,
-        provider,
-        desired_tunnels_rx,
-    ));
+        (capture_backend, posture_backend, tunnel_backend),
+        &policy_eval,
+        &telemetry,
+    )?;
 
     // 8. Endpoint DLP — opt-in; `None` unless `[dlp] enabled`. Shares
     //    the engine built above so the bundle publisher and the
     //    channel interceptors operate on the same live policy.
-    let dlp = match &dlp_engine {
-        Some(engine) => Some(build_dlp_subsystem(
-            &cfg.dlp,
-            telemetry.pipeline_handle(),
-            Arc::clone(engine),
-        )?),
-        None => None,
-    };
+    let dlp = dlp_engine.as_ref().map(|engine| {
+        build_dlp_subsystem(&cfg.dlp, telemetry.pipeline_handle(), Arc::clone(engine))
+    });
 
     // Register subsystems onto the builder we created above.
     // Boot order matters: telemetry + comms first so producer
@@ -401,6 +352,99 @@ pub fn build_agent(cli: &Cli, cfg: &AgentConfig) -> Result<BuiltAgent, AgentBuil
         pal_posture,
         pal_tunnel,
         dlp,
+        desired_tunnels_tx,
+    })
+}
+
+/// The three PAL adapter subsystems plus the desired-tunnel
+/// sender, built together by [`build_pal_subsystems`] so
+/// [`build_agent`] stays focused on top-level wiring.
+struct PalSubsystems {
+    capture: Arc<PalCaptureSubsystem>,
+    posture: Arc<PalPostureSubsystem>,
+    tunnel: Arc<PalTunnelSubsystem>,
+    desired_tunnels_tx: watch::Sender<Vec<TunnelConfig>>,
+}
+
+/// Build the PAL traffic-capture, posture, and tunnel
+/// subsystems (steps 5-7 of agent boot) from their already
+/// validated backends.
+///
+/// `backends` is the tuple produced by [`resolve_pal_backends`],
+/// which rejects any unsupported adapter up front — so the
+/// `Native` arms here are defensive: they keep each match
+/// exhaustive without an `unreachable!()` that would mask a
+/// future variant.
+fn build_pal_subsystems(
+    cfg: &AgentConfig,
+    platform: Platform,
+    backends: (PalBackend, PalBackend, PalBackend),
+    policy_eval: &Arc<PolicyEvalSubsystem>,
+    telemetry: &Arc<TelemetrySubsystem>,
+) -> Result<PalSubsystems, AgentBuildError> {
+    let (capture_backend, posture_backend, tunnel_backend) = backends;
+
+    // 5. PAL traffic capture.
+    let capture: Arc<dyn TrafficCapture> = match capture_backend {
+        PalBackend::InMemory => Arc::new(InMemoryCapture::new()),
+        PalBackend::Native => {
+            return Err(AgentBuildError::UnsupportedPalBackend {
+                selector: "capture",
+                backend: capture_backend,
+            });
+        }
+    };
+    let capture = Arc::new(PalCaptureSubsystem::new(
+        &cfg.capture,
+        capture,
+        Arc::clone(policy_eval.engine()),
+        telemetry.pipeline_handle(),
+    ));
+
+    // 6. PAL posture collector.
+    let collector: Arc<dyn PostureCollector> = match posture_backend {
+        PalBackend::InMemory => Arc::new(UnknownPostureCollector),
+        PalBackend::Native => {
+            return Err(AgentBuildError::UnsupportedPalBackend {
+                selector: "posture",
+                backend: posture_backend,
+            });
+        }
+    };
+    let posture = Arc::new(PalPostureSubsystem::new(
+        &cfg.posture,
+        collector,
+        platform,
+        cfg.identity.device_id.to_string(),
+        telemetry.pipeline_handle(),
+    ));
+
+    // 7. PAL tunnel provider.
+    let provider: Arc<dyn TunnelProvider> = match tunnel_backend {
+        PalBackend::InMemory => Arc::new(InMemoryTunnelProvider::new()),
+        PalBackend::Native => {
+            return Err(AgentBuildError::UnsupportedPalBackend {
+                selector: "tunnel",
+                backend: tunnel_backend,
+            });
+        }
+    };
+    // Desired tunnel set is currently empty at boot — the
+    // control plane delivers the actual set in a follow-up
+    // PR (Tasks 25-27, end-to-end integration). The sender
+    // is kept on BuiltAgent so the watch channel is not
+    // dropped while the subsystem is still subscribed.
+    let (desired_tunnels_tx, desired_tunnels_rx) = watch::channel(Vec::new());
+    let tunnel = Arc::new(PalTunnelSubsystem::new(
+        &cfg.tunnel,
+        provider,
+        desired_tunnels_rx,
+    ));
+
+    Ok(PalSubsystems {
+        capture,
+        posture,
+        tunnel,
         desired_tunnels_tx,
     })
 }
@@ -434,7 +478,7 @@ fn build_dlp_subsystem(
     cfg: &crate::config::DlpConfig,
     telemetry: sng_telemetry::PipelineHandle,
     engine: Arc<DlpEngine>,
-) -> Result<Arc<DlpSubsystem>, AgentBuildError> {
+) -> Arc<DlpSubsystem> {
     let mut interceptors: Vec<Arc<dyn ChannelInterceptor>> = Vec::new();
     // File-write channel: native edge-triggered watcher over the
     // configured sensitive directories (each per-OS backend falls back
@@ -447,13 +491,13 @@ fn build_dlp_subsystem(
     // own config flag so an operator can pare the channel set down.
     push_native_interceptors(cfg, &mut interceptors);
 
-    Ok(Arc::new(DlpSubsystem::new(
+    Arc::new(DlpSubsystem::new(
         engine,
         interceptors,
         Arc::new(TracingDlpSink),
         telemetry,
         cfg.idle_sleep,
-    )))
+    ))
 }
 
 /// Build the file-write interceptor for the host OS. On the three
