@@ -294,6 +294,30 @@ impl std::fmt::Debug for ZtnaService {
     }
 }
 
+/// A verdict plus whether the brain actually resolved a verified user
+/// subject while producing it.
+///
+/// [`ZtnaService::evaluate`] returns only the [`ZtnaDecision`], because
+/// the access-path producer routes on the verdict alone and the service
+/// already records `identity_verified` on its own telemetry. Callers
+/// that build their *own* telemetry from the verdict (e.g. the mobile
+/// core) need the same signal the service computes internally —
+/// `identity.is_some()` at decision time — rather than re-deriving it
+/// from the reason, which cannot distinguish a degraded device/context
+/// deny (no subject, denied before the `IdentityAbsent` gate) from a
+/// fully-resolved one. [`ZtnaService::evaluate_detailed`] surfaces it so
+/// there is a single source of truth.
+#[derive(Debug, Clone)]
+pub struct EvalOutcome {
+    /// The access verdict.
+    pub decision: ZtnaDecision,
+    /// `true` only when a user subject was resolved before the verdict
+    /// was produced (step 4). Every pre-policy deny (revocation,
+    /// unknown app, unenrolled device, identity-not-found) and the
+    /// degraded subjectless path report `false`.
+    pub identity_verified: bool,
+}
+
 impl ZtnaService {
     /// Stats handle.
     #[must_use]
@@ -410,6 +434,20 @@ impl ZtnaService {
     /// data path then treats the error as a deny.
     pub fn evaluate(&self, request: &AccessRequest) -> Result<ZtnaDecision, ZtnaError> {
         self.evaluate_reported(request, EvalReport::Emit)
+            .map(|o| o.decision)
+    }
+
+    /// Like [`Self::evaluate`], but also returns whether a verified user
+    /// subject was resolved while producing the verdict (see
+    /// [`EvalOutcome`]). For callers that build their own telemetry from
+    /// the verdict and need the authoritative `identity_verified` signal
+    /// instead of re-deriving it from the reason.
+    ///
+    /// # Errors
+    ///
+    /// Same provider-resolution errors as [`Self::evaluate`].
+    pub fn evaluate_detailed(&self, request: &AccessRequest) -> Result<EvalOutcome, ZtnaError> {
+        self.evaluate_reported(request, EvalReport::Emit)
     }
 
     /// Re-evaluate `request` for the continuous re-evaluation loop
@@ -440,13 +478,28 @@ impl ZtnaService {
     /// the corresponding revocation reason.
     pub fn evaluate_for_reeval(&self, request: &AccessRequest) -> Result<ZtnaDecision, ZtnaError> {
         self.evaluate_reported(request, EvalReport::Quiet)
+            .map(|o| o.decision)
+    }
+
+    /// Like [`Self::evaluate_for_reeval`], but also returns whether a
+    /// verified user subject was resolved (see [`EvalOutcome`]). The
+    /// sweep counterpart to [`Self::evaluate_detailed`].
+    ///
+    /// # Errors
+    ///
+    /// Same provider-resolution errors as [`Self::evaluate_for_reeval`].
+    pub fn evaluate_for_reeval_detailed(
+        &self,
+        request: &AccessRequest,
+    ) -> Result<EvalOutcome, ZtnaError> {
+        self.evaluate_reported(request, EvalReport::Quiet)
     }
 
     fn evaluate_reported(
         &self,
         request: &AccessRequest,
         report: EvalReport,
-    ) -> Result<ZtnaDecision, ZtnaError> {
+    ) -> Result<EvalOutcome, ZtnaError> {
         // Step 0: revocation. Checked before any provider
         // resolution so a compromised device or off-boarded
         // user is cut off immediately — even if its app /
@@ -471,7 +524,10 @@ impl ZtnaService {
                 &decision,
                 false,
             );
-            return Ok(decision);
+            return Ok(EvalOutcome {
+                decision,
+                identity_verified: false,
+            });
         }
 
         // Step 1: resolve the app.
@@ -572,7 +628,10 @@ impl ZtnaService {
             identity.is_some(),
         );
 
-        Ok(decision)
+        Ok(EvalOutcome {
+            decision,
+            identity_verified: identity.is_some(),
+        })
     }
 
     /// Record a finished decision on the access-path observability:
@@ -982,6 +1041,65 @@ mod tests {
         assert!(!d.allow);
         assert_eq!(d.reason, ZtnaDecisionReason::DevicePostureInsufficient);
         assert_eq!(d.posture_result, PostureResult::Fail);
+    }
+
+    #[test]
+    fn evaluate_detailed_reports_identity_verified_truthfully() {
+        // `evaluate_detailed` surfaces the authoritative
+        // `identity.is_some()` the service computes for its own
+        // telemetry, so a caller building its own telemetry (the mobile
+        // core) need not — and must not — re-derive it from the reason.
+        let now = 1_000_000;
+
+        // (a) Resolved subject -> identity_verified = true.
+        let (svc, _rx) = mk_service_degraded(
+            vec![app("wiki", PostureRequirement::BASIC, &["eng"])],
+            vec![device("dev-1", TENANT, pristine_posture(now))],
+            vec![user("alice", TENANT, &["eng"], now)],
+            policy(TENANT),
+            4,
+        );
+        let out = svc
+            .evaluate_detailed(&req("wiki", "dev-1", "alice", now))
+            .expect("resolved subject");
+        assert!(out.decision.allow);
+        assert!(out.identity_verified);
+
+        // (b) No subject, every other gate passes -> IdentityAbsent,
+        // identity_verified = false.
+        let (svc, _rx) = mk_service_degraded(
+            vec![app("wiki", PostureRequirement::BASIC, &["eng"])],
+            vec![device("dev-1", TENANT, pristine_posture(now))],
+            vec![],
+            policy(TENANT),
+            4,
+        );
+        let out = svc
+            .evaluate_detailed(&req("wiki", "dev-1", "alice", now))
+            .expect("degraded ok-deny");
+        assert_eq!(out.decision.reason, ZtnaDecisionReason::IdentityAbsent);
+        assert!(!out.identity_verified);
+
+        // (c) No subject AND a device gate fails -> the verdict denies on
+        // the device reason, but identity_verified is still false. This
+        // is the subcase a reason-only heuristic (`reason !=
+        // IdentityAbsent`) would mislabel as verified, which is exactly
+        // why the signal is surfaced rather than re-derived.
+        let (svc, _rx) = mk_service_degraded(
+            vec![app("admin", PostureRequirement::STRICT, &[])],
+            vec![device("dev-1", TENANT, DevicePosture::unmanaged())],
+            vec![],
+            policy(TENANT),
+            4,
+        );
+        let out = svc
+            .evaluate_detailed(&req("admin", "dev-1", "alice", now))
+            .expect("degraded device-fail ok-deny");
+        assert_eq!(
+            out.decision.reason,
+            ZtnaDecisionReason::DevicePostureInsufficient
+        );
+        assert!(!out.identity_verified);
     }
 
     #[test]
