@@ -8,6 +8,7 @@ import {
   useQueryClient,
   type UseQueryResult,
 } from "@tanstack/react-query";
+import { isAxiosError } from "axios";
 import { sngRequest } from "@/api/http-client";
 import type {
   BudgetOverride,
@@ -570,12 +571,7 @@ export function useAppliedPolicyTemplate(
       }).catch((err: unknown) => {
         // 404 simply means the tenant has no baseline yet — surface it as
         // null rather than an error so the wizard can show an empty state.
-        if (
-          typeof err === "object" &&
-          err !== null &&
-          "status" in err &&
-          (err as { status?: number }).status === 404
-        ) {
+        if (isAxiosError(err) && err.response?.status === 404) {
           return null;
         }
         throw err;
