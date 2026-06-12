@@ -12,6 +12,7 @@
 
 use crate::ai_app::AiAppPolicy;
 use crate::channels::{ChannelConfig, DlpChannel};
+use crate::edm::EdmDataset;
 use crate::error::{DlpError, DlpResult};
 use crate::rules::DlpRule;
 use serde::{Deserialize, Serialize};
@@ -44,6 +45,13 @@ pub struct DlpPolicy {
     /// The active detection rules.
     #[serde(default)]
     pub rules: Vec<DlpRule>,
+    /// Operator-registered Exact-Data-Match datasets, keyed by id from
+    /// an [`crate::rules::PatternType::Edm`] rule's `pattern_data`. Each
+    /// carries only salted digests (never plaintext); see
+    /// [`crate::edm`]. Empty (the default, and the shape older control
+    /// planes emit) means no EDM datasets are registered.
+    #[serde(default)]
+    pub edm_datasets: Vec<EdmDataset>,
     /// Per-channel configuration. Channels absent from this map use
     /// [`ChannelConfig::default`] (enabled, no action floor).
     #[serde(default)]
@@ -77,6 +85,7 @@ impl Default for DlpPolicy {
             target: default_target(),
             domain: default_domain(),
             rules: Vec::new(),
+            edm_datasets: Vec::new(),
             channels: BTreeMap::new(),
             ai_app: None,
         }
@@ -148,6 +157,33 @@ impl DlpPolicy {
                 )));
             }
         }
+        // EDM dataset ids must be unique, and every `Edm` rule must
+        // reference a registered dataset (fail-closed: a dangling
+        // reference is a malformed bundle, not a silently-disabled rule).
+        let mut edm_ids = BTreeSet::new();
+        for ds in &self.edm_datasets {
+            if ds.id.is_empty() {
+                return Err(DlpError::PolicyInvalid(
+                    "edm dataset with empty id".to_owned(),
+                ));
+            }
+            if !edm_ids.insert(ds.id.as_str()) {
+                return Err(DlpError::PolicyInvalid(format!(
+                    "duplicate edm dataset id {:?}",
+                    ds.id
+                )));
+            }
+        }
+        for rule in &self.rules {
+            if rule.pattern_type == crate::rules::PatternType::Edm
+                && !edm_ids.contains(rule.pattern_data.as_str())
+            {
+                return Err(DlpError::PolicyInvalid(format!(
+                    "edm rule {:?} references unknown dataset {:?}",
+                    rule.id, rule.pattern_data
+                )));
+            }
+        }
         if let Some(ai) = &self.ai_app {
             for (name, v) in [
                 ("block_confidence", ai.block_confidence),
@@ -180,6 +216,12 @@ impl DlpPolicy {
     #[must_use]
     pub fn rules(&self) -> &[DlpRule] {
         &self.rules
+    }
+
+    /// The registered EDM datasets (salted digests only).
+    #[must_use]
+    pub fn edm_datasets(&self) -> &[EdmDataset] {
+        &self.edm_datasets
     }
 }
 
@@ -223,6 +265,7 @@ mod tests {
             target: BundleTarget::Endpoint,
             domain: EnforcementDomain::Dlp,
             rules: vec![sample_rule("r1"), sample_rule("r2")],
+            edm_datasets: Vec::new(),
             channels,
             ai_app: Some(AiAppPolicy::default()),
         };
@@ -241,6 +284,60 @@ mod tests {
         assert_eq!(policy.schema_version, 1);
         // Unconfigured channels default to enabled.
         assert!(policy.is_channel_enabled(DlpChannel::Clipboard));
+    }
+
+    fn edm_rule(id: &str, dataset: &str) -> DlpRule {
+        DlpRule {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            pattern_type: PatternType::Edm,
+            pattern_data: dataset.to_owned(),
+            severity: Severity::Critical,
+            action: RuleAction::Block,
+            channels: vec![DlpChannel::BrowserUpload],
+        }
+    }
+
+    #[test]
+    fn valid_edm_policy_with_registered_dataset_passes_validation() {
+        let salt = crate::edm::random_salt();
+        let ds = EdmDataset::register("customers", "Customer PII", &salt, &["jane public"]);
+        let policy = DlpPolicy {
+            rules: vec![edm_rule("r-edm", "customers")],
+            edm_datasets: vec![ds],
+            ..DlpPolicy::default()
+        };
+        policy.validate().expect("valid edm policy");
+        // And it round-trips through the bundle JSON unchanged.
+        let bytes = policy.to_bundle_json().expect("encode");
+        let back = DlpPolicy::from_bundle_json(&bytes).expect("decode");
+        assert_eq!(policy, back);
+    }
+
+    #[test]
+    fn edm_rule_referencing_unregistered_dataset_is_rejected() {
+        let policy = DlpPolicy {
+            rules: vec![edm_rule("r-edm", "does-not-exist")],
+            edm_datasets: Vec::new(),
+            ..DlpPolicy::default()
+        };
+        let err = policy.validate().unwrap_err();
+        assert_eq!(err.code(), crate::error::DlpErrorCode::PolicyInvalid);
+    }
+
+    #[test]
+    fn duplicate_edm_dataset_ids_are_rejected() {
+        let salt = crate::edm::random_salt();
+        let policy = DlpPolicy {
+            rules: Vec::new(),
+            edm_datasets: vec![
+                EdmDataset::register("dup", "A", &salt, &["alpha beta"]),
+                EdmDataset::register("dup", "B", &salt, &["gamma delta"]),
+            ],
+            ..DlpPolicy::default()
+        };
+        let err = policy.validate().unwrap_err();
+        assert_eq!(err.code(), crate::error::DlpErrorCode::PolicyInvalid);
     }
 
     #[test]

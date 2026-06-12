@@ -195,8 +195,12 @@ impl DlpEngine {
     /// See [`Self::new`].
     pub fn with_limit(policy: DlpPolicy, max_scan_bytes: usize) -> DlpResult<Self> {
         let model = MlNerDetector::fallback_only();
-        let classifier =
-            ContentClassifier::compile_with_model(policy.rules(), max_scan_bytes, model.clone())?;
+        let classifier = ContentClassifier::compile_with_model_edm(
+            policy.rules(),
+            policy.edm_datasets(),
+            max_scan_bytes,
+            model.clone(),
+        )?;
         Ok(Self {
             state: ArcSwap::from_pointee(EngineState {
                 policy,
@@ -223,8 +227,12 @@ impl DlpEngine {
         let current = self.state.load();
         let max_scan_bytes = current.max_scan_bytes;
         let model = current.model.clone();
-        let classifier =
-            ContentClassifier::compile_with_model(policy.rules(), max_scan_bytes, model.clone())?;
+        let classifier = ContentClassifier::compile_with_model_edm(
+            policy.rules(),
+            policy.edm_datasets(),
+            max_scan_bytes,
+            model.clone(),
+        )?;
         // `install` rotates only the rule set + channel config. The
         // AI-app detector and the ML-NER model are orthogonal
         // dimensions, each mutated by its own atomic path
@@ -282,8 +290,12 @@ impl DlpEngine {
         let current = self.state.load();
         let max_scan_bytes = current.max_scan_bytes;
         let model = current.model.clone();
-        let classifier =
-            ContentClassifier::compile_with_model(policy.rules(), max_scan_bytes, model.clone())?;
+        let classifier = ContentClassifier::compile_with_model_edm(
+            policy.rules(),
+            policy.edm_datasets(),
+            max_scan_bytes,
+            model.clone(),
+        )?;
         // `ai_app_policy` is the authoritative detector config for this
         // swap; keep the stored policy struct's field in lock-step so
         // `current_policy().ai_app` and `ai_app_policy()` can never
@@ -371,8 +383,9 @@ impl DlpEngine {
         // The channel classifier is immutable and not `Clone`, so the
         // snapshot is rebuilt by recompiling the active policy against
         // the same model — only the AI-app detector actually changes.
-        let classifier = ContentClassifier::compile_with_model(
+        let classifier = ContentClassifier::compile_with_model_edm(
             current.policy.rules(),
+            current.policy.edm_datasets(),
             max_scan_bytes,
             model.clone(),
         )?;
@@ -403,8 +416,9 @@ impl DlpEngine {
     fn recompile_with_model(&self, detector: MlNerDetector) -> DlpResult<()> {
         let _guard = self.write_guard();
         let current = self.state.load();
-        let classifier = ContentClassifier::compile_with_model(
+        let classifier = ContentClassifier::compile_with_model_edm(
             current.policy.rules(),
+            current.policy.edm_datasets(),
             current.max_scan_bytes,
             detector.clone(),
         )?;

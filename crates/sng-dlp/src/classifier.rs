@@ -35,7 +35,9 @@
 
 use crate::channels::DlpChannel;
 use crate::doc_classifier::{DocumentClassification, classify_document};
+use crate::edm::{CompiledEdm, EdmDataset};
 use crate::error::{DlpError, DlpResult};
+use crate::fingerprint::FingerprintIndex;
 use crate::ml_classifier::{EntityClass, MlNerDetector};
 use crate::rules::{DlpRule, PatternType, RuleAction, Severity};
 use crate::validators;
@@ -219,6 +221,13 @@ pub const DEFAULT_MAX_SCAN_BYTES: usize = 1024 * 1024;
 /// is considered a match. Matches the Go side's 0.8 cut-off in
 /// `internal/service/dlp/engine/fingerprint.go`.
 pub const FINGERPRINT_SIMILARITY_THRESHOLD: f64 = 0.8;
+
+/// The Hamming-distance form of [`FINGERPRINT_SIMILARITY_THRESHOLD`]
+/// over 64-bit codes: `sim = 1 - d/64 >= 0.8` is exactly `d <= 12`.
+/// The fingerprint index searches by distance, so this is the radius
+/// it queries; [`fingerprint_distance_threshold_matches_similarity`]
+/// pins the two forms together so they can never drift.
+pub const FINGERPRINT_MAX_HAMMING_DISTANCE: u32 = 12;
 
 /// The managed/compliance posture of the device the content event was
 /// observed on, as reported by the agent's posture check. Feeds
@@ -497,14 +506,19 @@ struct RegexEntry {
     proximity: Option<ProximityAnalyzer>,
 }
 
-struct FingerprintEntry {
-    meta: RuleMeta,
-    simhash: u64,
-}
-
 struct MipEntry {
     meta: RuleMeta,
     label: String,
+}
+
+/// A compiled `Edm` rule: the rule metadata plus the index of the
+/// [`CompiledEdm`] dataset it matches against in
+/// [`ContentClassifier::edm_datasets`]. Several rules may target the
+/// same dataset, so the dataset is compiled once and referenced by
+/// index.
+struct EdmEntry {
+    meta: RuleMeta,
+    dataset: usize,
 }
 
 /// A compiled `MlNer` rule: the entity classes it fires on. The NER
@@ -527,7 +541,16 @@ pub struct ContentClassifier {
     keyword_ac: Option<AhoCorasick>,
     keyword_pat_to_rule: Vec<usize>,
     keyword_metas: Vec<RuleMeta>,
-    fingerprint_entries: Vec<FingerprintEntry>,
+    /// Rule metadata for each registered fingerprint, indexed by the
+    /// registration id returned from `fingerprint_index`. The index and
+    /// this vector are populated in lock-step so id `i` describes
+    /// `fingerprint_metas[i]`.
+    fingerprint_metas: Vec<RuleMeta>,
+    fingerprint_index: FingerprintIndex,
+    edm_entries: Vec<EdmEntry>,
+    /// EDM datasets compiled once and shared by index across
+    /// [`EdmEntry`]s; salted digests only, never plaintext.
+    edm_datasets: Vec<CompiledEdm>,
     mip_entries: Vec<MipEntry>,
     ml_entries: Vec<MlEntry>,
     ml_detector: MlNerDetector,
@@ -539,7 +562,9 @@ impl std::fmt::Debug for ContentClassifier {
         f.debug_struct("ContentClassifier")
             .field("regex_rules", &self.regex_entries.len())
             .field("keyword_patterns", &self.keyword_pat_to_rule.len())
-            .field("fingerprint_rules", &self.fingerprint_entries.len())
+            .field("fingerprint_rules", &self.fingerprint_metas.len())
+            .field("edm_rules", &self.edm_entries.len())
+            .field("edm_datasets", &self.edm_datasets.len())
             .field("mip_rules", &self.mip_entries.len())
             .field("ml_rules", &self.ml_entries.len())
             .field("ml_model_loaded", &self.ml_detector.has_model())
@@ -588,18 +613,60 @@ impl ContentClassifier {
     // would scatter the shared accumulators (the regex pattern list,
     // keyword dictionary, and metas) across functions and obscure that
     // they are populated together, for no real readability gain.
-    #[allow(clippy::too_many_lines)]
     pub fn compile_with_model(
         rules: &[DlpRule],
         max_scan_bytes: usize,
         ml_detector: MlNerDetector,
     ) -> DlpResult<Self> {
+        Self::compile_with_model_edm(rules, &[], max_scan_bytes, ml_detector)
+    }
+
+    /// Compile `rules` with explicit EDM datasets, a scan ceiling, and a
+    /// specific [`MlNerDetector`]. This is the full builder the engine
+    /// uses on every policy rotation: it threads the policy's registered
+    /// [`EdmDataset`]s in so `Edm` rules resolve to a compiled matcher,
+    /// alongside the ML model, atomically with the rule set.
+    ///
+    /// # Errors
+    /// Returns [`DlpError::RuleCompile`] if a regex rule's pattern fails
+    /// to compile, a keyword rule has an empty dictionary, a fingerprint
+    /// rule's `pattern_data` is not valid 16-char hex, an `Edm` rule
+    /// references a dataset absent from `edm_datasets` (or one that fails
+    /// to decode), or an `MlNer` rule lists no / unknown entity classes.
+    // Allow `clippy::too_many_lines`: this is a single linear dispatch
+    // that builds every detector's rule table in one pass over
+    // `rules`. Splitting the per-pattern arms into separate helpers
+    // would scatter the shared accumulators across functions.
+    #[allow(clippy::too_many_lines)]
+    pub fn compile_with_model_edm(
+        rules: &[DlpRule],
+        edm_datasets: &[EdmDataset],
+        max_scan_bytes: usize,
+        ml_detector: MlNerDetector,
+    ) -> DlpResult<Self> {
+        // Compile each registered EDM dataset once, indexed by id, so
+        // several `Edm` rules can share one matcher.
+        let mut edm_compiled = Vec::with_capacity(edm_datasets.len());
+        let mut edm_index: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::with_capacity(edm_datasets.len());
+        for dataset in edm_datasets {
+            let compiled =
+                CompiledEdm::from_dataset(dataset).map_err(|e| DlpError::RuleCompile {
+                    rule_id: format!("<edm:{}>", dataset.id),
+                    reason: e.to_string(),
+                })?;
+            edm_index.insert(dataset.id.as_str(), edm_compiled.len());
+            edm_compiled.push(compiled);
+        }
+        let mut edm_entries = Vec::new();
+
         let mut regex_entries = Vec::new();
         let mut regex_patterns = Vec::new();
         let mut keyword_patterns: Vec<String> = Vec::new();
         let mut keyword_pat_to_rule = Vec::new();
         let mut keyword_metas = Vec::new();
-        let mut fingerprint_entries = Vec::new();
+        let mut fingerprint_metas = Vec::new();
+        let mut fingerprint_index = FingerprintIndex::new();
         let mut mip_entries = Vec::new();
         let mut ml_entries = Vec::new();
 
@@ -665,7 +732,29 @@ impl ContentClassifier {
                             ),
                         }
                     })?;
-                    fingerprint_entries.push(FingerprintEntry { meta, simhash });
+                    // Register the code and record its metadata at the
+                    // matching id so a hit can be attributed back to the
+                    // rule. Registration ids are dense and sequential,
+                    // so they align with `fingerprint_metas` indices.
+                    let id = fingerprint_index.register(simhash);
+                    debug_assert_eq!(id as usize, fingerprint_metas.len());
+                    fingerprint_metas.push(meta);
+                }
+                PatternType::Edm => {
+                    // Resolve the rule's dataset reference to a compiled
+                    // matcher index. A dangling reference is a malformed
+                    // bundle (the policy validator also rejects it) — fail
+                    // the compile rather than silently disabling the rule.
+                    let &dataset = edm_index.get(rule.pattern_data.as_str()).ok_or_else(|| {
+                        DlpError::RuleCompile {
+                            rule_id: rule.id.clone(),
+                            reason: format!(
+                                "edm rule references unknown dataset {:?}",
+                                rule.pattern_data
+                            ),
+                        }
+                    })?;
+                    edm_entries.push(EdmEntry { meta, dataset });
                 }
                 PatternType::MipLabel => {
                     mip_entries.push(MipEntry {
@@ -712,7 +801,10 @@ impl ContentClassifier {
             keyword_ac,
             keyword_pat_to_rule,
             keyword_metas,
-            fingerprint_entries,
+            fingerprint_metas,
+            fingerprint_index,
+            edm_entries,
+            edm_datasets: edm_compiled,
             mip_entries,
             ml_entries,
             ml_detector,
@@ -725,7 +817,8 @@ impl ContentClassifier {
     pub fn rule_count(&self) -> usize {
         self.regex_entries.len()
             + self.keyword_metas.len()
-            + self.fingerprint_entries.len()
+            + self.fingerprint_metas.len()
+            + self.edm_entries.len()
             + self.mip_entries.len()
             + self.ml_entries.len()
     }
@@ -788,6 +881,7 @@ impl ContentClassifier {
         self.scan_regex(channel, &text, &mut matches);
         self.scan_keywords(channel, &text, &mut matches);
         self.scan_fingerprints(channel, content, &mut matches);
+        self.scan_edm(channel, &text, &mut matches);
         self.scan_mip_labels(channel, metadata, &mut matches);
         self.scan_ml(channel, &text, &mut matches);
 
@@ -886,22 +980,60 @@ impl ContentClassifier {
     }
 
     fn scan_fingerprints(&self, channel: DlpChannel, content: &[u8], out: &mut Vec<RuleMatch>) {
-        if self.fingerprint_entries.is_empty() {
+        if self.fingerprint_index.is_empty() {
             return;
         }
         let hash = simhash(content);
-        for entry in &self.fingerprint_entries {
+        // Multi-index nearest-neighbour search: returns every registered
+        // fingerprint within the distance threshold in time independent
+        // of the registry size, then we attribute each to its rule.
+        for neighbor in self
+            .fingerprint_index
+            .query_within(hash, FINGERPRINT_MAX_HAMMING_DISTANCE)
+        {
+            let meta = &self.fingerprint_metas[neighbor.id as usize];
+            if !meta.applies_to(channel) {
+                continue;
+            }
+            out.push(RuleMatch {
+                rule_id: meta.id.clone(),
+                pattern_type: PatternType::Fingerprint,
+                severity: meta.severity,
+                action: meta.action,
+                confidence: 1.0 - f64::from(neighbor.distance) / 64.0,
+                offset: None,
+                length: None,
+            });
+        }
+    }
+
+    /// Run every `Edm` rule against `text`. For each rule whose dataset
+    /// contains a record present in the content, emit a match carrying
+    /// only metadata — never the matched text or its offset, so an EDM
+    /// hit can no more leak the sensitive value than the dataset itself
+    /// stores it. A dataset compiled once is shared by id across rules,
+    /// so each distinct dataset is scanned at most once even when several
+    /// rules target it.
+    fn scan_edm(&self, channel: DlpChannel, text: &str, out: &mut Vec<RuleMatch>) {
+        if self.edm_entries.is_empty() {
+            return;
+        }
+        // Cache the per-dataset decision so N rules sharing one dataset
+        // cost one scan, not N.
+        let mut decided: Vec<Option<bool>> = vec![None; self.edm_datasets.len()];
+        for entry in &self.edm_entries {
             if !entry.meta.applies_to(channel) {
                 continue;
             }
-            let sim = hamming_similarity(hash, entry.simhash);
-            if sim >= FINGERPRINT_SIMILARITY_THRESHOLD {
+            let hit = *decided[entry.dataset]
+                .get_or_insert_with(|| self.edm_datasets[entry.dataset].matches(text));
+            if hit {
                 out.push(RuleMatch {
                     rule_id: entry.meta.id.clone(),
-                    pattern_type: PatternType::Fingerprint,
+                    pattern_type: PatternType::Edm,
                     severity: entry.meta.severity,
                     action: entry.meta.action,
-                    confidence: sim,
+                    confidence: CONFIDENCE_VALIDATED,
                     offset: None,
                     length: None,
                 });
@@ -1539,6 +1671,177 @@ mod tests {
             ContentClassifier::compile(&[rule("bad", PatternType::Regex, "(", RuleAction::Log)])
                 .unwrap_err();
         assert_eq!(err.code(), crate::error::DlpErrorCode::RuleCompileFailed);
+    }
+
+    #[test]
+    fn edm_rule_matches_registered_record_through_classifier() {
+        use crate::edm::{EdmDataset, random_salt};
+        // An operator registers a tiny PII table as salted hashes only.
+        let salt = random_salt();
+        let dataset = EdmDataset::register(
+            "customers",
+            "Customer PII",
+            &salt,
+            &["Jane Q Public", "4111 1111 1111 1111"],
+        );
+        let rules = [rule(
+            "edm-customers",
+            PatternType::Edm,
+            "customers",
+            RuleAction::Block,
+        )];
+        let c = ContentClassifier::compile_with_model_edm(
+            &rules,
+            std::slice::from_ref(&dataset),
+            DEFAULT_MAX_SCAN_BYTES,
+            MlNerDetector::fallback_only(),
+        )
+        .expect("compile");
+
+        // Content embedding a registered record (with surrounding text
+        // and different spacing/case) fires the rule, metadata only.
+        let res = c.classify(
+            DlpChannel::BrowserUpload,
+            b"please contact jane  q   public about the account",
+            &ContentMetadata::default(),
+        );
+        assert!(res.is_match());
+        assert_eq!(res.matches[0].rule_id, "edm-customers");
+        assert_eq!(res.matches[0].pattern_type, PatternType::Edm);
+        assert_eq!(res.matches[0].offset, None);
+        assert_eq!(res.matches[0].length, None);
+
+        // Content with no registered record does not.
+        let miss = c.classify(
+            DlpChannel::BrowserUpload,
+            b"the quick brown fox jumps over the lazy dog",
+            &ContentMetadata::default(),
+        );
+        assert!(!miss.is_match());
+    }
+
+    #[test]
+    fn edm_rule_referencing_unknown_dataset_is_a_compile_error() {
+        let err = ContentClassifier::compile_with_model_edm(
+            &[rule(
+                "edm",
+                PatternType::Edm,
+                "no-such-dataset",
+                RuleAction::Block,
+            )],
+            &[],
+            DEFAULT_MAX_SCAN_BYTES,
+            MlNerDetector::fallback_only(),
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), crate::error::DlpErrorCode::RuleCompileFailed);
+    }
+
+    #[test]
+    fn one_dataset_shared_by_many_rules_scans_once() {
+        use crate::edm::{EdmDataset, random_salt};
+        let salt = random_salt();
+        let dataset = EdmDataset::register("shared", "Shared", &salt, &["acme secret widget"]);
+        // Two rules target the same dataset; both should fire.
+        let rules = [
+            rule("edm-a", PatternType::Edm, "shared", RuleAction::Warn),
+            rule("edm-b", PatternType::Edm, "shared", RuleAction::Block),
+        ];
+        let c = ContentClassifier::compile_with_model_edm(
+            &rules,
+            std::slice::from_ref(&dataset),
+            DEFAULT_MAX_SCAN_BYTES,
+            MlNerDetector::fallback_only(),
+        )
+        .expect("compile");
+        let res = c.classify(
+            DlpChannel::BrowserUpload,
+            b"the ACME Secret Widget leaked",
+            &ContentMetadata::default(),
+        );
+        let mut ids: Vec<&str> = res.matches.iter().map(|m| m.rule_id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["edm-a", "edm-b"]);
+    }
+
+    #[test]
+    fn fingerprint_index_scales_to_many_registered_documents() {
+        // Register a large corpus of distinct document fingerprints as
+        // individual `Fingerprint` rules, then confirm that a real
+        // document whose SimHash is a near-duplicate of exactly one of
+        // them is attributed to that rule — and that the bulk-loaded
+        // multi-index path is what the classifier ends up holding. This
+        // exercises the at-scale fingerprint path end-to-end through the
+        // public classify() API.
+        let canary = "alpha bravo charlie delta echo foxtrot golf hotel india juliet \
+                      kilo lima mike november oscar papa quebec romeo sierra tango";
+        let canary_hash = simhash(canary.as_bytes());
+
+        let mut rules = Vec::new();
+        let mut seed = 0x1234_5678_9abc_def0u64;
+        let mut next = || {
+            // SplitMix64 — deterministic, no RNG dependency.
+            seed = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut z = seed;
+            z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            z ^ (z >> 31)
+        };
+        for i in 0..5_000u32 {
+            // Slot 2_500 is the canary's fingerprint; every other slot
+            // is a random code far from it.
+            let code = if i == 2_500 { canary_hash } else { next() };
+            rules.push(rule(
+                &format!("fp-{i}"),
+                PatternType::Fingerprint,
+                &format!("{code:016x}"),
+                RuleAction::Warn,
+            ));
+        }
+        let c = ContentClassifier::compile(&rules).expect("compile");
+        assert_eq!(c.fingerprint_index.len(), 5_000);
+
+        // Exact duplicate of the canary document classifies straight
+        // through the public API to the canary's rule at full confidence,
+        // even with 5_000 fingerprints registered.
+        let res = c.classify(
+            DlpChannel::FileWrite,
+            canary.as_bytes(),
+            &ContentMetadata::default(),
+        );
+        assert!(res.is_match(), "exact duplicate must match at scale");
+        assert!(
+            res.matches.iter().all(|m| m.rule_id == "fp-2500"),
+            "duplicate attributed only to the canary's rule, got {:?}",
+            res.matches.iter().map(|m| &m.rule_id).collect::<Vec<_>>()
+        );
+        assert_eq!(res.matches[0].confidence, 1.0);
+
+        // A near-duplicate — the canary fingerprint with 6 flipped bits,
+        // well inside the distance-12 threshold — is still attributed to
+        // exactly the canary's rule by the multi-index search the
+        // classifier holds, and to no other of the 5_000 rules.
+        let near = canary_hash ^ 0b0001_0110_1101u64; // 6 set bits
+        let hits = c
+            .fingerprint_index
+            .query_within(near, FINGERPRINT_MAX_HAMMING_DISTANCE);
+        let hit_rules: Vec<&str> = hits
+            .iter()
+            .map(|n| c.fingerprint_metas[n.id as usize].id.as_str())
+            .collect();
+        assert_eq!(
+            hit_rules,
+            ["fp-2500"],
+            "near-duplicate must resolve to exactly the canary's rule"
+        );
+
+        // An unrelated document matches none of the 5_000 fingerprints.
+        let unrelated = c.classify(
+            DlpChannel::FileWrite,
+            b"completely unrelated text with no shared structure whatsoever zzz",
+            &ContentMetadata::default(),
+        );
+        assert!(!unrelated.is_match(), "unrelated document must not match");
     }
 
     #[test]

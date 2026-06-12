@@ -39,15 +39,22 @@ pub mod australia;
 pub mod belgium;
 pub mod brazil;
 pub mod canada;
+pub mod estonia;
 pub mod europe;
+pub mod finland;
 pub mod france;
 pub mod germany;
 pub mod indonesia;
 pub mod italy;
 pub mod netherlands;
+pub mod norway;
 pub mod philippines;
 pub mod poland;
+pub mod portugal;
+pub mod south_africa;
 pub mod spain;
+pub mod sweden;
+pub mod turkey;
 pub mod uk;
 
 use crate::validators;
@@ -85,7 +92,7 @@ pub struct JurisdictionDetector {
 /// (in addition to the generic builtins in
 /// [`crate::classifier::builtin_pattern`]).
 ///
-/// The list is intentionally exhaustive across the 26 supported
+/// The list is intentionally exhaustive across the 33 supported
 /// national / regional identifiers so a single lookup answers
 /// "pattern, validator, and context for `name`".
 // The body is one flat `JurisdictionDetector` literal per supported
@@ -99,15 +106,22 @@ pub fn registry() -> &'static [JurisdictionDetector] {
     use belgium::belgium_national_number;
     use brazil::{brazil_cnpj, brazil_cpf};
     use canada::canada_sin;
+    use estonia::estonia_isikukood;
     use europe::{eu_iban, eu_vat};
+    use finland::finland_hetu;
     use france::france_insee;
     use germany::germany_personalausweis;
     use indonesia::indonesia_nik;
     use italy::italy_codice_fiscale;
     use netherlands::netherlands_bsn;
+    use norway::norway_fodselsnummer;
     use philippines::philippines_umid;
     use poland::poland_pesel;
+    use portugal::portugal_nif;
+    use south_africa::south_africa_id;
     use spain::{spain_dni, spain_nie};
+    use sweden::sweden_personnummer;
+    use turkey::turkey_tckn;
     use uk::{uk_nhs, uk_nino};
 
     &[
@@ -383,6 +397,94 @@ pub fn registry() -> &'static [JurisdictionDetector] {
             validator: Some(validators::saudi_national_id),
             context: &["الهوية الوطنية", "national id", "إقامة", "iqama"],
         },
+        // --- Sweden ---
+        JurisdictionDetector {
+            name: "sweden_personnummer",
+            jurisdiction: "SE",
+            title: "Sweden Personnummer",
+            pattern: r"\b(?:\d{2})?\d{6}[-+]?\d{4}\b",
+            validator: Some(sweden_personnummer),
+            context: &["personnummer", "personal number", "född", "skatteverket"],
+        },
+        // --- Norway ---
+        JurisdictionDetector {
+            name: "norway_fodselsnummer",
+            jurisdiction: "NO",
+            title: "Norway Fødselsnummer (birth number)",
+            pattern: r"\b\d{6}\s?\d{5}\b",
+            validator: Some(norway_fodselsnummer),
+            context: &[
+                "fødselsnummer",
+                "fodselsnummer",
+                "birth number",
+                "personnummer",
+                "folkeregister",
+            ],
+        },
+        // --- Finland ---
+        JurisdictionDetector {
+            name: "finland_hetu",
+            jurisdiction: "FI",
+            title: "Finland Henkilötunnus (HETU)",
+            pattern: r"\b\d{6}[-+ABCDEFUVWXY]\d{3}[0-9A-Y]\b",
+            validator: Some(finland_hetu),
+            context: &[
+                "henkilötunnus",
+                "henkilotunnus",
+                "hetu",
+                "personal identity code",
+                "social security",
+            ],
+        },
+        // --- Portugal ---
+        JurisdictionDetector {
+            name: "portugal_nif",
+            jurisdiction: "PT",
+            title: "Portugal NIF / NIPC (tax number)",
+            pattern: r"\b\d{3}[.\s]?\d{3}[.\s]?\d{3}\b",
+            validator: Some(portugal_nif),
+            context: &[
+                "nif",
+                "nipc",
+                "número de identificação fiscal",
+                "numero de identificacao fiscal",
+                "contribuinte",
+                "tax number",
+            ],
+        },
+        // --- Turkey ---
+        JurisdictionDetector {
+            name: "turkey_tckn",
+            jurisdiction: "TR",
+            title: "Turkey T.C. Kimlik No",
+            pattern: r"\b[1-9]\d{10}\b",
+            validator: Some(turkey_tckn),
+            context: &[
+                "kimlik",
+                "tc kimlik",
+                "t.c. kimlik",
+                "kimlik no",
+                "identity number",
+            ],
+        },
+        // --- South Africa ---
+        JurisdictionDetector {
+            name: "south_africa_id",
+            jurisdiction: "ZA",
+            title: "South Africa National ID",
+            pattern: r"\b\d{6}\s?\d{4}\s?\d{3}\b",
+            validator: Some(south_africa_id),
+            context: &["id number", "identity number", "south african id", "rsa id"],
+        },
+        // --- Estonia ---
+        JurisdictionDetector {
+            name: "estonia_isikukood",
+            jurisdiction: "EE",
+            title: "Estonia Isikukood (personal code)",
+            pattern: r"\b[1-8]\d{10}\b",
+            validator: Some(estonia_isikukood),
+            context: &["isikukood", "personal code", "personal identification"],
+        },
     ]
 }
 
@@ -425,7 +527,7 @@ mod tests {
     use regex::Regex;
 
     /// The full set of jurisdiction identifiers the catalog must support.
-    const EXPECTED_NAMES: [&str; 26] = [
+    const EXPECTED_NAMES: [&str; 33] = [
         "ni_uk",
         "uk_nhs",
         "canada_sin",
@@ -452,6 +554,13 @@ mod tests {
         "indonesia_nik",
         "uae_emirates_id",
         "saudi_id",
+        "sweden_personnummer",
+        "norway_fodselsnummer",
+        "finland_hetu",
+        "portugal_nif",
+        "turkey_tckn",
+        "south_africa_id",
+        "estonia_isikukood",
     ];
 
     #[test]
