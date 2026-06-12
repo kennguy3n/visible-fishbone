@@ -352,7 +352,17 @@ func (g *Google) ScanContent(
 		userToken, err := googleSAToken(ctx, g.client, g.userAgent, "google",
 			sec.PrivateKeyJSON, googleDriveScope, email, g.now(), g.tokenURL)
 		if err != nil {
-			return err
+			// Impersonating a suspended/deleted user (or one outside the
+			// delegation grant) fails at token exchange. Skip that user
+			// and record it rather than aborting the whole org scan.
+			if yerr := yield(ctx, casb.ContentObject{
+				ID:       "user:" + email,
+				Owner:    email,
+				FetchErr: fmt.Errorf("mint delegated token: %w", err),
+			}); yerr != nil {
+				return yerr
+			}
+			continue
 		}
 		if err := g.scanUserDrive(ctx, userToken, email, opts, yield); err != nil {
 			return err

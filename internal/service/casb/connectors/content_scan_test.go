@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/golang-jwt/jwt/v5"
+
 	"github.com/kennguy3n/visible-fishbone/internal/service/casb"
 )
 
@@ -353,6 +355,60 @@ func TestGoogle_ScanContent(t *testing.T) {
 	bin, ok := c.byID("bin1")
 	if !ok || string(bin.Content) != "binblob" {
 		t.Fatalf("bin1 = %+v", bin)
+	}
+}
+
+func TestGoogle_ScanContent_PerUserTokenFailureResilient(t *testing.T) {
+	// bad@co.com cannot be impersonated (token exchange 401). The scan
+	// must skip that user and still inspect good@co.com's Drive.
+	fx := newGoogleSAFixture(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/token"):
+			_ = r.ParseForm()
+			claims := jwt.MapClaims{}
+			_, _, _ = jwt.NewParser().ParseUnverified(r.PostFormValue("assertion"), claims)
+			if sub, _ := claims["sub"].(string); sub == "bad@co.com" {
+				http.Error(w, `{"error":"unauthorized_client"}`, http.StatusUnauthorized)
+				return
+			}
+			json.NewEncoder(w).Encode(map[string]any{"access_token": "minted-access-token", "expires_in": 3600})
+		case strings.Contains(r.URL.Path, "/admin/directory/v1/users"):
+			json.NewEncoder(w).Encode(map[string]any{
+				"users": []map[string]any{{"primaryEmail": "good@co.com"}, {"primaryEmail": "bad@co.com"}},
+			})
+		case strings.HasSuffix(r.URL.Path, "/drive/v3/files"):
+			json.NewEncoder(w).Encode(map[string]any{
+				"files": []map[string]any{
+					{"id": "bin1", "name": "data.bin", "mimeType": "application/octet-stream",
+						"size": "3", "modifiedTime": "2025-06-02T10:00:00Z"},
+				},
+			})
+		case r.URL.Path == "/drive/v3/files/bin1":
+			w.Write([]byte("xyz"))
+		default:
+			http.Error(w, "not found: "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	g := NewGoogle(srv.Client(), "test-ua")
+	g.baseURL = srv.URL
+	g.driveBaseURL = srv.URL
+	g.tokenURL = srv.URL + "/token"
+	cfg, sec := googleTestCfg(t, fx)
+
+	var c scanCollector
+	if err := g.ScanContent(context.Background(), cfg, sec, casb.ContentScanOptions{}, c.yield); err != nil {
+		t.Fatalf("ScanContent should skip the un-impersonatable user, got: %v", err)
+	}
+	bin, ok := c.byID("bin1")
+	if !ok || string(bin.Content) != "xyz" {
+		t.Fatalf("good user's file not scanned: %+v", bin)
+	}
+	bad, ok := c.byID("user:bad@co.com")
+	if !ok || bad.FetchErr == nil {
+		t.Fatalf("expected FetchErr placeholder for bad@co.com, got %+v", bad)
 	}
 }
 
