@@ -242,5 +242,4 @@ In short: the election logic and its failover behavior are validated and
 deterministic; the **clean-crash** RTO is real and bounded by the check
 interval; the **partition** RTO is a separate, keepalive-bound quantity
 this single-host harness intentionally does not measure.
-```
 

@@ -108,6 +108,13 @@ func (s *fakeSession) kill() {
 // staticTicker returns a tickerFunc that always hands back ch, so a
 // test can drive Run / RunIfLeader's poll one beat at a time by
 // sending on ch. The interval argument is ignored.
+//
+// Single-consumer constraint: every newTicker call on the elector
+// returns this same ch, so all consumers compete for each value sent.
+// Drive at most one loop (one Run OR one RunIfLeader) per elector with
+// a given staticTicker; combining several on one elector would split
+// beats between them and deadlock. Use a separate channel per loop if
+// you need to drive more than one.
 func staticTicker(ch <-chan time.Time) tickerFunc {
 	return func(time.Duration) (<-chan time.Time, func()) { return ch, func() {} }
 }

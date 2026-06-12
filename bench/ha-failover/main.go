@@ -38,7 +38,6 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -393,13 +392,22 @@ func startReplica(ctx context.Context, dbURL string, lockID int64, interval time
 			if err := json.Unmarshal(sc.Bytes(), &ev); err != nil {
 				continue
 			}
+			// Stamp the observation instant when the line arrives, then
+			// deliver with a blocking, ctx-aware send. A measurement
+			// event must never be silently dropped (that would corrupt
+			// an RTO sample), so we do NOT use a non-blocking send; the
+			// orchestrator drains continuously, and the ctx.Done() arm
+			// guarantees this goroutine exits instead of leaking once
+			// the run ends.
+			o := observed{ev: ev, at: time.Now()}
 			select {
-			case events <- observed{ev: ev, at: time.Now()}:
-			default:
+			case events <- o:
+			case <-ctx.Done():
+				return
 			}
 		}
-		// stdout closed (process exited); drain handled by orchestrator.
-		_ = io.EOF
+		// stdout closed (process exited); the orchestrator's reads
+		// unblock via its own timeouts / ctx.
 	}()
 	return p, nil
 }
