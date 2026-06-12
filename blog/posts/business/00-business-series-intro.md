@@ -33,7 +33,7 @@
 ## The evidence contract (unchanged from the engineering series)
 
 1. **Screenshots are of real, seeded pages** — captured this session from the
-   console on `:5173` against four seeded tenants under one MSP. They live in
+   console on `:5173` against the nine-tenant fleet under one MSP. They live in
    [`../../artifacts/business/`](../../artifacts/business).
 2. **Numbers trace to a source** — every figure is either a captured API
    payload in [`../../artifacts/payloads/`](../../artifacts/payloads) or a
@@ -50,23 +50,26 @@
 
 ## The cast (seeded data)
 
-One MSP, **Northwind Managed Security**, manages the four cost-modelled base
-tenants below across three tiers — so every screenshot in this buyer series shows
-real, tier-shaped cost/margin data. (The platform fleet was since expanded to
-nine tenants across seven countries and eight industries for the residency and
-compliance walk-through — see engineering [Post 8](../08-six-scenarios-on-this-vm.md);
-the cost/margin captures here stay on the four base tenants they were measured
-against.)
+One MSP, **Northwind Managed Security**, manages a **nine-tenant fleet across
+seven countries, eight industries, and three tiers** — so every screenshot in
+this buyer series shows real, tier-shaped, residency-correct cost/margin data.
+The full per-tenant residency + compliance walk-through is in engineering
+[Post 8](../08-six-scenarios-on-this-vm.md); the cost figures here are the
+fleet-wide metering report.
 
-| Tenant | Tier | Vertical | Monthly cost (projected) | Margin |
-| --- | --- | --- | ---: | ---: |
-| Acme Retail Group | Enterprise | retail / PCI | $1,047.59 | 47.6% |
-| Globex Health Systems | Enterprise | healthcare / HIPAA | $658.69 | 67.0% |
-| Initech Financial | Professional | finance | $418.97 | 16.0% |
-| Umbrella Logistics | Starter | logistics | $56.47 | 43.0% |
+| | Fleet (9 tenants) |
+| --- | ---: |
+| Revenue / mo | **$8,191** |
+| Projected cost / mo | **≈$4,056** |
+| Blended margin | **≈50%** |
+| Best-margin tenant | Globex Health ≈66.6% |
+| Worst-margin tenant | Maple Health **≈−14.8%** (deliberately underwater — the upsell signal) |
 
-Source: the **Fleet cost & margin** table on the Metering page, captured live in
-[`biz-10-fleet-margin.png`](../../artifacts/business/biz-10-fleet-margin.png).
+The per-tenant breakdown (worst-margin-first) is in
+[Post 5](12-cost-and-competition.md). Source: the **Fleet cost & margin** table
+on the Metering page, captured live in
+[`biz-10-fleet-margin.png`](../../artifacts/business/biz-10-fleet-margin.png), and
+[`s7-admin-cost-report.json`](../../artifacts/payloads/s7-admin-cost-report.json).
 
 Read on — Post 1 starts with the job that decides whether an MSP can afford to
 offer free trials at all.

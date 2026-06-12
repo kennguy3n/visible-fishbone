@@ -72,17 +72,25 @@ triages real signals instead of guessing. Critically, the queue is built on a
 > per-class counts — enough to triage and to author policy, never enough to
 > reconstruct the credential or record that produced it."*
 
-So Lena reviews "3 × `pan` (credit-card), 1 × `aws_secret_key`, destination =
-known AI assistant" — never the actual card number or key. The evidence she
-needs to decide, and nothing she shouldn't be storing.
+So Lena reviews "`Pci ×8`, `Phi ×5`, `Pii ×12`, destination = known AI assistant"
+— never the actual card number or key. The evidence she needs to decide, and
+nothing she shouldn't be storing.
+
+And it's a live console surface now, not an API-only story — the backlog digest
+(total / pending / by-severity / by-destination) over a real review window, with
+the redacted findings as per-class counts:
+
+![DLP review queue — live console with redacted findings](../../artifacts/screenshots/new-dlp-review-queue.png)
 
 ## Where we fall short (honest)
 
-- **The HITL queue isn't reachable from the console yet.** The `dlpreview`
-  service and its tenant-scoped, RLS-protected repositories exist and are tested,
-  but the operator-facing HTTP API (list / approve / block / digest) isn't wired
-  into the router yet — so there's no live screenshot of the queue in this post.
-  We're not going to fake one. Building that API is the explicit next step.
+- **The HITL queue is now reachable from the console — closed.** The previous
+  draft said the `dlpreview` operator API wasn't wired into the router and there
+  was no live screenshot. Both shipped: the operator API (list / approve / block
+  / digest,
+  [#176](https://github.com/kennguy3n/visible-fishbone/pull/176)) and the console
+  page ([#179](https://github.com/kennguy3n/visible-fishbone/pull/179)) are live
+  — the screenshot above is that page against seeded, redaction-invariant rows.
 - **Detection is as good as the catalog + entropy floors.** The long-tail
   *destination* detection is heuristic (known-app vs. suspected-app), and the
   block path deliberately refuses to fire on a merely "suspected" AI app. That's

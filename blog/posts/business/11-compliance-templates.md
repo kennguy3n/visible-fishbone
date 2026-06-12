@@ -78,11 +78,13 @@ it takes to choose two dropdowns.
   does not replace a real policy review for a complex customer. The compliance
   templates cover the regimes listed above; a customer under a regime not yet in
   the catalog still needs hand-authoring.
-- **The cross-tenant template *roll-out* UI is still thin.** The catalog browse /
-  resolve / apply flow is fully backed by the API, but the MSP "curate and push a
-  template to a cohort" console page is still being built out — today that page
-  is empty until an MSP authors a custom template. Applying a catalog template to
-  a tenant works; the bulk-cohort UI is follow-up.
+- **The cross-tenant template *roll-out* UI shipped — closed.** The previous
+  draft said the MSP "curate and push a template to a cohort" console page was
+  still being built. It landed in
+  [#207](https://github.com/kennguy3n/visible-fishbone/pull/207): a cross-tenant
+  roll-out surface (`ui/src/routes/PolicyRollout.tsx`) that previews a per-tenant
+  **diff**, executes the apply across the selected cohort, and supports
+  **rollback** — captured at `new-msp-cross-tenant-templates.png`.
 - **Detectors are only as current as the jurisdiction list.** The DLP detector
   set is broad (and Post 3 covers the AI-edge reuse), but new national-ID formats
   and regulatory regimes are an ongoing maintenance commitment, not a solved

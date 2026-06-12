@@ -69,6 +69,11 @@ var tenants = []struct {
 	{"3bd7bb7b-d48a-4569-8f97-46be31ae8e5a", "Globex Health Systems", "enterprise"},
 	{"b6520bda-e7bb-4af9-9c53-7b0051eae65b", "Initech Financial", "professional"},
 	{"0c8d2d9d-896d-45b1-8001-6a6776f832b9", "Umbrella Logistics", "starter"},
+	{"2d0935d3-8c57-4f66-a5a9-0de368f16a7c", "Britannia Robotics", "enterprise"},
+	{"cef9c934-507c-4adc-985b-48f3cbe274b0", "Maple Health", "professional"},
+	{"37619610-53b4-4eab-87f9-45ba902d30c2", "Outback Retail", "professional"},
+	{"890486df-98bd-482b-85a8-af361706676f", "Lumière Légal", "professional"},
+	{"8c93e8b9-5710-4f3a-9981-6d2c558bb78f", "Nordic EduCloud", "starter"},
 }
 
 // baseline is each tenant's STEADY-STATE full-period consumption per
@@ -124,6 +129,63 @@ var baseline = map[string]map[metering.Meter]int64{
 		metering.MeterClickHouseRowsWritten: 20_000_000,
 		metering.MeterS3BytesArchived:       60_000_000_000,
 		metering.MeterBandwidthProxiedBytes: 300_000_000_000,
+	},
+	"Britannia Robotics": { // enterprise $1999 — industrial robotics, ~$0.8k projected spend
+		metering.MeterLLMCalls:              9_500,
+		metering.MeterLLMTokensUsed:         9_000_000,
+		metering.MeterURLCatLookups:         90_000,
+		metering.MeterPolicyEvaluations:     45_000_000,
+		metering.MeterMalwareScans:          3_400,
+		metering.MeterClickHouseRowsWritten: 220_000_000,
+		metering.MeterS3BytesArchived:       1_100_000_000_000,
+		metering.MeterBandwidthProxiedBytes: 3_400_000_000_000,
+	},
+	// Maple Health is the deliberate UNDERWATER tenant: a professional-tier
+	// ($499) Canadian health network whose consumption has grown into
+	// enterprise scale (bandwidth + ClickHouse the dominant drivers), so
+	// its projected monthly cost (~$575) exceeds its tier revenue and the
+	// fleet cost report surfaces a NEGATIVE margin (~-15%). This is the
+	// honest upsell/margin signal the admin cost report is built to catch —
+	// not every tenant is profitable, and the engine says so.
+	"Maple Health": { // professional $499 — outgrew its plan, ~$575 projected (UNDERWATER)
+		metering.MeterLLMCalls:              7_200,
+		metering.MeterLLMTokensUsed:         6_800_000,
+		metering.MeterURLCatLookups:         68_000,
+		metering.MeterPolicyEvaluations:     34_000_000,
+		metering.MeterMalwareScans:          2_600,
+		metering.MeterClickHouseRowsWritten: 170_000_000,
+		metering.MeterS3BytesArchived:       850_000_000_000,
+		metering.MeterBandwidthProxiedBytes: 2_600_000_000_000,
+	},
+	"Outback Retail": { // professional $499 — AU retailer, ~$0.38k projected spend
+		metering.MeterLLMCalls:              2_800,
+		metering.MeterLLMTokensUsed:         2_600_000,
+		metering.MeterURLCatLookups:         26_000,
+		metering.MeterPolicyEvaluations:     13_000_000,
+		metering.MeterMalwareScans:          1_050,
+		metering.MeterClickHouseRowsWritten: 88_000_000,
+		metering.MeterS3BytesArchived:       350_000_000_000,
+		metering.MeterBandwidthProxiedBytes: 1_300_000_000_000,
+	},
+	"Lumière Légal": { // professional $499 — FR legal firm, ~$0.34k projected spend
+		metering.MeterLLMCalls:              2_500,
+		metering.MeterLLMTokensUsed:         2_300_000,
+		metering.MeterURLCatLookups:         23_000,
+		metering.MeterPolicyEvaluations:     11_500_000,
+		metering.MeterMalwareScans:          900,
+		metering.MeterClickHouseRowsWritten: 78_000_000,
+		metering.MeterS3BytesArchived:       310_000_000_000,
+		metering.MeterBandwidthProxiedBytes: 1_150_000_000_000,
+	},
+	"Nordic EduCloud": { // starter $99 — deliberately light education starter, ~$48 projected spend
+		metering.MeterLLMCalls:              480,
+		metering.MeterLLMTokensUsed:         480_000,
+		metering.MeterURLCatLookups:         4_800,
+		metering.MeterPolicyEvaluations:     2_400_000,
+		metering.MeterMalwareScans:          160,
+		metering.MeterClickHouseRowsWritten: 16_000_000,
+		metering.MeterS3BytesArchived:       48_000_000_000,
+		metering.MeterBandwidthProxiedBytes: 240_000_000_000,
 	},
 }
 

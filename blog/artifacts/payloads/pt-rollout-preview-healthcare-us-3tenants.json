@@ -1,0 +1,63 @@
+{
+    "selection": {
+        "industry": "healthcare",
+        "country": "US"
+    },
+    "regime": "us-baseline",
+    "template_ids": [
+        "baseline/global",
+        "industry/healthcare",
+        "compliance/us-baseline"
+    ],
+    "graph_hash": "08f781315cbf418eda2273a897e00f34affe56a96f7b5ef0f6f08bbdd257e99a",
+    "targets": [
+        {
+            "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+            "action": "update",
+            "current": {
+                "industry": "retail",
+                "country": "US",
+                "regime": "us-baseline",
+                "template_ids": [
+                    "baseline/global",
+                    "industry/retail",
+                    "compliance/us-baseline"
+                ],
+                "graph_hash": "ab2b1951196f2f2fcf311e6bb06ec3bd8b43f5425e4325cf8e51add9ed78d5f8",
+                "version": 1
+            }
+        },
+        {
+            "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
+            "action": "noop",
+            "current": {
+                "industry": "healthcare",
+                "country": "US",
+                "regime": "us-baseline",
+                "template_ids": [
+                    "baseline/global",
+                    "industry/healthcare",
+                    "compliance/us-baseline"
+                ],
+                "graph_hash": "08f781315cbf418eda2273a897e00f34affe56a96f7b5ef0f6f08bbdd257e99a",
+                "version": 1
+            }
+        },
+        {
+            "tenant_id": "b6520bda-e7bb-4af9-9c53-7b0051eae65b",
+            "action": "update",
+            "current": {
+                "industry": "finance",
+                "country": "DE",
+                "regime": "eu-gdpr",
+                "template_ids": [
+                    "baseline/global",
+                    "industry/finance",
+                    "compliance/eu-gdpr"
+                ],
+                "graph_hash": "88a726bf1fb5e9371d960dc32bcebff289bbc9baeafb26ad18e9d59cdbff3c2d",
+                "version": 1
+            }
+        }
+    ]
+}

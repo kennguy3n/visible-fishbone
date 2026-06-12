@@ -1,6 +1,6 @@
 {
   "ai_generated": false,
-  "generated_at": "2026-06-12T01:56:49.383587829Z",
+  "generated_at": "2026-06-12T15:13:31.056087749Z",
   "overview": {
     "alerts_by_severity": {
       "critical": 1,
@@ -10,9 +10,9 @@
     "trend": "degrading"
   },
   "period": {
-    "end": "2026-06-12T01:56:49.380204219Z",
+    "end": "2026-06-12T15:13:31.051731393Z",
     "label": "weekly",
-    "start": "2026-06-05T01:56:49.380204219Z"
+    "start": "2026-06-05T15:13:31.051731393Z"
   },
   "policy_health": {
     "active_policies": 11,

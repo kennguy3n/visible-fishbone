@@ -21,7 +21,7 @@
       "slug": "nordic-educloud",
       "status": "active",
       "tier": "starter",
-      "updated_at": "2026-06-12T01:01:46.022211000Z"
+      "updated_at": "2026-06-12T15:10:50.896519000Z"
     },
     {
       "created_at": "2026-06-12T00:54:56.404597000Z",
@@ -44,7 +44,7 @@
       "slug": "outback-retail",
       "status": "active",
       "tier": "professional",
-      "updated_at": "2026-06-12T01:01:45.648762000Z"
+      "updated_at": "2026-06-12T15:10:50.770905000Z"
     },
     {
       "created_at": "2026-06-12T00:54:56.404597000Z",
@@ -56,7 +56,7 @@
       "slug": "britannia-robotics",
       "status": "active",
       "tier": "enterprise",
-      "updated_at": "2026-06-12T01:01:45.276509000Z"
+      "updated_at": "2026-06-12T15:10:50.626397000Z"
     },
     {
       "created_at": "2026-06-11T04:40:14.976713000Z",
@@ -89,7 +89,7 @@
       "slug": "acme-retail",
       "status": "active",
       "tier": "enterprise",
-      "updated_at": "2026-06-12T01:01:44.502781000Z"
+      "updated_at": "2026-06-12T15:10:50.310158000Z"
     },
     {
       "created_at": "2026-06-11T04:40:14.976713000Z",
@@ -101,7 +101,7 @@
       "slug": "globex-health",
       "status": "active",
       "tier": "enterprise",
-      "updated_at": "2026-06-12T01:01:44.720177000Z"
+      "updated_at": "2026-06-12T15:10:50.433915000Z"
     },
     {
       "created_at": "2026-06-11T04:40:14.976713000Z",
@@ -113,7 +113,7 @@
       "slug": "umbrella-logistics",
       "status": "active",
       "tier": "starter",
-      "updated_at": "2026-06-12T01:01:45.102323000Z"
+      "updated_at": "2026-06-12T15:10:50.575862000Z"
     }
   ]
 }

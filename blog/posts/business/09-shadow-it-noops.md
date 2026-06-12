@@ -110,10 +110,12 @@ deliberately, per tenant.
   engine makes a conservative guess and tells you it's a guess. Optional
   AI-refinement (Post 5's self-hosted model) can raise confidence, but the
   baseline is deterministic heuristics.
-- **The console surfaces the inventory + risk, not yet the full verdict.** The
-  classification, sanction, and recommended action live in the API and audit log
-  today; the CASB *page* shows the discovered apps and risk. Surfacing the
-  recommendation inline in the UI is follow-up work.
+- **The recommendation is now inline in the console — closed.** The previous
+  draft said the recommended action lived only in the API/audit log and that
+  surfacing it inline was follow-up work. That's done: the CASB page now carries
+  a **Recommendation** column (`VerdictCell` in `ui/src/routes/Casb.tsx`) showing
+  the enforcement verb, the confidence, and whether it was recommended vs.
+  auto-applied — visible in the screenshot above.
 - **Discovery quality depends on telemetry.** The pipeline can only classify what
   the gateway sees. Apps reached entirely off-network are invisible to it, same
   as any CASB.

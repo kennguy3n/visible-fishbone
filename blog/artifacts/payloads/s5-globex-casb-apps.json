@@ -1,0 +1,192 @@
+{
+    "items": [
+        {
+            "id": "15c2625d-dead-445e-a53b-d1b7f8795ad7",
+            "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
+            "name": "Microsoft 365",
+            "vendor": "Microsoft",
+            "category": "productivity",
+            "risk_score": 10,
+            "users_count": 0,
+            "active_device_count": 410,
+            "first_seen": "2026-05-29T16:53:05Z",
+            "last_seen": "2026-06-11T07:29:45Z",
+            "verdict": {
+                "sanction": "sanctioned",
+                "risk_score": 24,
+                "confidence": 100,
+                "source": "heuristic",
+                "rationale": "category=productivity; risk=24; confidence=100; sanction=sanctioned; connector present; active_devices=410",
+                "classified_at": "2026-06-12T15:19:21Z"
+            }
+        },
+        {
+            "id": "d81ee0da-7df3-4e19-8025-99e13831be14",
+            "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
+            "name": "Epic MyChart",
+            "vendor": "Epic",
+            "category": "healthcare",
+            "risk_score": 20,
+            "users_count": 0,
+            "active_device_count": 380,
+            "first_seen": "2026-05-30T12:53:05Z",
+            "last_seen": "2026-06-11T07:29:45Z",
+            "verdict": {
+                "sanction": "tolerated",
+                "risk_score": 32,
+                "confidence": 35,
+                "source": "heuristic",
+                "rationale": "category=healthcare (unrecognised; treated as medium-high); risk=32; confidence=35; sanction=tolerated; active_devices=380",
+                "classified_at": "2026-06-12T15:19:21Z",
+                "action": {
+                    "enforcement": "throttle",
+                    "mode": "recommend",
+                    "traffic_class": "inspect_lite",
+                    "applied": false,
+                    "reason": "tolerated healthcare app (risk 32): recommend inspect_lite",
+                    "decided_at": "2026-06-12T15:19:21Z"
+                }
+            }
+        },
+        {
+            "id": "d951d6e6-3325-4496-b2c2-ca9316eadff6",
+            "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
+            "name": "Google Drive",
+            "vendor": "Google",
+            "category": "cloud_storage",
+            "risk_score": 50,
+            "users_count": 0,
+            "active_device_count": 64,
+            "first_seen": "2026-06-07T04:53:05Z",
+            "last_seen": "2026-06-11T07:29:45Z",
+            "verdict": {
+                "sanction": "unsanctioned",
+                "risk_score": 52,
+                "confidence": 85,
+                "source": "heuristic",
+                "rationale": "category=cloud_storage; risk=52; confidence=85; sanction=unsanctioned; active_devices=64",
+                "classified_at": "2026-06-12T15:19:21Z",
+                "action": {
+                    "enforcement": "protect",
+                    "mode": "recommend",
+                    "traffic_class": "inspect_full",
+                    "applied": false,
+                    "reason": "unsanctioned cloud_storage app (risk 52 / confidence 85): recommend inspect_full",
+                    "decided_at": "2026-06-12T15:19:21Z"
+                }
+            }
+        },
+        {
+            "id": "35b818c9-14e8-4603-a8cd-5ac65cd4fab5",
+            "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
+            "name": "ChatGPT",
+            "vendor": "OpenAI",
+            "category": "ai_assistant",
+            "risk_score": 65,
+            "users_count": 0,
+            "active_device_count": 140,
+            "first_seen": "2026-06-08T16:53:05Z",
+            "last_seen": "2026-06-11T07:29:45Z",
+            "verdict": {
+                "sanction": "tolerated",
+                "risk_score": 65,
+                "confidence": 35,
+                "source": "heuristic",
+                "rationale": "category=ai_assistant (unrecognised; treated as medium-high); risk=65; confidence=35; sanction=tolerated; active_devices=140",
+                "classified_at": "2026-06-12T15:19:21Z",
+                "action": {
+                    "enforcement": "protect",
+                    "mode": "recommend",
+                    "traffic_class": "inspect_full",
+                    "applied": false,
+                    "reason": "tolerated ai_assistant app (risk 65 / confidence 35): recommend inspect_full",
+                    "decided_at": "2026-06-12T15:19:21Z"
+                }
+            }
+        },
+        {
+            "id": "4e19a728-cb08-4516-8717-8d60679f3647",
+            "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
+            "name": "Telegram",
+            "vendor": "Telegram",
+            "category": "messaging",
+            "risk_score": 78,
+            "users_count": 0,
+            "active_device_count": 9,
+            "first_seen": "2026-06-10T04:53:05Z",
+            "last_seen": "2026-06-11T07:29:45Z",
+            "verdict": {
+                "sanction": "unsanctioned",
+                "risk_score": 78,
+                "confidence": 85,
+                "source": "heuristic",
+                "rationale": "category=messaging; risk=78; confidence=85; sanction=unsanctioned; active_devices=9",
+                "classified_at": "2026-06-12T15:19:21Z",
+                "action": {
+                    "enforcement": "enforce",
+                    "mode": "recommend",
+                    "traffic_class": "block",
+                    "applied": false,
+                    "reason": "high-risk messaging app (risk 78): recommend blocking \u2014 auto-block withheld as destructive",
+                    "decided_at": "2026-06-12T15:19:21Z"
+                }
+            }
+        },
+        {
+            "id": "25e75707-00aa-4a1a-88a7-7ee543e24e09",
+            "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
+            "name": "MEGA",
+            "vendor": "MEGA",
+            "category": "cloud_storage",
+            "risk_score": 82,
+            "users_count": 0,
+            "active_device_count": 6,
+            "first_seen": "2026-06-10T08:53:05Z",
+            "last_seen": "2026-06-11T07:29:45Z",
+            "verdict": {
+                "sanction": "unsanctioned",
+                "risk_score": 82,
+                "confidence": 85,
+                "source": "heuristic",
+                "rationale": "category=cloud_storage; risk=82; confidence=85; sanction=unsanctioned; active_devices=6",
+                "classified_at": "2026-06-12T15:19:21Z",
+                "action": {
+                    "enforcement": "enforce",
+                    "mode": "recommend",
+                    "traffic_class": "block",
+                    "applied": false,
+                    "reason": "high-risk cloud_storage app (risk 82): recommend blocking \u2014 auto-block withheld as destructive",
+                    "decided_at": "2026-06-12T15:19:21Z"
+                }
+            }
+        },
+        {
+            "id": "39810460-4827-4d70-85b9-b92c71f0dcf4",
+            "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
+            "name": "Claude",
+            "vendor": "Anthropic",
+            "category": "ai_assistant",
+            "risk_score": 55,
+            "users_count": 0,
+            "active_device_count": 47,
+            "first_seen": "2026-06-09T12:53:05Z",
+            "last_seen": "2026-06-11T07:29:45Z",
+            "verdict": {
+                "sanction": "tolerated",
+                "risk_score": 55,
+                "confidence": 35,
+                "source": "heuristic",
+                "rationale": "category=ai_assistant (unrecognised; treated as medium-high); risk=55; confidence=35; sanction=tolerated; active_devices=47",
+                "classified_at": "2026-06-12T15:19:21Z",
+                "action": {
+                    "enforcement": "protect",
+                    "mode": "recommend",
+                    "traffic_class": "inspect_full",
+                    "applied": false,
+                    "reason": "tolerated ai_assistant app (risk 55 / confidence 35): recommend inspect_full",
+                    "decided_at": "2026-06-12T15:19:21Z"
+                }
+            }
+        }
+    ]
+}

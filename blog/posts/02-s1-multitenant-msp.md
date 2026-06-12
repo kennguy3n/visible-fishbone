@@ -16,8 +16,8 @@ shows the managed tenants and the management relationship (owner vs. co-manager)
 
 ![MSP hierarchy](../artifacts/screenshots/s1-msp-hierarchy.png)
 
-The tenant list is the per-tenant control surface. Four tenants across three
-tiers, each with its own region, plan, and status:
+The tenant list is the per-tenant control surface. Nine managed tenants across
+three tiers and seven countries, each with its own region, plan, and status:
 
 ![Tenants](../artifacts/screenshots/s1-tenants.png)
 
@@ -40,8 +40,8 @@ From `GET /api/v1/msps` ([`s1-msps.json`](../artifacts/payloads/s1-msps.json)):
 } ] }
 ```
 
-`GET /api/v1/tenants` returns the five tenants visible to the platform operator
-(four managed + the platform tenant itself). The audit log
+`GET /api/v1/tenants` returns the ten tenants visible to the platform operator
+(nine managed + the platform tenant itself). The audit log
 ([`s1-acme-audit-log.json`](../artifacts/payloads/s1-acme-audit-log.json)) carries
 the real provisioning trail, from the `tenant.created` event that anchors each
 tenant's history through `policy.compiled`, `policy.signing_key_created`,
@@ -107,21 +107,31 @@ by `tenancy` + `identity` unit tests (green on `main`), but that sync loop isn't
 started in `cmd/sng-control` yet — so the tiering is proven by tests, not yet
 shaping a live production sweep. Flagged, not hidden.*
 
-## Where we fall short
+## Where we fall short (and what closed this cycle)
 
-- **RBAC / SCIM / IdP breadth.** The scaffolding (roles, SCIM provisioning, IdP
-  federation, branding, bulk ops) is present in the console, but the depth of,
-  say, Okta/Entra SCIM edge-case handling is not at the level of a dedicated IGA
-  product. This is honest scaffolding, not a finished IAM suite.
-- **Templates are a catalog, not yet a roll-out UI.** The 14-template catalog and
-  its render path are real and tested, but the cross-tenant "apply this baseline
-  to these 12 tenants" console flow is still thin — today it's an API capability
-  more than a guided operator surface.
-- **Onboarding is API-fast, not wizard-polished.** Our seed harness stands up a
-  full tenant in seconds via the API, which is great for MSP automation. The
-  *guided* click-through onboarding wizard is thinner than the API path.
-- **No cross-region tenant migration yet.** A tenant's region is set at creation;
-  moving it is not a one-click operation.
+Three of last cycle's caveats here closed; one narrowed. Honestly, in order:
+
+- **Templates now *have* a roll-out UI — closed.** The previous draft said the
+  cross-tenant "apply this baseline to these N tenants" flow was "an API
+  capability more than a guided operator surface." That's no longer true: C3
+  ([#207](https://github.com/kennguy3n/visible-fishbone/pull/207)) shipped a
+  cross-tenant roll-out console (`ui/src/routes/PolicyRollout.tsx`) with
+  per-tenant **diff → execute → rollback**, captured at
+  `new-msp-cross-tenant-templates.png`.
+- **Onboarding now has a guided wizard — closed.** Alongside the API-fast seed
+  path, C3 added a guided click-through onboarding wizard
+  (`ui/src/routes/GuidedOnboarding.tsx`), so the wizard is no longer thinner than
+  the API.
+- **Cross-region tenant migration ships — closed.** "A tenant's region is set at
+  creation; moving it is not a one-click operation" is stale —
+  `internal/service/tenant/migrate_region.go` performs a guarded region move.
+- **SCIM hardened, but live IGA depth still narrows.** C5
+  ([#206](https://github.com/kennguy3n/visible-fishbone/pull/206)) fixed **three
+  real SCIM bugs** (filter-pushdown returning empty pages, Okta `valuePath`
+  de-provisioning silently dropped, case-sensitive URN prefix) and added a
+  conformance suite. The honest residual: we ran the conformance suite in-repo,
+  not a *live* Okta/Entra certification — so SCIM is hardened and tested, not
+  vendor-certified. Still scaffolding-plus, not a finished IGA product.
 
 ## Control-plane comparison
 

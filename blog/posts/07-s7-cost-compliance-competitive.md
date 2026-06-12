@@ -16,32 +16,35 @@ The metering surface is the new **WS8 cost metering UI**
 ([PR #130](https://github.com/kennguy3n/visible-fishbone/pull/130)) — a
 purpose-built spend dashboard that turns the raw usage meters into a buyer-facing
 view. It shows eight meters per tenant, each with current usage, a **projected**
-end-of-period total, and a budget utilisation bar, and the fleet cost report
-refreshes when a tenant's budgets change. Here it is across all four tiers — the
-meter limits and projections differ by tier:
+end-of-period total, and a budget utilisation bar, plus a platform-wide **fleet
+cost & margin** table that refreshes when a tenant's budgets change. Here is the
+per-tenant view for Acme (enterprise) — meter limits and projections differ by
+tier:
 
-![Metering — Acme (enterprise)](../artifacts/screenshots/s7-metering-acme.png)
-![Metering — Globex (enterprise)](../artifacts/screenshots/s7-metering-globex.png)
-![Metering — Initech (professional)](../artifacts/screenshots/s7-metering-initech.png)
-![Metering — Umbrella (starter)](../artifacts/screenshots/s7-metering-umbrella.png)
+![Metering — Acme (enterprise), per-meter usage + projected spend](../artifacts/screenshots/new-metering-fleet-top.png)
+
+And here is the **MSP fleet roll-up** across all nine tenants, sorted
+worst-margin-first so a loss-making tenant is the first thing the operator sees:
+
+![Metering — 9-tenant fleet cost & margin](../artifacts/screenshots/new-metering-fleet-table.png)
 
 ## The real numbers
 
 Eight meters, captured live from `GET /usage`
-([`s7-acme-usage.json`](../artifacts/payloads/s7-acme-usage.json)). The
-**projected** column is the engine extrapolating the partial-period run rate to a
-steady-state period-end total:
+([`s7-acme-usage.json`](../artifacts/payloads/s7-acme-usage.json)) after a clean
+full re-seed. The **projected** column is the engine extrapolating the
+partial-period run rate to a steady-state period-end total:
 
 | meter | used | projected (period-end) |
 | --- | ---: | ---: |
-| llm_tokens_used | 4,449,246 | 11,999,997 |
-| llm_calls | 4,820 | 13,000 |
-| url_cat_lookups | 14,774 | 119,999 |
-| malware_scans | 616 | 5,004 |
-| clickhouse_rows_written | 111,231,156 | 299,999,941 |
-| s3_bytes_archived | 556.2 GB | ~1.50 TB |
-| bandwidth_proxied_bytes | 1.85 TB | ~5.00 TB |
-| policy_evaluations | 7,386,934 | 59,998,911 |
+| llm_tokens_used | 4,661,799 | 11,999,317 |
+| llm_calls | 5,050 | 12,999 |
+| url_cat_lookups | 78,540 | 119,879 |
+| malware_scans | 3,272 | 4,995 |
+| clickhouse_rows_written | 116,544,966 | 299,982,896 |
+| s3_bytes_archived | 582.7 GB | ~1.50 TB |
+| bandwidth_proxied_bytes | 1.94 TB | ~5.00 TB |
+| policy_evaluations | 39,269,797 | 59,939,144 |
 
 ### Projection is the feature
 
@@ -52,36 +55,60 @@ visibility *before* the breach — the UI flags `projected_soft_exceeded` /
 
 ### The one credible anomaly
 
-We seeded realistic data, which means most things look normal — and they do. The
+We seeded realistic data — current period *plus five trailing complete months* of
+history per tenant — which means most things look normal, and they do. The
 cost-anomaly model surfaces exactly **one** credible anomaly across all tenants,
 Initech's URL-category lookups, captured at
 [`s7-initech-cost-anomalies.json`](../artifacts/payloads/s7-initech-cost-anomalies.json):
 
 ```json
 { "meter": "url_cat_lookups", "baseline_monthly_usd": 72.31,
-  "projected_monthly_usd": 225.01, "ratio": 3.1116,
+  "projected_monthly_usd": 224.77, "ratio": 3.1083,
   "baseline_months": 5, "severity": "warning" }
 ```
 
-A 3.1× run-rate over a 5-month baseline — flagged `warning`, not screamed as
-critical. Acme's anomalies file, by contrast, is quiet. That restraint is the
-point: an anomaly detector that flags everything is noise.
+A 3.11× run-rate over a 5-month baseline (`ratio` 3.1083) — flagged `warning`, not screamed as
+critical. Acme's anomalies file, by contrast, is empty (the control). That
+restraint is the point: an anomaly detector that flags everything is noise. This
+is the detector firing on real seeded history — it only works *because* the seed
+carries trailing-month baselines, which is why the harness writes them.
 
 ### The margin story (for the MSP)
 
-The admin cost-report rolls up a **projected $2,216.81/mo** of cost across the
-four tenants. Per-tenant gross margins (`margin_pct` from
-[`s7-admin-cost-report.json`](../artifacts/payloads/s7-admin-cost-report.json)):
+This is the section the previous draft most understated: metering is no longer a
+**four-tenant** report. The admin cost-report now rolls up the full **nine-tenant
+fleet** — **$8,191/mo revenue against ≈$4,056/mo projected cost, ≈50% blended
+margin** (`s7-admin-cost-report.json`). Per-tenant gross margins (`margin_pct`),
+sorted worst-first the way the console shows them:
 
-| tenant | tier | margin |
-| --- | --- | ---: |
-| Globex | enterprise | 66.5% |
-| Acme | enterprise | 46.8% |
-| Umbrella | starter | 42.1% |
-| Initech | professional | 14.4% |
+| tenant | tier | projected cost | margin |
+| --- | --- | ---: | ---: |
+| Maple Health | professional | ≈$573 | **≈−14.8%** |
+| Initech Financial | professional | ≈$425 | ≈14.8% |
+| Umbrella Logistics | starter | ≈$57 | ≈42.4% |
+| Acme Retail | enterprise | ≈$1,060 | ≈47.0% |
+| Outback Retail | professional | ≈$253 | ≈49.3% |
+| Nordic EduCloud | starter | ≈$46 | ≈53.9% |
+| Lumière Légal | professional | ≈$223 | ≈55.3% |
+| Britannia Robotics | enterprise | ≈$752 | ≈62.4% |
+| Globex Health | enterprise | ≈$667 | ≈66.6% |
 
-Initech's thinner margin is *because* of its url_cat surge — the anomaly and the
-margin compression are the same story, and an MSP can see it before renewal.
+Two things this surfaces that a four-tenant all-green table couldn't:
+
+- **Maple Health is underwater (≈−14.8%).** A professional-$499 tenant consuming
+  enterprise-scale bandwidth + ClickHouse, projected ≈$573/mo against $499
+  revenue. That negative margin is the honest **upsell signal** the report is
+  built to surface — an MSP sees the loss-making tenant *first*, before renewal,
+  not after the year-end true-up.
+- **Initech's thin ≈14.8% margin is the url_cat surge** — the anomaly above and
+  the margin compression are the same story. Initech still clears its $499 tier,
+  but only just.
+
+The four-tenant base cohort (Globex + Acme + Umbrella + Initech) still totals
+≈$2,210/mo, reconciling with the earlier #196 figure; the other ≈$1,846/mo is the
+five tenants added to round the fleet out to nine. (Margins are *projected*
+figures and drift sub-percent within a billing period as the elapsed fraction
+grows; the saved payload is the point-in-time source of record.)
 
 ## Compliance + audit evidence
 
@@ -176,6 +203,35 @@ table, and the wire firewall/IPS columns above sit on top of each other), which
 is the genuinely interesting architectural signal — now backed by a real wire
 benchmark rather than dry-run alone.
 
+### Why is the wire firewall floor (5.5) *equal* to the IPS floor (5.5)?
+
+This is the obvious question — if IPS adds inspection work, why doesn't the wire
+number drop like the appliance rows do? Because **at the single-stream wire
+floor, the bottleneck is the wire, not the inspection.** The `sng-bench-wire` rig
+drives one AF_PACKET stream over a veth pair, and a single stream is capped by a
+per-frame syscall / packets-per-second ceiling long before either the firewall or
+the IPS path saturates a core. Both rows hit the *same* ceiling, so they read the
+same — it's a property of the single-stream harness, not evidence that IPS is
+free.
+
+Two measurements prove the wire (not inspection) is the limit:
+
+- **Frame-size sweep (Post 1):** the same path scales with frame size — 64 B
+  → 0.25 Gbps, 1500 B → 5.38 Gbps, 9000 B → 18.96 Gbps. Throughput tracks frames
+  *per second*, the signature of a PPS/syscall bound, not an inspection bound.
+- **Multi-queue scaling rig** ([`multiqueue-micro.json`](../artifacts/multiqueue-micro.json)):
+  lifting the single-stream cap by fanning out across queues takes the *same*
+  enforcement path from **5.45 Gbps (1 queue) → 25.98 Gbps (16 queues), a 4.77×
+  scale-up** (1q→2q at 96% efficiency, 2q→4q at 91%, then flattening as the VM's
+  cores saturate). The wire floor moves 4.77× just by adding queues — so 5.5 was
+  never an inspection limit.
+
+The true inspection cost only shows up where the wire *isn't* the bottleneck — in
+the dry-run ceiling (firewall ~79 → IPS ~74 Gbps, a single-pass ~3–4% hit) and in
+the multi-queue ceiling. Because SNG is **single-pass** (one decode, all
+verdicts), inspection costs a few percent rather than collapsing throughput the
+way a bolt-on inspection stage does on a fixed appliance.
+
 ## The one apples-to-apples comparison
 
 The only directly-comparable competitor row is cloud-native: **Zscaler's admin
@@ -223,17 +279,21 @@ that comparison *is* fair because both are software services, not silicon.
 ## Where SNG genuinely falls short
 
 1. **Wire throughput is a single-stream floor** — measured over a veth pair, not
-   a multi-queue physical NIC, so it understates real line-rate.
+   a multi-queue physical NIC, so it understates real line-rate. The multi-queue
+   rig (5.45 → 25.98 Gbps, 4.77×) shows the headroom above the floor, but it is
+   still a software-on-x86 number, not an ASIC line-rate.
 2. **Identity/IAM depth** is scaffolding, not a finished IGA suite (Posts 2, 4).
 3. **No global PoP network** — it's software you operate, not a network you rent.
 4. **Threat-intel and DLP-detector breadth** trail the specialist incumbents.
 5. **Curated efficacy corpora**, not wild-traffic catch-rates.
-6. **This cycle's six capabilities aren't all live yet.** Dormancy, ClamAV,
-   safe-browsing, the NoOps engine, AI-app DLP and the review queue are
-   code-complete and tested on `main`, but most are not yet wired into the
-   running control plane (the integration PR is staged). The evidence in this
-   series is real engine output and tests — we don't claim they're enforcing
-   production traffic today.
+6. **This cycle's new capabilities are wired but default-OFF.** ClamAV,
+   safe-browsing, the NoOps engine, AI-app DLP and the review queue are now wired
+   into the running control plane behind per-tenant default-OFF gates (the staged
+   off→monitor→enforce rollout framework, #202) — a step past the previous draft's
+   "staged, not wired." The honest framing is now *wired vs. default-ON*: an
+   out-of-the-box install isn't enforcing them until an operator opts in, which
+   is the production-correct posture, not the same as "on for every tenant
+   today."
 
 Next, the closing post: methodology, reproducibility, and how to run all of this
 yourself.
