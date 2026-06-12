@@ -374,11 +374,11 @@ impl HealthCheck for ZtnaSubsystem {
 
     async fn check(&self) -> SubsystemHealth {
         let snap = self.stats.snapshot();
-        // Denies aren't surfaced as a single counter — sum the
-        // per-reason buckets so the operator dashboard sees one
-        // total. Bundle / telemetry / provider failures degrade
-        // status to Degraded so the dashboard renders an amber
-        // marker rather than a green one.
+        // Denies aren't surfaced as a single counter — sum every
+        // per-reason bucket so the operator dashboard sees one total
+        // that actually reconciles with `requests_evaluated`. Bundle
+        // / telemetry / provider failures degrade status to Degraded
+        // so the dashboard renders an amber marker rather than green.
         let denies = snap.deny_unknown_app
             + snap.deny_device_not_enrolled
             + snap.deny_device_posture_stale
@@ -387,7 +387,12 @@ impl HealthCheck for ZtnaSubsystem {
             + snap.deny_identity_absent
             + snap.deny_mfa_stale
             + snap.deny_not_entitled
-            + snap.deny_tenant_mismatch;
+            + snap.deny_tenant_mismatch
+            + snap.deny_revoked
+            + snap.deny_geo_blocked
+            + snap.deny_network_type_blocked
+            + snap.deny_outside_hours
+            + snap.deny_tag_mismatch;
         let status = if snap.bundle_load_failures > 0 || snap.provider_failures > 0 {
             HealthStatus::Degraded
         } else {
