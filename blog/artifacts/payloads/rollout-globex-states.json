@@ -1,0 +1,33 @@
+{
+    "items": [
+        {
+            "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
+            "capability": "clamav_swg",
+            "state": "monitor",
+            "enforces": false,
+            "evaluates": true,
+            "reason": "Wave2: HIPAA tenant SWG canary",
+            "updated_by": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+            "created_at": "2026-06-12T15:18:17Z",
+            "updated_at": "2026-06-12T15:18:17Z"
+        },
+        {
+            "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
+            "capability": "noops_autoenforce",
+            "state": "off",
+            "enforces": false,
+            "evaluates": false
+        },
+        {
+            "tenant_id": "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a",
+            "capability": "idp_directory_sync",
+            "state": "monitor",
+            "enforces": false,
+            "evaluates": true,
+            "reason": "Wave2: dry-run Okta directory sync",
+            "updated_by": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+            "created_at": "2026-06-12T15:18:17Z",
+            "updated_at": "2026-06-12T15:18:17Z"
+        }
+    ]
+}

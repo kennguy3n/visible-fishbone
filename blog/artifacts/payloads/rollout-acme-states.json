@@ -1,0 +1,33 @@
+{
+    "items": [
+        {
+            "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+            "capability": "clamav_swg",
+            "state": "enforce",
+            "enforces": true,
+            "evaluates": true,
+            "reason": "Wave2: canary clean, enforce ClamAV",
+            "updated_by": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+            "created_at": "2026-06-12T15:18:17Z",
+            "updated_at": "2026-06-12T15:18:17Z"
+        },
+        {
+            "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+            "capability": "noops_autoenforce",
+            "state": "monitor",
+            "enforces": false,
+            "evaluates": true,
+            "reason": "Wave2: observe shadow-IT verdicts first",
+            "updated_by": "190fc952-71ff-4ad5-a0fa-68b78ec39fca",
+            "created_at": "2026-06-12T15:18:17Z",
+            "updated_at": "2026-06-12T15:18:17Z"
+        },
+        {
+            "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+            "capability": "idp_directory_sync",
+            "state": "off",
+            "enforces": false,
+            "evaluates": false
+        }
+    ]
+}

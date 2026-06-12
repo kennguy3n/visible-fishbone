@@ -32,7 +32,7 @@ Verbatim from
 {
   "verdict": "inspect",
   "evaluation_mode": "compiled-bundle",
-  "matched_rules": ["policy-graph:b70aebd7-7706-40ca-b8e7-c18b8d5e9c30@v1"],
+  "matched_rules": ["policy-graph:b70aebd7-7706-40ca-b8e7-c18b8d5e9c30@v2"],
   "ai_generated": false,
   "confidence": 0.7,
   "explanation": "Verdict \"inspect\" from tenant policy graph ... for
@@ -113,8 +113,11 @@ The same human-in-the-loop principle now has a dedicated data-plane sibling: the
 cycle, where coach-first AI-app DLP events that aren't auto-resolved wait for a
 human verdict (`pending → approved / blocked / dismissed`) instead of being
 silently enforced. It's walked in [Post 5](05-s5-dlp-casb-rbi.md) and
-[business Post B3](business/10-ai-dlp-coaching.md) — and, honestly, it still
-needs an operator console API before it's reachable end-to-end. (#158)
+[business Post B3](business/10-ai-dlp-coaching.md) — and, unlike the previous
+draft, it is now reachable end-to-end: the operator console surface lives at
+`/dlp/review-queue` with a per-tenant digest and triage actions.
+(#158, [#176](https://github.com/kennguy3n/visible-fishbone/pull/176),
+[#179](https://github.com/kennguy3n/visible-fishbone/pull/179))
 
 ## The model itself (and the deterministic fallback)
 

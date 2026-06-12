@@ -42,14 +42,16 @@ ShieldNet Gateway is a multi-tenant SASE platform with three moving parts:
 The single most important thing in this series is what we *don't* claim. Four
 rules govern every figure:
 
-1. **Measured ≠ dry-run.** The edge performance harness (`bench/`) has a
-   `--dry-run` mode that crafts and measures frames *in-process with no wire
-   I/O*. Its Gbps numbers exercise the craft→measure pipeline, **not** real
-   inspected throughput on a NIC. Real wire numbers need `CAP_NET_RAW` and an
-   in-path edge, which this non-privileged VM cannot provide. So when you see a
-   throughput table, you will also see the dry-run caveat — and the per-packet
-   *latency* percentiles (which are genuinely informative even in dry-run) are
-   called out separately from the headline Gbps.
+1. **Measured ≠ dry-run, and we publish both.** The edge performance harness
+   (`bench/`) has a `--dry-run` mode that crafts and measures frames *in-process
+   with no wire I/O* — that number is a **ceiling**, exercising the
+   craft→measure pipeline, not real inspected NIC throughput. This cycle a real
+   wire rig (`sng-bench-wire`, AF_PACKET in-path) and a multi-queue scaling rig
+   landed, so we now also publish a **floor**: a single-stream wire number
+   (≈5.5 Gbps) and the multi-queue scale-up to ≈26 Gbps (Posts 1, 7, 8). We
+   refuse to quote the dry-run ceiling as a competitive figure; throughput
+   tables show ceiling *and* floor side by side, and the per-packet *latency*
+   percentiles are called out separately from the headline Gbps.
 
 2. **Competitor numbers are published datasheet figures, caveated.** They live
    in [`bench/business-report/competitors.json`](../../bench/business-report/competitors.json)

@@ -44,21 +44,21 @@ swept on the active cadence again on its next login.
 ## The cost story, on a real page
 
 The Metering page makes the fleet economics legible. Here's Acme (the busy
-enterprise) — projected $1,047.59/mo, every meter inside budget, top cost driver
+enterprise) — projected ≈$1,060/mo, every meter inside budget, top cost driver
 called out:
 
 ![Metering & cost — Acme](../../artifacts/business/biz-09-metering-cost.png)
 
-And the **Fleet cost & margin** table — four tenants, cost vs. revenue vs. margin
-per tenant, sorted by margin:
+And the **Fleet cost & margin** table — the full **nine-tenant** fleet, cost vs.
+revenue vs. margin per tenant, sorted worst-margin-first:
 
 ![Fleet cost & margin](../../artifacts/business/biz-10-fleet-margin.png)
 
 Two things matter to Mara here:
 
 - **Cost is per-tenant and activity-shaped.** Umbrella (Starter, low activity)
-  projects **$56.47/mo** of infra; Acme (Enterprise, busy) projects **$1,047.59**.
-  The 19× spread is driven by usage, not a flat per-tenant tax. A dormant trial
+  projects **≈$57/mo** of infra; Acme (Enterprise, busy) projects **≈$1,060**.
+  The ~19× spread is driven by usage, not a flat per-tenant tax. A dormant trial
   sits near the bottom of that curve.
 - **The margin column is the trial-economics column.** Because dormant tenants
   consume a fraction of the sweep work, their cost line stays near zero until

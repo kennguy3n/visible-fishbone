@@ -1,0 +1,232 @@
+{
+    "items": [
+        {
+            "id": "c2664e2c-afd4-412d-9b28-45bfd9bea11c",
+            "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+            "name": "WeTransfer",
+            "vendor": "WeTransfer",
+            "category": "file_transfer",
+            "risk_score": 70,
+            "users_count": 0,
+            "active_device_count": 12,
+            "first_seen": "2026-06-09T16:53:05Z",
+            "last_seen": "2026-06-11T07:29:45Z",
+            "verdict": {
+                "sanction": "unsanctioned",
+                "risk_score": 70,
+                "confidence": 85,
+                "source": "heuristic",
+                "rationale": "category=file_transfer; risk=70; confidence=85; sanction=unsanctioned; active_devices=12",
+                "classified_at": "2026-06-12T15:19:21Z",
+                "action": {
+                    "enforcement": "enforce",
+                    "mode": "recommend",
+                    "traffic_class": "block",
+                    "applied": false,
+                    "reason": "high-risk file_transfer app (risk 70): recommend blocking \u2014 auto-block withheld as destructive",
+                    "decided_at": "2026-06-12T15:19:21Z"
+                }
+            }
+        },
+        {
+            "id": "96595b50-8ea5-4c5f-80c5-ddf0038bb856",
+            "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+            "name": "Notion",
+            "vendor": "Notion Labs",
+            "category": "productivity",
+            "risk_score": 30,
+            "users_count": 0,
+            "active_device_count": 58,
+            "first_seen": "2026-06-06T04:53:05Z",
+            "last_seen": "2026-06-11T07:29:45Z",
+            "verdict": {
+                "sanction": "tolerated",
+                "risk_score": 36,
+                "confidence": 85,
+                "source": "heuristic",
+                "rationale": "category=productivity; risk=36; confidence=85; sanction=tolerated; active_devices=58",
+                "classified_at": "2026-06-12T15:19:21Z",
+                "action": {
+                    "enforcement": "throttle",
+                    "mode": "recommend",
+                    "traffic_class": "inspect_lite",
+                    "applied": false,
+                    "reason": "tolerated productivity app (risk 36): recommend inspect_lite",
+                    "decided_at": "2026-06-12T15:19:21Z"
+                }
+            }
+        },
+        {
+            "id": "360d3d73-819c-471e-a64c-fe7be516928e",
+            "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+            "name": "Pastebin",
+            "vendor": "Pastebin",
+            "category": "code_paste",
+            "risk_score": 75,
+            "users_count": 0,
+            "active_device_count": 4,
+            "first_seen": "2026-06-10T10:53:05Z",
+            "last_seen": "2026-06-11T07:29:45Z",
+            "verdict": {
+                "sanction": "tolerated",
+                "risk_score": 75,
+                "confidence": 30,
+                "source": "heuristic",
+                "rationale": "category=code_paste (unrecognised; treated as medium-high); risk=75; confidence=30; sanction=tolerated; active_devices=4",
+                "classified_at": "2026-06-12T15:19:21Z",
+                "action": {
+                    "enforcement": "enforce",
+                    "mode": "recommend",
+                    "traffic_class": "block",
+                    "applied": false,
+                    "reason": "high-risk code_paste app (risk 75): recommend blocking \u2014 auto-block withheld as destructive",
+                    "decided_at": "2026-06-12T15:19:21Z"
+                }
+            }
+        },
+        {
+            "id": "44327d7a-aa5b-4b49-89de-ef241db54789",
+            "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+            "name": "DeepL",
+            "vendor": "DeepL",
+            "category": "ai_translation",
+            "risk_score": 40,
+            "users_count": 0,
+            "active_device_count": 21,
+            "first_seen": "2026-06-09T04:53:05Z",
+            "last_seen": "2026-06-11T07:29:45Z",
+            "verdict": {
+                "sanction": "tolerated",
+                "risk_score": 44,
+                "confidence": 35,
+                "source": "heuristic",
+                "rationale": "category=ai_translation (unrecognised; treated as medium-high); risk=44; confidence=35; sanction=tolerated; active_devices=21",
+                "classified_at": "2026-06-12T15:19:21Z",
+                "action": {
+                    "enforcement": "throttle",
+                    "mode": "recommend",
+                    "traffic_class": "inspect_lite",
+                    "applied": false,
+                    "reason": "tolerated ai_translation app (risk 44): recommend inspect_lite",
+                    "decided_at": "2026-06-12T15:19:21Z"
+                }
+            }
+        },
+        {
+            "id": "b7fc1e29-4d1a-4a26-b780-ab66dbac50a6",
+            "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+            "name": "Microsoft 365",
+            "vendor": "Microsoft",
+            "category": "productivity",
+            "risk_score": 10,
+            "users_count": 0,
+            "active_device_count": 240,
+            "first_seen": "2026-06-01T04:53:05Z",
+            "last_seen": "2026-06-11T07:29:45Z",
+            "verdict": {
+                "sanction": "sanctioned",
+                "risk_score": 24,
+                "confidence": 100,
+                "source": "heuristic",
+                "rationale": "category=productivity; risk=24; confidence=100; sanction=sanctioned; connector present; active_devices=240",
+                "classified_at": "2026-06-12T15:19:21Z"
+            }
+        },
+        {
+            "id": "eedbc945-7bc0-4d4d-ac2d-b0832f2f043c",
+            "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+            "name": "Slack",
+            "vendor": "Salesforce",
+            "category": "collaboration",
+            "risk_score": 15,
+            "users_count": 0,
+            "active_device_count": 180,
+            "first_seen": "2026-06-02T20:53:05Z",
+            "last_seen": "2026-06-11T07:29:45Z",
+            "verdict": {
+                "sanction": "sanctioned",
+                "risk_score": 23,
+                "confidence": 100,
+                "source": "heuristic",
+                "rationale": "category=collaboration; risk=23; confidence=100; sanction=sanctioned; connector present; active_devices=180",
+                "classified_at": "2026-06-12T15:19:21Z"
+            }
+        },
+        {
+            "id": "4714f847-8783-4eed-b34b-713c452e8c75",
+            "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+            "name": "Dropbox",
+            "vendor": "Dropbox",
+            "category": "cloud_storage",
+            "risk_score": 55,
+            "users_count": 0,
+            "active_device_count": 42,
+            "first_seen": "2026-06-07T10:53:05Z",
+            "last_seen": "2026-06-11T07:29:45Z",
+            "verdict": {
+                "sanction": "sanctioned",
+                "risk_score": 55,
+                "confidence": 100,
+                "source": "heuristic",
+                "rationale": "category=cloud_storage; risk=55; confidence=100; sanction=sanctioned; connector present; active_devices=42",
+                "classified_at": "2026-06-12T15:19:21Z"
+            }
+        },
+        {
+            "id": "212264e3-0a8a-4408-b641-3cf1f622ae81",
+            "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+            "name": "ChatGPT",
+            "vendor": "OpenAI",
+            "category": "ai_assistant",
+            "risk_score": 60,
+            "users_count": 0,
+            "active_device_count": 96,
+            "first_seen": "2026-06-08T04:53:05Z",
+            "last_seen": "2026-06-11T07:29:45Z",
+            "verdict": {
+                "sanction": "tolerated",
+                "risk_score": 60,
+                "confidence": 35,
+                "source": "heuristic",
+                "rationale": "category=ai_assistant (unrecognised; treated as medium-high); risk=60; confidence=35; sanction=tolerated; active_devices=96",
+                "classified_at": "2026-06-12T15:19:21Z",
+                "action": {
+                    "enforcement": "protect",
+                    "mode": "recommend",
+                    "traffic_class": "inspect_full",
+                    "applied": false,
+                    "reason": "tolerated ai_assistant app (risk 60 / confidence 35): recommend inspect_full",
+                    "decided_at": "2026-06-12T15:19:21Z"
+                }
+            }
+        },
+        {
+            "id": "6da38e87-44e4-4717-a492-0fae194b666e",
+            "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+            "name": "Grammarly",
+            "vendor": "Grammarly",
+            "category": "ai_writing",
+            "risk_score": 45,
+            "users_count": 0,
+            "active_device_count": 33,
+            "first_seen": "2026-06-08T16:53:05Z",
+            "last_seen": "2026-06-11T07:29:45Z",
+            "verdict": {
+                "sanction": "tolerated",
+                "risk_score": 47,
+                "confidence": 35,
+                "source": "heuristic",
+                "rationale": "category=ai_writing (unrecognised; treated as medium-high); risk=47; confidence=35; sanction=tolerated; active_devices=33",
+                "classified_at": "2026-06-12T15:19:21Z",
+                "action": {
+                    "enforcement": "throttle",
+                    "mode": "recommend",
+                    "traffic_class": "inspect_lite",
+                    "applied": false,
+                    "reason": "tolerated ai_writing app (risk 47): recommend inspect_lite",
+                    "decided_at": "2026-06-12T15:19:21Z"
+                }
+            }
+        }
+    ]
+}

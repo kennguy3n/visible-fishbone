@@ -1,0 +1,23 @@
+{
+    "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+    "window": "24h0m0s",
+    "since": "2026-06-11T15:18:18Z",
+    "generated_at": "2026-06-12T15:18:18Z",
+    "total": 4,
+    "pending": 4,
+    "by_state": {
+        "pending": 4
+    },
+    "by_severity": {
+        "critical": 1,
+        "high": 1,
+        "low": 1,
+        "medium": 1
+    },
+    "pending_by_app": {
+        "chatgpt": 1,
+        "claude": 1,
+        "gemini": 1,
+        "suspected_ai_app": 1
+    }
+}

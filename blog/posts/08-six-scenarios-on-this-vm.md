@@ -125,12 +125,12 @@ stack. So the evidence here is not a screenshot — it's the
 [`sng-efficacy`](../../bench/efficacy) harness driving the **real enforcement
 crates** against curated good/bad corpora, re-run on this VM
 ([`../artifacts/efficacy-report.json`](../artifacts/efficacy-report.json),
-git `98debf5`, overall verdict **PASS**):
+git `c3d99ce`, overall verdict **PASS**):
 
 | Function | Catch-rate | Accuracy | Verdict |
 | --- | ---: | ---: | :---: |
 | firewall (nftables) | 100.0% | 100.0% | PASS |
-| firewall — in-kernel (eBPF/XDP) | 100.0% | 100.0% | PASS |
+| firewall — in-kernel (nftables) | 100.0% | 100.0% | PASS |
 | swg (URL-cat + scan) | 100.0% | 100.0% | PASS |
 | ztna | 100.0% | 100.0% | PASS |
 | dlp (detectors) | 100.0% | 100.0% | PASS |
@@ -143,33 +143,38 @@ git `98debf5`, overall verdict **PASS**):
 
 **What "measured" means here.** The firewall row runs against real kernel
 `nftables`; the IPS rows run against a real Suricata binary; the ML-NER row runs
-against ONNX Runtime 1.22. These are conformance corpora, not wild traffic —
-100% on a curated set means "the rule fires on the cases we wrote," not "100% of
-real-world threats." The honest signal is that every enforcement path is wired
-and behaves, plus the two adversarial-evasion rows that test the harder cases.
+against ONNX Runtime 1.22. These are conformance + adversarial corpora, not wild
+traffic — 100% on a curated set means "the rule fires on the cases we wrote," not
+"100% of real-world threats." For the **wild / FPR-under-load** picture (malware
+90.1% catch / 9.6% FPR on a 1,342-sample noisy corpus, published honestly as
+informational), see Post 3's full matrix — this table is the gating + adversarial
+subset.
 
 ## The throughput question, re-measured
 
-Post 7 promised the multi-queue follow-up; here it is, run on this VM via the
-[#181](https://github.com/kennguy3n/visible-fishbone/pull/181) rig
-([`../artifacts/multi-queue-branch-large.json`](../artifacts/multi-queue-branch-large.json),
-branch-large profile, 1500B frames, XDP backend):
+Post 7 promised the multi-queue follow-up, and it answers the obvious question:
+*why does the single-stream wire floor read the same (≈5.5 Gbps) for firewall and
+IPS?* Because the single stream — not the inspection — is the bottleneck. Lifting
+that cap by fanning the **same** `micro`-profile enforcement path across queues
+(run on this VM, `multiqueue-micro.json`, 1500B frames, full-stack nftables
+backend, 128 rules, `available_parallelism = 8`):
 
 | Concurrent queues | Aggregate | Scaling efficiency |
 | ---: | ---: | ---: |
-| 1 (single-stream floor) | 17.7 Gbps | 1.00 |
-| 2 | 36.3 Gbps | 1.03 |
-| 4 | 56.1 Gbps | 0.79 |
-| 8 | 79.8 Gbps | 0.56 |
-| 16 (ceiling) | 83.5 Gbps | 0.29 |
+| 1 (single-stream floor) | 5.45 Gbps | 1.00 |
+| 2 | 10.43 Gbps | 0.96 |
+| 4 | 19.87 Gbps | 0.91 |
+| 8 | 25.01 Gbps | 0.57 |
+| 16 (ceiling) | 25.98 Gbps | 0.30 |
 
-That's a **4.72× lift** from one stream to sixteen. The honest reading: this is a
-*software* multi-queue model on one VM's CPUs, not a multi-queue physical NIC and
-emphatically not an ASIC. Efficiency degrades past the box's
-`available_parallelism` (8 here), which is exactly what you'd expect from
-CPU-bound software scaling — the curve flattening is itself the honest part. The
-full per-SKU dry-run vs. wire datasheet (wire = real `AF_PACKET` on a veth pair,
-the line-rate floor) is at
+That's a **4.77× lift** from one stream to sixteen — the floor moves 4.77× *just by
+adding queues*, which proves 5.45 was a single-stream/syscall ceiling, not an
+inspection limit. The honest reading: this is still *software* multi-queue
+scaling on one VM's CPUs, not a multi-queue physical NIC and emphatically not an
+ASIC. Efficiency stays high through 4 queues (0.91) then degrades past the box's
+`available_parallelism` (8 here) — exactly what CPU-bound software scaling looks
+like, and the curve flattening is itself the honest part. The full per-SKU
+dry-run-ceiling vs. wire-floor datasheet is at
 [`../artifacts/edge-performance-datasheet.md`](../artifacts/edge-performance-datasheet.md).
 
 ## Where we fall short (this scenario set)

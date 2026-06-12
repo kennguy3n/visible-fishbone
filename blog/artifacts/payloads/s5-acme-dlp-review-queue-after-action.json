@@ -1,0 +1,78 @@
+{
+    "items": [
+        {
+            "id": "d13d113f-5229-4b05-865b-08cf21083a73",
+            "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+            "signal": "ai_app_upload",
+            "destination_app": "suspected_ai_app",
+            "severity": "critical",
+            "confidence": 0.95,
+            "state": "pending",
+            "findings": [
+                {
+                    "kind": "phi",
+                    "label": "mrn",
+                    "count": 5,
+                    "max_confidence": 0,
+                    "severity": "critical"
+                },
+                {
+                    "kind": "pci",
+                    "label": "credit_card_pan",
+                    "count": 8,
+                    "max_confidence": 0,
+                    "severity": "high"
+                }
+            ],
+            "occurred_at": "2026-06-12T14:16:52Z",
+            "created_at": "2026-06-12T14:16:52Z"
+        },
+        {
+            "id": "88a66354-ee28-4100-bb0c-aa587d484dfc",
+            "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+            "signal": "ai_app_upload",
+            "destination_app": "chatgpt",
+            "severity": "high",
+            "confidence": 0.88,
+            "state": "pending",
+            "findings": [
+                {
+                    "kind": "pci",
+                    "label": "credit_card_pan",
+                    "count": 3,
+                    "max_confidence": 0,
+                    "severity": "high"
+                },
+                {
+                    "kind": "pii",
+                    "label": "email",
+                    "count": 12,
+                    "max_confidence": 0,
+                    "severity": "medium"
+                }
+            ],
+            "occurred_at": "2026-06-12T12:16:52Z",
+            "created_at": "2026-06-12T12:16:52Z"
+        },
+        {
+            "id": "4b192a47-037f-4bf5-96e8-deb111512498",
+            "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+            "signal": "ai_app_upload",
+            "destination_app": "claude",
+            "severity": "medium",
+            "confidence": 0.71,
+            "state": "pending",
+            "findings": [
+                {
+                    "kind": "source_code",
+                    "label": "private_key_block",
+                    "count": 1,
+                    "max_confidence": 0,
+                    "severity": "high"
+                }
+            ],
+            "occurred_at": "2026-06-12T08:16:52Z",
+            "created_at": "2026-06-12T08:16:52Z"
+        }
+    ]
+}

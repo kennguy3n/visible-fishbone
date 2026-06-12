@@ -1,0 +1,12 @@
+{
+    "items": [
+        {
+            "id": "19fb6b4b-84ac-4c32-9224-3a33baf1a09a",
+            "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+            "name": "FY26 board deck (confidential)",
+            "content_type": "text/plain",
+            "registered_at": "2026-06-12T15:18:19.297399Z"
+        }
+    ],
+    "next_cursor": ""
+}

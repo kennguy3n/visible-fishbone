@@ -1,0 +1,22 @@
+{
+    "id": "58814f2b-d518-4693-8418-6de701b9dd65",
+    "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+    "signal": "ai_app_upload",
+    "destination_app": "gemini",
+    "severity": "low",
+    "confidence": 0.42,
+    "state": "dismissed",
+    "findings": [
+        {
+            "kind": "pii",
+            "label": "phone_number",
+            "count": 2,
+            "max_confidence": 0,
+            "severity": "low"
+        }
+    ],
+    "occurred_at": "2026-06-11T19:16:52Z",
+    "created_at": "2026-06-11T19:16:52Z",
+    "decided_at": "2026-06-12T15:18:18Z",
+    "decided_by": "190fc952-71ff-4ad5-a0fa-68b78ec39fca"
+}

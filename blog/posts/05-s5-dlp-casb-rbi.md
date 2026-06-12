@@ -2,8 +2,8 @@
 
 > **Post 5 of 8.** Personas: **Lena** (SOC) and **Tom** (compliance). Outcome:
 > stop regulated data exfiltration with on-device ML classification, CASB
-> visibility, and remote browser isolation — and an honest story about the three
-> routes that used to be broken.
+> visibility, and remote browser isolation — now wired live (default-OFF), with a
+> human-in-the-loop review queue you can actually open in the console.
 
 ## The "broken routes" backstory
 
@@ -52,16 +52,24 @@ shows content going in and labels coming out.
 The efficacy matrix (Post 3) is where DLP earns its keep — it's the highest-volume
 row by far:
 
-- **`dlp` (1100 cases):** the `ContentClassifier` over generated Asia + GCC
-  national-ID corpora. Valid identifiers (correct check digit) must be detected;
-  same-length identifiers with a *wrong* check digit must be suppressed by the
-  validators. 550 bad / 550 good, zero false positives. This is the check-digit
-  validation doing real work — it's not a regex that fires on anything that looks
-  like a number.
-- **`dlp_ml_ner` (31 cases):** real on-device **ONNX NER** (`ner_v1.onnx`) over a
-  labelled PII corpus across six entity classes, with benign and
-  capitalised-non-name controls. Spec targets were precision > 0.90 and recall >
-  0.85; the run cleared them.
+- **`dlp` (4,800 cases):** the `ContentClassifier` over generated national-ID
+  corpora spanning the expanded jurisdiction set. Valid identifiers (correct
+  check digit) must be detected; same-length identifiers with a *wrong* check
+  digit must be suppressed by the validators. 2,400 bad / 2,400 good, **zero
+  false positives**. This is the check-digit validation doing real work — it's
+  not a regex that fires on anything that looks like a number. (The corpus grew
+  4× from the previous 1,100-case run as the detector set expanded.)
+- **`dlp_ml_ner` (47 cases):** real on-device **ONNX NER** (`ner_v1.onnx`, via
+  ONNX Runtime 1.22) over a labelled PII corpus, with benign and
+  capitalised-non-name controls. Measured **97.4% catch / 97.9% accuracy** —
+  reported as-is, not rounded to 100%. Spec targets were precision > 0.90 and
+  recall > 0.85; the run cleared them.
+
+The national-ID detector set also grew materially this cycle: from the earlier
+handful to **21 jurisdiction detectors**
+([#209](https://github.com/kennguy3n/visible-fishbone/pull/209),
+`crates/sng-dlp/src/detectors/`), each with check-digit/format validation. That
+is the breadth gap the previous draft named, narrowed.
 
 ## How it works under the hood
 
@@ -70,7 +78,7 @@ row by far:
   provisions it; without it, those tests are labeled and skipped rather than
   faked.)
 - **Validators, not just matchers.** National-ID detection validates check
-  digits, which is why the 550 invalid controls produce zero false positives.
+  digits, which is why the 2,400 invalid controls produce zero false positives.
 - **RBI as a policy action.** Remote browser isolation is a first-class action in
   the browser-policy model (migration 054), so "isolate uncategorized sites" is a
   policy verdict, not a bolt-on.
@@ -115,10 +123,13 @@ they just run sooner and without the idle tax.
 ## What shipped this cycle: malware, safe-browsing, NoOps shadow-IT
 
 The audit above closed the *broken-route* gap. This cycle added four new
-data-protection capabilities to these same surfaces. They are code-complete and
-tested on `main`; runtime wiring into `cmd/sng-control` is staged for the
-integration PR. So the honest framing here is **real engine output and tests, not
-live console screenshots for the parts not yet wired** — flagged per capability.
+data-protection capabilities to these same surfaces — and, unlike the previous
+draft, they are now **wired into the running control plane behind default-OFF
+gates**, not merely "code-complete on `main`." The honest framing has moved from
+*wired vs. not-wired* to *wired vs. default-ON*: an upgrade is behaviourally
+inert until an operator opts in, which is the production-correct posture (no
+surprise enforcement on upgrade). Integration status is flagged per capability
+below.
 
 ### Content scanning at the gateway: ClamAV INSTREAM
 
@@ -134,8 +145,10 @@ download's bytes to a local `clamd` daemon over the **INSTREAM** protocol:
 
 It complements — doesn't replace — the existing in-process `yara-x` signature
 scan: yara-x is the always-on cheap pre-filter; ClamAV is the opt-in deep content
-scan. *Integration status: OFF by default, constructor-gated, not yet wired into
-the running control plane.* ([#156](https://github.com/kennguy3n/visible-fishbone/pull/156))
+scan. *Integration status: **wired** via the ext-authz listener, default-OFF and
+constructor-gated, fail-open when off.*
+([#156](https://github.com/kennguy3n/visible-fishbone/pull/156),
+[#178](https://github.com/kennguy3n/visible-fishbone/pull/178))
 
 ### Safe-browsing and category filtering
 
@@ -143,7 +156,10 @@ The new categoriser (`crates/sng-swg/src/categorizer.rs`) maps `(host, path)` to
 category string the verdict layer reads as allow/deny, hot-reloaded via an
 `ArcSwap` snapshot so the operator deny-list and the vendor category feed update
 without a restart. Smart defaults deny the obviously-bad category groups out of
-the box, layered over the existing DNS threat-intel sinkhole. (#156)
+the box, layered over the existing DNS threat-intel sinkhole. *Integration
+status: **wired** via the same ext-authz listener, default-OFF.*
+([#156](https://github.com/kennguy3n/visible-fishbone/pull/156),
+[#178](https://github.com/kennguy3n/visible-fishbone/pull/178))
 
 ### Shadow-IT, handled NoOps: discover → classify → recommend
 
@@ -167,6 +183,11 @@ six apps draw an action:
 | Grammarly | ai_writing | 47 | `inspect_lite` |
 | DeepL | ai_translation | 44 | `inspect_lite` |
 | Notion | productivity | 36 | `inspect_lite` |
+
+This is the live `/casb` surface showing those per-app NoOps verdicts against
+Acme's shadow-IT inventory:
+
+![CASB — shadow-IT NoOps verdicts](../artifacts/screenshots/new-casb-noops-shadow-it.png)
 
 The three sanctioned suites (Dropbox, Microsoft 365, Slack) correctly draw **no**
 action. Every row above is `mode: recommend`, `applied: false` — that field *is*
@@ -195,29 +216,52 @@ opt-in, to avoid the false-positive backlash that makes users route around DLP.
 Events that aren't auto-resolved land in a **human-in-the-loop review queue**
 (`internal/service/dlpreview`, migration 060): `pending → approved / blocked /
 dismissed`, with RLS and redacted-evidence-only storage. *Integration status:
-repos + service + migration are on `main`; the operator console API is not built
-yet, so there is deliberately no screenshot of the queue — building that API is
-the obvious next step.* (#158)
+**the operator console surface now exists** — the queue is reachable at
+`/dlp/review-queue` with a per-tenant digest and triage actions, backed by the
+operator API.* Here it is live against Acme:
+
+![DLP review queue — digest + pending items](../artifacts/screenshots/new-dlp-review-queue.png)
+
+The captured queue + a dismiss action are at
+[`s5-acme-dlp-review-queue.json`](../artifacts/payloads/s5-acme-dlp-review-queue.json)
+and
+[`s5-acme-dlp-review-dismiss-action.json`](../artifacts/payloads/s5-acme-dlp-review-dismiss-action.json).
+(#158, [#176](https://github.com/kennguy3n/visible-fishbone/pull/176),
+[#179](https://github.com/kennguy3n/visible-fishbone/pull/179))
+
+### Exact-Data-Match + fingerprinting at scale
+
+Beyond pattern detectors, `sng-dlp` gained **Exact-Data-Match**
+(`crates/sng-dlp/src/edm.rs`, migration 067): an operator registers a sensitive
+record set (customer PANs, employee records) and the engine matches on it via
+**salted HMAC-SHA256** — the plaintext is never stored, only the keyed hash.
+Document **fingerprinting** uses multi-index-hashing SimHash, tested at **5,000
+fingerprints** for near-duplicate detection at scale.
+([#209](https://github.com/kennguy3n/visible-fishbone/pull/209))
 
 ## Where we fall short
 
-- **Corpus is synthetic.** As with all of Post 3: the 1100-case result proves the
-  validators and the classifier code are correct on a decision-boundary corpus,
-  not that real document exfiltration is caught at that rate.
-- **NER is six entity classes.** A mature DLP suite ships dozens of
-  jurisdiction-specific detectors and document fingerprinting at scale. Ours is a
-  credible on-device core.
+Four of the five caveats this post used to carry are now closed — they were the
+staged-but-not-wired and no-console-API gaps, and this cycle wired and surfaced
+them. What honestly remains is breadth, not plumbing:
+
+- **Wild-corpus catch-rate is below the gating number.** The gating `dlp` row is
+  100% on a decision-boundary corpus; the *wild* DLP rows (Post 3,
+  `dlp_wild` / `dlp_fpr_load`) are the honest signal that real exfiltration
+  detection is a harder, noisier problem than the curated corpus implies.
+- **Detector breadth is much wider, still not Netskope-wide.** 21 jurisdiction
+  detectors + EDM + at-scale fingerprinting is a credible on-device core and a
+  big step up from the six-class draft — but a mature DLP suite still ships more
+  jurisdiction-specific detectors and managed corpora than we do.
 - **CASB is connector-shaped, not full inline-CASB-at-scale.** We model
-  connectors and inline rules; we don't claim the SaaS API coverage of a
-  dedicated CASB vendor.
-- **The four new capabilities are not yet wired into the running control
-  plane.** ClamAV scanning, safe-browsing/category filtering, the NoOps engine,
-  and the DLP review queue are code-complete and tested on `main` but staged
-  behind the integration PR. The evidence here is real engine output and tests —
-  not a claim that they are enforcing live traffic today.
-- **The DLP review queue has no operator API yet.** The `dlpreview` service and
-  its store exist, but there's no console surface to triage the queue, so the
-  human-in-the-loop story is half-built until that API lands.
+  connectors and inline rules; we don't claim the SaaS-API coverage of a
+  dedicated CASB vendor. Unchanged, and stated.
+- **The new capabilities are wired but default-OFF.** ClamAV scanning,
+  safe-browsing/category filtering, the NoOps engine, and the DLP review queue
+  are now wired into the running control plane — but behind default-OFF gates, so
+  an out-of-the-box install isn't enforcing them until an operator opts in. That
+  is the production-correct posture; it is *not* the same as "on for every tenant
+  today."
 
 ## Competitive note
 

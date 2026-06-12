@@ -16,26 +16,42 @@ series with all three.
 
 The Metering page turns raw usage meters into a buyer-facing view — eight metered
 dimensions per tenant, each with current usage, a **projected** period-end total,
-and a budget bar. Here's Acme, projecting **$1,063.54/mo** at **46.8% margin**:
+and a budget bar. Here's Acme, projecting **≈$1,060/mo** at **≈47% margin**:
 
 ![Metering & cost — Acme](../../artifacts/business/biz-09-metering-cost.png)
 
-And the fleet roll-up across all four tenants — cost vs. revenue vs. margin, the
-number Tom actually manages to:
+And the fleet roll-up — now across the **full nine-tenant fleet**, not four:
+cost vs. revenue vs. margin, sorted worst-margin-first, the number Tom actually
+manages to:
 
 ![Fleet cost & margin](../../artifacts/business/biz-10-fleet-margin.png)
 
 | Tenant | Tier | Projected cost/mo | Margin |
 | --- | --- | ---: | ---: |
-| Acme Retail Group | Enterprise | $1,063.53 | 46.8% |
-| Globex Health Systems | Enterprise | $668.87 | 66.5% |
-| Initech Financial | Professional | $426.95 | 14.4% |
-| Umbrella Logistics | Starter | $57.29 | 42.1% |
+| Maple Health Network | Professional | ≈$573 | **≈−14.8%** |
+| Initech Financial | Professional | ≈$425 | ≈14.8% |
+| Umbrella Logistics | Starter | ≈$57 | ≈42.4% |
+| Acme Retail Group | Enterprise | ≈$1,060 | ≈47.0% |
+| Outback Retail Co | Professional | ≈$253 | ≈49.3% |
+| Nordic EduCloud | Starter | ≈$46 | ≈53.9% |
+| Lumière Légal | Professional | ≈$223 | ≈55.3% |
+| Britannia Robotics | Enterprise | ≈$752 | ≈62.4% |
+| Globex Health Systems | Enterprise | ≈$667 | ≈66.6% |
 
+Fleet-wide: **$8,191/mo revenue, ≈$4,056/mo projected cost, ≈50% blended margin**
+([`s7-admin-cost-report.json`](../../artifacts/payloads/s7-admin-cost-report.json)).
 The **projection** is the feature: the engine extrapolates a partial-period run
 rate to a period-end total and flags "on track to breach" *before* the invoice,
-not after. Initech's thin 14% margin isn't a mystery — it's a visible run-rate
-story Tom can act on before renewal.
+not after. Two stories Tom acts on:
+
+- **Maple Health is underwater (≈−14.8%).** A professional-$499 tenant pulling
+  enterprise-scale bandwidth and ClickHouse — the report surfaces the loss-making
+  customer *first*, which is the upsell/renegotiation conversation, not a
+  year-end surprise.
+- **Initech's thin ≈15% margin** is a visible url-category run-rate surge (the
+  cost-anomaly detector flags it at 3.1× its 5-month baseline) — actionable
+  before renewal, not a mystery. (Margins are *projected* and drift sub-percent
+  within a billing period; the payload is the point-in-time source of record.)
 
 ## The structural cost advantage: zero idle cost + self-hosted AI
 
@@ -112,11 +128,15 @@ throughput tables; here is the *business* read, capability by capability.
 
 ## Where this whole series falls short (consolidated, honest)
 
-- **Integration is partial.** Several capabilities ship as tested, opt-in
-  components with runtime wiring still in progress — the dormancy planner has one
-  live consumer (Post 1), the HITL review queue has no console API yet (Post 3),
-  and the cross-tenant template roll-out UI is thin (Post 4). We labeled each one
-  in place rather than implying a finished product.
+- **Capabilities are wired but default-OFF.** This cycle closed most of the
+  "tested but not wired" gaps: the HITL review queue now has both an operator API
+  and a live console surface (Post 3), and the cross-tenant template roll-out UI
+  + guided onboarding wizard shipped (Post 4). The honest residual is *wired vs.
+  default-ON* — new enforcement surfaces ship behind per-tenant default-OFF gates,
+  so an upgrade is inert until an operator opts in. The one genuinely partial
+  item is the dormancy planner, which is proven by tests but not yet driving a
+  live production sweep (Post 1). We label each in place rather than implying a
+  finished product.
 - **The classifiers are heuristic-first.** CASB classification and AI-app
   destination detection make conservative, confidence-scored guesses for the long
   tail and *say so* in their rationale. Optional self-hosted AI refinement raises

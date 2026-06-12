@@ -1,0 +1,17 @@
+{
+    "matches": [
+        {
+            "rule_type": "regex",
+            "pattern": "credit_card",
+            "offset": 42,
+            "length": 19,
+            "snippet": "4111 1111 1111 1111",
+            "confidence": 1
+        }
+    ],
+    "policy_ids": [
+        "7962040e-2886-4d96-a2f4-fe89b5d5034d"
+    ],
+    "action": "block",
+    "confidence": 1
+}

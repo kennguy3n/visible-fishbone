@@ -74,7 +74,8 @@ assessment for the SME/MSP buyer.
 - **Performance datasheet:** [`../artifacts/edge-performance-datasheet.md`](../artifacts/edge-performance-datasheet.md)
   — per-SKU throughput in **two columns (dry-run + real `AF_PACKET` wire)** +
   per-packet latency percentiles, plus the multi-queue floor-vs-ceiling rig
-  ([`../artifacts/multi-queue-branch-large.json`](../artifacts/multi-queue-branch-large.json)).
+  ([`../artifacts/multiqueue-micro.json`](../artifacts/multiqueue-micro.json) —
+  single-stream 5.45 Gbps → 16-queue 25.98 Gbps, 4.77×).
 - **Scenario provenance:** [`../artifacts/scenarios.md`](../artifacts/scenarios.md)
   — maps each of the six operator intents to its real code primitive + captured
   evidence file.
