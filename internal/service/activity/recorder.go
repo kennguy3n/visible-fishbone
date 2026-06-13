@@ -114,6 +114,14 @@ type SourceStat struct {
 	Enqueued uint64
 	// Debounced is the number of Observe calls from this source
 	// suppressed because the tenant was touched within MinInterval.
+	// The debounce gate keys on (tenant, wall-clock) alone, not on
+	// source, so a touch here may have been coalesced with an *earlier
+	// touch from a different source* for the same tenant — a non-zero
+	// Debounced for a source does not imply that source's touches were
+	// redundant with themselves. This is intentional: the gate bounds
+	// the Postgres write rate per tenant, and TouchLastActive uses
+	// GREATEST so only the latest timestamp matters regardless of which
+	// source won.
 	Debounced uint64
 	// Dropped is the number of touches from this source discarded
 	// because the drain queue was full.
