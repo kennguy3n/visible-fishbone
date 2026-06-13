@@ -297,6 +297,55 @@ type CapacityPlanSection struct {
 	ClickHouse ClickHouseWritePlan `json:"clickhouse"`
 	// NATS is the subject-cardinality + JetStream storage projection.
 	NATS NATSSubjectPlan `json:"nats"`
+	// PeriodicSweep is the control-plane dormancy-dividend projection:
+	// tenants-visited/cycle for the periodic per-tenant sweeps, before
+	// vs after activity-tiered gating (WS-1).
+	PeriodicSweep PeriodicSweepPlan `json:"periodic_sweep"`
+}
+
+// PeriodicSweepPlan projects the WS-1 dormancy dividend: how many
+// tenants the periodic per-tenant sweeps (idp_directory_sync,
+// casb_noops_reconcile, alert_feedback_tuning) visit per cycle once the
+// shared tenancy.TieredSweep gates them by activity tier, versus the
+// legacy every-tenant-every-cycle fan-out. The dominant avoidable
+// control-plane cost at a dormant-heavy 5000-SME fleet.
+type PeriodicSweepPlan struct {
+	// Jobs is the set of sweep loops modelled (the {job} label values
+	// of sweep_tenants_visited).
+	Jobs []string `json:"jobs"`
+	// JobCount is len(Jobs), surfaced for the aggregate roll-up.
+	JobCount int `json:"job_count"`
+	// IdleEvery / DormantEvery are the planner cadences the model used
+	// (idle tenants visited every Nth cycle, dormant every Mth).
+	IdleEvery    int64 `json:"idle_every"`
+	DormantEvery int64 `json:"dormant_every"`
+	// ActiveTenants / IdleTenants / DormantTenants is the modelled
+	// activity-tier breakdown of the fleet.
+	ActiveTenants  int `json:"active_tenants"`
+	IdleTenants    int `json:"idle_tenants"`
+	DormantTenants int `json:"dormant_tenants"`
+	// UntieredVisitsPerCyclePerJob is the legacy cost: every tenant,
+	// every cycle (== TenantCount).
+	UntieredVisitsPerCyclePerJob int `json:"untiered_visits_per_cycle_per_job"`
+	// TieredVisitsPerCyclePerJob is the steady-state cost after tiering,
+	// averaged over one full cadence period.
+	TieredVisitsPerCyclePerJob float64 `json:"tiered_visits_per_cycle_per_job"`
+	// ActiveVisitsPerCycle / IdleVisitsPerCycle / DormantVisitsPerCycle
+	// decompose the tiered per-job cost by tier.
+	ActiveVisitsPerCycle  float64 `json:"active_visits_per_cycle"`
+	IdleVisitsPerCycle    float64 `json:"idle_visits_per_cycle"`
+	DormantVisitsPerCycle float64 `json:"dormant_visits_per_cycle"`
+	// UntieredVisitsPerCycleTotal / TieredVisitsPerCycleTotal aggregate
+	// across all modelled jobs.
+	UntieredVisitsPerCycleTotal int     `json:"untiered_visits_per_cycle_total"`
+	TieredVisitsPerCycleTotal   float64 `json:"tiered_visits_per_cycle_total"`
+	// ReductionFactor is untiered/tiered per job (aggregate dividend).
+	ReductionFactor float64 `json:"reduction_factor"`
+	// IdleReductionFactor / DormantReductionFactor are the per-tier
+	// dividends on the idle/dormant tail (the headline 10-100x).
+	IdleReductionFactor    float64 `json:"idle_reduction_factor"`
+	DormantReductionFactor float64 `json:"dormant_reduction_factor"`
+	Note                   string  `json:"note"`
 }
 
 // PostgresPoolPlan projects connection-pool pressure at scale.
