@@ -587,7 +587,7 @@ func run() error {
 			slog.Duration("min_interval", cfg.Activity.MinInterval))
 	}
 
-	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer, dlpReviewIngest, rc.SampleRateResolver, rc.ActivityRecorder)
+	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer, dlpReviewIngest, rc.SampleRateResolver, rc.ActivityRecorder, rc.TierActivityLister)
 	if err != nil {
 		return fmt.Errorf("start telemetry: %w", err)
 	}
@@ -858,6 +858,12 @@ type routerComponents struct {
 	// activity observer; the control-plane signal is wired into the
 	// router here in buildRouter.
 	ActivityRecorder *activity.Recorder
+	// TierActivityLister is the (id, last_active_at) projection the
+	// WS-4 tier-sampling refresher classifies once per cycle to drive
+	// the per-activity-tier telemetry sampling policy. Satisfied by the
+	// TenantRepository; handed to startTelemetry, which only consults it
+	// when CLICKHOUSE_TIER_SAMPLING_ENABLED. Never nil.
+	TierActivityLister telemetry.TenantActivityLister
 }
 
 // buildRouter wires every repository / service / handler against
@@ -2036,6 +2042,7 @@ func buildRouter(
 		IDPSyncService:      idpSyncSvc,
 		DLPReviewService:    dlpReviewSvc,
 		ActivityRecorder:    activityRecorder,
+		TierActivityLister:  tenantRepo,
 	}, nil
 }
 
@@ -2618,6 +2625,7 @@ func startTelemetry(
 	dlpObserver telemetry.DLPReviewObserver,
 	sampleResolver *telemetry.MapSampleRateResolver,
 	activityObserver *activity.Recorder,
+	tierActivityLister telemetry.TenantActivityLister,
 ) (func(context.Context) error, handler.TelemetryClassQuerier, func() (policy.TelemetrySource, error), error) {
 	var hot telemetry.HotWriter
 	var cold telemetry.ColdWriter
@@ -2786,11 +2794,39 @@ func startTelemetry(
 	//     entirely via CLICKHOUSE_ROW_LIMIT_ENABLED=false — a nil
 	//     limiter is a no-op, so a deployment that bounds write cost
 	//     another way carries no per-tenant ceiling.
+	// WS-4: activity-tier-aware telemetry sampling. DEFAULT-OFF — only
+	// engaged when CLICKHOUSE_TIER_SAMPLING_ENABLED and an activity
+	// projection is available, so an upgrade never silently changes
+	// retention. When on, a background refresher classifies every tenant
+	// (active / idle / dormant) once per interval into a lock-free
+	// snapshot the sampler reads on the hot path; idle tenants sample at
+	// the configured reduced multiplier and dormant tenants write
+	// security-events-only. Security-relevant events (IPS / ZTNA / DLP)
+	// and the inspect_full compliance record are always preserved
+	// regardless. A single indexed scan per interval for the whole
+	// fleet; one background goroutine, stopped with the consumer.
+	var tierPolicy *telemetry.TierSamplingPolicy
+	var tierRefresher *telemetry.TierRefresher
+	if cfg.TelemetryAnalytics.ClickHouseTierSamplingEnabled && tierActivityLister != nil {
+		tierResolver := telemetry.NewMapTierResolver(nil)
+		tierPolicy = telemetry.NewTierSamplingPolicy(telemetry.TierSamplingConfig{
+			Resolver:       tierResolver,
+			IdleMultiplier: cfg.TelemetryAnalytics.ClickHouseTierSamplingIdleMultiplier,
+		})
+		tierRefresher = telemetry.NewTierRefresher(telemetry.TierRefresherConfig{
+			Lister:   tierActivityLister,
+			Resolver: tierResolver,
+			Interval: cfg.TelemetryAnalytics.ClickHouseTierSamplingRefreshInterval,
+			Logger:   logger,
+		})
+	}
 	svc.WithSampler(telemetry.NewAdaptiveSampler(telemetry.SamplerConfig{
 		// WS12: consult the policy-graph-published per-tenant / per-class
 		// sampling overrides ahead of the built-in class defaults and the
 		// adaptive sampler. Empty until a tenant publishes sampling config.
 		RateResolver: sampleResolver,
+		// WS-4: nil unless tier sampling is enabled (default-OFF).
+		TierPolicy: tierPolicy,
 	}))
 	if cfg.TelemetryAnalytics.ClickHouseRowLimitEnabled {
 		// WS12: prefer the self-calibrating per-tenant limiter (cap tracks
@@ -2832,6 +2868,16 @@ func startTelemetry(
 		return nil, nil, nil, fmt.Errorf("telemetry start: %w", err)
 	}
 	logger.Info("telemetry: consumer started")
+
+	// WS-4: launch the activity-tier refresher once the consumer is
+	// live. nil (and no goroutine) unless tier sampling is enabled. It
+	// exits when ctx is cancelled (graceful shutdown), and a failed
+	// refresh keeps the previous snapshot rather than blanking the tier
+	// signal (which fails safe to active anyway).
+	if tierRefresher != nil {
+		go tierRefresher.Run(ctx)
+		logger.Info("telemetry: activity-tier sampling enabled (idle reduced, dormant security-events-only)")
+	}
 
 	// WS12: launch the ClickHouse batch-size auto-tuner once the writers
 	// and consumer are live. It holds each shard's insert frequency near

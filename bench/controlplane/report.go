@@ -289,6 +289,29 @@ type CapacityPlanSection struct {
 	ClickHouse ClickHouseWritePlan `json:"clickhouse"`
 	// NATS is the subject-cardinality + JetStream storage projection.
 	NATS NATSSubjectPlan `json:"nats"`
+	// TierSampling is the WS-4 activity-tier sampling breakdown. Present
+	// only when the policy is modelled (default-OFF), so the baseline
+	// projection's JSON is byte-for-byte unchanged.
+	TierSampling *TierSamplingPlan `json:"tier_sampling,omitempty"`
+}
+
+// TierSamplingPlan decomposes the fleet write rate by activity tier
+// under the WS-4 sampling policy: active tenants write full fidelity,
+// idle tenants sample at IdleSampleMultiplier, dormant tenants write
+// security-events-only. It is the metric proving dormant-tenant rows/s
+// collapse and that total write cost tracks the active cohort.
+type TierSamplingPlan struct {
+	IdleSampleMultiplier float64 `json:"idle_sample_multiplier"`
+	ActiveTenants        int     `json:"active_tenants"`
+	IdleTenants          int     `json:"idle_tenants"`
+	DormantTenants       int     `json:"dormant_tenants"`
+	ActiveRowsPerSec     float64 `json:"active_rows_per_sec"`
+	IdleRowsPerSec       float64 `json:"idle_rows_per_sec"`
+	DormantRowsPerSec    float64 `json:"dormant_rows_per_sec"`
+	SampledRowsPerSec    float64 `json:"sampled_rows_per_sec"`
+	BaselineRowsPerSec   float64 `json:"baseline_rows_per_sec"`
+	ReductionPct         float64 `json:"reduction_pct"`
+	ActiveCohortSharePct float64 `json:"active_cohort_share_pct"`
 }
 
 // PostgresPoolPlan projects connection-pool pressure at scale.

@@ -34,6 +34,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/config"
 	sngnats "github.com/kennguy3n/visible-fishbone/internal/nats"
 	"github.com/kennguy3n/visible-fishbone/internal/nats/schema"
+	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy"
 )
 
 // hotPathMaxDeliver is the JetStream consumer's per-message retry
@@ -128,11 +129,40 @@ type Metrics struct {
 	RowRateLimited atomic.Uint64 // events rejected by the ClickHouse row-write limiter (every rejection: Nak'd for retry or DLQ'd on delivery exhaustion)
 	DLQPublished   atomic.Uint64 // bad payloads successfully routed to DLQ
 	DLQPublishFail atomic.Uint64 // DLQ publish itself failed (data preserved by Nak retry)
+
+	// KeptByTier / DroppedByTier break the WS-4 tier-sampling
+	// keep/drop decision down by the tenant's activity tier, indexed by
+	// tenancy.Tier (active / idle / dormant). Populated only when a tier
+	// policy is wired (SamplerConfig.TierPolicy); otherwise both stay
+	// zero. KeptByTier is the rows/s-by-tier signal that proves the
+	// dormant cohort's write volume collapses — see recordTierDecision.
+	KeptByTier    [numTiers]atomic.Uint64
+	DroppedByTier [numTiers]atomic.Uint64
+}
+
+// numTiers is the number of tenancy.Tier values (active, idle, dormant);
+// it sizes the per-tier metric arrays. A guard in recordTierDecision
+// keeps an out-of-range tier from panicking the hot path.
+const numTiers = 3
+
+// recordTierDecision increments the per-tier kept / dropped counter for
+// a tier-sampling decision. An out-of-range tier (a future enum value
+// reaching an old binary) is ignored rather than panicking the consumer.
+func (m *Metrics) recordTierDecision(tier tenancy.Tier, kept bool) {
+	i := int(tier)
+	if i < 0 || i >= numTiers {
+		return
+	}
+	if kept {
+		m.KeptByTier[i].Add(1)
+	} else {
+		m.DroppedByTier[i].Add(1)
+	}
 }
 
 // Snapshot returns a copy of the current counter values.
 func (m *Metrics) Snapshot() MetricsSnapshot {
-	return MetricsSnapshot{
+	s := MetricsSnapshot{
 		Received:       m.Received.Load(),
 		Deduplicated:   m.Deduplicated.Load(),
 		Enriched:       m.Enriched.Load(),
@@ -145,7 +175,15 @@ func (m *Metrics) Snapshot() MetricsSnapshot {
 		RowRateLimited: m.RowRateLimited.Load(),
 		DLQPublished:   m.DLQPublished.Load(),
 		DLQPublishFail: m.DLQPublishFail.Load(),
+		KeptByTier:     make(map[string]uint64, numTiers),
+		DroppedByTier:  make(map[string]uint64, numTiers),
 	}
+	for i := 0; i < numTiers; i++ {
+		label := tenancy.Tier(i).String()
+		s.KeptByTier[label] = m.KeptByTier[i].Load()
+		s.DroppedByTier[label] = m.DroppedByTier[i].Load()
+	}
+	return s
 }
 
 // MetricsSnapshot is a point-in-time copy of Metrics.
@@ -162,6 +200,11 @@ type MetricsSnapshot struct {
 	RowRateLimited uint64
 	DLQPublished   uint64
 	DLQPublishFail uint64
+	// KeptByTier / DroppedByTier map an activity-tier label (active /
+	// idle / dormant) to the count of events the tier-sampling policy
+	// kept / dropped. Empty maps when the tier policy is not wired.
+	KeptByTier    map[string]uint64
+	DroppedByTier map[string]uint64
 }
 
 // Config tunes the consumer loop.
@@ -785,6 +828,11 @@ func (s *Service) dispatch(ctx context.Context, w *worker, msg jetstream.Msg) {
 	// it). Deciding once, on first delivery, makes keep/drop stable
 	// for the lifetime of the message.
 	if w.sampler != nil {
+		// WS-4: security-relevant events (IPS / ZTNA / DLP) are never
+		// shed on cost grounds in any activity tier. Derived from the
+		// envelope's EventClass alone, so the hot path never decodes a
+		// payload to inspect a verdict.
+		securityRelevant := isSecurityRelevantEventClass(env.EventClass)
 		if isRedelivery(msg) {
 			// Always keep a redelivery (decided above). But its de-bias
 			// rate must still reach the writer: the first delivery
@@ -798,12 +846,20 @@ func (s *Service) dispatch(ctx context.Context, w *worker, msg jetstream.Msg) {
 			// failed write within seconds, so this is the same window's
 			// rate in the common case and at most one window stale
 			// otherwise — within the window granularity the de-bias
-			// scheme already operates at.
-			if sr := w.sampler.SampleRateForClass(env.TenantID, env.TrafficClass); sr < 1.0 {
+			// scheme already operates at. SampleRateForEvent folds in the
+			// tenant's activity tier when a tier policy is wired and is
+			// exactly SampleRateForClass otherwise.
+			if sr := w.sampler.SampleRateForEvent(env.TenantID, env.TrafficClass, securityRelevant); sr < 1.0 {
 				env.SampleRate = sr
 			}
 		} else {
-			keep, sampleRate := w.sampler.DecideClass(ctx, env.TenantID, env.EventID, env.TrafficClass)
+			keep, sampleRate, tier, tiered := w.sampler.DecideEvent(ctx, env.TenantID, env.EventID, env.TrafficClass, securityRelevant)
+			if tiered {
+				// Per-tier rows/s metric: count the keep/drop decision
+				// against the tenant's tier so the dormant cohort's
+				// collapse is observable.
+				s.metrics.recordTierDecision(tier, keep)
+			}
 			if !keep {
 				s.metrics.Sampled.Add(1)
 				if ackErr := msg.Ack(); ackErr != nil {

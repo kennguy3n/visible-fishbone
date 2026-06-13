@@ -130,6 +130,90 @@ func TestCapacityPlanPostgresFlagsUndersizedPool(t *testing.T) {
 	}
 }
 
+func TestCapacityPlanTierSamplingDefaultOff(t *testing.T) {
+	// With the policy off the section is omitted and the ClickHouse
+	// projection is the full publish rate — the baseline is untouched.
+	s := RunCapacityPlan(CapacityPlanConfig{})
+	if s.TierSampling != nil {
+		t.Fatal("tier-sampling section should be nil when the policy is off")
+	}
+	if s.ClickHouse.TotalRowsPerSec != 26500.0 {
+		t.Fatalf("baseline rows/s = %.1f, want 26500.0", s.ClickHouse.TotalRowsPerSec)
+	}
+}
+
+func TestCapacityPlanTierSamplingCollapsesDormantCohort(t *testing.T) {
+	s := RunCapacityPlan(CapacityPlanConfig{TierSampling: true})
+	ts := s.TierSampling
+	if ts == nil {
+		t.Fatal("tier-sampling section should be present when enabled")
+	}
+	// Default NoOps split: 10% active, 15% idle, 75% dormant of 5000.
+	if ts.ActiveTenants != 500 || ts.IdleTenants != 750 || ts.DormantTenants != 3750 {
+		t.Fatalf("cohort split = %d/%d/%d, want 500/750/3750",
+			ts.ActiveTenants, ts.IdleTenants, ts.DormantTenants)
+	}
+	// Sampled total must be well below baseline and the ClickHouse plan
+	// must size against the sampled rate, not the full publish rate.
+	if ts.SampledRowsPerSec >= ts.BaselineRowsPerSec {
+		t.Fatalf("sampled %.1f should be below baseline %.1f", ts.SampledRowsPerSec, ts.BaselineRowsPerSec)
+	}
+	if s.ClickHouse.TotalRowsPerSec != ts.SampledRowsPerSec {
+		t.Fatalf("ClickHouse total %.1f should equal sampled %.1f",
+			s.ClickHouse.TotalRowsPerSec, ts.SampledRowsPerSec)
+	}
+	if ts.ReductionPct < 50 {
+		t.Fatalf("expected a >50%% reduction at the NoOps split, got %.1f%%", ts.ReductionPct)
+	}
+	// Dormant tenants are 75% of the fleet but write only the
+	// security-event floor (ips+ztna = 0.5/s each): 3750 × 0.5 = 1875.
+	if ts.DormantRowsPerSec != 1875.0 {
+		t.Fatalf("dormant rows/s = %.1f, want 1875.0 (security floor)", ts.DormantRowsPerSec)
+	}
+}
+
+func TestCapacityPlanTierSamplingPreservesSecurityFloor(t *testing.T) {
+	// Even with idle fully shed and the dormant majority, the fleet
+	// never drops below the security-event publish rate of the non-active
+	// cohorts — security events are never sampled away.
+	s := RunCapacityPlan(CapacityPlanConfig{TierSampling: true, IdleSampleMultiplier: 0.0001})
+	ts := s.TierSampling
+	// active(500)=2650 full; idle≈0; dormant(3750)=1875 security floor.
+	if ts.DormantRowsPerSec != 1875.0 {
+		t.Fatalf("dormant security floor changed: %.1f, want 1875.0", ts.DormantRowsPerSec)
+	}
+	if ts.SampledRowsPerSec < ts.ActiveRowsPerSec+ts.DormantRowsPerSec {
+		t.Fatalf("sampled total %.1f dropped below active+dormant floor %.1f",
+			ts.SampledRowsPerSec, ts.ActiveRowsPerSec+ts.DormantRowsPerSec)
+	}
+}
+
+func TestCapacityPlanTierSamplingRendersAndRoundTrips(t *testing.T) {
+	r := &BusinessBenchmarkReport{
+		SchemaVersion: SchemaVersion,
+		Mode:          ModeCapacityPlan,
+		Theoretical:   DefaultTheoreticalTargets(),
+		Competitor:    DefaultCompetitorBaselines(),
+		CapacityPlan:  RunCapacityPlan(CapacityPlanConfig{TierSampling: true}),
+	}
+	r.Grade()
+	md := r.ToMarkdown()
+	if !strings.Contains(md, "WS-4 activity-tier telemetry sampling") {
+		t.Errorf("markdown missing tier-sampling section")
+	}
+	js, err := r.ToJSON()
+	if err != nil {
+		t.Fatalf("ToJSON: %v", err)
+	}
+	got, err := ReportFromJSON(js)
+	if err != nil {
+		t.Fatalf("ReportFromJSON: %v", err)
+	}
+	if got.CapacityPlan.TierSampling == nil {
+		t.Fatal("tier-sampling section dropped in JSON round-trip")
+	}
+}
+
 func TestNextPow2(t *testing.T) {
 	cases := map[int]int{0: 1, 1: 1, 2: 2, 3: 4, 16: 16, 17: 32, 300: 256}
 	for in, want := range cases {
