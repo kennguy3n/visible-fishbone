@@ -30,6 +30,9 @@ const (
 	sampleMD5    = "0123456789abcdef0123456789abcdef"
 	sampleSHA1   = "0123456789abcdef0123456789abcdef01234567"
 	sampleSHA256 = "a1b2c3d4e5f6071829304a5b6c7d8e9f00112233445566778899aabbccddeeff"
+	// a second, distinct SHA-256 so a test can assert two separate hash
+	// IOCs landed independently.
+	sampleSHA256b = "ffeeddccbbaa99887766554433221100f9e8d7c6b5a4039281706f5e4d3c2b1a"
 )
 
 // --- STIX / TAXII 2.1 ---

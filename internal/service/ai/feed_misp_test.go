@@ -37,7 +37,7 @@ var mispEventsResponse = `{
         "Object": [
           {
             "Attribute": [
-              {"type": "filename|sha256", "value": "dropper.exe|` + sampleSHA1 + sampleSHA1[:24] + `", "to_ids": true}
+              {"type": "filename|sha256", "value": "dropper.exe|` + sampleSHA256b + `", "to_ids": true}
             ]
           }
         ]
@@ -94,7 +94,7 @@ func TestMISPParser_EventsResponse(t *testing.T) {
 	}
 
 	// Object attribute: filename|sha256 yields the hash, drops the filename.
-	hashKey := string(IOCTypeHash) + "\x00" + (sampleSHA1 + sampleSHA1[:24])
+	hashKey := string(IOCTypeHash) + "\x00" + sampleSHA256b
 	if h := by[hashKey]; h.HashAlgo != HashAlgoSHA256 {
 		t.Errorf("object filename|sha256 hash missing/wrong algo: %q", h.HashAlgo)
 	}
