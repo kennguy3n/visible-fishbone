@@ -51,7 +51,7 @@ import (
 // seeded tenants whose baselines this harness folds — the first four
 // scenario tenants. Identities come from the shared fleet package (the
 // single source of truth), so they always match seed-summary.json.
-var tenants = []fleet.Tenant{fleet.Acme, fleet.Globex, fleet.Initech, fleet.Umbrella}
+var tenants = []fleet.Tenant{fleet.Acme(), fleet.Globex(), fleet.Initech(), fleet.Umbrella()}
 
 // dimProfile is one monitored metric and the spikes injected after
 // warmup. mean/std drive the warmup walk; spikeMultiples are how many

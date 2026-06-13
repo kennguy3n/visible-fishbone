@@ -144,8 +144,8 @@ type playbookSpec struct {
 func scenarioTenants() []tenantSpec {
 	return []tenantSpec{
 		{
-			name: fleet.Acme.Name, slug: fleet.Acme.Slug, region: fleet.Acme.Region,
-			tier: fleet.Acme.Tier, relationship: "owner", country: fleet.Acme.Country, industry: fleet.Acme.Industry,
+			name: fleet.Acme().Name, slug: fleet.Acme().Slug, region: fleet.Acme().Region,
+			tier: fleet.Acme().Tier, relationship: "owner", country: fleet.Acme().Country, industry: fleet.Acme().Industry,
 			sites: []siteSpec{
 				{"Acme HQ — Dallas", "hub"},
 				{"Distribution Center — Memphis", "hub"},
@@ -194,8 +194,8 @@ func scenarioTenants() []tenantSpec {
 			},
 		},
 		{
-			name: fleet.Globex.Name, slug: fleet.Globex.Slug, region: fleet.Globex.Region,
-			tier: fleet.Globex.Tier, relationship: "owner", country: fleet.Globex.Country, industry: fleet.Globex.Industry,
+			name: fleet.Globex().Name, slug: fleet.Globex().Slug, region: fleet.Globex().Region,
+			tier: fleet.Globex().Tier, relationship: "owner", country: fleet.Globex().Country, industry: fleet.Globex().Industry,
 			sites: []siteSpec{
 				{"Globex Main Hospital — Seattle", "hub"},
 				{"Outpatient Clinic — Bellevue", "branch"},
@@ -243,8 +243,8 @@ func scenarioTenants() []tenantSpec {
 			},
 		},
 		{
-			name: fleet.Initech.Name, slug: fleet.Initech.Slug, region: fleet.Initech.Region,
-			tier: fleet.Initech.Tier, relationship: "co_manager", country: fleet.Initech.Country, industry: fleet.Initech.Industry,
+			name: fleet.Initech().Name, slug: fleet.Initech().Slug, region: fleet.Initech().Region,
+			tier: fleet.Initech().Tier, relationship: "co_manager", country: fleet.Initech().Country, industry: fleet.Initech().Industry,
 			sites: []siteSpec{
 				{"Initech HQ — Frankfurt", "hub"},
 				{"Trading Floor — London", "branch"},
@@ -281,8 +281,8 @@ func scenarioTenants() []tenantSpec {
 			// yet model SG (an honest non-goal), so country is left empty and
 			// no baseline is auto-applied; APAC residency DLP is still covered
 			// via the pdpa-singapore DLP template below.
-			name: fleet.Umbrella.Name, slug: fleet.Umbrella.Slug, region: fleet.Umbrella.Region,
-			tier: fleet.Umbrella.Tier, relationship: "owner", country: fleet.Umbrella.Country, industry: fleet.Umbrella.Industry,
+			name: fleet.Umbrella().Name, slug: fleet.Umbrella().Slug, region: fleet.Umbrella().Region,
+			tier: fleet.Umbrella().Tier, relationship: "owner", country: fleet.Umbrella().Country, industry: fleet.Umbrella().Industry,
 			sites: []siteSpec{
 				{"Umbrella HQ — Singapore", "hub"},
 				{"Warehouse — Jakarta", "branch"},
@@ -298,8 +298,8 @@ func scenarioTenants() []tenantSpec {
 			integrations: []integrationSpec{{"syslog", "Umbrella rsyslog"}},
 		},
 		{
-			name: fleet.Britannia.Name, slug: fleet.Britannia.Slug, region: fleet.Britannia.Region,
-			tier: fleet.Britannia.Tier, relationship: "owner", country: fleet.Britannia.Country, industry: fleet.Britannia.Industry,
+			name: fleet.Britannia().Name, slug: fleet.Britannia().Slug, region: fleet.Britannia().Region,
+			tier: fleet.Britannia().Tier, relationship: "owner", country: fleet.Britannia().Country, industry: fleet.Britannia().Industry,
 			sites: []siteSpec{
 				{"Britannia HQ — London", "hub"},
 				{"Smart Factory — Manchester", "hub"},
@@ -336,8 +336,8 @@ func scenarioTenants() []tenantSpec {
 			},
 		},
 		{
-			name: fleet.Maple.Name, slug: fleet.Maple.Slug, region: fleet.Maple.Region,
-			tier: fleet.Maple.Tier, relationship: "co_manager", country: fleet.Maple.Country, industry: fleet.Maple.Industry,
+			name: fleet.Maple().Name, slug: fleet.Maple().Slug, region: fleet.Maple().Region,
+			tier: fleet.Maple().Tier, relationship: "co_manager", country: fleet.Maple().Country, industry: fleet.Maple().Industry,
 			sites: []siteSpec{
 				{"Maple HQ — Toronto", "hub"},
 				{"Community Clinic — Vancouver", "branch"},
@@ -371,8 +371,8 @@ func scenarioTenants() []tenantSpec {
 			},
 		},
 		{
-			name: fleet.Outback.Name, slug: fleet.Outback.Slug, region: fleet.Outback.Region,
-			tier: fleet.Outback.Tier, relationship: "owner", country: fleet.Outback.Country, industry: fleet.Outback.Industry,
+			name: fleet.Outback().Name, slug: fleet.Outback().Slug, region: fleet.Outback().Region,
+			tier: fleet.Outback().Tier, relationship: "owner", country: fleet.Outback().Country, industry: fleet.Outback().Industry,
 			sites: []siteSpec{
 				{"Outback HQ — Sydney", "hub"},
 				{"Distribution Center — Melbourne", "hub"},
@@ -395,8 +395,8 @@ func scenarioTenants() []tenantSpec {
 			integrations: []integrationSpec{{"siem_webhook", "Outback Splunk HEC"}},
 		},
 		{
-			name: fleet.Lumiere.Name, slug: fleet.Lumiere.Slug, region: fleet.Lumiere.Region,
-			tier: fleet.Lumiere.Tier, relationship: "co_manager", country: fleet.Lumiere.Country, industry: fleet.Lumiere.Industry,
+			name: fleet.Lumiere().Name, slug: fleet.Lumiere().Slug, region: fleet.Lumiere().Region,
+			tier: fleet.Lumiere().Tier, relationship: "co_manager", country: fleet.Lumiere().Country, industry: fleet.Lumiere().Industry,
 			sites: []siteSpec{
 				{"Lumière HQ — Paris", "hub"},
 				{"Annexe — Lyon", "branch"},
@@ -423,8 +423,8 @@ func scenarioTenants() []tenantSpec {
 			// console renders an honest empty state (an intentional tier/
 			// onboarding difference, not a load failure) — captured as
 			// s5-nordic-dlp-policies-emptystate.json.
-			name: fleet.Nordic.Name, slug: fleet.Nordic.Slug, region: fleet.Nordic.Region,
-			tier: fleet.Nordic.Tier, relationship: "owner", country: fleet.Nordic.Country, industry: fleet.Nordic.Industry,
+			name: fleet.Nordic().Name, slug: fleet.Nordic().Slug, region: fleet.Nordic().Region,
+			tier: fleet.Nordic().Tier, relationship: "owner", country: fleet.Nordic().Country, industry: fleet.Nordic().Industry,
 			sites: []siteSpec{
 				{"Nordic HQ — Stockholm", "hub"},
 				{"Campus Network — Uppsala", "branch"},

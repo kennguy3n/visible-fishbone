@@ -63,7 +63,7 @@ type discoveredApp struct {
 // Keyed by tenant SLUG (the stable fleet key); the UUID and display name
 // are resolved from the shared fleet package at seed time.
 var perTenantApps = map[string][]discoveredApp{
-	fleet.Acme.Slug: {
+	fleet.Acme().Slug: {
 		{"Microsoft 365", "Microsoft", "productivity", 10, 240, 240 * time.Hour},
 		{"Slack", "Salesforce", "collaboration", 15, 180, 200 * time.Hour},
 		{"Dropbox", "Dropbox", "cloud_storage", 55, 42, 90 * time.Hour},
@@ -74,7 +74,7 @@ var perTenantApps = map[string][]discoveredApp{
 		{"Pastebin", "Pastebin", "code_paste", 75, 4, 18 * time.Hour},
 		{"DeepL", "DeepL", "ai_translation", 40, 21, 48 * time.Hour},
 	},
-	fleet.Globex.Slug: {
+	fleet.Globex().Slug: {
 		{"Microsoft 365", "Microsoft", "productivity", 10, 410, 300 * time.Hour},
 		{"Epic MyChart", "Epic", "healthcare", 20, 380, 280 * time.Hour},
 		{"Google Drive", "Google", "cloud_storage", 50, 64, 96 * time.Hour},
@@ -83,7 +83,7 @@ var perTenantApps = map[string][]discoveredApp{
 		{"MEGA", "MEGA", "cloud_storage", 82, 6, 20 * time.Hour},
 		{"Claude", "Anthropic", "ai_assistant", 55, 47, 40 * time.Hour},
 	},
-	fleet.Initech.Slug: {
+	fleet.Initech().Slug: {
 		{"Microsoft 365", "Microsoft", "productivity", 10, 150, 260 * time.Hour},
 		{"Salesforce", "Salesforce", "crm", 18, 120, 240 * time.Hour},
 		{"Box", "Box", "cloud_storage", 35, 70, 110 * time.Hour},
@@ -91,7 +91,7 @@ var perTenantApps = map[string][]discoveredApp{
 		{"AnonFiles", "AnonFiles", "file_transfer", 85, 3, 14 * time.Hour},
 		{"Perplexity", "Perplexity", "ai_assistant", 48, 28, 36 * time.Hour},
 	},
-	fleet.Umbrella.Slug: {
+	fleet.Umbrella().Slug: {
 		{"Microsoft 365", "Microsoft", "productivity", 10, 95, 220 * time.Hour},
 		{"Google Workspace", "Google", "productivity", 12, 88, 210 * time.Hour},
 		{"Dropbox", "Dropbox", "cloud_storage", 55, 24, 80 * time.Hour},

@@ -48,15 +48,15 @@ import (
 // smart-default policy-template engine (britannia GB -> uk-dpa, maple CA
 // -> ca-pipeda, outback AU -> au-privacy, lumiere FR -> eu-gdpr).
 var (
-	acme      = fleet.Acme.ID
-	umbrella  = fleet.Umbrella.ID
-	nordic    = fleet.Nordic.ID
-	initech   = fleet.Initech.ID
-	globex    = fleet.Globex.ID
-	britannia = fleet.Britannia.ID
-	maple     = fleet.Maple.ID
-	outback   = fleet.Outback.ID
-	lumiere   = fleet.Lumiere.ID
+	acme      = fleet.Acme().ID
+	umbrella  = fleet.Umbrella().ID
+	nordic    = fleet.Nordic().ID
+	initech   = fleet.Initech().ID
+	globex    = fleet.Globex().ID
+	britannia = fleet.Britannia().ID
+	maple     = fleet.Maple().ID
+	outback   = fleet.Outback().ID
+	lumiere   = fleet.Lumiere().ID
 )
 
 // postSpec captures a live POST response. Bodies are fixed so reruns

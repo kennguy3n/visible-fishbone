@@ -77,7 +77,7 @@ import (
 // so a name change in the fleet definition can never silently produce an
 // empty baseline.
 var baseline = map[string]map[metering.Meter]int64{
-	fleet.Acme.Slug: { // Acme Retail Group — enterprise $1999, busy retailer, ~$1.1k projected spend
+	fleet.Acme().Slug: { // Acme Retail Group — enterprise $1999, busy retailer, ~$1.1k projected spend
 		metering.MeterLLMCalls:              13_000,            // 65% of 20k/mo
 		metering.MeterLLMTokensUsed:         12_000_000,        // 60% of 20M/mo
 		metering.MeterURLCatLookups:         120_000,           // 6% of 2M/day (url-cat is the dearest meter)
@@ -87,7 +87,7 @@ var baseline = map[string]map[metering.Meter]int64{
 		metering.MeterS3BytesArchived:       1_500_000_000_000, // 1.5 TB/month
 		metering.MeterBandwidthProxiedBytes: 5_000_000_000_000, // 5 TB/month
 	},
-	fleet.Globex.Slug: { // Globex Health Systems — enterprise $1999, moderate, ~$0.7k projected spend
+	fleet.Globex().Slug: { // Globex Health Systems — enterprise $1999, moderate, ~$0.7k projected spend
 		metering.MeterLLMCalls:              8_600,
 		metering.MeterLLMTokensUsed:         8_000_000,
 		metering.MeterURLCatLookups:         80_000,
@@ -97,7 +97,7 @@ var baseline = map[string]map[metering.Meter]int64{
 		metering.MeterS3BytesArchived:       1_000_000_000_000,
 		metering.MeterBandwidthProxiedBytes: 3_000_000_000_000,
 	},
-	fleet.Initech.Slug: { // Initech Financial — professional $499, ~$0.44k projected spend
+	fleet.Initech().Slug: { // Initech Financial — professional $499, ~$0.44k projected spend
 		metering.MeterLLMCalls:              3_250,
 		metering.MeterLLMTokensUsed:         3_000_000,
 		metering.MeterURLCatLookups:         30_000, // baseline; current run rate is the surge below
@@ -107,7 +107,7 @@ var baseline = map[string]map[metering.Meter]int64{
 		metering.MeterS3BytesArchived:       400_000_000_000,
 		metering.MeterBandwidthProxiedBytes: 1_500_000_000_000,
 	},
-	fleet.Umbrella.Slug: { // Umbrella Logistics — starter $99, light, ~$59 projected spend
+	fleet.Umbrella().Slug: { // Umbrella Logistics — starter $99, light, ~$59 projected spend
 		metering.MeterLLMCalls:              600,
 		metering.MeterLLMTokensUsed:         600_000,
 		metering.MeterURLCatLookups:         6_000,
@@ -117,7 +117,7 @@ var baseline = map[string]map[metering.Meter]int64{
 		metering.MeterS3BytesArchived:       60_000_000_000,
 		metering.MeterBandwidthProxiedBytes: 300_000_000_000,
 	},
-	fleet.Britannia.Slug: { // Britannia Robotics — enterprise $1999, industrial robotics, ~$0.8k projected spend
+	fleet.Britannia().Slug: { // Britannia Robotics — enterprise $1999, industrial robotics, ~$0.8k projected spend
 		metering.MeterLLMCalls:              9_500,
 		metering.MeterLLMTokensUsed:         9_000_000,
 		metering.MeterURLCatLookups:         90_000,
@@ -134,7 +134,7 @@ var baseline = map[string]map[metering.Meter]int64{
 	// fleet cost report surfaces a NEGATIVE margin (~-15%). This is the
 	// honest upsell/margin signal the admin cost report is built to catch —
 	// not every tenant is profitable, and the engine says so.
-	fleet.Maple.Slug: { // Maple Health Network — professional $499, outgrew its plan, ~$575 projected (UNDERWATER)
+	fleet.Maple().Slug: { // Maple Health Network — professional $499, outgrew its plan, ~$575 projected (UNDERWATER)
 		metering.MeterLLMCalls:              7_200,
 		metering.MeterLLMTokensUsed:         6_800_000,
 		metering.MeterURLCatLookups:         68_000,
@@ -144,7 +144,7 @@ var baseline = map[string]map[metering.Meter]int64{
 		metering.MeterS3BytesArchived:       850_000_000_000,
 		metering.MeterBandwidthProxiedBytes: 2_600_000_000_000,
 	},
-	fleet.Outback.Slug: { // Outback Retail Co — professional $499, AU retailer, ~$0.38k projected spend
+	fleet.Outback().Slug: { // Outback Retail Co — professional $499, AU retailer, ~$0.38k projected spend
 		metering.MeterLLMCalls:              2_800,
 		metering.MeterLLMTokensUsed:         2_600_000,
 		metering.MeterURLCatLookups:         26_000,
@@ -154,7 +154,7 @@ var baseline = map[string]map[metering.Meter]int64{
 		metering.MeterS3BytesArchived:       350_000_000_000,
 		metering.MeterBandwidthProxiedBytes: 1_300_000_000_000,
 	},
-	fleet.Lumiere.Slug: { // Lumière Légal — professional $499, FR legal firm, ~$0.34k projected spend
+	fleet.Lumiere().Slug: { // Lumière Légal — professional $499, FR legal firm, ~$0.34k projected spend
 		metering.MeterLLMCalls:              2_500,
 		metering.MeterLLMTokensUsed:         2_300_000,
 		metering.MeterURLCatLookups:         23_000,
@@ -164,7 +164,7 @@ var baseline = map[string]map[metering.Meter]int64{
 		metering.MeterS3BytesArchived:       310_000_000_000,
 		metering.MeterBandwidthProxiedBytes: 1_150_000_000_000,
 	},
-	fleet.Nordic.Slug: { // Nordic EduCloud — starter $99, deliberately light education starter, ~$48 projected spend
+	fleet.Nordic().Slug: { // Nordic EduCloud — starter $99, deliberately light education starter, ~$48 projected spend
 		metering.MeterLLMCalls:              480,
 		metering.MeterLLMTokensUsed:         480_000,
 		metering.MeterURLCatLookups:         4_800,
@@ -186,7 +186,7 @@ var baseline = map[string]map[metering.Meter]int64{
 // monthly url-cat spend at ~3x the trailing-month median and raises a
 // (non-critical) warning, while Initech still clears its $499 tier.
 var currentRunRate = map[string]map[metering.Meter]int64{
-	fleet.Initech.Slug: {
+	fleet.Initech().Slug: {
 		metering.MeterURLCatLookups: 75_000, // 2.5x the 30k/day baseline
 	},
 }
