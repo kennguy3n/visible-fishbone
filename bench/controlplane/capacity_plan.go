@@ -120,6 +120,38 @@ type CapacityPlanConfig struct {
 	// overhead (subject + headers + index) added to BytesPerEvent.
 	NATSMsgOverheadBytes int
 
+	// --- WS-9 shared AI inference model -----------------------------
+	// These knobs model the fleet's AI inference footprint under two
+	// architectures: per-tenant model residency (one model instance per
+	// tenant) versus a single shared, fair-scheduled pool. They prove
+	// the cost/efficiency claim that a bounded shared pool — not N
+	// instances — serves the whole fleet.
+
+	// AIActiveTenantFraction is the share of the fleet active enough to
+	// issue AI calls in a peak window. In the NoOps dormancy posture
+	// most SME tenants are dormant trials, so this is small.
+	AIActiveTenantFraction float64
+	// AICallsPerActiveTenantPerHour is the modelled per-active-tenant AI
+	// request rate (policy suggestions, summaries, troubleshooting).
+	AICallsPerActiveTenantPerHour float64
+	// AIBurstFactor scales the average call rate to a peak so the pool
+	// is sized for bursts, not just the mean.
+	AIBurstFactor float64
+	// AIAvgLatencySec is the mean wall-clock time the shared model
+	// takes to serve one request (Ternary-Bonsai-8B Q2_0 on CPU,
+	// ~2–5s for a 512-token reply; default 3.5s midpoint).
+	AIAvgLatencySec float64
+	// AIPoolConcurrency is the shared pool's global concurrency cap
+	// (InferencePoolConfig.MaxConcurrent) — the model server's real
+	// parallel-slot count, NOT the tenant count.
+	AIPoolConcurrency int
+	// AIModelResidentGB is the resident memory of one loaded model
+	// instance (Q2_0 ≈ 3 GB recommended).
+	AIModelResidentGB float64
+	// AIKVCacheGBPerSlot is the additional KV-cache memory each
+	// concurrent in-flight request adds to a model server.
+	AIKVCacheGBPerSlot float64
+
 	// classRates is the per-class per-tenant event rate. Unset uses
 	// defaultClassRates.
 	classRates []classEventRate
@@ -147,7 +179,18 @@ func DefaultCapacityPlanConfig() CapacityPlanConfig {
 		NATSPartitions:           16,
 		NATSRetentionHours:       24,
 		NATSMsgOverheadBytes:     64,
-		classRates:               defaultClassRates(),
+		// WS-9 shared AI inference defaults. ~5% of SME tenants active
+		// in a peak window (dormancy posture), ~6 AI calls/active-tenant
+		// per hour, 3× burst, 3.5s mean inference, a shared pool of 4
+		// parallel slots, 3 GB resident model, 0.4 GB KV-cache/slot.
+		AIActiveTenantFraction:        0.05,
+		AICallsPerActiveTenantPerHour: 6,
+		AIBurstFactor:                 3,
+		AIAvgLatencySec:               3.5,
+		AIPoolConcurrency:             4,
+		AIModelResidentGB:             3.0,
+		AIKVCacheGBPerSlot:            0.4,
+		classRates:                    defaultClassRates(),
 	}
 }
 
@@ -204,6 +247,27 @@ func (c CapacityPlanConfig) withDefaults() CapacityPlanConfig {
 	if c.NATSMsgOverheadBytes <= 0 {
 		c.NATSMsgOverheadBytes = d.NATSMsgOverheadBytes
 	}
+	if c.AIActiveTenantFraction <= 0 {
+		c.AIActiveTenantFraction = d.AIActiveTenantFraction
+	}
+	if c.AICallsPerActiveTenantPerHour <= 0 {
+		c.AICallsPerActiveTenantPerHour = d.AICallsPerActiveTenantPerHour
+	}
+	if c.AIBurstFactor <= 0 {
+		c.AIBurstFactor = d.AIBurstFactor
+	}
+	if c.AIAvgLatencySec <= 0 {
+		c.AIAvgLatencySec = d.AIAvgLatencySec
+	}
+	if c.AIPoolConcurrency <= 0 {
+		c.AIPoolConcurrency = d.AIPoolConcurrency
+	}
+	if c.AIModelResidentGB <= 0 {
+		c.AIModelResidentGB = d.AIModelResidentGB
+	}
+	if c.AIKVCacheGBPerSlot <= 0 {
+		c.AIKVCacheGBPerSlot = d.AIKVCacheGBPerSlot
+	}
 	if len(c.classRates) == 0 {
 		c.classRates = d.classRates
 	}
@@ -236,7 +300,64 @@ func RunCapacityPlan(cfg CapacityPlanConfig) *CapacityPlanSection {
 		Postgres:         planPostgresPool(cfg),
 		ClickHouse:       planClickHouseWrite(cfg),
 		NATS:             planNATSSubjects(cfg),
+		AIInference:      planAIInference(cfg),
 	}
+}
+
+// planAIInference models the WS-9 shared-inference footprint. It sizes
+// the fleet's peak AI demand (Little's law) against a single bounded,
+// fair-scheduled pool and contrasts the pool's resident memory with the
+// naive per-tenant model-residency architecture the pool replaces.
+//
+// The shared pool is the lever: instead of one warm model per tenant
+// (TenantCount × model RAM, which does not fit at 5,000 tenants), a
+// single loaded model with a small concurrency cap serves the whole
+// fleet because, under the dormancy posture, only a fraction of tenants
+// are active at once and each request occupies a slot for only its
+// inference latency. Bursts beyond the slot count queue (fair, per
+// tenant) up to MaxWait rather than spawning capacity.
+func planAIInference(cfg CapacityPlanConfig) AIInferencePlan {
+	activeTenants := float64(cfg.TenantCount) * cfg.AIActiveTenantFraction
+	avgCallsPerSec := activeTenants * cfg.AICallsPerActiveTenantPerHour / 3600.0
+	peakCallsPerSec := avgCallsPerSec * cfg.AIBurstFactor
+	// Little's law: mean concurrent in-flight requests = arrival rate ×
+	// service time. This is the parallelism the shared model must offer
+	// to keep the steady peak from backing up into the queue.
+	offeredConcurrency := peakCallsPerSec * cfg.AIAvgLatencySec
+
+	sharedPoolGB := cfg.AIModelResidentGB + float64(cfg.AIPoolConcurrency)*cfg.AIKVCacheGBPerSlot
+	// The architecture the pool replaces: a warm model instance per
+	// tenant across the whole fleet (each carries the resident model
+	// plus a single request's KV-cache).
+	perTenantResidencyGB := float64(cfg.TenantCount) * (cfg.AIModelResidentGB + cfg.AIKVCacheGBPerSlot)
+
+	util := offeredConcurrency / float64(cfg.AIPoolConcurrency)
+	const healthyUtil = 0.7
+	recommended := cfg.AIPoolConcurrency
+	if util > healthyUtil {
+		recommended = int(math.Ceil(offeredConcurrency / healthyUtil))
+	}
+
+	plan := AIInferencePlan{
+		ActiveTenants:              int(math.Round(activeTenants)),
+		AvgCallsPerSec:             round2c(avgCallsPerSec),
+		PeakCallsPerSec:            round2c(peakCallsPerSec),
+		OfferedConcurrency:         round2c(offeredConcurrency),
+		PoolConcurrency:            cfg.AIPoolConcurrency,
+		PoolUtilization:            round2c(util),
+		RecommendedPoolConcurrency: recommended,
+		SharedPoolGB:               round1(sharedPoolGB),
+		PerTenantResidencyGB:       round1(perTenantResidencyGB),
+		MemorySavingsFactor:        round1(perTenantResidencyGB / sharedPoolGB),
+	}
+	if util > healthyUtil {
+		plan.Note = fmt.Sprintf("peak demand needs ~%.2f parallel slots; raise AI_INFERENCE_POOL_MAX_CONCURRENT to %d (bursts above the cap queue fairly up to MaxWait, then degrade to the template path).",
+			offeredConcurrency, recommended)
+	} else {
+		plan.Note = fmt.Sprintf("one shared pool of %d slots (%.1f GB) absorbs the modelled peak at %.0f%% utilization, vs %.1f GB for per-tenant residency — ~%.0f× less memory.",
+			cfg.AIPoolConcurrency, sharedPoolGB, util*100, perTenantResidencyGB, perTenantResidencyGB/sharedPoolGB)
+	}
+	return plan
 }
 
 // planPostgresPool models connection-pool pressure. Concurrent in-flight
@@ -437,4 +558,11 @@ func (r *BusinessBenchmarkReport) writeCapacityPlanMarkdown(b *strings.Builder) 
 	fmt.Fprintf(b, "- %d distinct subjects across %d partition(s) = %.1f avg (busiest ~%d)\n", n.DistinctSubjects, n.Partitions, n.SubjectsPerPartitionAvg, n.SubjectsPerPartitionMax)
 	fmt.Fprintf(b, "- %.1f msgs/s, %.0fh retention → ~%d bytes hot JetStream storage\n", n.MsgsPerSec, n.RetentionHours, n.StreamBytesHot)
 	fmt.Fprintf(b, "- recommended NATS_PARTITIONS: %d — %s\n\n", n.RecommendedPartitions, n.Note)
+
+	ai := cp.AIInference
+	b.WriteString("**AI inference footprint (WS-9 shared pool)**\n\n")
+	fmt.Fprintf(b, "- %d active tenants → %.2f avg calls/s, %.2f peak calls/s (burst)\n", ai.ActiveTenants, ai.AvgCallsPerSec, ai.PeakCallsPerSec)
+	fmt.Fprintf(b, "- offered concurrency (Little's law): %.2f vs pool slots %d → %.0f%% utilization (recommended slots %d)\n", ai.OfferedConcurrency, ai.PoolConcurrency, ai.PoolUtilization*100, ai.RecommendedPoolConcurrency)
+	fmt.Fprintf(b, "- shared pool %.1f GB vs per-tenant residency %.1f GB → ~%.0f× less memory\n", ai.SharedPoolGB, ai.PerTenantResidencyGB, ai.MemorySavingsFactor)
+	fmt.Fprintf(b, "- %s\n\n", ai.Note)
 }

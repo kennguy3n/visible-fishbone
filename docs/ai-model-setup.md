@@ -209,6 +209,10 @@ AI_LLM_TIMEOUT=15s
 | `AI_LLM_MODEL` | `Ternary-Bonsai-8B`² | Served model name sent in each request. |
 | `AI_LLM_MODEL_FAMILY` | `auto` | Prompt tuning: `ternary-bonsai`, `openai-compat`, or `auto` (infer from model name). |
 | `AI_LLM_TIMEOUT` | `15s` | Per-call HTTP timeout. |
+| `AI_INFERENCE_POOL_ENABLED` | `false` | Enable the fleet-scale shared inference pool (fair, tenant-aware admission). **DEFAULT-OFF.** |
+| `AI_INFERENCE_POOL_MAX_CONCURRENT` | `4` | Global cap on in-flight requests to the shared backend. Size to the model server's real parallelism, **not** the tenant count. |
+| `AI_INFERENCE_POOL_MAX_QUEUE_PER_TENANT` | `8` | Per-tenant queue depth before the pool sheds load (graceful template fallback). |
+| `AI_INFERENCE_POOL_MAX_WAIT` | `15s` | Max queue wait before a request degrades to the template path. `0` ⇒ bounded only by the request context. |
 
 ² When `AI_LLM_ENDPOINT` is set but `AI_LLM_MODEL` is empty, the control
 plane defaults the model to `Ternary-Bonsai-8B`. Set the value to match
@@ -231,3 +235,61 @@ The client retries transient failures (transport errors, HTTP 429, and
 servers can briefly 503 while loading a model. A cancelled/timed-out
 context aborts retries immediately. On persistent failure the AI feature
 degrades gracefully to its deterministic template output.
+
+## Fleet-scale shared inference (WS-9)
+
+At ~5,000 tenants you cannot run one model instance per tenant — a warm
+Q2_0 instance is ~3 GB resident, so per-tenant residency would need
+multiple terabytes of RAM. Instead every tenant's AI call lands on a
+single shared backend (one `AI_LLM_ENDPOINT`). The **shared inference
+pool** is a fair, tenant-aware admission layer in front of that backend:
+
+- **Bounded global concurrency.** At most `AI_INFERENCE_POOL_MAX_CONCURRENT`
+  requests are in flight at once — sized to the model server's real
+  parallel-slot count (e.g. `llama-server --parallel`), not the tenant
+  count. This caps KV-cache growth and prevents a thundering herd from
+  collapsing latency for everyone.
+- **Fair scheduling.** Each tenant has its own FIFO queue; queues are
+  drained round-robin, so one bursty tenant — even one within its own
+  guardrail rate limit — cannot monopolise the shared slots and starve
+  the rest of the fleet.
+- **Graceful load-shedding.** When a tenant's queue is full
+  (`AI_INFERENCE_POOL_MAX_QUEUE_PER_TENANT`) or a request waits longer
+  than `AI_INFERENCE_POOL_MAX_WAIT`, the call fails exactly as a busy
+  backend's 503 would — the AI feature degrades to its deterministic
+  template output. **The pool never fabricates a verdict.**
+- **Strict tenant isolation.** Requests are keyed and queued by the
+  tenant ID already on the request context; one tenant's prompt/response
+  is never mixed with another's.
+
+The pool is **DEFAULT-OFF**. With `AI_INFERENCE_POOL_ENABLED=false` the
+LLM path is exactly as before (per-tenant guardrails wrapping the HTTP
+provider directly), so upgrading introduces no new behaviour until an
+operator opts in. The guardrails (rate limit, daily token budget, PII /
+secret content filter, audit log) run *before* admission, so rejected or
+over-budget calls never even enter the queue.
+
+### Sizing the pool
+
+Use the capacity-plan harness to size `AI_INFERENCE_POOL_MAX_CONCURRENT`
+against modelled peak demand:
+
+```bash
+go run ./bench/controlplane capacity-plan --tenants 5000
+```
+
+The **AI inference footprint** section reports the offered concurrency
+(Little's law: peak call rate × mean inference latency), the pool
+utilization at the current cap, a recommended slot count to keep
+utilization ≤70%, and the memory saved versus per-tenant residency.
+
+### Observability
+
+When the pool is enabled the control plane exports
+`sng_ai_inference_pool_*` gauges on the `/metrics` endpoint:
+`inflight` / `peak_inflight` (should track the concurrency cap, **not**
+the tenant count), `queued` / `peak_queued`, `admitted_total`,
+`completed_total`, `errors_total`, `rejected_queue_full_total`,
+`wait_timeouts_total`, `cancelled_total`, and `avg_wait_ms`. These prove
+the fleet-scale efficiency curve: a single bounded pool serving the whole
+fleet with fair admission.
