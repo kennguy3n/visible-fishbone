@@ -4,18 +4,24 @@ import (
 	"context"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 	"github.com/kennguy3n/visible-fishbone/internal/service/ai"
 	"github.com/kennguy3n/visible-fishbone/internal/service/troubleshoot"
 )
 
-// mockLLMProvider is a test double for the AI LLM provider.
+// mockLLMProvider is a test double for the AI LLM provider. It records
+// the tenant ID carried on the context it was called with so tests can
+// assert per-tenant attribution.
 type mockLLMProvider struct {
-	response ai.LLMResponse
-	err      error
+	response  ai.LLMResponse
+	err       error
+	gotTenant uuid.UUID
 }
 
-func (m *mockLLMProvider) Complete(_ context.Context, _ ai.LLMRequest) (ai.LLMResponse, error) {
+func (m *mockLLMProvider) Complete(ctx context.Context, _ ai.LLMRequest) (ai.LLMResponse, error) {
+	m.gotTenant = ai.TenantIDFromContext(ctx)
 	return m.response, m.err
 }
 
@@ -53,6 +59,12 @@ func TestAssistant_Respond_WithLLM(t *testing.T) {
 	}
 	if resp.Content == "" {
 		t.Fatal("expected non-empty content")
+	}
+	// The tenant ID must reach the provider so the guardrails and the
+	// shared inference pool attribute / fair-queue per tenant rather
+	// than collapsing every troubleshoot call onto uuid.Nil.
+	if llm.gotTenant != tenantID {
+		t.Fatalf("LLM tenant on context = %v, want %v", llm.gotTenant, tenantID)
 	}
 }
 

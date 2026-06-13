@@ -149,7 +149,7 @@ func TestCapacityPlanRendersInMarkdown(t *testing.T) {
 	}
 	r.Grade()
 	md := r.ToMarkdown()
-	for _, want := range []string{"Capacity plan @ 5000 tenants", "Postgres connection-pool pressure", "ClickHouse write throughput", "NATS subject cardinality"} {
+	for _, want := range []string{"Capacity plan @ 5000 tenants", "Postgres connection-pool pressure", "ClickHouse write throughput", "NATS subject cardinality", "AI inference footprint (WS-9 shared pool)"} {
 		if !strings.Contains(md, want) {
 			t.Errorf("markdown missing %q", want)
 		}
