@@ -66,25 +66,27 @@ capacity-plan / full-suite flags:
 
 // options holds the parsed CLI flags shared across subcommands.
 type options struct {
-	dryRun      bool
-	out         string
-	gitSHA      string
-	baseline    string
-	current     string
-	threshold   float64
-	url         string
-	tenantTiers string
-	concurrency int
-	duration    time.Duration
-	jwtSecret   string
-	jwtIssuer   string
-	jwtAudience string
-	apiKey      string
-	dsn         string
-	tenants     int
-	poolSize    int
-	chShards    int
-	natsParts   int
+	dryRun        bool
+	out           string
+	gitSHA        string
+	baseline      string
+	current       string
+	threshold     float64
+	url           string
+	tenantTiers   string
+	concurrency   int
+	duration      time.Duration
+	jwtSecret     string
+	jwtIssuer     string
+	jwtAudience   string
+	apiKey        string
+	dsn           string
+	tenants       int
+	poolSize      int
+	chShards      int
+	natsParts     int
+	dormantFrac   float64
+	hibSampleRate float64
 }
 
 func main() {
@@ -145,6 +147,8 @@ func parseFlags(mode string, args []string) *options {
 	// override path could tell them apart.
 	fs.IntVar(&opts.chShards, "ch-shards", 0, "ClickHouse shard count to model (capacity-plan; 0 = default)")
 	fs.IntVar(&opts.natsParts, "nats-partitions", 0, "NATS_PARTITIONS to model (capacity-plan; 0 = default)")
+	fs.Float64Var(&opts.dormantFrac, "dormant-fraction", 0, "fraction of the fleet (0..1) modelled as dormant/hibernated (capacity-plan; 0 = pre-hibernation baseline)")
+	fs.Float64Var(&opts.hibSampleRate, "hibernated-sample-rate", 0, "near-zero telemetry keep-probability for hibernated tenants (capacity-plan; 0 = default 1-in-10000)")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	// ExitOnError handles the error path; the assignment keeps the
 	// linter from flagging the unchecked return.
@@ -258,6 +262,12 @@ func buildCapacityPlan(opts *options) *CapacityPlanSection {
 	}
 	if opts.natsParts > 0 {
 		cfg.NATSPartitions = opts.natsParts
+	}
+	if opts.dormantFrac > 0 {
+		cfg.DormantFraction = opts.dormantFrac
+	}
+	if opts.hibSampleRate > 0 {
+		cfg.HibernatedSampleRate = opts.hibSampleRate
 	}
 	return RunCapacityPlan(cfg)
 }

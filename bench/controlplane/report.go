@@ -280,6 +280,14 @@ type PostgresScaleSection struct {
 type CapacityPlanSection struct {
 	// TenantCount is the modelled fleet size.
 	TenantCount int `json:"tenant_count"`
+	// DormantFraction is the share of the fleet modelled as dormant
+	// (hibernation candidates). 0 reproduces the pre-WS-3 projection.
+	DormantFraction float64 `json:"dormant_fraction"`
+	// EmittingTenantsEffective is the hibernation-adjusted count of
+	// full-fidelity tenants worth of telemetry the data plane carries:
+	// active tenants plus dormant tenants scaled by the near-zero
+	// hibernated sample rate. Equals TenantCount when DormantFraction=0.
+	EmittingTenantsEffective float64 `json:"emitting_tenants_effective"`
 	// TelemetryClasses is the set of telemetry classes the throughput
 	// and subject-cardinality models fan out across.
 	TelemetryClasses []string `json:"telemetry_classes"`

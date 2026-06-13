@@ -652,6 +652,16 @@ type InfraCostProjection struct {
 	S3MonthlyUSD            float64 `json:"s3_monthly_usd"`
 	// TotalMonthlyUSD is the sum of the three driver costs.
 	TotalMonthlyUSD float64 `json:"total_monthly_usd"`
+	// Hibernated reports whether the tenant is currently in dormant-
+	// tenant scale-to-zero hibernation (see
+	// internal/service/tenancy/hibernation). It is set only when a
+	// HibernationStateReader is wired (false otherwise). A hibernated
+	// trial's drivers are already near-zero — telemetry ingest is
+	// sampled to near-zero so ClickHouse rows stop accruing, NATS
+	// subscriptions are condensed, and retention is at the aggressive
+	// floor — so this flag lets the fleet view attribute the near-zero
+	// projection to the parked state rather than to an absence of data.
+	Hibernated bool `json:"hibernated"`
 }
 
 // ProjectInfraMonthlyCost turns one tenant's infrastructure usage
@@ -811,7 +821,17 @@ type Reports struct {
 	tiers         TierResolver
 	calc          *CostCalculator
 	natsSizer     NATSStreamSizer
+	hibReader     HibernationStateReader
 	now           func() time.Time
+}
+
+// HibernationStateReader reports whether a tenant is currently in
+// dormant-tenant scale-to-zero hibernation. It is an in-memory read
+// (the hibernation registry), so it is cheap to consult per projection.
+// Wiring it is optional: without it the fleet view simply never marks a
+// projection hibernated. A *hibernation.Registry satisfies it.
+type HibernationStateReader interface {
+	IsHibernated(tenantID uuid.UUID) bool
 }
 
 // ReportsOption customises a Reports orchestrator.
@@ -825,6 +845,18 @@ func WithNATSStreamSizer(s NATSStreamSizer) ReportsOption {
 	return func(r *Reports) {
 		if s != nil {
 			r.natsSizer = s
+		}
+	}
+}
+
+// WithHibernationStateReader wires the optional hibernation-state read
+// surface so TenantInfraProjection can mark a parked trial's projection
+// hibernated. A nil reader is ignored so callers can pass an optional
+// dependency (e.g. a feature-gated registry) unconditionally.
+func WithHibernationStateReader(h HibernationStateReader) ReportsOption {
+	return func(r *Reports) {
+		if h != nil {
+			r.hibReader = h
 		}
 	}
 }
@@ -926,7 +958,11 @@ func (r *Reports) TenantInfraProjection(ctx context.Context, tenantID uuid.UUID)
 		NATSStreamBytes:          natsBytes,
 		S3ArchiveBytes:           s3Bytes,
 	}
-	return r.calc.ProjectInfraMonthlyCost(sample), nil
+	proj := r.calc.ProjectInfraMonthlyCost(sample)
+	if r.hibReader != nil {
+		proj.Hibernated = r.hibReader.IsHibernated(tenantID)
+	}
+	return proj, nil
 }
 
 // PlatformReport builds the platform-wide cost report across every

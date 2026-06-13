@@ -123,7 +123,30 @@ type CapacityPlanConfig struct {
 	// classRates is the per-class per-tenant event rate. Unset uses
 	// defaultClassRates.
 	classRates []classEventRate
+
+	// DormantFraction is the share of the fleet (0..1) in TierDormant —
+	// the hibernation candidates. WS-3's dormant-tenant hibernation parks
+	// these tenants' telemetry at HibernatedSampleRate. 0 (the default)
+	// models the pre-hibernation world where every tenant emits at full
+	// fidelity, so an empty config reproduces the original projection
+	// exactly. A NoOps trial-heavy fleet runs ~0.8.
+	DormantFraction float64
+	// HibernatedSampleRate is the near-zero telemetry keep-probability a
+	// hibernated tenant's non-security classes are sampled to (mirrors
+	// hibernation.DefaultHibernatedSampleRate). Only consulted when
+	// DormantFraction > 0. Security-relevant events (inspect_full) are
+	// pinned at 1:1 by the live sampler and are not part of this model's
+	// class set, so the near-zero rate applies cleanly to the modelled
+	// classes. Unset uses DefaultHibernatedSampleRate.
+	HibernatedSampleRate float64
 }
+
+// DefaultHibernatedSampleRate mirrors
+// hibernation.DefaultHibernatedSampleRate (1-in-10000): the near-zero
+// keep probability a hibernated tenant's non-security telemetry is
+// sampled to. Duplicated here so the dependency-free bench model carries
+// no import of the control-plane service packages.
+const DefaultHibernatedSampleRate = 0.0001
 
 // DefaultCapacityPlanConfig models the headline 5,000-tenant tier with
 // the platform's documented default knobs.
@@ -207,7 +230,32 @@ func (c CapacityPlanConfig) withDefaults() CapacityPlanConfig {
 	if len(c.classRates) == 0 {
 		c.classRates = d.classRates
 	}
+	// DormantFraction defaults to 0 (no hibernation) on purpose: an empty
+	// config reproduces the pre-WS-3 projection. Clamp an out-of-range
+	// value into [0,1] rather than rejecting it (the model never errors).
+	if c.DormantFraction < 0 {
+		c.DormantFraction = 0
+	}
+	if c.DormantFraction > 1 {
+		c.DormantFraction = 1
+	}
+	if c.HibernatedSampleRate <= 0 {
+		c.HibernatedSampleRate = DefaultHibernatedSampleRate
+	}
 	return c
+}
+
+// effectiveTelemetryTenants is the hibernation-adjusted count of tenants
+// worth of telemetry the data plane actually carries: the active tenants
+// emit at full fidelity, while the dormant (hibernated) tenants emit
+// only HibernatedSampleRate of their events. With DormantFraction == 0
+// this is exactly TenantCount, so the pre-hibernation projection is
+// unchanged. The dormant count is rounded so the split is a whole number
+// of tenants.
+func (c CapacityPlanConfig) effectiveTelemetryTenants() float64 {
+	dormant := math.Round(float64(c.TenantCount) * c.DormantFraction)
+	active := float64(c.TenantCount) - dormant
+	return active + dormant*c.HibernatedSampleRate
 }
 
 // totalEventsPerSec is the fleet-wide telemetry publish rate: every
@@ -217,7 +265,10 @@ func (c CapacityPlanConfig) totalEventsPerSec() float64 {
 	for _, r := range c.classRates {
 		perTenant += r.perTenantPS
 	}
-	return perTenant * float64(c.TenantCount)
+	// Hibernation parks dormant tenants' telemetry to near-zero, so the
+	// fleet-wide rate scales with the effective (hibernation-adjusted)
+	// tenant count, not the raw fleet size.
+	return perTenant * c.effectiveTelemetryTenants()
 }
 
 // RunCapacityPlan evaluates the three sub-models and returns the
@@ -231,11 +282,13 @@ func RunCapacityPlan(cfg CapacityPlanConfig) *CapacityPlanSection {
 	}
 	sort.Strings(classes)
 	return &CapacityPlanSection{
-		TenantCount:      cfg.TenantCount,
-		TelemetryClasses: classes,
-		Postgres:         planPostgresPool(cfg),
-		ClickHouse:       planClickHouseWrite(cfg),
-		NATS:             planNATSSubjects(cfg),
+		TenantCount:              cfg.TenantCount,
+		DormantFraction:          cfg.DormantFraction,
+		EmittingTenantsEffective: round1(cfg.effectiveTelemetryTenants()),
+		TelemetryClasses:         classes,
+		Postgres:                 planPostgresPool(cfg),
+		ClickHouse:               planClickHouseWrite(cfg),
+		NATS:                     planNATSSubjects(cfg),
 	}
 }
 
@@ -417,6 +470,10 @@ func (r *BusinessBenchmarkReport) writeCapacityPlanMarkdown(b *strings.Builder) 
 	fmt.Fprintf(b, "### Capacity plan @ %d tenants × %d telemetry classes\n\n",
 		cp.TenantCount, len(cp.TelemetryClasses))
 	fmt.Fprintf(b, "Telemetry classes: `%s`\n\n", strings.Join(cp.TelemetryClasses, "`, `"))
+	if cp.DormantFraction > 0 {
+		fmt.Fprintf(b, "Hibernation: %.0f%% dormant → **%.1f** effective emitting tenants (parked telemetry at the near-zero hibernated sample rate).\n\n",
+			cp.DormantFraction*100, cp.EmittingTenantsEffective)
+	}
 
 	pg := cp.Postgres
 	b.WriteString("**Postgres connection-pool pressure**\n\n")

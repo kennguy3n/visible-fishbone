@@ -76,6 +76,7 @@ import (
 	telreplay "github.com/kennguy3n/visible-fishbone/internal/service/telemetry/replay"
 	s3writer "github.com/kennguy3n/visible-fishbone/internal/service/telemetry/s3"
 	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy"
+	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy/hibernation"
 	"github.com/kennguy3n/visible-fishbone/internal/service/tenant"
 	"github.com/kennguy3n/visible-fishbone/internal/service/terraform"
 	"github.com/kennguy3n/visible-fishbone/internal/service/threatintel"
@@ -587,7 +588,23 @@ func run() error {
 			slog.Duration("min_interval", cfg.Activity.MinInterval))
 	}
 
-	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer, dlpReviewIngest, rc.SampleRateResolver, rc.ActivityRecorder)
+	// Dormant-tenant hibernation (DEFAULT-OFF; nil unless enabled). The
+	// registry syncer and wake coordinator run on EVERY replica so each
+	// replica's telemetry sampler / retention resolver honor the parked
+	// set and any replica can wake a tenant on activity; the reconcile
+	// controller is leader-only (elector.RunIfLeader) so exactly one
+	// replica writes hibernate/wake transitions per interval. All three
+	// stop with rootCtx.
+	if rc.HibernationRegistry != nil {
+		go rc.HibernationSyncer.Run(rootCtx, cfg.Hibernation.RegistrySyncInterval)
+		go rc.HibernationCoordinator.Run(rootCtx)
+		go elector.RunIfLeader(rootCtx, "tenant-hibernation", func(ctx context.Context) {
+			rc.HibernationController.Run(ctx, cfg.Hibernation.SweepInterval)
+		})
+		logger.Info("sng-control: dormant-tenant hibernation enabled (leader-gated reconcile)")
+	}
+
+	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer, dlpReviewIngest, rc.SampleRateResolver, rc.ActivityRecorder, rc.HibernationRegistry, rc.HibernationMetrics)
 	if err != nil {
 		return fmt.Errorf("start telemetry: %w", err)
 	}
@@ -858,6 +875,40 @@ type routerComponents struct {
 	// activity observer; the control-plane signal is wired into the
 	// router here in buildRouter.
 	ActivityRecorder *activity.Recorder
+	// Hibernation* wire the dormant-tenant scale-to-zero subsystem. All
+	// are nil unless cfg.Hibernation.Enabled (DEFAULT-OFF): the registry
+	// is the per-replica parked-set snapshot the telemetry sampler /
+	// retention resolver / metering fleet view consult; the syncer
+	// refreshes it from the store on every replica; the coordinator
+	// performs the fast wake-on-activity (wired into the recorder's
+	// SetWakeNotifier here); and the controller is the leader-only
+	// reconcile loop main() runs via elector.RunIfLeader.
+	HibernationRegistry    *hibernation.Registry
+	HibernationSyncer      *hibernation.Syncer
+	HibernationCoordinator *hibernation.Coordinator
+	HibernationController  *hibernation.Controller
+	HibernationMetrics     *hibernation.Metrics
+}
+
+// hibernationActivityLister adapts the tenant repository's
+// ListTenantActivity (which returns repository.TenantActivity) to the
+// hibernation.ActivityLister the controller consumes, converting at the
+// boundary so the hibernation package keeps its inward-pointing
+// dependency rule.
+type hibernationActivityLister struct {
+	tenants repository.TenantRepository
+}
+
+func (l hibernationActivityLister) ListTenantActivity(ctx context.Context) ([]hibernation.TenantActivity, error) {
+	acts, err := l.tenants.ListTenantActivity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]hibernation.TenantActivity, len(acts))
+	for i, a := range acts {
+		out[i] = hibernation.TenantActivity{ID: a.ID, LastActiveAt: a.LastActiveAt}
+	}
+	return out, nil
 }
 
 // buildRouter wires every repository / service / handler against
@@ -903,6 +954,48 @@ func buildRouter(
 			activity.WithQueueSize(cfg.Activity.QueueSize),
 		)
 		activityObs = activityRecorder
+	}
+
+	// Dormant-tenant hibernation (DEFAULT-OFF). When enabled, build the
+	// per-replica registry + store-backed syncer, the leader-only
+	// reconcile controller, and the wake coordinator; wire the wake into
+	// the activity recorder's hot path so the first sign of life on a
+	// parked tenant triggers an immediate rehydration. When disabled,
+	// every hibernation field stays nil and the telemetry / retention /
+	// metering hooks below are not wired, so the feature is fully inert.
+	var (
+		hibRegistry    *hibernation.Registry
+		hibSyncer      *hibernation.Syncer
+		hibCoordinator *hibernation.Coordinator
+		hibController  *hibernation.Controller
+		hibMetrics     *hibernation.Metrics
+	)
+	if cfg.Hibernation.Enabled {
+		hibRegistry = hibernation.NewRegistry()
+		hibMetrics = hibernation.NewMetrics(mx.Registry(), mx.Namespace())
+		hibStore := store.NewTenantHibernationRepository()
+		hibSyncer = hibernation.NewSyncer(hibStore, hibRegistry, logger)
+		hibCoordinator = hibernation.NewCoordinator(hibRegistry, hibStore,
+			hibernation.WithCoordinatorLogger(logger),
+			hibernation.WithCoordinatorMetrics(hibMetrics),
+		)
+		ctrl, err := hibernation.New(
+			tenancy.DefaultPlanner().Classifier,
+			hibStore,
+			hibernationActivityLister{tenants: tenantRepo},
+			hibernation.WithLogger(logger),
+			hibernation.WithMetrics(hibMetrics),
+		)
+		if err != nil {
+			return routerComponents{}, fmt.Errorf("control: hibernation controller: %w", err)
+		}
+		hibController = ctrl
+		if activityRecorder != nil {
+			activityRecorder.SetWakeNotifier(hibCoordinator.Notify)
+		}
+		logger.Info("hibernation: enabled (leader-gated controller + per-replica wake)",
+			slog.Duration("sweep_interval", cfg.Hibernation.SweepInterval),
+			slog.Duration("registry_sync_interval", cfg.Hibernation.RegistrySyncInterval))
 	}
 
 	tenantMigrationRepo := store.NewTenantMigrationRepository()
@@ -1556,7 +1649,13 @@ func buildRouter(
 		return routerComponents{}, fmt.Errorf("control: budget enforcer: %w", err)
 	}
 	costCalc := metering.NewCostCalculator(metering.DefaultUnitCosts)
-	meteringReports, err := metering.NewReports(meteringSvc, budgetEnforcer, meteringStore, meteringTiers, costCalc)
+	meteringReportOpts := []metering.ReportsOption{}
+	if hibRegistry != nil {
+		// Fleet view attributes a parked trial's near-zero projection to
+		// hibernation rather than to an absence of data.
+		meteringReportOpts = append(meteringReportOpts, metering.WithHibernationStateReader(hibRegistry))
+	}
+	meteringReports, err := metering.NewReports(meteringSvc, budgetEnforcer, meteringStore, meteringTiers, costCalc, meteringReportOpts...)
 	if err != nil {
 		return routerComponents{}, fmt.Errorf("control: metering reports: %w", err)
 	}
@@ -2017,25 +2116,30 @@ func buildRouter(
 	// way to refresh vendor endpoints — which contradicts
 	// docs/TRAFFIC_CLASSIFICATION.md's "24h cadence" contract.
 	return routerComponents{
-		Router:              router,
-		WebhookWorker:       webhookWorker,
-		IntegrationWorker:   integrationWorker,
-		AppRegistry:         appRegHandler,
-		AppSyncer:           appSyncer,
-		PolicySim:           policySimHandler,
-		AI:                  aiSvc,
-		Metering:            meteringSvc,
-		PoP:                 popSvc,
-		RegionMigrator:      tenantMigrator,
-		EvidenceScheduler:   evidenceScheduler,
-		FeedManager:         feedMgr,
-		AppNoOpsEngine:      appNoOpsEngine,
-		Recompiler:          recompiler,
-		DLPReviewRecompiler: dlpReviewRecompiler,
-		SampleRateResolver:  sampleRateResolver,
-		IDPSyncService:      idpSyncSvc,
-		DLPReviewService:    dlpReviewSvc,
-		ActivityRecorder:    activityRecorder,
+		Router:                 router,
+		WebhookWorker:          webhookWorker,
+		IntegrationWorker:      integrationWorker,
+		AppRegistry:            appRegHandler,
+		AppSyncer:              appSyncer,
+		PolicySim:              policySimHandler,
+		AI:                     aiSvc,
+		Metering:               meteringSvc,
+		PoP:                    popSvc,
+		RegionMigrator:         tenantMigrator,
+		EvidenceScheduler:      evidenceScheduler,
+		FeedManager:            feedMgr,
+		AppNoOpsEngine:         appNoOpsEngine,
+		Recompiler:             recompiler,
+		DLPReviewRecompiler:    dlpReviewRecompiler,
+		SampleRateResolver:     sampleRateResolver,
+		IDPSyncService:         idpSyncSvc,
+		DLPReviewService:       dlpReviewSvc,
+		ActivityRecorder:       activityRecorder,
+		HibernationRegistry:    hibRegistry,
+		HibernationSyncer:      hibSyncer,
+		HibernationCoordinator: hibCoordinator,
+		HibernationController:  hibController,
+		HibernationMetrics:     hibMetrics,
 	}, nil
 }
 
@@ -2618,6 +2722,15 @@ func startTelemetry(
 	dlpObserver telemetry.DLPReviewObserver,
 	sampleResolver *telemetry.MapSampleRateResolver,
 	activityObserver *activity.Recorder,
+	// hibRegistry is the dormant-tenant hibernation registry, or nil when
+	// the feature is disabled. When non-nil it drives the near-zero
+	// telemetry sample rate and the aggressive ClickHouse retention floor
+	// for parked tenants (security-relevant events stay full-fidelity via
+	// the sampler's 1:1 inspect_full floor).
+	hibRegistry *hibernation.Registry,
+	// hibMetrics is the hibernation Prometheus surface, or nil. The wrapped
+	// sample resolver feeds its per-class shed counter; nil-safe.
+	hibMetrics *hibernation.Metrics,
 ) (func(context.Context) error, handler.TelemetryClassQuerier, func() (policy.TelemetrySource, error), error) {
 	var hot telemetry.HotWriter
 	var cold telemetry.ColdWriter
@@ -2648,6 +2761,16 @@ func startTelemetry(
 			FlushInterval:        cfg.TelemetryAnalytics.ClickHouseFlushInterval,
 			BatchSize:            cfg.TelemetryAnalytics.ClickHouseBatchSize,
 			MaxBacklogMultiplier: cfg.TelemetryAnalytics.ClickHouseMaxBacklogMultiplier,
+		}
+		if hibRegistry != nil {
+			// WS3 hibernation: a parked tenant resolves to the aggressive
+			// retention floor so its hot partitions age into the S3 cold
+			// tier as fast as the compliance floor allows. The inner
+			// resolver is nil here, so a non-parked tenant resolves to 0
+			// (defer to DefaultRetentionDays); the writer clamps every
+			// result to [MinRetentionDays, MaxRetentionDays], so hibernation
+			// can only push a tenant down to the 30-day floor, never below.
+			chCfg.Retention = hibernation.NewRetentionResolver(hibRegistry, nil, hibernation.DefaultHibernatedRetentionDays)
 		}
 		if cfg.TelemetryAnalytics.ClickHouseSharding {
 			sw, err := chwriter.NewShardedWriter(ctx, chCfg, logger)
@@ -2786,11 +2909,22 @@ func startTelemetry(
 	//     entirely via CLICKHOUSE_ROW_LIMIT_ENABLED=false — a nil
 	//     limiter is a no-op, so a deployment that bounds write cost
 	//     another way carries no per-tenant ceiling.
+	// WS12: consult the policy-graph-published per-tenant / per-class
+	// sampling overrides ahead of the built-in class defaults and the
+	// adaptive sampler. Empty until a tenant publishes sampling config.
+	var rateResolver telemetry.SampleRateResolver = sampleResolver
+	if hibRegistry != nil {
+		// WS3 hibernation: a parked tenant's non-security telemetry is
+		// driven to a near-zero keep probability ahead of the policy-graph
+		// overrides, so "no traffic → near-zero rows" holds even if a
+		// dormant tenant still emits. The sampler's mandatory 1:1 floor
+		// for inspect_full overrides this, so security/audit events are
+		// never sampled away. A non-parked tenant falls through to the
+		// policy-graph resolver unchanged.
+		rateResolver = hibernation.NewSampleResolver(hibRegistry, sampleResolver, hibernation.DefaultHibernatedSampleRate, hibMetrics)
+	}
 	svc.WithSampler(telemetry.NewAdaptiveSampler(telemetry.SamplerConfig{
-		// WS12: consult the policy-graph-published per-tenant / per-class
-		// sampling overrides ahead of the built-in class defaults and the
-		// adaptive sampler. Empty until a tenant publishes sampling config.
-		RateResolver: sampleResolver,
+		RateResolver: rateResolver,
 	}))
 	if cfg.TelemetryAnalytics.ClickHouseRowLimitEnabled {
 		// WS12: prefer the self-calibrating per-tenant limiter (cap tracks

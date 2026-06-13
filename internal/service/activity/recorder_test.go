@@ -132,6 +132,50 @@ func TestRecorder_DistinctTenantsNotDebouncedTogether(t *testing.T) {
 	}
 }
 
+func TestRecorder_WakeNotifierFiresOnObserve(t *testing.T) {
+	f := &fakeToucher{}
+	now := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
+	r := NewRecorder(f, WithMinInterval(time.Hour), WithClock(func() time.Time { return now }))
+
+	var mu sync.Mutex
+	var notified []uuid.UUID
+	r.SetWakeNotifier(func(id uuid.UUID) {
+		mu.Lock()
+		notified = append(notified, id)
+		mu.Unlock()
+	})
+
+	id := uuid.New()
+	r.Observe(id, now)
+	// Even a debounced repeat still fires the wake notifier (it runs
+	// before the debounce gate) so a parked tenant always wakes.
+	r.Observe(id, now)
+
+	mu.Lock()
+	got := len(notified)
+	first := uuid.Nil
+	if got > 0 {
+		first = notified[0]
+	}
+	mu.Unlock()
+	if got != 2 {
+		t.Fatalf("wake notifier fired %d times, want 2 (pre-debounce)", got)
+	}
+	if first != id {
+		t.Fatalf("wake notifier got tenant %s, want %s", first, id)
+	}
+
+	// Clearing the notifier stops further calls.
+	r.SetWakeNotifier(nil)
+	r.Observe(uuid.New(), now)
+	mu.Lock()
+	got = len(notified)
+	mu.Unlock()
+	if got != 2 {
+		t.Fatalf("notifier fired after clear: %d, want 2", got)
+	}
+}
+
 func TestRecorder_NilAndZeroAreSafe(t *testing.T) {
 	var r *Recorder
 	r.Observe(uuid.New(), time.Now()) // nil receiver: must not panic
