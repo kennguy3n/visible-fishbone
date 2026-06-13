@@ -154,10 +154,12 @@ type autopilotReporter interface {
 	TenantReport(ctx context.Context, tenantID uuid.UUID) (TenantCostReport, error)
 }
 
-// autopilotAnomalyReader returns a tenant's cost anomalies. Satisfied by
-// *CostAnomalyDetector.
+// autopilotAnomalyReader returns a tenant's cost anomalies given an
+// already-built cost report, so the autopilot can reuse the report it
+// just priced instead of forcing a second TenantReport round trip.
+// Satisfied by *CostAnomalyDetector.
 type autopilotAnomalyReader interface {
-	TenantAnomalies(ctx context.Context, tenantID uuid.UUID) ([]CostAnomaly, error)
+	AnomaliesForReport(ctx context.Context, tenantID uuid.UUID, report TenantCostReport) ([]CostAnomaly, error)
 }
 
 // autopilotCapManager is the narrow budget surface the engine needs to
@@ -200,9 +202,6 @@ type MarginAutopilot struct {
 	// 5000-SME model's dormant trials live on.
 	trialTiers map[repository.TenantTier]bool
 
-	// cycle is the monotonic 0-based sweep counter the planner's cadence
-	// gate consumes.
-	cycle atomic.Uint64
 	stats autopilotCounters
 }
 
@@ -295,7 +294,7 @@ func (e *MarginAutopilot) EvaluateTenant(ctx context.Context, tenantID uuid.UUID
 	var recs []Recommendation
 	recs = append(recs, e.budgetRecommendations(ctx, tenantID, report, mode, now)...)
 	recs = append(recs, e.marginRecommendations(tenantID, report, now)...)
-	recs = append(recs, e.anomalyRecommendations(ctx, tenantID, report.Tier, now)...)
+	recs = append(recs, e.anomalyRecommendations(ctx, tenantID, report, now)...)
 
 	for i := range recs {
 		e.record(ctx, recs[i])
@@ -324,9 +323,21 @@ func (e *MarginAutopilot) budgetRecommendations(
 	}
 	var out []Recommendation
 	for _, line := range report.Lines {
-		ceiling, ok := tierCeilingHardLimit(report.Tier, line.Meter)
+		ceiling, ceilingPeriod, ok := tierCeilingHardLimit(report.Tier, line.Meter)
 		if !ok || ceiling <= 0 {
 			continue // no tier policy ceiling for this meter; nothing to enforce against
+		}
+		if line.Period != ceilingPeriod {
+			// The tier ceiling is denominated in ceilingPeriod, but this
+			// tenant's effective budget for the meter resolves to a
+			// different period (an operator override changed it). The cost
+			// report's ProjectedUsage is computed for line.Period, so
+			// comparing it against — or pinning the cap to — a ceiling from
+			// another window would enforce a wildly wrong limit (e.g. a
+			// daily 100k ceiling onto a monthly budget). Defer to the
+			// operator and skip this meter; the breach is still surfaced by
+			// the margin path when it drives the tenant underwater.
+			continue
 		}
 		if line.ProjectedUsage <= ceiling {
 			continue // on track to stay within the ceiling — healthy on this meter
@@ -360,7 +371,7 @@ func (e *MarginAutopilot) budgetRecommendations(
 			if err := e.budgets.SetTenantBudget(ctx, tenantID, BudgetLimit{
 				Meter:     line.Meter,
 				HardLimit: ceiling,
-				Period:    line.Period,
+				Period:    ceilingPeriod,
 			}); err != nil {
 				e.logger.WarnContext(ctx, "metering: autopilot cap enforce failed; degrading to recommendation",
 					slog.String("tenant_id", tenantID.String()),
@@ -447,8 +458,8 @@ func (e *MarginAutopilot) marginRecommendations(tenantID uuid.UUID, report Tenan
 // recommend-only review signal. An anomaly read failure is logged and
 // skipped so it never drops the budget/margin recommendations the caller
 // already computed.
-func (e *MarginAutopilot) anomalyRecommendations(ctx context.Context, tenantID uuid.UUID, tier repository.TenantTier, now time.Time) []Recommendation {
-	anomalies, err := e.anomalies.TenantAnomalies(ctx, tenantID)
+func (e *MarginAutopilot) anomalyRecommendations(ctx context.Context, tenantID uuid.UUID, report TenantCostReport, now time.Time) []Recommendation {
+	anomalies, err := e.anomalies.AnomaliesForReport(ctx, tenantID, report)
 	if err != nil {
 		e.logger.WarnContext(ctx, "metering: autopilot anomaly read failed; skipping anomaly recommendations",
 			slog.String("tenant_id", tenantID.String()),
@@ -459,7 +470,7 @@ func (e *MarginAutopilot) anomalyRecommendations(ctx context.Context, tenantID u
 	for _, a := range anomalies {
 		out = append(out, Recommendation{
 			TenantID:                tenantID,
-			Tier:                    tier,
+			Tier:                    report.Tier,
 			Kind:                    RecReviewAnomaly,
 			Meter:                   a.Meter,
 			Mode:                    RecModeRecommend,
@@ -487,9 +498,11 @@ func (e *MarginAutopilot) Reconcile(ctx context.Context) error {
 	if e.tenants == nil {
 		return fmt.Errorf("metering: autopilot: Reconcile requires a tenant lister")
 	}
-	cycle := int64(e.cycle.Add(1) - 1)
+	// cycle is 0-based for the planner's cadence gate; stats.cycles is
+	// the 1-based lifetime count Stats reports. Derive both from one
+	// increment so they can never drift.
+	cycle := e.stats.cycles.Add(1) - 1
 	now := e.nowFunc()
-	e.stats.cycles.Add(1)
 
 	var (
 		page            repository.Page
@@ -667,16 +680,16 @@ func (e *MarginAutopilot) Stats() AutopilotStats {
 // It reads the same tierDefaults table the BudgetEnforcer resolves
 // against, so the autopilot can never invent a cap the budget policy does
 // not already define. ok is false when the tier/meter has no default.
-func tierCeilingHardLimit(tier repository.TenantTier, meter Meter) (int64, bool) {
+func tierCeilingHardLimit(tier repository.TenantTier, meter Meter) (int64, Period, bool) {
 	byMeter, ok := tierDefaults[tier]
 	if !ok {
-		return 0, false
+		return 0, "", false
 	}
 	lim, ok := byMeter[meter]
 	if !ok || lim.HardLimit <= 0 {
-		return 0, false
+		return 0, "", false
 	}
-	return lim.HardLimit, true
+	return lim.HardLimit, lim.Period, true
 }
 
 // mostExpensiveLine returns the cost line with the greatest projected

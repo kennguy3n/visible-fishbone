@@ -249,6 +249,20 @@ func (d *CostAnomalyDetector) TenantAnomalies(ctx context.Context, tenantID uuid
 	if err != nil {
 		return nil, fmt.Errorf("metering: anomaly detector: report: %w", err)
 	}
+	return d.AnomaliesForReport(ctx, tenantID, report)
+}
+
+// AnomaliesForReport returns the cost anomalies for one tenant against
+// an already-built cost report, fetching only the trailing usage
+// history. It lets a caller that already holds a fresh report (e.g. the
+// margin autopilot, which prices the tenant once per evaluation) avoid
+// a redundant TenantReport round trip — halving the metering read load
+// of a full-fleet sweep. TenantAnomalies is the equivalent that fetches
+// the report itself.
+func (d *CostAnomalyDetector) AnomaliesForReport(ctx context.Context, tenantID uuid.UUID, report TenantCostReport) ([]CostAnomaly, error) {
+	if tenantID == uuid.Nil {
+		return nil, fmt.Errorf("metering: anomaly detector: tenant id must not be nil")
+	}
 	hist, err := d.history.UsageHistory(ctx, tenantID, d.cfg.LookbackMonths)
 	if err != nil {
 		return nil, fmt.Errorf("metering: anomaly detector: history: %w", err)

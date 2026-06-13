@@ -34,9 +34,17 @@ func (f *apReporter) TenantReport(_ context.Context, tenantID uuid.UUID) (Tenant
 type apAnomalies struct {
 	byTenant map[uuid.UUID][]CostAnomaly
 	err      error
+	// reports captures the report passed in, so a test can assert the
+	// autopilot reuses the report it already priced rather than forcing
+	// a second fetch.
+	mu      sync.Mutex
+	reports []TenantCostReport
 }
 
-func (f *apAnomalies) TenantAnomalies(_ context.Context, tenantID uuid.UUID) ([]CostAnomaly, error) {
+func (f *apAnomalies) AnomaliesForReport(_ context.Context, tenantID uuid.UUID, report TenantCostReport) ([]CostAnomaly, error) {
+	f.mu.Lock()
+	f.reports = append(f.reports, report)
+	f.mu.Unlock()
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -385,6 +393,72 @@ func TestEnforceSkipsAlreadyTightCap(t *testing.T) {
 	}
 	if caps.callCount() != 0 {
 		t.Errorf("must not rewrite an already-tight cap, got %d cap writes", caps.callCount())
+	}
+}
+
+// When an operator override has moved a meter onto a different budget
+// period than its tier default, the tier ceiling (denominated in the
+// default period) and the cost-report projection (denominated in the
+// override period) are not comparable. The autopilot must defer to the
+// operator: emit no enforce_budget_cap recommendation and never pin the
+// cross-period ceiling onto the overridden budget, even under enforce.
+func TestPeriodMismatchSkipsBudgetEnforcement(t *testing.T) {
+	t.Parallel()
+	id := uuid.New()
+	rep := &apReporter{reports: map[uuid.UUID]TenantCostReport{
+		id: {
+			TenantID:          id,
+			Tier:              repository.TenantTierStarter,
+			MonthlyRevenueUSD: 99,
+			MarginUSD:         50,
+			Lines: []CostLine{
+				// URLCatLookups ceiling is 100k DAILY, but this tenant's
+				// effective budget resolves monthly (operator override),
+				// with a 3M monthly cap and a 2.5M monthly projection.
+				{Meter: MeterURLCatLookups, Period: PeriodMonthly, ProjectedUsage: 2_500_000, MonthlyCostUSD: 30, HardLimit: 3_000_000, OverBudget: false},
+			},
+		},
+	}}
+	caps := &apCapManager{}
+	e := newTestAutopilot(t, rep, &apAnomalies{}, caps)
+	e.SetGate(apGate{mode: AutoActEnforce})
+
+	recs, err := e.EvaluateTenant(context.Background(), id)
+	if err != nil {
+		t.Fatalf("EvaluateTenant: %v", err)
+	}
+	if rec, ok := findRec(recs, RecEnforceBudgetCap); ok {
+		t.Errorf("must not emit a cross-period budget recommendation, got %+v", rec)
+	}
+	if caps.callCount() != 0 {
+		t.Errorf("must not clobber a cross-period override, got %d cap writes", caps.callCount())
+	}
+}
+
+// The autopilot prices a tenant once and hands that same report to the
+// anomaly detector, instead of triggering a second TenantReport fetch.
+func TestAnomalyEvaluationReusesReport(t *testing.T) {
+	t.Parallel()
+	id := uuid.New()
+	want := TenantCostReport{
+		TenantID:          id,
+		Tier:              repository.TenantTierStarter,
+		MonthlyRevenueUSD: 99,
+		MarginUSD:         50,
+		Lines:             []CostLine{{Meter: MeterLLMTokensUsed, Period: PeriodMonthly, ProjectedUsage: 100, MonthlyCostUSD: 1, HardLimit: 1_000_000}},
+	}
+	rep := &apReporter{reports: map[uuid.UUID]TenantCostReport{id: want}}
+	anom := &apAnomalies{}
+	e := newTestAutopilot(t, rep, anom, &apCapManager{})
+
+	if _, err := e.EvaluateTenant(context.Background(), id); err != nil {
+		t.Fatalf("EvaluateTenant: %v", err)
+	}
+	if len(anom.reports) != 1 {
+		t.Fatalf("anomaly detector called %d times, want exactly 1 (no redundant fetch)", len(anom.reports))
+	}
+	if anom.reports[0].TenantID != want.TenantID || anom.reports[0].MarginUSD != want.MarginUSD {
+		t.Errorf("anomaly detector got a different report than the one priced: %+v", anom.reports[0])
 	}
 }
 
