@@ -257,6 +257,9 @@ func (e *AppNoOpsEngine) Reconcile(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("casb: list tenants: %w", err)
 		}
+		// The cyc==nil guard registers the deferred Finish at most once,
+		// even though the defer sits inside the pagination loop: after the
+		// first successful page sets cyc, later iterations skip this block.
 		if e.sweep != nil && cyc == nil {
 			cyc = e.sweep.Begin(e.nowFunc())
 			defer func() {
@@ -276,8 +279,13 @@ func (e *AppNoOpsEngine) Reconcile(ctx context.Context) error {
 			}
 			active++
 			// Only active-status tenants reach the tier gate, so the
-			// metric's tally reflects the activity-tier distribution
-			// among reconcilable tenants.
+			// metric's tally reflects the activity-tier distribution among
+			// reconcilable tenants — NOT the whole fleet. Suspended/deleted
+			// tenants are filtered above and are invisible to the sweep
+			// metric, so sweep_tenants_*{job="casb_noops_reconcile"} total
+			// is intentionally smaller than the fleet size (and than the
+			// IdP-sync / alert jobs, which enumerate all tenants). Account
+			// for that when comparing jobs on a dashboard.
 			if cyc != nil && !cyc.Visit(t.LastActiveAt) {
 				continue
 			}
