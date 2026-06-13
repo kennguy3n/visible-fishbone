@@ -746,6 +746,14 @@ fn run_wire_scaling(args: &WireScalingArgs) -> Result<std::process::ExitCode, Be
     use sng_bench::report::{WIRE_SCALING_SCHEMA_VERSION, WireScalingReport};
     use sng_bench::wire_scaling::{self, WireScalingConfig};
 
+    // Reject a zero measurement window, matching `throughput`/`multi-queue`.
+    // A zero duration would make every worker loop exit before sending a
+    // frame and emit an all-zero artifact — worse than an error, since it
+    // could be committed as a garbage baseline the compare gate then trusts.
+    if args.duration_ms == 0 {
+        return Err(BenchError::Config("duration-ms must be > 0".to_string()));
+    }
+
     let profile = load_profile(&args.profile)?;
     let parallelism = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
 
@@ -2060,6 +2068,34 @@ mod tests {
                 "{} has a positive-weight traffic mix",
                 p.name
             );
+        }
+    }
+
+    #[test]
+    fn wire_scaling_rejects_zero_duration() {
+        // Parity with `throughput`/`multi-queue`: a zero measurement window
+        // must error out front rather than emit an all-zero artifact that
+        // could be committed as a garbage baseline. The check precedes
+        // profile loading, so a non-existent profile path is irrelevant.
+        let cli = Cli::try_parse_from([
+            "sng-bench",
+            "wire-scaling",
+            "--profile",
+            "/nonexistent/profile.toml",
+            "--duration-ms",
+            "0",
+            "--dry-run",
+        ])
+        .unwrap();
+        let Command::WireScaling(args) = cli.command else {
+            panic!("expected wire-scaling subcommand");
+        };
+        match run_wire_scaling(&args) {
+            Err(BenchError::Config(msg)) => assert!(
+                msg.contains("duration-ms must be > 0"),
+                "unexpected message: {msg}"
+            ),
+            other => panic!("expected a Config error for zero duration, got {other:?}"),
         }
     }
 }
