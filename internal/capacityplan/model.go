@@ -149,6 +149,39 @@ type Config struct {
 	// DefaultClassRates.
 	ClassRates []ClassEventRate
 
+	// --- Activity-tier telemetry sampling (WS-4) --------------------
+	//
+	// TierSampling models the WS-4 activity-tier-aware telemetry
+	// sampling policy: the fleet is split into active / idle / dormant
+	// cohorts, active tenants write full fidelity, idle tenants sample
+	// at IdleSampleMultiplier, and dormant tenants write
+	// security-events-only (ips / ztna / dlp). When false the model is
+	// the pre-WS-4 projection (every tenant writes every class at full
+	// rate), so the default output is unchanged — this is the bench
+	// twin of the DEFAULT-OFF runtime gate.
+	TierSampling bool
+	// ActiveFraction / IdleFraction are the share of the fleet in the
+	// active / idle cohorts; the remainder is dormant. Only consulted
+	// when TierSampling is true. Defaults model a NoOps fleet where most
+	// tenants are dormant trials (10% active, 15% idle, 75% dormant).
+	//
+	// They are not validated to sum to <= 1: tierTenantCounts clamps the
+	// idle count so active+idle never exceeds TenantCount and derives
+	// dormant as the remainder, so an over-1 sum is silently renormalised
+	// (dormant collapses to 0) rather than rejected. Pass fractions that
+	// sum to <= 1 for the cohort split you intend.
+	//
+	// A zero (or negative) value means "unset" and is replaced with the
+	// default by withDefaults — consistent with every other knob in this
+	// config. To model a fully-dormant fleet, pass a tiny positive
+	// ActiveFraction (e.g. 0.001) rather than 0.
+	ActiveFraction float64
+	IdleFraction   float64
+	// IdleSampleMultiplier is the keep fraction applied to an idle
+	// tenant's events. Defaults to the telemetry package default (0.25).
+	// Only consulted when TierSampling is true.
+	IdleSampleMultiplier float64
+
 	// --- Periodic per-tenant sweep (WS-1 dormancy dividend) ---------
 	//
 	// SweepActiveFraction / SweepIdleFraction / SweepDormantFraction are
@@ -178,6 +211,26 @@ func DefaultSweepJobs() []string {
 		"alert_feedback_tuning",
 	}
 }
+
+// securityClass reports whether a telemetry class is security-relevant
+// and therefore never shed by the dormant tier. Mirrors the runtime
+// predicate (telemetry.isSecurityRelevantEventClass): ips / ztna / dlp.
+func securityClass(class string) bool {
+	switch class {
+	case "ips", "ztna", "dlp":
+		return true
+	default:
+		return false
+	}
+}
+
+// Default cohort split + idle keep fraction for the tier-sampling
+// model. Most tenants in a NoOps trial fleet are dormant.
+const (
+	defaultActiveFraction       = 0.10
+	defaultIdleFraction         = 0.15
+	defaultIdleSampleMultiplier = 0.25
+)
 
 // DefaultConfig models the headline 5,000-tenant tier with the
 // platform's documented default knobs.
@@ -267,6 +320,20 @@ func (c Config) withDefaults() Config {
 	if len(c.ClassRates) == 0 {
 		c.ClassRates = d.ClassRates
 	}
+	// Tier-sampling cohort knobs only matter when the policy is modelled;
+	// fill them with NoOps-fleet defaults so an operator can flip
+	// TierSampling on without having to specify the whole split.
+	if c.TierSampling {
+		if c.ActiveFraction <= 0 {
+			c.ActiveFraction = defaultActiveFraction
+		}
+		if c.IdleFraction <= 0 {
+			c.IdleFraction = defaultIdleFraction
+		}
+		if c.IdleSampleMultiplier <= 0 {
+			c.IdleSampleMultiplier = defaultIdleSampleMultiplier
+		}
+	}
 	// The three sweep fractions are filled as a group: if none was set
 	// (all <= 0) apply the default mix; a partially-specified mix is left
 	// as given and normalised by planPeriodicSweep.
@@ -289,22 +356,74 @@ func (c Config) withDefaults() Config {
 	return c
 }
 
+// perTenantEventsPerSec sums every modelled telemetry class's per-tenant
+// publish rate — what one full-fidelity tenant emits each second.
+func (c Config) perTenantEventsPerSec() float64 {
+	var sum float64
+	for _, r := range c.ClassRates {
+		sum += r.PerTenantPS
+	}
+	return sum
+}
+
+// perTenantSecurityEventsPerSec sums only the security-relevant classes
+// (ips / ztna / dlp) — the floor a dormant tenant always writes.
+func (c Config) perTenantSecurityEventsPerSec() float64 {
+	var sum float64
+	for _, r := range c.ClassRates {
+		if securityClass(r.Class) {
+			sum += r.PerTenantPS
+		}
+	}
+	return sum
+}
+
 // modelledEventsPerSec is the synthetic fleet-wide telemetry publish
 // rate: every tenant emits every class at its per-class rate.
 func (c Config) modelledEventsPerSec() float64 {
-	var perTenant float64
-	for _, r := range c.ClassRates {
-		perTenant += r.PerTenantPS
-	}
-	return perTenant * float64(c.TenantCount)
+	return c.perTenantEventsPerSec() * float64(c.TenantCount)
 }
 
-// effectiveEventsPerSec is the rate the throughput models size
-// against: the live MeasuredEventsPerSec when supplied, else the
-// synthetic per-class projection.
+// tierTenantCounts splits the fleet into active / idle / dormant
+// cohorts. Dormant absorbs the remainder (and any rounding slack) so
+// the three always sum to TenantCount.
+func (c Config) tierTenantCounts() (active, idle, dormant int) {
+	active = int(math.Round(c.ActiveFraction * float64(c.TenantCount)))
+	idle = int(math.Round(c.IdleFraction * float64(c.TenantCount)))
+	if active > c.TenantCount {
+		active = c.TenantCount
+	}
+	if active+idle > c.TenantCount {
+		idle = c.TenantCount - active
+	}
+	dormant = c.TenantCount - active - idle
+	return active, idle, dormant
+}
+
+// tierRowsPerSec returns each cohort's contribution to the fleet write
+// rate under the tier-sampling policy: active full fidelity, idle scaled
+// by the idle multiplier, dormant security-events-only.
+func (c Config) tierRowsPerSec() (active, idle, dormant float64) {
+	na, ni, nd := c.tierTenantCounts()
+	perTenant := c.perTenantEventsPerSec()
+	active = float64(na) * perTenant
+	idle = float64(ni) * perTenant * c.IdleSampleMultiplier
+	dormant = float64(nd) * c.perTenantSecurityEventsPerSec()
+	return active, idle, dormant
+}
+
+// effectiveEventsPerSec is the rate the throughput models size against.
+// A live MeasuredEventsPerSec always wins — it already reflects whatever
+// sampling production is doing. Otherwise, when the WS-4 tier-sampling
+// policy is modelled the rate is the post-sampling cohort sum; with the
+// policy off it is the synthetic full-fidelity per-class projection.
 func (c Config) effectiveEventsPerSec() float64 {
 	if c.MeasuredEventsPerSec > 0 {
 		return c.MeasuredEventsPerSec
+	}
+	if c.TierSampling {
+		a, i, d := c.tierRowsPerSec()
+		return a + i + d
 	}
 	return c.modelledEventsPerSec()
 }
@@ -324,10 +443,33 @@ type Section struct {
 	ClickHouse ClickHouseWritePlan `json:"clickhouse"`
 	// NATS is the subject-cardinality + JetStream storage projection.
 	NATS NATSSubjectPlan `json:"nats"`
+	// TierSampling is the WS-4 activity-tier sampling breakdown. Present
+	// only when the policy is modelled (default-OFF), so the baseline
+	// projection's JSON is byte-for-byte unchanged.
+	TierSampling *TierSamplingPlan `json:"tier_sampling,omitempty"`
 	// PeriodicSweep is the control-plane dormancy-dividend projection:
 	// tenants-visited/cycle for the periodic per-tenant sweeps, before
 	// vs after activity-tiered gating (WS-1).
 	PeriodicSweep PeriodicSweepPlan `json:"periodic_sweep"`
+}
+
+// TierSamplingPlan decomposes the fleet write rate by activity tier
+// under the WS-4 sampling policy: active tenants write full fidelity,
+// idle tenants sample at IdleSampleMultiplier, dormant tenants write
+// security-events-only. It is the metric proving dormant-tenant rows/s
+// collapse and that total write cost tracks the active cohort.
+type TierSamplingPlan struct {
+	IdleSampleMultiplier float64 `json:"idle_sample_multiplier"`
+	ActiveTenants        int     `json:"active_tenants"`
+	IdleTenants          int     `json:"idle_tenants"`
+	DormantTenants       int     `json:"dormant_tenants"`
+	ActiveRowsPerSec     float64 `json:"active_rows_per_sec"`
+	IdleRowsPerSec       float64 `json:"idle_rows_per_sec"`
+	DormantRowsPerSec    float64 `json:"dormant_rows_per_sec"`
+	SampledRowsPerSec    float64 `json:"sampled_rows_per_sec"`
+	BaselineRowsPerSec   float64 `json:"baseline_rows_per_sec"`
+	ReductionPct         float64 `json:"reduction_pct"`
+	ActiveCohortSharePct float64 `json:"active_cohort_share_pct"`
 }
 
 // PeriodicSweepPlan projects the WS-1 dormancy dividend: how many
@@ -434,7 +576,46 @@ func Run(cfg Config) *Section {
 		Postgres:         planPostgresPool(cfg),
 		ClickHouse:       planClickHouseWrite(cfg),
 		NATS:             planNATSSubjects(cfg),
+		TierSampling:     planTierSampling(cfg),
 		PeriodicSweep:    planPeriodicSweep(cfg),
+	}
+}
+
+// planTierSampling projects the WS-4 cohort breakdown. Returns nil when
+// the policy is not modelled (default-OFF), so the section is omitted
+// from the report and the baseline projection is untouched. When on, it
+// shows fleet rows/s decomposed by activity tier — the proof that write
+// cost tracks the active cohort rather than the raw tenant count.
+func planTierSampling(cfg Config) *TierSamplingPlan {
+	if !cfg.TierSampling {
+		return nil
+	}
+	na, ni, nd := cfg.tierTenantCounts()
+	activeRows, idleRows, dormantRows := cfg.tierRowsPerSec()
+	sampledTotal := activeRows + idleRows + dormantRows
+	baselineTotal := cfg.modelledEventsPerSec()
+
+	var reductionPct float64
+	if baselineTotal > 0 {
+		reductionPct = (1 - sampledTotal/baselineTotal) * 100
+	}
+	var activeShare float64
+	if sampledTotal > 0 {
+		activeShare = activeRows / sampledTotal * 100
+	}
+
+	return &TierSamplingPlan{
+		IdleSampleMultiplier: cfg.IdleSampleMultiplier,
+		ActiveTenants:        na,
+		IdleTenants:          ni,
+		DormantTenants:       nd,
+		ActiveRowsPerSec:     round1(activeRows),
+		IdleRowsPerSec:       round1(idleRows),
+		DormantRowsPerSec:    round1(dormantRows),
+		SampledRowsPerSec:    round1(sampledTotal),
+		BaselineRowsPerSec:   round1(baselineTotal),
+		ReductionPct:         round1(reductionPct),
+		ActiveCohortSharePct: round1(activeShare),
 	}
 }
 

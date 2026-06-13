@@ -15,7 +15,9 @@ package main
 //
 // The first three sub-models mirror the three horizontal-scaling axes
 // the platform exposes (Postgres pool, ClickHouse write throughput,
-// NATS subject cardinality). A fourth sub-model captures the control-
+// NATS subject cardinality). A fourth sub-model captures the WS-4
+// activity-tier telemetry sampling policy (fleet rows/s decomposed by
+// active / idle / dormant cohort), and a fifth captures the control-
 // plane (not data-plane) cost the dormancy work targets: how many
 // tenants the periodic per-tenant sweeps visit per cycle, before vs
 // after the activity-tiered SweepPlanner gating (the WS-1 dormancy
@@ -37,6 +39,7 @@ type (
 	PostgresPoolPlan    = capacityplan.PostgresPoolPlan
 	ClickHouseWritePlan = capacityplan.ClickHouseWritePlan
 	NATSSubjectPlan     = capacityplan.NATSSubjectPlan
+	TierSamplingPlan    = capacityplan.TierSamplingPlan
 	PeriodicSweepPlan   = capacityplan.PeriodicSweepPlan
 )
 
@@ -80,6 +83,15 @@ func (r *BusinessBenchmarkReport) writeCapacityPlanMarkdown(b *strings.Builder) 
 	fmt.Fprintf(b, "- %d distinct subjects across %d partition(s) = %.1f avg (busiest ~%d)\n", n.DistinctSubjects, n.Partitions, n.SubjectsPerPartitionAvg, n.SubjectsPerPartitionMax)
 	fmt.Fprintf(b, "- %.1f msgs/s, %.0fh retention → ~%d bytes hot JetStream storage\n", n.MsgsPerSec, n.RetentionHours, n.StreamBytesHot)
 	fmt.Fprintf(b, "- recommended NATS_PARTITIONS: %d — %s\n\n", n.RecommendedPartitions, n.Note)
+
+	if ts := cp.TierSampling; ts != nil {
+		b.WriteString("**WS-4 activity-tier telemetry sampling** (ClickHouse rows/s)\n\n")
+		fmt.Fprintf(b, "- active: %d tenants → %.1f rows/s (full fidelity)\n", ts.ActiveTenants, ts.ActiveRowsPerSec)
+		fmt.Fprintf(b, "- idle: %d tenants → %.1f rows/s (sampled @ %.2f×)\n", ts.IdleTenants, ts.IdleRowsPerSec, ts.IdleSampleMultiplier)
+		fmt.Fprintf(b, "- dormant: %d tenants → %.1f rows/s (security-events-only)\n", ts.DormantTenants, ts.DormantRowsPerSec)
+		fmt.Fprintf(b, "- fleet: %.1f rows/s sampled vs %.1f rows/s baseline (−%.1f%%); active cohort is %.1f%% of the write rate\n\n",
+			ts.SampledRowsPerSec, ts.BaselineRowsPerSec, ts.ReductionPct, ts.ActiveCohortSharePct)
+	}
 
 	sw := cp.PeriodicSweep
 	b.WriteString("**Periodic per-tenant sweep cost (dormancy dividend, WS-1)**\n\n")
