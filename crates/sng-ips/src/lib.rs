@@ -95,7 +95,7 @@ pub mod process;
 pub mod rules;
 pub mod telemetry;
 
-pub use config::{ConfigGenerator, IpsConfigInput, IpsRuntime, SuricataConfig};
+pub use config::{CaptureThreads, ConfigGenerator, IpsConfigInput, IpsRuntime, SuricataConfig};
 pub use error::IpsError;
 pub use eve::{EveAlert, EveAnomaly, EveDns, EveFileinfo, EveFlow, EveHttp, EveRecord, EveTls};
 pub use health::{

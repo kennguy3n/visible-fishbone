@@ -51,6 +51,56 @@ impl IpsRuntime {
     }
 }
 
+/// Number of Suricata `af-packet` capture+worker threads — the
+/// multi-queue (RSS) fan-out of the inspection data path.
+///
+/// The generator always emits `cluster-type: cluster_flow`, so each
+/// capture thread claims one `PACKET_FANOUT` slot and the kernel
+/// flow-hashes packets across the threads. A single capture thread is
+/// the historical single-stream floor; fanning across the NIC's RSS
+/// queues is what lets a software edge approach line rate without an
+/// ASIC offload.
+///
+/// [`Self::Auto`] (the default) renders Suricata's `threads: auto`,
+/// which the engine resolves to the NIC's RSS-queue count and **fails
+/// safe to a single thread** on a single-queue NIC or when the count
+/// cannot be probed — so turning multi-queue on by default can never
+/// drop traffic a single-threaded capture would have inspected; it only
+/// ever adds parallelism. [`Self::Fixed`] pins an explicit count for
+/// hosts that want deterministic core budgeting.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureThreads {
+    /// Match the capture-thread count to the NIC's RSS queues; fails
+    /// safe to a single thread when the queue count is 1 or unknown.
+    Auto,
+    /// Pin an explicit capture-thread count. Clamped to `>= 1` at render
+    /// time because Suricata rejects a zero-thread af-packet stanza.
+    Fixed(u16),
+}
+
+impl Default for CaptureThreads {
+    /// Multi-queue by default: an operator who sets nothing gets the
+    /// fastest fan-out their NIC can run, with the single-thread
+    /// fail-safe baked into Suricata's `auto` resolution.
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl CaptureThreads {
+    /// The literal Suricata's af-packet `threads:` key expects: the
+    /// keyword `auto`, or the decimal count. `Fixed(0)` is clamped to
+    /// `1` (the safe single-stream floor) since Suricata refuses to
+    /// start a capture interface with zero threads.
+    fn yaml_value(self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Self::Auto => std::borrow::Cow::Borrowed("auto"),
+            Self::Fixed(n) => std::borrow::Cow::Owned(n.max(1).to_string()),
+        }
+    }
+}
+
 /// Render a Rust `bool` as the lowercase `yes`/`no` literal
 /// Suricata's own default configuration uses for every boolean
 /// knob (see the upstream `suricata.yaml.in` template). Keeping
@@ -99,6 +149,13 @@ pub struct IpsConfigInput {
     pub force_drop_on_alert: Option<bool>,
     /// Maximum number of detection threads. `None` = auto.
     pub max_pending_packets: Option<u32>,
+    /// Multi-queue (RSS) fan-out of the `af-packet` capture path.
+    /// Defaults to [`CaptureThreads::Auto`] so the inspection data path
+    /// scales across the NIC's receive queues out of the box, with a
+    /// single-thread fail-safe (see [`CaptureThreads`]). Older bundles
+    /// that predate the knob deserialize to the same default.
+    #[serde(default)]
+    pub capture_threads: CaptureThreads,
 }
 
 impl IpsConfigInput {
@@ -131,6 +188,7 @@ impl IpsConfigInput {
             app_layer_enabled: app_layer,
             force_drop_on_alert: None,
             max_pending_packets: Some(1024),
+            capture_threads: CaptureThreads::default(),
         }
     }
 }
@@ -296,6 +354,12 @@ impl ConfigGenerator {
         out.push_str("    copy-iface: \"\"\n");
         out.push_str("    cluster-id: 99\n");
         out.push_str("    cluster-type: cluster_flow\n");
+        // Multi-queue (RSS) fan-out. `cluster_flow` above hashes flows
+        // across these threads via `PACKET_FANOUT`; `auto` resolves to
+        // the NIC's RSS-queue count and fails safe to a single thread on
+        // a single-queue NIC, so it never sheds traffic a single-thread
+        // capture would have inspected (see `CaptureThreads`).
+        let _ = writeln!(out, "    threads: {}", input.capture_threads.yaml_value());
         out.push_str("    defrag: yes\n");
         out.push_str("    use-mmap: yes\n");
         out.push_str("    tpacket-v3: yes\n");
@@ -486,6 +550,51 @@ mod tests {
         let t = cfg.text();
         assert!(t.contains("copy-mode: ips"), "{t}");
         assert!(t.contains("drop-on-alert: yes"), "{t}");
+    }
+
+    #[test]
+    fn render_defaults_to_auto_multiqueue_threads() {
+        // Multi-queue/RSS is the default: an operator who sets nothing
+        // gets `threads: auto`, which Suricata resolves to the NIC's RSS
+        // queue count (and fails safe to 1 on a single-queue NIC).
+        let g = ConfigGenerator::new();
+        let t = g.render(&baseline()).expect("render").text().to_owned();
+        assert!(t.contains("cluster-type: cluster_flow"), "{t}");
+        assert!(t.contains("threads: auto"), "{t}");
+    }
+
+    #[test]
+    fn render_pins_fixed_capture_threads() {
+        let g = ConfigGenerator::new();
+        let mut input = baseline();
+        input.capture_threads = CaptureThreads::Fixed(8);
+        let t = g.render(&input).expect("render").text().to_owned();
+        assert!(t.contains("threads: 8"), "{t}");
+        assert!(!t.contains("threads: auto"), "{t}");
+    }
+
+    #[test]
+    fn fixed_zero_capture_threads_clamps_to_single_stream_floor() {
+        // Suricata rejects a zero-thread af-packet interface; clamp to 1
+        // so a footgun config degrades to the safe single-stream floor
+        // rather than refusing to boot.
+        let g = ConfigGenerator::new();
+        let mut input = baseline();
+        input.capture_threads = CaptureThreads::Fixed(0);
+        let t = g.render(&input).expect("render").text().to_owned();
+        assert!(t.contains("threads: 1"), "{t}");
+    }
+
+    #[test]
+    fn capture_threads_defaults_when_absent_from_bundle() {
+        // Bundles serialized before the knob existed must deserialize to
+        // the multi-queue default, not fail or read as zero.
+        let json = serde_json::to_value(baseline()).expect("serialize");
+        let mut map = json.as_object().expect("object").clone();
+        map.remove("capture_threads");
+        let restored: IpsConfigInput =
+            serde_json::from_value(serde_json::Value::Object(map)).expect("deserialize");
+        assert_eq!(restored.capture_threads, CaptureThreads::Auto);
     }
 
     #[test]

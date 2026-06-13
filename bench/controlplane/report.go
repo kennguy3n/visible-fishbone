@@ -293,6 +293,10 @@ type CapacityPlanSection struct {
 	// fleet AI demand vs. a single bounded shared pool, and the memory
 	// saved versus per-tenant model residency.
 	AIInference AIInferencePlan `json:"ai_inference"`
+	// TierSampling is the WS-4 activity-tier sampling breakdown. Present
+	// only when the policy is modelled (default-OFF), so the baseline
+	// projection's JSON is byte-for-byte unchanged.
+	TierSampling *TierSamplingPlan `json:"tier_sampling,omitempty"`
 	// PeriodicSweep is the control-plane dormancy-dividend projection:
 	// tenants-visited/cycle for the periodic per-tenant sweeps, before
 	// vs after activity-tiered gating (WS-1).
@@ -335,6 +339,25 @@ type AIInferencePlan struct {
 	MemorySavingsFactor float64 `json:"memory_savings_factor"`
 	// Note summarises pool adequacy and the savings claim.
 	Note string `json:"note"`
+}
+
+// TierSamplingPlan decomposes the fleet write rate by activity tier
+// under the WS-4 sampling policy: active tenants write full fidelity,
+// idle tenants sample at IdleSampleMultiplier, dormant tenants write
+// security-events-only. It is the metric proving dormant-tenant rows/s
+// collapse and that total write cost tracks the active cohort.
+type TierSamplingPlan struct {
+	IdleSampleMultiplier float64 `json:"idle_sample_multiplier"`
+	ActiveTenants        int     `json:"active_tenants"`
+	IdleTenants          int     `json:"idle_tenants"`
+	DormantTenants       int     `json:"dormant_tenants"`
+	ActiveRowsPerSec     float64 `json:"active_rows_per_sec"`
+	IdleRowsPerSec       float64 `json:"idle_rows_per_sec"`
+	DormantRowsPerSec    float64 `json:"dormant_rows_per_sec"`
+	SampledRowsPerSec    float64 `json:"sampled_rows_per_sec"`
+	BaselineRowsPerSec   float64 `json:"baseline_rows_per_sec"`
+	ReductionPct         float64 `json:"reduction_pct"`
+	ActiveCohortSharePct float64 `json:"active_cohort_share_pct"`
 }
 
 // PeriodicSweepPlan projects the WS-1 dormancy dividend: how many
@@ -398,12 +421,16 @@ type PostgresPoolPlan struct {
 
 // ClickHouseWritePlan projects hot-path write load at scale.
 type ClickHouseWritePlan struct {
-	Shards                 int     `json:"shards"`
-	BatchSize              int     `json:"batch_size"`
-	TotalRowsPerSec        float64 `json:"total_rows_per_sec"`
-	RowsPerSecPerShard     float64 `json:"rows_per_sec_per_shard"`
-	InsertsPerSecPerShard  float64 `json:"inserts_per_sec_per_shard"`
-	MonthlyRows            int64   `json:"monthly_rows"`
+	Shards                int     `json:"shards"`
+	BatchSize             int     `json:"batch_size"`
+	TotalRowsPerSec       float64 `json:"total_rows_per_sec"`
+	RowsPerSecPerShard    float64 `json:"rows_per_sec_per_shard"`
+	InsertsPerSecPerShard float64 `json:"inserts_per_sec_per_shard"`
+	MonthlyRows           int64   `json:"monthly_rows"`
+	// PerTenantMonthlyRows is the fleet-wide mean (monthly_rows ÷
+	// tenant_count). With tier sampling on it is an average across
+	// cohorts, not any individual tenant's volume — read the
+	// tier_sampling section for the per-cohort split.
 	PerTenantMonthlyRows   int64   `json:"per_tenant_monthly_rows"`
 	HotStorageGBCompressed float64 `json:"hot_storage_gb_compressed"`
 	IngestBytesPerSec      int64   `json:"ingest_bytes_per_sec"`
