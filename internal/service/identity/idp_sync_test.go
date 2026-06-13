@@ -410,3 +410,69 @@ func TestSyncSkipsConfigWithoutCredential(t *testing.T) {
 		t.Errorf("users seen = %d, want 0 (skipped before directory call)", report.UsersSeen)
 	}
 }
+
+// --- directory observer ---------------------------------------------------
+
+type dirListRecord struct {
+	provider string
+	users    int
+	err      error
+}
+
+type recordingDirObserver struct {
+	mu      sync.Mutex
+	records []dirListRecord
+}
+
+func (o *recordingDirObserver) ObserveDirectoryList(provider string, users int, err error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.records = append(o.records, dirListRecord{provider: provider, users: users, err: err})
+}
+
+// A successful directory read reports one observation tagged with the
+// provider and the number of users returned, with a nil error.
+func TestSyncDirectoryObserverRecordsSuccess(t *testing.T) {
+	t.Parallel()
+	f := newSyncFixture(t)
+	obs := &recordingDirObserver{}
+	f.svc.WithDirectoryObserver(obs)
+	f.client.users = []DirectoryUser{
+		{ExternalID: "okta-1", Email: "alice@example.com", Active: true},
+		{ExternalID: "okta-2", Email: "bob@example.com", Active: true},
+	}
+
+	if _, err := f.svc.SyncTenant(context.Background(), f.tid); err != nil {
+		t.Fatalf("SyncTenant: %v", err)
+	}
+	if len(obs.records) != 1 {
+		t.Fatalf("observations = %d, want 1", len(obs.records))
+	}
+	rec := obs.records[0]
+	if rec.provider != string(repository.IDPProviderOkta) || rec.users != 2 || rec.err != nil {
+		t.Errorf("record = %+v, want {okta 2 <nil>}", rec)
+	}
+}
+
+// A failed directory read still reports one observation, tagged with the
+// error and zero users, so an errored connector is visible in metrics.
+func TestSyncDirectoryObserverRecordsError(t *testing.T) {
+	t.Parallel()
+	f := newSyncFixture(t)
+	obs := &recordingDirObserver{}
+	f.svc.WithDirectoryObserver(obs)
+	f.client.err = context.DeadlineExceeded
+
+	// The list failure surfaces as a per-config error on the report, but
+	// SyncTenant itself does not fail the whole tenant.
+	if _, err := f.svc.SyncTenant(context.Background(), f.tid); err != nil {
+		t.Fatalf("SyncTenant: %v", err)
+	}
+	if len(obs.records) != 1 {
+		t.Fatalf("observations = %d, want 1", len(obs.records))
+	}
+	rec := obs.records[0]
+	if rec.provider != string(repository.IDPProviderOkta) || rec.users != 0 || rec.err == nil {
+		t.Errorf("record = %+v, want {okta 0 <non-nil err>}", rec)
+	}
+}

@@ -187,3 +187,30 @@ func TestNATSCollectorPrunesStaleSeries(t *testing.T) {
 		t.Error("EVENTS/c3 should remain tracked (stream not scraped this round)")
 	}
 }
+
+func TestIdentityDirectoryMetricsRegistered(t *testing.T) {
+	m := newTestMetrics(t)
+	// Touch each metric so it appears in the exposition.
+	m.IdentityDirectorySyncTotal.WithLabelValues("zoho", "success").Inc()
+	m.IdentityDirectoryUsersListed.WithLabelValues("zoho").Add(3)
+
+	mfs, err := m.Registry().Gather()
+	if err != nil {
+		t.Fatalf("Gather: %v", err)
+	}
+	present := map[string]bool{}
+	for _, mf := range mfs {
+		present[mf.GetName()] = true
+	}
+	for _, want := range []string{
+		"sng_identity_directory_sync_total",
+		"sng_identity_directory_users_listed_total",
+	} {
+		if !present[want] {
+			t.Errorf("metric %q not found in exposition", want)
+		}
+	}
+	if got := testutil.ToFloat64(m.IdentityDirectoryUsersListed.WithLabelValues("zoho")); got != 3 {
+		t.Errorf("users listed = %v, want 3", got)
+	}
+}

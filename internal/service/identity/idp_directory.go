@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,8 +23,9 @@ const directoryAPITimeout = 15 * time.Second
 const maxDirectoryResponseBytes = 8 << 20 // 8 MiB
 
 // DefaultDirectoryClientFactory builds provider-specific directory
-// clients (Okta, Microsoft Graph, Google Admin SDK) over a shared HTTP
-// client. A nil http client falls back to a timeout-bounded default.
+// clients (Okta, Microsoft Graph, Google Admin SDK, Zoho Directory) over
+// a shared HTTP client. A nil http client falls back to a
+// timeout-bounded default.
 type DefaultDirectoryClientFactory struct {
 	HTTP *http.Client
 }
@@ -57,6 +59,12 @@ func (f DefaultDirectoryClientFactory) Build(cfg repository.IDPConfig, cred Dire
 			base = "https://admin.googleapis.com"
 		}
 		return &googleDirectoryClient{http: httpc, base: base, token: cred.Token}, nil
+	case repository.IDPProviderZoho:
+		base := strings.TrimRight(cred.BaseURL, "/")
+		if base == "" {
+			base = "https://directory.zoho.com"
+		}
+		return &zohoDirectoryClient{http: httpc, base: base, token: cred.Token}, nil
 	default:
 		return nil, fmt.Errorf("provider %q has no directory client: %w", cfg.ProviderType, repository.ErrInvalidArgument)
 	}
@@ -411,5 +419,209 @@ func (c *googleDirectoryClient) userGroups(ctx context.Context, userKey string) 
 			return names, nil
 		}
 		pageToken = page.NextPageToken
+	}
+}
+
+// --- Zoho Directory -------------------------------------------------------
+
+// zohoPageLimit is the per-request user page size requested from the
+// Zoho Directory Users API. Zoho paginates with an offset (`start`,
+// 1-based) plus a `limit`.
+const zohoPageLimit = 200
+
+// zohoMaxUserPages bounds the directory user pagination loop. It exists
+// only to stop a misbehaving provider (one that always reports "more
+// records" while ignoring the offset) from looping forever. On hitting
+// it the client returns an ERROR rather than a truncated snapshot,
+// because the reconcile treats an absent user as off-boarded — so a
+// silently-truncated list would mass-deactivate present users. Failing
+// fast leaves the local store untouched (fail-safe toward MORE access,
+// never less).
+const zohoMaxUserPages = 10000
+
+// zohoDirectoryClient reads the Zoho Directory Users API
+// (https://www.zoho.com/directory/). It authenticates with a Zoho OAuth2
+// access token using the `Zoho-oauthtoken` Authorization scheme common
+// to every Zoho REST API, paginates the offset-based Users endpoint, and
+// resolves each user's group memberships via the per-user groups
+// endpoint — mirroring the Okta / Graph / Google connectors.
+//
+// The wire shapes below are modeled from Zoho's published API
+// conventions (OAuth token scheme, offset pagination, `page_context`
+// continuation flag), NOT validated against a live Zoho tenant — the
+// same doc-derived basis as the existing connectors and the SCIM
+// conformance vectors. Field decoding is kept tolerant (id accepts a
+// JSON number or string; email and name each fall back across the
+// documented attribute names) so a minor wire variation degrades a
+// field rather than breaking the whole connector. The data-center base
+// URL is overridable via the directory credential (directory.zoho.eu,
+// .in, .com.au, .jp, …).
+type zohoDirectoryClient struct {
+	http  *http.Client
+	base  string
+	token string
+}
+
+// zohoID tolerates Zoho returning an identifier as either a JSON number
+// (its usual ZUID shape) or a quoted string, so a minor wire variation
+// does not break decoding the whole page.
+type zohoID string
+
+func (z *zohoID) UnmarshalJSON(b []byte) error {
+	s := strings.Trim(string(b), `"`)
+	if s == "null" {
+		s = ""
+	}
+	*z = zohoID(s)
+	return nil
+}
+
+type zohoUser struct {
+	ZUID                zohoID `json:"zuid"`
+	Email               string `json:"email"`
+	PrimaryEmailAddress string `json:"primary_email_address"`
+	FirstName           string `json:"first_name"`
+	LastName            string `json:"last_name"`
+	DisplayName         string `json:"display_name"`
+	FullName            string `json:"full_name"`
+	// Status is Zoho's lifecycle string. A user is treated as off-boarded
+	// only when the status is a RECOGNISED disabled value (see
+	// zohoActive); an empty or unrecognised status leaves the user active.
+	// This direction is deliberate: a status-vocabulary mismatch must
+	// never mass-deactivate present users (the reconcile off-boards
+	// absent/inactive locals), so the connector fails safe toward MORE
+	// access. The disabled vocabulary is doc-modeled and a certification
+	// item (see the connector doc comment).
+	Status string `json:"status"`
+}
+
+type zohoUserPage struct {
+	Users       []zohoUser `json:"users"`
+	PageContext struct {
+		HasMoreRecords bool `json:"has_more_records"`
+	} `json:"page_context"`
+}
+
+type zohoGroupPage struct {
+	Groups []struct {
+		Name  string `json:"name"`
+		Email string `json:"email"`
+	} `json:"groups"`
+	PageContext struct {
+		HasMoreRecords bool `json:"has_more_records"`
+	} `json:"page_context"`
+}
+
+func (c *zohoDirectoryClient) auth() string { return "Zoho-oauthtoken " + c.token }
+
+func (c *zohoDirectoryClient) ListUsers(ctx context.Context) ([]DirectoryUser, error) {
+	out := []DirectoryUser{}
+	start := 1
+	for page := 0; ; page++ {
+		if page >= zohoMaxUserPages {
+			return nil, fmt.Errorf("zoho list users exceeded %d pages; aborting rather than returning a truncated (off-boarding) snapshot", zohoMaxUserPages)
+		}
+		q := url.Values{}
+		q.Set("limit", strconv.Itoa(zohoPageLimit))
+		q.Set("start", strconv.Itoa(start))
+		u := c.base + "/api/v1/users?" + q.Encode()
+
+		var pg zohoUserPage
+		if err := getJSON(ctx, c.http, u, c.auth(), &pg); err != nil {
+			return nil, fmt.Errorf("zoho list users: %w", err)
+		}
+		for _, zu := range pg.Users {
+			email := zohoEmail(zu)
+			groups, gerr := c.userGroups(ctx, string(zu.ZUID))
+			if gerr != nil {
+				return nil, fmt.Errorf("zoho groups for %s: %w", zu.ZUID, gerr)
+			}
+			out = append(out, DirectoryUser{
+				ExternalID:  string(zu.ZUID),
+				Email:       strings.ToLower(email),
+				DisplayName: zohoDisplayName(zu),
+				Active:      zohoActive(zu.Status),
+				Groups:      groups,
+			})
+		}
+		// The server's continuation flag is authoritative (as the cursor
+		// is for the other connectors). An empty page that still claims
+		// "more" would otherwise spin, so stop there too.
+		if !pg.PageContext.HasMoreRecords || len(pg.Users) == 0 {
+			return out, nil
+		}
+		start += len(pg.Users)
+	}
+}
+
+func (c *zohoDirectoryClient) userGroups(ctx context.Context, zuid string) ([]string, error) {
+	if zuid == "" {
+		return nil, nil
+	}
+	var names []string
+	start := 1
+	for page := 0; ; page++ {
+		if page >= zohoMaxUserPages {
+			return nil, fmt.Errorf("zoho groups for %s exceeded %d pages", zuid, zohoMaxUserPages)
+		}
+		q := url.Values{}
+		q.Set("limit", strconv.Itoa(zohoPageLimit))
+		q.Set("start", strconv.Itoa(start))
+		u := fmt.Sprintf("%s/api/v1/users/%s/groups?%s", c.base, url.PathEscape(zuid), q.Encode())
+
+		var pg zohoGroupPage
+		if err := getJSON(ctx, c.http, u, c.auth(), &pg); err != nil {
+			return nil, err
+		}
+		for _, g := range pg.Groups {
+			switch {
+			case g.Name != "":
+				names = append(names, g.Name)
+			case g.Email != "":
+				names = append(names, g.Email)
+			}
+		}
+		if !pg.PageContext.HasMoreRecords || len(pg.Groups) == 0 {
+			return names, nil
+		}
+		start += len(pg.Groups)
+	}
+}
+
+// zohoEmail resolves a Zoho user's primary email, tolerating the two
+// documented attribute names (`email`, `primary_email_address`).
+func zohoEmail(u zohoUser) string {
+	if u.Email != "" {
+		return u.Email
+	}
+	return u.PrimaryEmailAddress
+}
+
+// zohoActive reports whether a Zoho lifecycle status denotes an active
+// account. It is intentionally lenient — active UNLESS the status is a
+// recognised disabled value — so an empty or unexpected status never
+// causes the reconcile to off-board a present user. Cutting access for a
+// genuinely disabled user still happens, but only on a positively
+// recognised disabled state; widening this vocabulary is a
+// certification-time task against a live tenant.
+func zohoActive(status string) bool {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "disabled", "inactive", "deactivated", "deleted", "suspended", "blocked":
+		return false
+	default:
+		return true
+	}
+}
+
+// zohoDisplayName prefers an explicit display/full name, falling back to
+// the assembled first + last name.
+func zohoDisplayName(u zohoUser) string {
+	switch {
+	case u.DisplayName != "":
+		return u.DisplayName
+	case u.FullName != "":
+		return u.FullName
+	default:
+		return strings.TrimSpace(u.FirstName + " " + u.LastName)
 	}
 }

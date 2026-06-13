@@ -129,6 +129,20 @@ type TenantSource interface {
 	ListTenants(ctx context.Context) ([]uuid.UUID, error)
 }
 
+// DirectoryObserver receives one record per directory ListUsers attempt
+// so the control plane can prove connector breadth and fleet-scale
+// directory pull volume by provider — without the identity package
+// importing internal/metrics. It fires for every provider config that is
+// actually read (monitor dry-run and enforce alike), and never for a
+// tenant gated off or a config with no directory credential. A nil
+// observer (the default) disables it.
+type DirectoryObserver interface {
+	// ObserveDirectoryList records a directory read for provider: users
+	// is the number of users the connector returned (0 on failure) and
+	// err is non-nil when the directory could not be listed.
+	ObserveDirectoryList(provider string, users int, err error)
+}
+
 // TenantActivitySource yields the cheap (id, last_active_at) projection
 // the dormancy planner buckets by recency. repository.TenantRepository
 // satisfies it; supplying one (via WithDormancyPlanner) switches the
@@ -232,6 +246,10 @@ type SyncService struct {
 	// framework (see RolloutGate). Optional: nil preserves the legacy
 	// full-sync-every-tenant behavior.
 	rolloutGate RolloutGate
+
+	// dirObs receives per-provider directory-read telemetry (see
+	// DirectoryObserver). Optional: nil disables it.
+	dirObs DirectoryObserver
 }
 
 // NewSyncService wires an IdP directory sync service.
@@ -293,6 +311,17 @@ func (s *SyncService) WithDormancyPlanner(planner *tenancy.SweepPlanner, activit
 func (s *SyncService) WithRolloutGate(gate RolloutGate) *SyncService {
 	if gate != nil {
 		s.rolloutGate = gate
+	}
+	return s
+}
+
+// WithDirectoryObserver wires per-provider directory-read telemetry so
+// each ListUsers attempt is reported by provider and outcome (see
+// DirectoryObserver). A nil observer is a no-op. Returns the receiver
+// for chaining at construction.
+func (s *SyncService) WithDirectoryObserver(obs DirectoryObserver) *SyncService {
+	if obs != nil {
+		s.dirObs = obs
 	}
 	return s
 }
@@ -499,6 +528,9 @@ func (s *SyncService) syncConfig(ctx context.Context, tenantID uuid.UUID, cfg re
 		return fmt.Errorf("build directory client: %w", err)
 	}
 	dirUsers, err := client.ListUsers(ctx)
+	if s.dirObs != nil {
+		s.dirObs.ObserveDirectoryList(string(cfg.ProviderType), len(dirUsers), err)
+	}
 	if err != nil {
 		return fmt.Errorf("list directory users: %w", err)
 	}
