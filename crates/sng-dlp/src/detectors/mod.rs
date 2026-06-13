@@ -45,15 +45,20 @@ pub mod finland;
 pub mod france;
 pub mod germany;
 pub mod indonesia;
+pub mod ireland;
+pub mod israel;
 pub mod italy;
+pub mod mexico;
 pub mod netherlands;
 pub mod norway;
 pub mod philippines;
 pub mod poland;
 pub mod portugal;
+pub mod romania;
 pub mod south_africa;
 pub mod spain;
 pub mod sweden;
+pub mod switzerland;
 pub mod turkey;
 pub mod uk;
 
@@ -92,7 +97,7 @@ pub struct JurisdictionDetector {
 /// (in addition to the generic builtins in
 /// [`crate::classifier::builtin_pattern`]).
 ///
-/// The list is intentionally exhaustive across the 33 supported
+/// The list is intentionally exhaustive across the 38 supported
 /// national / regional identifiers so a single lookup answers
 /// "pattern, validator, and context for `name`".
 // The body is one flat `JurisdictionDetector` literal per supported
@@ -112,15 +117,20 @@ pub fn registry() -> &'static [JurisdictionDetector] {
     use france::france_insee;
     use germany::germany_personalausweis;
     use indonesia::indonesia_nik;
+    use ireland::ireland_ppsn;
+    use israel::israel_id;
     use italy::italy_codice_fiscale;
+    use mexico::mexico_curp;
     use netherlands::netherlands_bsn;
     use norway::norway_fodselsnummer;
     use philippines::philippines_umid;
     use poland::poland_pesel;
     use portugal::portugal_nif;
+    use romania::romania_cnp;
     use south_africa::south_africa_id;
     use spain::{spain_dni, spain_nie};
     use sweden::sweden_personnummer;
+    use switzerland::switzerland_ahv;
     use turkey::turkey_tckn;
     use uk::{uk_nhs, uk_nino};
 
@@ -485,6 +495,63 @@ pub fn registry() -> &'static [JurisdictionDetector] {
             validator: Some(estonia_isikukood),
             context: &["isikukood", "personal code", "personal identification"],
         },
+        // --- Ireland ---
+        JurisdictionDetector {
+            name: "ireland_ppsn",
+            jurisdiction: "IE",
+            title: "Ireland PPS Number",
+            pattern: r"\b\d{7}[A-Wa-w][A-IWa-iw]?\b",
+            validator: Some(ireland_ppsn),
+            context: &[
+                "pps",
+                "ppsn",
+                "pps number",
+                "personal public service",
+                "uimhir psp",
+            ],
+        },
+        // --- Switzerland ---
+        JurisdictionDetector {
+            name: "switzerland_ahv",
+            jurisdiction: "CH",
+            title: "Switzerland AHV/AVS social-security number",
+            pattern: r"\b756[.\s]?\d{4}[.\s]?\d{4}[.\s]?\d{2}\b",
+            validator: Some(switzerland_ahv),
+            context: &[
+                "ahv",
+                "avs",
+                "ahv-nummer",
+                "sozialversicherungsnummer",
+                "social security",
+            ],
+        },
+        // --- Israel ---
+        JurisdictionDetector {
+            name: "israel_id",
+            jurisdiction: "IL",
+            title: "Israel national ID (Teudat Zehut)",
+            pattern: r"\b\d{9}\b",
+            validator: Some(israel_id),
+            context: &["תעודת זהות", "teudat zehut", "national id", "id number"],
+        },
+        // --- Romania ---
+        JurisdictionDetector {
+            name: "romania_cnp",
+            jurisdiction: "RO",
+            title: "Romania CNP (Cod Numeric Personal)",
+            pattern: r"\b[1-8]\d{12}\b",
+            validator: Some(romania_cnp),
+            context: &["cnp", "cod numeric personal", "personal numeric code"],
+        },
+        // --- Mexico ---
+        JurisdictionDetector {
+            name: "mexico_curp",
+            jurisdiction: "MX",
+            title: "Mexico CURP",
+            pattern: r"\b[A-Z]{4}\d{6}[HM][A-Z]{2}[A-Z]{3}[A-Z0-9]\d\b",
+            validator: Some(mexico_curp),
+            context: &["curp", "clave única de registro", "registro de población"],
+        },
     ]
 }
 
@@ -527,7 +594,7 @@ mod tests {
     use regex::Regex;
 
     /// The full set of jurisdiction identifiers the catalog must support.
-    const EXPECTED_NAMES: [&str; 33] = [
+    const EXPECTED_NAMES: [&str; 38] = [
         "ni_uk",
         "uk_nhs",
         "canada_sin",
@@ -561,6 +628,11 @@ mod tests {
         "turkey_tckn",
         "south_africa_id",
         "estonia_isikukood",
+        "ireland_ppsn",
+        "switzerland_ahv",
+        "israel_id",
+        "romania_cnp",
+        "mexico_curp",
     ];
 
     #[test]
