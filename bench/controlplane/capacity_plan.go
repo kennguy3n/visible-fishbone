@@ -242,6 +242,13 @@ func (c CapacityPlanConfig) withDefaults() CapacityPlanConfig {
 	if c.HibernatedSampleRate <= 0 {
 		c.HibernatedSampleRate = DefaultHibernatedSampleRate
 	}
+	// HibernatedSampleRate is a keep-probability; clamp the upper bound so
+	// a fat-fingered flag can never project MORE telemetry than the
+	// un-hibernated fleet (effectiveTelemetryTenants would otherwise
+	// exceed TenantCount).
+	if c.HibernatedSampleRate > 1 {
+		c.HibernatedSampleRate = 1
+	}
 	return c
 }
 
