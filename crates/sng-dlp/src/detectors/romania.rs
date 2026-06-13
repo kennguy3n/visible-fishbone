@@ -110,6 +110,18 @@ mod tests {
     }
 
     #[test]
+    fn county_boundaries() {
+        // County 70 (special-case allocation) is accepted; 53..=69 and 71+
+        // fall outside the allowed 01..=52/70 set and are rejected.
+        assert!(romania_cnp(&make(1, 80, 6, 15, 70, 123)), "county 70");
+        assert!(romania_cnp(&make(1, 80, 6, 15, 52, 123)), "county 52");
+        assert!(romania_cnp(&make(1, 80, 6, 15, 1, 123)), "county 01");
+        assert!(!romania_cnp(&make(1, 80, 6, 15, 53, 123)), "county 53");
+        assert!(!romania_cnp(&make(1, 80, 6, 15, 69, 123)), "county 69");
+        assert!(!romania_cnp(&make(1, 80, 6, 15, 71, 123)), "county 71");
+    }
+
+    #[test]
     fn structural_rejects() {
         let good = make(1, 80, 6, 15, 40, 123);
         // Impossible month.

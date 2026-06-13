@@ -200,6 +200,18 @@ func TestRomaniaCNP(t *testing.T) {
 		}
 		count++
 	}
+	// County boundaries: 01..=52 and the special-case 70 are accepted;
+	// 53..=69 and 71+ are rejected.
+	for _, county := range []int{1, 52, 70} {
+		if cnp := makeCNP(1, 80, 6, 15, county, 123); !romaniaCNP(cnp) {
+			t.Errorf("romaniaCNP(%q) = false, want true (county %d)", cnp, county)
+		}
+	}
+	for _, county := range []int{53, 69, 71} {
+		if cnp := makeCNP(1, 80, 6, 15, county, 123); romaniaCNP(cnp) {
+			t.Errorf("romaniaCNP(%q) = true, want false (county %d)", cnp, county)
+		}
+	}
 	good := makeCNP(1, 80, 6, 15, 40, 123)
 	bads := []string{
 		good[:3] + "99" + good[5:], // impossible month
