@@ -357,6 +357,79 @@ func TestReconcile_ActivityTieredSkipsDormant(t *testing.T) {
 	}
 }
 
+// recordingSweepObserver captures ObserveSweep calls so a test can
+// assert the per-tier tallies a sweep published.
+type recordingSweepObserver struct {
+	mu    sync.Mutex
+	calls []sweepObsCall
+}
+
+type sweepObsCall struct {
+	job              string
+	tier             tenancy.Tier
+	visited, skipped int
+}
+
+func (r *recordingSweepObserver) ObserveSweep(job string, tier tenancy.Tier, visited, skipped int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, sweepObsCall{job, tier, visited, skipped})
+}
+
+// pagedThenErrTenants returns one successful page (with a cursor) and
+// then errors on the next List, simulating a tenant-list failure that
+// occurs partway through a paginated reconcile sweep. Only List is
+// implemented; the embedded nil interface would panic on any other
+// method, which Reconcile never calls.
+type pagedThenErrTenants struct {
+	repository.TenantRepository
+	first []repository.Tenant
+	err   error
+}
+
+func (p pagedThenErrTenants) List(_ context.Context, page repository.Page) (repository.PageResult[repository.Tenant], error) {
+	if page.After == "" {
+		return repository.PageResult[repository.Tenant]{Items: p.first, NextCursor: "page2"}, nil
+	}
+	return repository.PageResult[repository.Tenant]{}, p.err
+}
+
+// TestReconcile_PublishesPartialTalliesOnListError pins the round-2
+// Devin Review fix: Begin advances the cycle counter before the
+// paginated loop, so a mid-sweep tenant-list error must still publish
+// the partial per-tier tally (the work that did happen) rather than
+// silently dropping that cycle's observability.
+func TestReconcile_PublishesPartialTalliesOnListError(t *testing.T) {
+	fx := newEngineFixture(t)
+	obs := &recordingSweepObserver{}
+	active := repository.Tenant{ID: uuid.New(), Status: repository.TenantStatusActive, LastActiveAt: &fx.clock}
+	failing := pagedThenErrTenants{first: []repository.Tenant{active}, err: context.DeadlineExceeded}
+
+	engine := casb.NewAppNoOpsEngine(fx.store, fx.apps, failing, nil)
+	engine.SetClock(func() time.Time { return fx.clock })
+	engine.WithDormancyPlanner(tenancy.NewTieredSweep("casb_noops_reconcile", tenancy.DefaultPlanner(), obs))
+
+	if err := engine.Reconcile(context.Background()); err == nil {
+		t.Fatal("expected the mid-sweep list error to propagate")
+	}
+
+	obs.mu.Lock()
+	defer obs.mu.Unlock()
+	if len(obs.calls) == 0 {
+		t.Fatal("Finish must publish the partial tally even when the sweep aborts mid-pagination")
+	}
+	visited := 0
+	for _, c := range obs.calls {
+		if c.job != "casb_noops_reconcile" {
+			t.Fatalf("unexpected job label %q", c.job)
+		}
+		visited += c.visited
+	}
+	if visited != 1 {
+		t.Fatalf("partial visited tally = %d, want 1 (the page-1 tenant visited before the error)", visited)
+	}
+}
+
 func TestBuildDigest_SummariseAndAdvanceCursor(t *testing.T) {
 	fx := newEngineFixture(t)
 	fx.enforcer.created = true

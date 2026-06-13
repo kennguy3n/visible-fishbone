@@ -160,9 +160,13 @@ func (c *SweepCycle) Summary() PlanSummary {
 
 // Finish publishes the accumulated per-tier tallies to the observer (if
 // any). Call it exactly once at the end of a pass; after Finish the
-// SweepCycle should be discarded and the next pass obtained from Begin.
-// Tiers with no tenants this cycle are not emitted, so an idle metric
-// series never appears for a job that has no tenants in that tier.
+// SweepCycle must not be reused for another Begin/Visit/Due pass and a
+// fresh one should be obtained from Begin. Reading the tallies after
+// Finish is safe, though — Summary is read-only over the same unchanged
+// fields, so the common "Finish then Summary for a debug log" pattern is
+// well-defined. Tiers with no tenants this cycle are not emitted, so an
+// idle metric series never appears for a job that has no tenants in that
+// tier.
 func (c *SweepCycle) Finish() {
 	if c.sweep.obs == nil {
 		return

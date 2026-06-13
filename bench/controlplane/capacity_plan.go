@@ -256,6 +256,14 @@ func (c CapacityPlanConfig) withDefaults() CapacityPlanConfig {
 		c.SweepActiveFraction = d.SweepActiveFraction
 		c.SweepIdleFraction = d.SweepIdleFraction
 		c.SweepDormantFraction = d.SweepDormantFraction
+	} else {
+		// A partially-specified mix may carry a stray negative weight;
+		// clamp each to 0 so a single negative fraction can never produce
+		// a negative tenant count (the normalisation in planPeriodicSweep
+		// divides by the sum, which a negative term could otherwise skew).
+		c.SweepActiveFraction = max(c.SweepActiveFraction, 0)
+		c.SweepIdleFraction = max(c.SweepIdleFraction, 0)
+		c.SweepDormantFraction = max(c.SweepDormantFraction, 0)
 	}
 	if len(c.sweepJobs) == 0 {
 		c.sweepJobs = d.sweepJobs

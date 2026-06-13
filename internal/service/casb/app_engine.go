@@ -234,18 +234,33 @@ func (e *AppNoOpsEngine) Reconcile(ctx context.Context) error {
 	if e.tenants == nil {
 		return fmt.Errorf("casb: Reconcile requires a tenant repository")
 	}
+	var (
+		firstErr error
+		page     repository.Page
+		active   int
+	)
 	// The TieredSweep owns the 0-based monotonic cycle counter; the
 	// first sweep is cycle 0 (full visit). A nil sweep keeps the legacy
 	// every-active-tenant fan-out.
 	var cyc *tenancy.SweepCycle
 	if e.sweep != nil {
 		cyc = e.sweep.Begin(e.nowFunc())
+		// Publish the per-tier tallies on every return path — including a
+		// mid-sweep tenant-list error — so a transient failure never
+		// silently drops this cycle's observability (Begin already
+		// consumed the cycle number, so the partial counts are the
+		// honest record of the work that did happen).
+		defer func() {
+			cyc.Finish()
+			if summary := cyc.Summary(); summary.Skipped > 0 {
+				e.logger.DebugContext(ctx, "casb: activity-tiered reconcile sweep",
+					slog.Int64("cycle", summary.Cycle),
+					slog.Int("active", active),
+					slog.Int("visited", summary.Visited),
+					slog.Int("skipped", summary.Skipped))
+			}
+		}()
 	}
-	var (
-		firstErr error
-		page     repository.Page
-		active   int
-	)
 	for {
 		res, err := e.tenants.List(ctx, page)
 		if err != nil {
@@ -270,16 +285,6 @@ func (e *AppNoOpsEngine) Reconcile(ctx context.Context) error {
 			break
 		}
 		page.After = res.NextCursor
-	}
-	if cyc != nil {
-		cyc.Finish()
-		if summary := cyc.Summary(); summary.Skipped > 0 {
-			e.logger.DebugContext(ctx, "casb: activity-tiered reconcile sweep",
-				slog.Int64("cycle", summary.Cycle),
-				slog.Int("active", active),
-				slog.Int("visited", summary.Visited),
-				slog.Int("skipped", summary.Skipped))
-		}
 	}
 	return firstErr
 }

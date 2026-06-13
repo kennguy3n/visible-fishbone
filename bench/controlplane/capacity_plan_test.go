@@ -224,6 +224,29 @@ func TestCapacityPlanPeriodicSweepDividend(t *testing.T) {
 	}
 }
 
+func TestCapacityPlanPeriodicSweepClampsNegativeFraction(t *testing.T) {
+	// A stray negative weight in a partially-specified mix must be
+	// clamped to 0 so it can never produce a negative tenant count.
+	s := RunCapacityPlan(CapacityPlanConfig{
+		TenantCount:          1000,
+		SweepActiveFraction:  -0.1,
+		SweepIdleFraction:    0.5,
+		SweepDormantFraction: 0.5,
+	})
+	sw := s.PeriodicSweep
+	if sw.ActiveTenants < 0 || sw.IdleTenants < 0 || sw.DormantTenants < 0 {
+		t.Fatalf("negative tenant count after clamp: %d/%d/%d",
+			sw.ActiveTenants, sw.IdleTenants, sw.DormantTenants)
+	}
+	if sw.ActiveTenants != 0 {
+		t.Fatalf("clamped active fraction should yield 0 active tenants, got %d", sw.ActiveTenants)
+	}
+	if sw.ActiveTenants+sw.IdleTenants+sw.DormantTenants != s.TenantCount {
+		t.Fatalf("tier breakdown %d+%d+%d != %d after clamp",
+			sw.ActiveTenants, sw.IdleTenants, sw.DormantTenants, s.TenantCount)
+	}
+}
+
 func TestCapacityPlanPeriodicSweepAllActiveNoDividend(t *testing.T) {
 	// A fully-active fleet (fail-safe / no dormancy) must show no
 	// reduction: every tenant is visited every cycle.
