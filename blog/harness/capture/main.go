@@ -29,40 +29,34 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/kennguy3n/visible-fishbone/blog/harness/fleet"
 )
 
-// Acme Retail Group — the richest seeded tenant; used for the
-// per-scenario walk-throughs in the series.
-const acme = "92112770-7c0a-410b-b0f4-09dde70e063a"
-
-// Umbrella Logistics — APAC residency tenant; carries a single
-// pdpa-singapore DLP policy (the Singapore-residency example).
-const umbrella = "0c8d2d9d-896d-45b1-8001-6a6776f832b9"
-
-// Nordic EduCloud — the deliberately-sparse starter tenant (0 DLP
-// policies); used to capture an honest, intentional empty-state payload.
-const nordic = "8c93e8b9-5710-4f3a-9981-6d2c558bb78f"
-
-// Initech Financial — the professional-tier tenant carrying a seeded
-// url_cat surge; used to capture the one credible cost anomaly in the
-// dataset (its current-month run rate runs well above its own history).
-const initech = "b6520bda-e7bb-4af9-9c53-7b0051eae65b"
-
-// Globex Health Systems — the HIPAA tenant; used to capture a playbook
-// set with a mix of enabled and disabled automated-response runbooks.
-const globex = "3bd7bb7b-d48a-4569-8f97-46be31ae8e5a"
-
-// Multi-country / multi-industry tenants — each resolves to a distinct
-// compliance regime via the smart-default policy-template engine, so
-// their applied baselines are the evidence for the jurisdiction story:
+// The scenario tenant UUIDs are the canonical identities defined once in
+// the shared fleet package. The short aliases below keep the capture
+// endpoint list readable while sourcing every id from that single source
+// of truth. Each tenant's role in the series:
 //
-//	britannia (GB) -> uk-dpa, maple (CA) -> ca-pipeda,
-//	outback   (AU) -> au-privacy, lumiere (FR) -> eu-gdpr.
-const (
-	britannia = "2d0935d3-8c57-4f66-a5a9-0de368f16a7c"
-	maple     = "cef9c934-507c-4adc-985b-48f3cbe274b0"
-	outback   = "37619610-53b4-4eab-87f9-45ba902d30c2"
-	lumiere   = "890486df-98bd-482b-85a8-af361706676f"
+//	acme      — the richest seeded tenant; per-scenario walk-throughs.
+//	umbrella  — APAC residency tenant; single pdpa-singapore DLP policy.
+//	nordic    — deliberately-sparse starter (0 DLP policies); empty-state.
+//	initech   — professional tenant with a seeded url_cat cost surge.
+//	globex    — HIPAA tenant; mixed enabled/disabled automated runbooks.
+//
+// Multi-country baselines resolve to distinct compliance regimes via the
+// smart-default policy-template engine (britannia GB -> uk-dpa, maple CA
+// -> ca-pipeda, outback AU -> au-privacy, lumiere FR -> eu-gdpr).
+var (
+	acme      = fleet.Acme().ID
+	umbrella  = fleet.Umbrella().ID
+	nordic    = fleet.Nordic().ID
+	initech   = fleet.Initech().ID
+	globex    = fleet.Globex().ID
+	britannia = fleet.Britannia().ID
+	maple     = fleet.Maple().ID
+	outback   = fleet.Outback().ID
+	lumiere   = fleet.Lumiere().ID
 )
 
 // postSpec captures a live POST response. Bodies are fixed so reruns

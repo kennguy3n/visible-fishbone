@@ -29,6 +29,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/kennguy3n/visible-fishbone/blog/harness/fleet"
 )
 
 var (
@@ -59,7 +61,7 @@ func main() {
 	summary := map[string]any{}
 	var tenantSummaries []map[string]any
 
-	msp := ensureMSP("Northwind Managed Security", "northwind-msp")
+	msp := ensureMSP(fleet.MSPName, fleet.MSPSlug)
 	summary["msp"] = msp
 
 	for _, t := range scenarioTenants() {
@@ -142,8 +144,8 @@ type playbookSpec struct {
 func scenarioTenants() []tenantSpec {
 	return []tenantSpec{
 		{
-			name: "Acme Retail Group", slug: "acme-retail", region: "us-east-1",
-			tier: "enterprise", relationship: "owner", country: "US", industry: "retail",
+			name: fleet.Acme().Name, slug: fleet.Acme().Slug, region: fleet.Acme().Region,
+			tier: fleet.Acme().Tier, relationship: "owner", country: fleet.Acme().Country, industry: fleet.Acme().Industry,
 			sites: []siteSpec{
 				{"Acme HQ — Dallas", "hub"},
 				{"Distribution Center — Memphis", "hub"},
@@ -192,8 +194,8 @@ func scenarioTenants() []tenantSpec {
 			},
 		},
 		{
-			name: "Globex Health Systems", slug: "globex-health", region: "us-west-2",
-			tier: "enterprise", relationship: "owner", country: "US", industry: "healthcare",
+			name: fleet.Globex().Name, slug: fleet.Globex().Slug, region: fleet.Globex().Region,
+			tier: fleet.Globex().Tier, relationship: "owner", country: fleet.Globex().Country, industry: fleet.Globex().Industry,
 			sites: []siteSpec{
 				{"Globex Main Hospital — Seattle", "hub"},
 				{"Outpatient Clinic — Bellevue", "branch"},
@@ -241,8 +243,8 @@ func scenarioTenants() []tenantSpec {
 			},
 		},
 		{
-			name: "Initech Financial", slug: "initech-financial", region: "eu-central-1",
-			tier: "professional", relationship: "co_manager", country: "DE", industry: "finance",
+			name: fleet.Initech().Name, slug: fleet.Initech().Slug, region: fleet.Initech().Region,
+			tier: fleet.Initech().Tier, relationship: "co_manager", country: fleet.Initech().Country, industry: fleet.Initech().Industry,
 			sites: []siteSpec{
 				{"Initech HQ — Frankfurt", "hub"},
 				{"Trading Floor — London", "branch"},
@@ -279,8 +281,8 @@ func scenarioTenants() []tenantSpec {
 			// yet model SG (an honest non-goal), so country is left empty and
 			// no baseline is auto-applied; APAC residency DLP is still covered
 			// via the pdpa-singapore DLP template below.
-			name: "Umbrella Logistics", slug: "umbrella-logistics", region: "ap-southeast-1",
-			tier: "starter", relationship: "owner", industry: "general",
+			name: fleet.Umbrella().Name, slug: fleet.Umbrella().Slug, region: fleet.Umbrella().Region,
+			tier: fleet.Umbrella().Tier, relationship: "owner", country: fleet.Umbrella().Country, industry: fleet.Umbrella().Industry,
 			sites: []siteSpec{
 				{"Umbrella HQ — Singapore", "hub"},
 				{"Warehouse — Jakarta", "branch"},
@@ -296,8 +298,8 @@ func scenarioTenants() []tenantSpec {
 			integrations: []integrationSpec{{"syslog", "Umbrella rsyslog"}},
 		},
 		{
-			name: "Britannia Robotics", slug: "britannia-robotics", region: "eu-west-2",
-			tier: "enterprise", relationship: "owner", country: "GB", industry: "technology",
+			name: fleet.Britannia().Name, slug: fleet.Britannia().Slug, region: fleet.Britannia().Region,
+			tier: fleet.Britannia().Tier, relationship: "owner", country: fleet.Britannia().Country, industry: fleet.Britannia().Industry,
 			sites: []siteSpec{
 				{"Britannia HQ — London", "hub"},
 				{"Smart Factory — Manchester", "hub"},
@@ -334,8 +336,8 @@ func scenarioTenants() []tenantSpec {
 			},
 		},
 		{
-			name: "Maple Health Network", slug: "maple-health", region: "ca-central-1",
-			tier: "professional", relationship: "co_manager", country: "CA", industry: "healthcare",
+			name: fleet.Maple().Name, slug: fleet.Maple().Slug, region: fleet.Maple().Region,
+			tier: fleet.Maple().Tier, relationship: "co_manager", country: fleet.Maple().Country, industry: fleet.Maple().Industry,
 			sites: []siteSpec{
 				{"Maple HQ — Toronto", "hub"},
 				{"Community Clinic — Vancouver", "branch"},
@@ -369,8 +371,8 @@ func scenarioTenants() []tenantSpec {
 			},
 		},
 		{
-			name: "Outback Retail Co", slug: "outback-retail", region: "ap-southeast-2",
-			tier: "professional", relationship: "owner", country: "AU", industry: "retail",
+			name: fleet.Outback().Name, slug: fleet.Outback().Slug, region: fleet.Outback().Region,
+			tier: fleet.Outback().Tier, relationship: "owner", country: fleet.Outback().Country, industry: fleet.Outback().Industry,
 			sites: []siteSpec{
 				{"Outback HQ — Sydney", "hub"},
 				{"Distribution Center — Melbourne", "hub"},
@@ -393,8 +395,8 @@ func scenarioTenants() []tenantSpec {
 			integrations: []integrationSpec{{"siem_webhook", "Outback Splunk HEC"}},
 		},
 		{
-			name: "Lumière Légal", slug: "lumiere-legal", region: "eu-west-3",
-			tier: "professional", relationship: "co_manager", country: "FR", industry: "legal",
+			name: fleet.Lumiere().Name, slug: fleet.Lumiere().Slug, region: fleet.Lumiere().Region,
+			tier: fleet.Lumiere().Tier, relationship: "co_manager", country: fleet.Lumiere().Country, industry: fleet.Lumiere().Industry,
 			sites: []siteSpec{
 				{"Lumière HQ — Paris", "hub"},
 				{"Annexe — Lyon", "branch"},
@@ -421,8 +423,8 @@ func scenarioTenants() []tenantSpec {
 			// console renders an honest empty state (an intentional tier/
 			// onboarding difference, not a load failure) — captured as
 			// s5-nordic-dlp-policies-emptystate.json.
-			name: "Nordic EduCloud", slug: "nordic-educloud", region: "eu-north-1",
-			tier: "starter", relationship: "owner", country: "SE", industry: "education",
+			name: fleet.Nordic().Name, slug: fleet.Nordic().Slug, region: fleet.Nordic().Region,
+			tier: fleet.Nordic().Tier, relationship: "owner", country: fleet.Nordic().Country, industry: fleet.Nordic().Industry,
 			sites: []siteSpec{
 				{"Nordic HQ — Stockholm", "hub"},
 				{"Campus Network — Uppsala", "branch"},

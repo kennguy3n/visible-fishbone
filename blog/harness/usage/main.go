@@ -55,26 +55,9 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/kennguy3n/visible-fishbone/blog/harness/fleet"
 	"github.com/kennguy3n/visible-fishbone/internal/service/metering"
 )
-
-// seeded customer tenants (the ShieldNet Platform system tenant is
-// deliberately excluded — it is not a billed customer).
-var tenants = []struct {
-	id   string
-	name string
-	tier string
-}{
-	{"92112770-7c0a-410b-b0f4-09dde70e063a", "Acme Retail Group", "enterprise"},
-	{"3bd7bb7b-d48a-4569-8f97-46be31ae8e5a", "Globex Health Systems", "enterprise"},
-	{"b6520bda-e7bb-4af9-9c53-7b0051eae65b", "Initech Financial", "professional"},
-	{"0c8d2d9d-896d-45b1-8001-6a6776f832b9", "Umbrella Logistics", "starter"},
-	{"2d0935d3-8c57-4f66-a5a9-0de368f16a7c", "Britannia Robotics", "enterprise"},
-	{"cef9c934-507c-4adc-985b-48f3cbe274b0", "Maple Health", "professional"},
-	{"37619610-53b4-4eab-87f9-45ba902d30c2", "Outback Retail", "professional"},
-	{"890486df-98bd-482b-85a8-af361706676f", "Lumière Légal", "professional"},
-	{"8c93e8b9-5710-4f3a-9981-6d2c558bb78f", "Nordic EduCloud", "starter"},
-}
 
 // baseline is each tenant's STEADY-STATE full-period consumption per
 // meter — the value the cost engine should project the current period
@@ -89,8 +72,12 @@ var tenants = []struct {
 // the dollar breakdown in the admin cost report. Volumes are calibrated
 // so each tenant's projected monthly spend lands comfortably inside its
 // tier revenue (starter $99 / professional $499 / enterprise $1999).
+//
+// Keyed by tenant SLUG (the stable fleet key) rather than display name,
+// so a name change in the fleet definition can never silently produce an
+// empty baseline.
 var baseline = map[string]map[metering.Meter]int64{
-	"Acme Retail Group": { // enterprise $1999 — busy retailer, ~$1.1k projected spend
+	fleet.Acme().Slug: { // Acme Retail Group — enterprise $1999, busy retailer, ~$1.1k projected spend
 		metering.MeterLLMCalls:              13_000,            // 65% of 20k/mo
 		metering.MeterLLMTokensUsed:         12_000_000,        // 60% of 20M/mo
 		metering.MeterURLCatLookups:         120_000,           // 6% of 2M/day (url-cat is the dearest meter)
@@ -100,7 +87,7 @@ var baseline = map[string]map[metering.Meter]int64{
 		metering.MeterS3BytesArchived:       1_500_000_000_000, // 1.5 TB/month
 		metering.MeterBandwidthProxiedBytes: 5_000_000_000_000, // 5 TB/month
 	},
-	"Globex Health Systems": { // enterprise $1999 — moderate, ~$0.7k projected spend
+	fleet.Globex().Slug: { // Globex Health Systems — enterprise $1999, moderate, ~$0.7k projected spend
 		metering.MeterLLMCalls:              8_600,
 		metering.MeterLLMTokensUsed:         8_000_000,
 		metering.MeterURLCatLookups:         80_000,
@@ -110,7 +97,7 @@ var baseline = map[string]map[metering.Meter]int64{
 		metering.MeterS3BytesArchived:       1_000_000_000_000,
 		metering.MeterBandwidthProxiedBytes: 3_000_000_000_000,
 	},
-	"Initech Financial": { // professional $499 — ~$0.44k projected spend
+	fleet.Initech().Slug: { // Initech Financial — professional $499, ~$0.44k projected spend
 		metering.MeterLLMCalls:              3_250,
 		metering.MeterLLMTokensUsed:         3_000_000,
 		metering.MeterURLCatLookups:         30_000, // baseline; current run rate is the surge below
@@ -120,7 +107,7 @@ var baseline = map[string]map[metering.Meter]int64{
 		metering.MeterS3BytesArchived:       400_000_000_000,
 		metering.MeterBandwidthProxiedBytes: 1_500_000_000_000,
 	},
-	"Umbrella Logistics": { // starter $99 — light, ~$59 projected spend
+	fleet.Umbrella().Slug: { // Umbrella Logistics — starter $99, light, ~$59 projected spend
 		metering.MeterLLMCalls:              600,
 		metering.MeterLLMTokensUsed:         600_000,
 		metering.MeterURLCatLookups:         6_000,
@@ -130,7 +117,7 @@ var baseline = map[string]map[metering.Meter]int64{
 		metering.MeterS3BytesArchived:       60_000_000_000,
 		metering.MeterBandwidthProxiedBytes: 300_000_000_000,
 	},
-	"Britannia Robotics": { // enterprise $1999 — industrial robotics, ~$0.8k projected spend
+	fleet.Britannia().Slug: { // Britannia Robotics — enterprise $1999, industrial robotics, ~$0.8k projected spend
 		metering.MeterLLMCalls:              9_500,
 		metering.MeterLLMTokensUsed:         9_000_000,
 		metering.MeterURLCatLookups:         90_000,
@@ -147,7 +134,7 @@ var baseline = map[string]map[metering.Meter]int64{
 	// fleet cost report surfaces a NEGATIVE margin (~-15%). This is the
 	// honest upsell/margin signal the admin cost report is built to catch —
 	// not every tenant is profitable, and the engine says so.
-	"Maple Health": { // professional $499 — outgrew its plan, ~$575 projected (UNDERWATER)
+	fleet.Maple().Slug: { // Maple Health Network — professional $499, outgrew its plan, ~$575 projected (UNDERWATER)
 		metering.MeterLLMCalls:              7_200,
 		metering.MeterLLMTokensUsed:         6_800_000,
 		metering.MeterURLCatLookups:         68_000,
@@ -157,7 +144,7 @@ var baseline = map[string]map[metering.Meter]int64{
 		metering.MeterS3BytesArchived:       850_000_000_000,
 		metering.MeterBandwidthProxiedBytes: 2_600_000_000_000,
 	},
-	"Outback Retail": { // professional $499 — AU retailer, ~$0.38k projected spend
+	fleet.Outback().Slug: { // Outback Retail Co — professional $499, AU retailer, ~$0.38k projected spend
 		metering.MeterLLMCalls:              2_800,
 		metering.MeterLLMTokensUsed:         2_600_000,
 		metering.MeterURLCatLookups:         26_000,
@@ -167,7 +154,7 @@ var baseline = map[string]map[metering.Meter]int64{
 		metering.MeterS3BytesArchived:       350_000_000_000,
 		metering.MeterBandwidthProxiedBytes: 1_300_000_000_000,
 	},
-	"Lumière Légal": { // professional $499 — FR legal firm, ~$0.34k projected spend
+	fleet.Lumiere().Slug: { // Lumière Légal — professional $499, FR legal firm, ~$0.34k projected spend
 		metering.MeterLLMCalls:              2_500,
 		metering.MeterLLMTokensUsed:         2_300_000,
 		metering.MeterURLCatLookups:         23_000,
@@ -177,7 +164,7 @@ var baseline = map[string]map[metering.Meter]int64{
 		metering.MeterS3BytesArchived:       310_000_000_000,
 		metering.MeterBandwidthProxiedBytes: 1_150_000_000_000,
 	},
-	"Nordic EduCloud": { // starter $99 — deliberately light education starter, ~$48 projected spend
+	fleet.Nordic().Slug: { // Nordic EduCloud — starter $99, deliberately light education starter, ~$48 projected spend
 		metering.MeterLLMCalls:              480,
 		metering.MeterLLMTokensUsed:         480_000,
 		metering.MeterURLCatLookups:         4_800,
@@ -199,7 +186,7 @@ var baseline = map[string]map[metering.Meter]int64{
 // monthly url-cat spend at ~3x the trailing-month median and raises a
 // (non-critical) warning, while Initech still clears its $499 tier.
 var currentRunRate = map[string]map[metering.Meter]int64{
-	"Initech Financial": {
+	fleet.Initech().Slug: {
 		metering.MeterURLCatLookups: 75_000, // 2.5x the 30k/day baseline
 	},
 }
@@ -225,26 +212,26 @@ func main() {
 
 	now := time.Now().UTC()
 	seededTenants, seededRows := 0, 0
-	for _, t := range tenants {
-		tid := uuid.MustParse(t.id)
+	for _, t := range fleet.All() {
+		tid := uuid.MustParse(t.ID)
 
 		// Idempotency: skip a tenant that already has current-period
 		// rows so a rerun neither doubles current usage nor re-adds
 		// history (BatchUpsertUsage is additive).
 		existing, err := store.TenantCurrentUsage(ctx, tid, now)
 		if err != nil {
-			fatal(fmt.Sprintf("current usage for %s: %v", t.name, err))
+			fatal(fmt.Sprintf("current usage for %s: %v", t.Name, err))
 		}
 		if len(existing) > 0 {
-			logf("SKIP  %-22s already has %d current rows (idempotent)", t.name, len(existing))
+			logf("SKIP  %-22s already has %d current rows (idempotent)", t.Name, len(existing))
 			continue
 		}
 
-		deltas := buildDeltas(tid, t.name, now)
+		deltas := buildDeltas(tid, t.Slug, now)
 		if err := store.BatchUpsertUsage(ctx, deltas); err != nil {
-			fatal(fmt.Sprintf("upsert usage for %s: %v", t.name, err))
+			fatal(fmt.Sprintf("upsert usage for %s: %v", t.Name, err))
 		}
-		logf("OK    %-22s seeded %d usage rows (current + 5mo history)", t.name, len(deltas))
+		logf("OK    %-22s seeded %d usage rows (current + 5mo history)", t.Name, len(deltas))
 		seededTenants++
 		seededRows += len(deltas)
 	}
@@ -261,8 +248,8 @@ func main() {
 //     daily meter that is daily_baseline × days-in-that-month, since the
 //     history query SUMs per month and the cost model prices the total
 //     directly.
-func buildDeltas(tid uuid.UUID, name string, now time.Time) []metering.UsageDelta {
-	base := baseline[name]
+func buildDeltas(tid uuid.UUID, slug string, now time.Time) []metering.UsageDelta {
+	base := baseline[slug]
 	out := make([]metering.UsageDelta, 0, len(base)*6)
 
 	for meter, baseVal := range base {
@@ -272,7 +259,7 @@ func buildDeltas(tid uuid.UUID, name string, now time.Time) []metering.UsageDelt
 		// slice of the run rate so the control plane projects it back to
 		// runRate. The run rate is the baseline unless overridden.
 		runRate := baseVal
-		if rr, ok := currentRunRate[name][meter]; ok {
+		if rr, ok := currentRunRate[slug][meter]; ok {
 			runRate = rr
 		}
 		cs, ce := period.Bounds(now)
