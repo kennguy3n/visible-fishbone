@@ -55,6 +55,13 @@ type DeviceHandler struct {
 	// own trusted-proxy list, so this is only consulted on the
 	// guard-disabled path. Nil falls back to no IP in the log line.
 	clientIP func(*http.Request) string
+	// activity, when set, receives an activity touch on a successful
+	// device enrolment. The public POST /api/v1/enroll endpoint bypasses
+	// the authenticated chain (the claim token is the credential), so
+	// the RecordActivity middleware never sees it; recording here is
+	// what lets an agent coming online count as tenant activity for the
+	// dormancy planner. Nil disables the touch (fail-safe pass-through).
+	activity middleware.ActivityObserver
 }
 
 // NewDeviceHandler wires the handler.
@@ -76,6 +83,14 @@ func (h *DeviceHandler) SetEnrollmentService(es *identity.EnrollmentService) {
 func (h *DeviceHandler) SetBruteForceGuard(guard *middleware.AttemptLimiter, logger *slog.Logger) {
 	h.enrollGuard = guard
 	h.logger = logger
+}
+
+// SetActivityObserver attaches the per-tenant activity recorder. When
+// set, a successful device enrolment records an activity touch for the
+// enrolled tenant so an agent coming online (a public, unauthenticated
+// ingress) advances last_active_at. A nil observer disables the touch.
+func (h *DeviceHandler) SetActivityObserver(obs middleware.ActivityObserver) {
+	h.activity = obs
 }
 
 // SetClientIPDeriver supplies the trusted-proxy-aware client-IP
@@ -408,6 +423,15 @@ func (h *DeviceHandler) enrollDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.enrollGuard != nil && ip != "" {
 		h.enrollGuard.RecordSuccess(ip)
+	}
+	// A successful enrolment is real tenant activity (an agent coming
+	// online). Record it against the tenant the enrollment service
+	// actually bound the device to — not the request's claimed
+	// tenant_id — so a touch can never be attributed to a tenant the
+	// redemption did not authorise. The observer debounces + persists
+	// asynchronously, so this stays off the hot path.
+	if h.activity != nil {
+		h.activity.Observe(result.Enrollment.TenantID, time.Now())
 	}
 	WriteJSON(w, http.StatusCreated, EnrollDeviceResponse{
 		DeviceID:  result.Enrollment.DeviceID.String(),

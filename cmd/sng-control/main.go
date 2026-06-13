@@ -671,6 +671,13 @@ func run() error {
 		}
 		go metrics.NewNATSCollector(mx, js, streamNames, metrics.DefaultConsumerScrapeInterval, logger).Run(rootCtx)
 
+		// WS-2: bridge the activity recorder's per-source touch counters
+		// onto the activity_touches_total metric so the dormancy-signal
+		// writer coverage is observable. Nil recorder ⇒ Run is a no-op.
+		if rc.ActivityRecorder != nil {
+			go metrics.NewActivityCollector(mx, rc.ActivityRecorder, metrics.DefaultActivityScrapeInterval).Run(rootCtx)
+		}
+
 		metricsMux := http.NewServeMux()
 		metricsMux.Handle("/metrics", mx.Handler())
 		metricsSrv = &http.Server{
@@ -902,7 +909,11 @@ func buildRouter(
 			activity.WithMinInterval(cfg.Activity.MinInterval),
 			activity.WithQueueSize(cfg.Activity.QueueSize),
 		)
-		activityObs = activityRecorder
+		// The authenticated API chain's touches are attributed to the
+		// "api" ingress source so the coverage metric can distinguish
+		// them from the data-plane (telemetry) and public-ingress
+		// (enroll / mobile) writers wired below.
+		activityObs = activityRecorder.From(activity.SourceAPI)
 	}
 
 	tenantMigrationRepo := store.NewTenantMigrationRepository()
@@ -1646,6 +1657,18 @@ func buildRouter(
 		logger,
 	)
 	oidcHandler := handler.NewOIDCHandler(idpConfigRepo, oidcSvc, cfg.MobileAuth.MaxProvidersPerTenant)
+	// WS-2: the public mobile native-SSO token / refresh endpoints
+	// bypass the authenticated chain (the agent has no SNG session
+	// yet), so the RecordActivity middleware never sees them. Record a
+	// successful token exchange (a login) and refresh (the recurring
+	// agent check-in) as tenant activity, each attributed to its own
+	// ingress source. Nil recorder ⇒ no-op.
+	if activityRecorder != nil {
+		oidcHandler = oidcHandler.WithActivityObservers(
+			activityRecorder.From(activity.SourceMobileToken),
+			activityRecorder.From(activity.SourceMobileRefresh),
+		)
+	}
 
 	// --- IdP directory sync (opt-in, leader-gated) -------------------
 	// When enabled, construct the sealed directory-credential vault,
@@ -1943,6 +1966,12 @@ func buildRouter(
 				if fallback, ferr := middleware.NewClientIPDeriver(""); ferr == nil {
 					h.SetClientIPDeriver(fallback)
 				}
+			}
+			// WS-2: a successful enrolment on the public /enroll endpoint
+			// (an agent coming online) bypasses the authenticated chain,
+			// so record it here as tenant activity. Nil recorder ⇒ no-op.
+			if activityRecorder != nil {
+				h.SetActivityObserver(activityRecorder.From(activity.SourceEnroll))
 			}
 			return h
 		}(),
@@ -2844,9 +2873,12 @@ func startTelemetry(
 	}
 	// Feed the dormancy planner's activity signal from the data-plane
 	// hot path. nil-checked on the concrete pointer (not the interface)
-	// so a disabled recorder does not install a typed-nil observer.
+	// so a disabled recorder does not install a typed-nil observer. The
+	// touches are attributed to the "telemetry" ingress source so the
+	// coverage metric separates the data plane from the control-plane
+	// writers (api / enroll / mobile).
 	if activityObserver != nil {
-		svc.WithActivityObserver(activityObserver)
+		svc.WithActivityObserver(activityObserver.From(activity.SourceTelemetry))
 	}
 	if err := svc.Start(ctx); err != nil {
 		if hotStop != nil {
