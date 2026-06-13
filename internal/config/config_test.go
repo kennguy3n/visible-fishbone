@@ -68,6 +68,7 @@ func clearAll(t *testing.T) {
 		"WS11_MIGRATION_RESUME_INTERVAL",
 		"AI_LLM_ENDPOINT", "AI_LLM_API_KEY", "AI_LLM_MODEL", "AI_LLM_MODEL_FAMILY", "AI_LLM_TIMEOUT",
 		"AI_GUARDRAIL_MAX_REQUESTS_PER_MINUTE", "AI_GUARDRAIL_MAX_TOKENS_PER_DAY",
+		"ALERT_FEEDBACK_TUNING_ENABLED", "ALERT_FEEDBACK_TUNING_INTERVAL",
 	}
 	for _, k := range keys {
 		k := k
@@ -1550,4 +1551,61 @@ func TestIAMCoreValidateIssuerScheme(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLoadAlertFeedbackTuning covers the DEFAULT-OFF alert feedback
+// tuning gate: it is off (with the documented 30m interval) unless an
+// operator opts in, an explicit enable parses, and an enabled loop with
+// a non-positive interval is rejected at boot rather than silently
+// running on a zero ticker.
+func TestLoadAlertFeedbackTuning(t *testing.T) {
+	loadIn := func(t *testing.T) (Config, error) {
+		t.Helper()
+		tmp := t.TempDir()
+		wd, _ := os.Getwd()
+		if err := os.Chdir(tmp); err != nil {
+			t.Fatalf("chdir: %v", err)
+		}
+		t.Cleanup(func() { _ = os.Chdir(wd) })
+		return Load()
+	}
+
+	t.Run("default off with 30m interval", func(t *testing.T) {
+		clearAll(t)
+		cfg, err := loadIn(t)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.AlertFeedback.TuningEnabled {
+			t.Fatal("AlertFeedback.TuningEnabled must default to false")
+		}
+		if cfg.AlertFeedback.TuningInterval != 30*time.Minute {
+			t.Fatalf("TuningInterval = %s, want 30m", cfg.AlertFeedback.TuningInterval)
+		}
+	})
+
+	t.Run("enables with custom interval", func(t *testing.T) {
+		clearAll(t)
+		t.Setenv("ALERT_FEEDBACK_TUNING_ENABLED", "true")
+		t.Setenv("ALERT_FEEDBACK_TUNING_INTERVAL", "15m")
+		cfg, err := loadIn(t)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if !cfg.AlertFeedback.TuningEnabled {
+			t.Fatal("TuningEnabled should be true")
+		}
+		if cfg.AlertFeedback.TuningInterval != 15*time.Minute {
+			t.Fatalf("TuningInterval = %s, want 15m", cfg.AlertFeedback.TuningInterval)
+		}
+	})
+
+	t.Run("enabled with non-positive interval is rejected", func(t *testing.T) {
+		clearAll(t)
+		t.Setenv("ALERT_FEEDBACK_TUNING_ENABLED", "true")
+		t.Setenv("ALERT_FEEDBACK_TUNING_INTERVAL", "0s")
+		if _, err := loadIn(t); err == nil {
+			t.Fatal("expected error when tuning enabled with non-positive interval")
+		}
+	})
 }

@@ -577,6 +577,24 @@ func run() error {
 			slog.Duration("dwell_window", cfg.RolloutAutopilot.DwellWindow))
 	}
 
+	// Leader-only alert false-positive feedback tuning loop. DEFAULT-OFF
+	// (cfg.AlertFeedback.TuningEnabled): the sweep mutates baseline
+	// Z-thresholds, so it is registered only when an operator opts in.
+	// Leader-gated so only the lock holder tunes, and activity-tiered
+	// (the configured TieredSweep) so dormant trials are re-tuned at a
+	// reduced cadence while active tenants stay on the per-tick cadence.
+	// Own goroutine because RunIfLeader blocks until rootCtx is cancelled.
+	if cfg.AlertFeedback.TuningEnabled && rc.AlertFeedback != nil {
+		feedbackSvc := rc.AlertFeedback
+		tenantsFn := rc.AlertFeedbackTenants
+		interval := cfg.AlertFeedback.TuningInterval
+		go elector.RunIfLeader(rootCtx, "alert-feedback-tuning", func(ctx context.Context) {
+			feedbackSvc.Run(ctx, interval, tenantsFn)
+		})
+		logger.Info("sng-control: alert feedback tuning loop enabled (runs on leader only)",
+			slog.Duration("interval", interval))
+	}
+
 	// Producer half of the human-in-the-loop DLP review queue: an async,
 	// bounded adapter that turns coach-action DLP events off the
 	// telemetry hot path into review-queue enqueues. Drained on shutdown
@@ -688,6 +706,13 @@ func run() error {
 			streamNames = append(streamNames, s.Name)
 		}
 		go metrics.NewNATSCollector(mx, js, streamNames, metrics.DefaultConsumerScrapeInterval, logger).Run(rootCtx)
+
+		// WS-2: bridge the activity recorder's per-source touch counters
+		// onto the activity_touches_total metric so the dormancy-signal
+		// writer coverage is observable. Nil recorder ⇒ Run is a no-op.
+		if rc.ActivityRecorder != nil {
+			go metrics.NewActivityCollector(mx, rc.ActivityRecorder, metrics.DefaultActivityScrapeInterval).Run(rootCtx)
+		}
 
 		metricsMux := http.NewServeMux()
 		metricsMux.Handle("/metrics", mx.Handler())
@@ -881,6 +906,19 @@ type routerComponents struct {
 	// in which case main() runs its leader-only sweep via
 	// elector.RunIfLeader on cfg.RolloutAutopilot.Interval.
 	RolloutAutopilot *rollout.Autopilot
+	// AlertFeedback is the alert false-positive feedback tuning service.
+	// Always non-nil (it also backs on-demand TuneDimension via the alert
+	// handler). main() registers its leader-only, activity-tiered tuning
+	// loop (AlertFeedback.Run) only when cfg.AlertFeedback.TuningEnabled
+	// — DEFAULT-OFF so an upgrade never starts mutating baseline
+	// thresholds unprompted.
+	AlertFeedback *alert.Feedback
+	// AlertFeedbackTenants is the legacy full-fanout tenant lister handed
+	// to AlertFeedback.Run as its fallback enumeration. The configured
+	// dormancy sweep gates the actual cadence; this is only consulted if
+	// the sweep is ever unset, so it stays correct (never starves) by
+	// listing every tenant.
+	AlertFeedbackTenants func(context.Context) ([]uuid.UUID, error)
 }
 
 // buildRouter wires every repository / service / handler against
@@ -925,7 +963,11 @@ func buildRouter(
 			activity.WithMinInterval(cfg.Activity.MinInterval),
 			activity.WithQueueSize(cfg.Activity.QueueSize),
 		)
-		activityObs = activityRecorder
+		// The authenticated API chain's touches are attributed to the
+		// "api" ingress source so the coverage metric can distinguish
+		// them from the data-plane (telemetry) and public-ingress
+		// (enroll / mobile) writers wired below.
+		activityObs = activityRecorder.From(activity.SourceAPI)
 	}
 
 	tenantMigrationRepo := store.NewTenantMigrationRepository()
@@ -1154,9 +1196,12 @@ func buildRouter(
 	// re-classify thousands of dormant trial tenants' inventories every
 	// interval. Active tenants are still visited every cycle; the planner
 	// only skips quiet tenants whose tier is not yet due. The status
-	// filter is unchanged. Same DefaultPlanner the IdP sync uses.
-	casbReconcilePlanner := tenancy.DefaultPlanner()
-	appNoOpsEngine.WithDormancyPlanner(&casbReconcilePlanner)
+	// filter is unchanged. Same DefaultPlanner the IdP sync uses, wired
+	// through the shared tenancy.TieredSweep so the saving lands on the
+	// sweep_tenants_visited{job,tier} metric.
+	sweepObs := newSweepObserver(mx)
+	casbReconcileSweep := tenancy.NewTieredSweep("casb_noops_reconcile", tenancy.DefaultPlanner(), sweepObs)
+	appNoOpsEngine.WithDormancyPlanner(casbReconcileSweep)
 	// Both gates, not just NoOpsAutoEnforce: the engine only acts at all
 	// when NoOpsEnabled (the discovery hook and reconcile loop in main()
 	// are both gated on it), so wiring the enforcer also requires
@@ -1458,6 +1503,14 @@ func buildRouter(
 	// `component=alert-feedback` to triage missing threshold
 	// adjustments without scrolling through every router log.
 	alertFeedback.SetLogger(logger.With(slog.String("component", "alert-feedback")))
+	// Activity-tiered tuning cadence: the leader-only tuning loop
+	// re-tunes active tenants every cycle and idle/dormant trials at a
+	// reduced cadence instead of walking every tenant's baselines every
+	// tick. Wired through the shared TieredSweep so the saving lands on
+	// sweep_tenants_visited{job="alert_feedback_tuning"}. tenantRepo
+	// supplies the cheap (id, last_active_at) projection.
+	alertFeedbackSweep := tenancy.NewTieredSweep("alert_feedback_tuning", tenancy.DefaultPlanner(), sweepObs)
+	alertFeedback.WithDormancySweep(alertFeedbackSweep, tenantRepo)
 	// NOTE: baseline.NewService(baselineRepo) is intentionally
 	// NOT constructed here. The Service / Detector pair is
 	// wired by the telemetry consumer (future block) once the
@@ -1681,6 +1734,18 @@ func buildRouter(
 		logger,
 	)
 	oidcHandler := handler.NewOIDCHandler(idpConfigRepo, oidcSvc, cfg.MobileAuth.MaxProvidersPerTenant)
+	// WS-2: the public mobile native-SSO token / refresh endpoints
+	// bypass the authenticated chain (the agent has no SNG session
+	// yet), so the RecordActivity middleware never sees them. Record a
+	// successful token exchange (a login) and refresh (the recurring
+	// agent check-in) as tenant activity, each attributed to its own
+	// ingress source. Nil recorder ⇒ no-op.
+	if activityRecorder != nil {
+		oidcHandler = oidcHandler.WithActivityObservers(
+			activityRecorder.From(activity.SourceMobileToken),
+			activityRecorder.From(activity.SourceMobileRefresh),
+		)
+	}
 
 	// --- IdP directory sync (opt-in, leader-gated) -------------------
 	// When enabled, construct the sealed directory-credential vault,
@@ -1715,8 +1780,9 @@ func buildRouter(
 
 		// Activity-tiered cadence so dormant trials are not reconciled
 		// every cycle. tenantRepo satisfies both the activity projection
-		// and (via idpTenantSource) the full-fanout fallback.
-		planner := tenancy.DefaultPlanner()
+		// and (via idpTenantSource) the full-fanout fallback. The shared
+		// TieredSweep reports the saving on sweep_tenants_visited.
+		idpSyncSweep := tenancy.NewTieredSweep("idp_directory_sync", tenancy.DefaultPlanner(), sweepObs)
 		idpSyncSvc = identity.NewSyncService(
 			idpConfigRepo,
 			userRepo,
@@ -1727,7 +1793,7 @@ func buildRouter(
 			identity.DefaultDirectoryClientFactory{},
 			identity.NewNATSRevocationPublisher(natsAlertAdapter{p: telPub}),
 			logger,
-		).WithDormancyPlanner(&planner, tenantRepo).
+		).WithDormancyPlanner(idpSyncSweep, tenantRepo).
 			// Gate directory sync (#177) through the staged-enablement
 			// framework: off skips a tenant entirely, monitor dry-runs the
 			// reconcile (reporting would-have provisions/off-boards but
@@ -1977,6 +2043,12 @@ func buildRouter(
 					h.SetClientIPDeriver(fallback)
 				}
 			}
+			// WS-2: a successful enrolment on the public /enroll endpoint
+			// (an agent coming online) bypasses the authenticated chain,
+			// so record it here as tenant activity. Nil recorder ⇒ no-op.
+			if activityRecorder != nil {
+				h.SetActivityObserver(activityRecorder.From(activity.SourceEnroll))
+			}
 			return h
 		}(),
 		RBAC:             handler.NewRBACHandler(rbacSvc),
@@ -2068,26 +2140,28 @@ func buildRouter(
 	}
 
 	return routerComponents{
-		Router:              router,
-		WebhookWorker:       webhookWorker,
-		IntegrationWorker:   integrationWorker,
-		AppRegistry:         appRegHandler,
-		AppSyncer:           appSyncer,
-		PolicySim:           policySimHandler,
-		AI:                  aiSvc,
-		Metering:            meteringSvc,
-		PoP:                 popSvc,
-		RegionMigrator:      tenantMigrator,
-		EvidenceScheduler:   evidenceScheduler,
-		FeedManager:         feedMgr,
-		AppNoOpsEngine:      appNoOpsEngine,
-		Recompiler:          recompiler,
-		DLPReviewRecompiler: dlpReviewRecompiler,
-		SampleRateResolver:  sampleRateResolver,
-		IDPSyncService:      idpSyncSvc,
-		DLPReviewService:    dlpReviewSvc,
-		ActivityRecorder:    activityRecorder,
-		RolloutAutopilot:    rolloutAutopilot,
+		Router:               router,
+		WebhookWorker:        webhookWorker,
+		IntegrationWorker:    integrationWorker,
+		AppRegistry:          appRegHandler,
+		AppSyncer:            appSyncer,
+		PolicySim:            policySimHandler,
+		AI:                   aiSvc,
+		Metering:             meteringSvc,
+		PoP:                  popSvc,
+		RegionMigrator:       tenantMigrator,
+		EvidenceScheduler:    evidenceScheduler,
+		FeedManager:          feedMgr,
+		AppNoOpsEngine:       appNoOpsEngine,
+		Recompiler:           recompiler,
+		DLPReviewRecompiler:  dlpReviewRecompiler,
+		SampleRateResolver:   sampleRateResolver,
+		IDPSyncService:       idpSyncSvc,
+		DLPReviewService:     dlpReviewSvc,
+		ActivityRecorder:     activityRecorder,
+		RolloutAutopilot:     rolloutAutopilot,
+		AlertFeedback:        alertFeedback,
+		AlertFeedbackTenants: idpTenantSource{activity: tenantRepo}.ListTenants,
 	}, nil
 }
 
@@ -2503,6 +2577,13 @@ func buildThreatFeeds(cfg config.ThreatIntel) []aisvc.Feed {
 	if cfg.JSONURL != "" {
 		add("cert-json", aisvc.JSONParser{Source: "cert-json", DefaultConfidence: 0.5}, mkFetcher(cfg.JSONURL, nil))
 	}
+	if cfg.MISPURL != "" {
+		h := http.Header{"Accept": []string{"application/json"}}
+		if cfg.MISPAuthKey != "" {
+			h.Set("Authorization", cfg.MISPAuthKey)
+		}
+		add("misp", aisvc.MISPParser{Source: "misp", DefaultConfidence: 0.5, IncludeNonIDs: cfg.MISPIncludeNonIDs}, mkFetcher(cfg.MISPURL, h))
+	}
 	return feeds
 }
 
@@ -2870,9 +2951,12 @@ func startTelemetry(
 	}
 	// Feed the dormancy planner's activity signal from the data-plane
 	// hot path. nil-checked on the concrete pointer (not the interface)
-	// so a disabled recorder does not install a typed-nil observer.
+	// so a disabled recorder does not install a typed-nil observer. The
+	// touches are attributed to the "telemetry" ingress source so the
+	// coverage metric separates the data plane from the control-plane
+	// writers (api / enroll / mobile).
 	if activityObserver != nil {
-		svc.WithActivityObserver(activityObserver)
+		svc.WithActivityObserver(activityObserver.From(activity.SourceTelemetry))
 	}
 	if err := svc.Start(ctx); err != nil {
 		if hotStop != nil {
@@ -3838,6 +3922,17 @@ func (s idpTenantSource) ListTenants(ctx context.Context) ([]uuid.UUID, error) {
 		ids[i] = a.ID
 	}
 	return ids, nil
+}
+
+// newSweepObserver returns a tenancy.SweepObserver backed by mx, or nil
+// when metrics are disabled (mx == nil). A nil observer is the documented
+// "disable emission" contract of TieredSweep, so the tiered sweeps still
+// gate correctly with metrics off — they simply publish nothing.
+func newSweepObserver(mx *metrics.Metrics) tenancy.SweepObserver {
+	if mx == nil {
+		return nil
+	}
+	return mx.SweepObserver()
 }
 
 // hostnameForSyslog returns the local hostname used as the

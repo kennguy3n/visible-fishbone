@@ -30,7 +30,17 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
+	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy"
 )
+
+// TenantActivitySource yields the cheap (id, last_active_at) projection
+// the dormancy sweep buckets tenants by. It mirrors the identity package's
+// source of the same name (both are satisfied by the tenant repository),
+// letting the tuning loop reuse the shared tenancy.TieredSweep instead of
+// re-tuning every tenant's baselines every cycle.
+type TenantActivitySource interface {
+	ListTenantActivity(ctx context.Context) ([]repository.TenantActivity, error)
+}
 
 // defaultRunConcurrency caps the number of tenants the Run
 // background loop processes in parallel per tick. The choice
@@ -116,6 +126,15 @@ type Feedback struct {
 	// SetLogger — the Run docstring promises a logger is
 	// always present, so the field is never nil at use time.
 	logger *slog.Logger
+
+	// sweep + activity, when both set (via WithDormancySweep), make the
+	// Run tuning loop activity-tiered through the shared
+	// tenancy.TieredSweep helper: active tenants are re-tuned every
+	// cycle, idle/dormant ones at a reduced cadence, instead of walking
+	// every tenant's baselines every tick. nil keeps the legacy
+	// every-tenant fan-out via the tenantsFn passed to Run.
+	sweep    *tenancy.TieredSweep
+	activity TenantActivitySource
 }
 
 // NewFeedback constructs a Feedback service. The tuning loop
@@ -155,6 +174,24 @@ func (f *Feedback) SetClock(fn func() time.Time) {
 	if fn != nil {
 		f.now = fn
 	}
+}
+
+// WithDormancySweep makes the Run tuning loop activity-tiered using the
+// shared tenancy.TieredSweep helper. Once set, each tick loads the cheap
+// (id, last_active_at) projection from `activity` and lets the sweep
+// decide which tenants to re-tune this cycle: active tenants every tick,
+// idle/dormant ones at a reduced cadence. Cycle 0 (the first pass, which
+// Run executes immediately on entry) tunes every tenant, so enabling this
+// never delays a tenant's first tuning.
+// Passing a nil sweep or activity source is a no-op (legacy every-tenant
+// fan-out via the tenantsFn given to Run is retained), so wiring is
+// fail-safe. Returns the receiver for chaining at construction.
+func (f *Feedback) WithDormancySweep(sweep *tenancy.TieredSweep, activity TenantActivitySource) *Feedback {
+	if sweep != nil && activity != nil {
+		f.sweep = sweep
+		f.activity = activity
+	}
+	return f
 }
 
 // Submit persists feedback on an alert. The caller passes the
@@ -313,6 +350,15 @@ func (f *Feedback) TuneDimension(
 // the repository knows about. Cancellation through ctx stops
 // the loop.
 //
+// It runs one pass immediately on entry, then on each tick —
+// matching the IdP-sync and CASB reconcile loops, which also
+// sweep once on leadership acquisition. This makes the cycle-0
+// full sweep (the TieredSweep startup guarantee) fire promptly
+// when the loop is enabled or a leader takes over a crashed
+// predecessor, rather than after a full interval (default 30m).
+// Run is invoked through elector.RunIfLeader, so the immediate
+// pass is leader-gated exactly like the per-tick passes.
+//
 // Each tick processes every baseline for every tenant. Tenant
 // fan-out is bounded by opts.RunConcurrency (default 16) so
 // the tick produces at most that many in-flight per-tenant
@@ -332,6 +378,7 @@ func (f *Feedback) Run(
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	f.tickOnce(ctx, tenantsFn)
 	for {
 		select {
 		case <-ctx.Done():
@@ -343,7 +390,7 @@ func (f *Feedback) Run(
 }
 
 func (f *Feedback) tickOnce(ctx context.Context, tenantsFn func(ctx context.Context) ([]uuid.UUID, error)) {
-	tenants, err := tenantsFn(ctx)
+	tenants, err := f.dueTenants(ctx, tenantsFn)
 	if err != nil {
 		f.logger.Warn("feedback tuning tick: tenants enumeration failed",
 			slog.Any("error", err))
@@ -411,4 +458,35 @@ func (f *Feedback) tickOnce(ctx context.Context, tenantsFn func(ctx context.Cont
 		})
 	}
 	_ = g.Wait()
+}
+
+// dueTenants returns the tenants to tune this tick. With a dormancy
+// sweep configured it loads the cheap (id, last_active_at) projection
+// and lets the shared TieredSweep gate by activity tier — advancing the
+// cycle counter, exporting the per-tier metric, and logging the skip
+// count so the saving is observable. Without a sweep it falls back to
+// the tenantsFn passed to Run (legacy every-tenant fan-out).
+func (f *Feedback) dueTenants(ctx context.Context, tenantsFn func(ctx context.Context) ([]uuid.UUID, error)) ([]uuid.UUID, error) {
+	if f.sweep == nil || f.activity == nil {
+		return tenantsFn(ctx)
+	}
+	acts, err := f.activity.ListTenantActivity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cyc := f.sweep.Begin(f.now())
+	due := cyc.Due(acts)
+	cyc.Finish()
+	if summary := cyc.Summary(); summary.Skipped > 0 {
+		f.logger.Debug("feedback tuning tick: activity-tiered sweep",
+			slog.Int64("cycle", summary.Cycle),
+			slog.Int("total", summary.Total),
+			slog.Int("visited", summary.Visited),
+			slog.Int("skipped", summary.Skipped),
+			slog.Int("active", summary.Active),
+			slog.Int("idle", summary.Idle),
+			slog.Int("dormant", summary.Dormant),
+		)
+	}
+	return due, nil
 }
