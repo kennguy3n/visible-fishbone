@@ -269,6 +269,39 @@ func (s *IOCStore) SizeByType() IOCCounts {
 	return c
 }
 
+// SizeBySource returns the active (non-expired) indicator counts
+// partitioned by source feed, then by type within each source. It
+// answers the operator question "which feed is contributing what,
+// live, right now?" — the per-source breakdown the aggregate
+// SizeByType cannot show. Counted under the read lock in one pass.
+// An indicator with an empty Source is keyed under "" so the
+// total across sources always reconciles with SizeByType.
+func (s *IOCStore) SizeBySource() map[string]IOCCounts {
+	now := s.now().UTC()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make(map[string]IOCCounts)
+	for _, ioc := range s.byKey {
+		if ioc.Expired(now) {
+			continue
+		}
+		c := out[ioc.Source]
+		switch ioc.Type {
+		case IOCTypeDomain:
+			c.Domains++
+		case IOCTypeIP:
+			c.IPs++
+		case IOCTypeURL:
+			c.URLs++
+		case IOCTypeHash:
+			c.Hashes++
+		}
+		c.Total++
+		out[ioc.Source] = c
+	}
+	return out
+}
+
 // Snapshot returns the active indicators grouped by type, each
 // group sorted by descending confidence then value so downstream
 // rule compilation is byte-deterministic. Expired indicators are
