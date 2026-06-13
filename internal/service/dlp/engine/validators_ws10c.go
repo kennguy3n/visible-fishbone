@@ -1,5 +1,7 @@
 package engine
 
+import "unicode"
+
 // Workstream-10c jurisdiction validators.
 //
 // Each function here is the byte-identical Go twin of a validator in
@@ -22,7 +24,7 @@ const ppsnCheckAlphabet = "WABCDEFGHIJKLMNOPQRSTUV"
 func irelandPPSN(s string) bool {
 	c := make([]rune, 0, len(s))
 	for _, r := range s {
-		if r == ' ' || r == '\t' || r == '\n' || r == '\r' || r == '-' {
+		if unicode.IsSpace(r) || r == '-' {
 			continue
 		}
 		c = append(c, r)

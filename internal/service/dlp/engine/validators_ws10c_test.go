@@ -59,6 +59,13 @@ func TestIrelandPPSN(t *testing.T) {
 	if !irelandPPSN(nine) {
 		t.Errorf("irelandPPSN(%q) = false, want true", nine)
 	}
+	// Unicode-whitespace parity with the Rust twin: NBSP / em-space /
+	// ASCII space and hyphens are all stripped before validation.
+	canonical := make8([7]int{1, 2, 3, 4, 5, 6, 7})
+	spaced := canonical[:3] + "\u00a0" + canonical[3:5] + "\u2003" + canonical[5:7] + " -" + canonical[7:]
+	if !irelandPPSN(spaced) {
+		t.Errorf("irelandPPSN(%q) = false, want true (unicode whitespace must be stripped)", spaced)
+	}
 	for _, bad := range []string{"123456T", "12345678", "1234567TZ", "A234567T"} {
 		if irelandPPSN(bad) {
 			t.Errorf("irelandPPSN(%q) = true, want false", bad)

@@ -100,6 +100,21 @@ mod tests {
     }
 
     #[test]
+    fn unicode_whitespace_is_stripped() {
+        // Parity with the Go twin: NBSP (U+00A0), em-space (U+2003),
+        // ASCII space and hyphens are all ignored before validation.
+        let good = make([1, 2, 3, 4, 5, 6, 7]);
+        let spaced = format!(
+            "{}\u{00a0}{}\u{2003}{} -{}",
+            &good[..3],
+            &good[3..5],
+            &good[5..7],
+            &good[7..]
+        );
+        assert!(ireland_ppsn(&spaced), "unicode whitespace must be stripped");
+    }
+
+    #[test]
     fn structural_rejects() {
         assert!(!ireland_ppsn("123456T"), "7 chars (missing digit)");
         assert!(!ireland_ppsn("12345678"), "no check letter");
