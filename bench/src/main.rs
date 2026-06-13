@@ -102,6 +102,12 @@ enum Command {
     /// single-stream wire floor. `--dry-run` crafts frames in-process
     /// without a socket so the leg is self-testable without `CAP_NET_RAW`.
     WireScaling(WireScalingArgs),
+    /// Gate current `wire-scaling` artifact(s) against a committed baseline on
+    /// the hardware-invariant per-width transmit scaling efficiency, exiting
+    /// non-zero on a real regression. The wire counterpart to
+    /// `multi-queue-compare`: gates the dimensionless scaling curve, not the
+    /// host-specific absolute Gbps.
+    WireScalingCompare(WireScalingCompareArgs),
 }
 
 /// Forwarding inspection-depth selector for the multi-queue sweep.
@@ -565,6 +571,31 @@ struct WireScalingArgs {
     git_sha: Option<String>,
 }
 
+#[derive(Debug, Args)]
+struct WireScalingCompareArgs {
+    /// Committed baseline wire-scaling artifact.
+    #[arg(long)]
+    baseline: PathBuf,
+    /// Current wire-scaling artifact(s). Pass `--current` once per sample
+    /// (the `wire-scaling` sweep re-run N times on this host); the gate
+    /// aggregates the samples by median and tests the move against a noise
+    /// band. A single `--current` reproduces a one-shot compare.
+    #[arg(long, required = true, num_args = 1..)]
+    current: Vec<PathBuf>,
+    /// Fractional *drop* in per-width transmit scaling efficiency of the
+    /// sample *median* that counts as a regression. Must be finite and
+    /// non-negative (a negative threshold would flag every run).
+    #[arg(long, default_value_t = 0.15, value_parser = parse_nonneg_f64)]
+    threshold: f64,
+    /// Noise-band width in sample standard deviations. A metric is flagged
+    /// only when the median move clears the threshold *and* is larger than
+    /// `sigma × σ` of the samples, so single-run scatter on a shared CI
+    /// runner does not fail the build. `0` disables the band (threshold
+    /// only); the default of ~2σ covers ~95% of Gaussian noise.
+    #[arg(long, default_value_t = 2.0, value_parser = parse_nonneg_f64)]
+    sigma: f64,
+}
+
 /// Clap parser that accepts only finite, non-negative `f64` values. Used to
 /// reject footgun inputs (negative `--threshold`/`--sigma`, `NaN`, `inf`)
 /// that would quietly weaken or invert the regression gate.
@@ -606,6 +637,7 @@ fn run(cli: Cli) -> Result<std::process::ExitCode, BenchError> {
         Command::MultiQueue(args) => run_multi_queue(&args),
         Command::MultiQueueCompare(args) => run_multi_queue_compare(&args),
         Command::WireScaling(args) => run_wire_scaling(&args),
+        Command::WireScalingCompare(args) => run_wire_scaling_compare(&args),
     }
 }
 
@@ -778,6 +810,87 @@ fn run_wire_scaling(args: &WireScalingArgs) -> Result<std::process::ExitCode, Be
         println!("{json}");
     }
     Ok(std::process::ExitCode::SUCCESS)
+}
+
+fn load_wire_scaling_report(path: &Path) -> Result<report::WireScalingReport, BenchError> {
+    let s = std::fs::read_to_string(path).map_err(|source| BenchError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    Ok(report::WireScalingReport::from_json(&s)?)
+}
+
+/// Gate one-or-more current wire-scaling artifacts against a committed
+/// baseline on the hardware-invariant per-width transmit scaling
+/// efficiency, exiting 2 on a real regression. The wire counterpart to
+/// `run_multi_queue_compare`: it surfaces the full statistical picture
+/// (median, σ, noise band) for every gated width so an engineer can see
+/// *why* the gate did or did not fire.
+fn run_wire_scaling_compare(
+    args: &WireScalingCompareArgs,
+) -> Result<std::process::ExitCode, BenchError> {
+    let baseline = load_wire_scaling_report(&args.baseline)?;
+    let samples = args
+        .current
+        .iter()
+        .map(|p| load_wire_scaling_report(p))
+        .collect::<Result<Vec<_>, _>>()?;
+    let label = samples.first().map_or_else(
+        || format!("{}/{}/{}/{}", baseline.profile, baseline.transport, baseline.ip_version, baseline.l4),
+        |s| format!("{}/{}/{}/{}", s.profile, s.transport, s.ip_version, s.l4),
+    );
+
+    let rr = report::detect_wire_scaling_regression_stats(
+        &baseline,
+        &samples,
+        args.threshold,
+        args.sigma,
+    )
+    .map_err(BenchError::Regression)?;
+
+    eprintln!(
+        "wire-scaling gate: {label}, {} sample(s), threshold {:.0}%, noise band {:.1}σ",
+        rr.sample_count,
+        args.threshold * 100.0,
+        args.sigma,
+    );
+    for m in &rr.metrics {
+        let verdict = if m.flagged {
+            "REGRESSION"
+        } else if m.exceeds_threshold {
+            "within-noise" // crossed threshold but inside the σ band
+        } else {
+            "ok"
+        };
+        eprintln!(
+            "  [{verdict}] {}: baseline {:.4} -> median {:.4} ({:+.1}%), σ={:.4} (n={}), band=±{:.4}",
+            m.metric,
+            m.baseline,
+            m.median,
+            m.change_fraction * 100.0,
+            m.stddev,
+            m.samples,
+            args.sigma * m.stddev,
+        );
+    }
+
+    if rr.has_regression() {
+        eprintln!(
+            "WIRE-SCALING REGRESSION DETECTED ({label}): {} width(s) cleared both the {:.0}% threshold and the {:.1}σ noise band.",
+            rr.flagged().count(),
+            args.threshold * 100.0,
+            args.sigma,
+        );
+        Ok(std::process::ExitCode::from(EXIT_REGRESSION))
+    } else {
+        println!(
+            "no wire-scaling regression: {label} median within {:.0}% threshold / {:.1}σ noise band across {} sample(s)",
+            args.threshold * 100.0,
+            args.sigma,
+            rr.sample_count,
+        );
+        Ok(std::process::ExitCode::SUCCESS)
+    }
 }
 
 fn load_multiqueue_report(path: &Path) -> Result<report::MultiQueueReport, BenchError> {

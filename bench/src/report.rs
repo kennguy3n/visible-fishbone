@@ -1617,6 +1617,114 @@ pub fn detect_multiqueue_regression(
     Ok(RegressionReport { regressions })
 }
 
+/// Gate one-or-more current *wire* scaling sweeps against a committed
+/// baseline on the hardware-invariant per-width transmit scaling
+/// efficiency, exactly as [`detect_multiqueue_regression_stats`] gates the
+/// in-process forwarding curve.
+///
+/// Efficiency (`aggregate / (queues × single_stream)`) is dimensionless, so
+/// a baseline captured on one box still gates another: a real loss of
+/// transmit scale-out (lock contention on the TX path, false sharing in the
+/// per-socket harness, an allocator regression) drops efficiency on every
+/// host, while swapping hardware moves only the absolute Gbps the gate
+/// ignores. The `queues == 1` floor is skipped — its efficiency is `1.0` by
+/// construction. Each wider width is gated as a **drop**, aggregated by
+/// median and tested against a `sigma × σ` noise band so a single noisy run
+/// on a shared runner does not fail the build.
+///
+/// # Errors
+/// Returns an error string when `samples` is empty or when any sample
+/// describes a different schema version, profile, transport, IP version, L4
+/// shape, or frame size than the baseline — guards that stop a `dry-run`
+/// craft ceiling from ever being compared against a live `af-packet` wire
+/// curve, or a v4/UDP run against a v6/TCP one.
+pub fn detect_wire_scaling_regression_stats(
+    baseline: &WireScalingReport,
+    samples: &[WireScalingReport],
+    threshold: f64,
+    sigma: f64,
+) -> Result<StatRegressionReport, String> {
+    if samples.is_empty() {
+        return Err("no current samples to compare against the baseline".to_string());
+    }
+    for s in samples {
+        if baseline.schema_version != s.schema_version {
+            return Err(format!(
+                "wire-scaling schema version mismatch: baseline {} vs current {}",
+                baseline.schema_version, s.schema_version
+            ));
+        }
+        if baseline.profile != s.profile
+            || baseline.transport != s.transport
+            || baseline.ip_version != s.ip_version
+            || baseline.l4 != s.l4
+            || baseline.frame_bytes != s.frame_bytes
+        {
+            return Err(format!(
+                "cannot compare different wire sweeps: baseline {}/{}/{}/{}/{}B vs current {}/{}/{}/{}/{}B",
+                baseline.profile,
+                baseline.transport,
+                baseline.ip_version,
+                baseline.l4,
+                baseline.frame_bytes,
+                s.profile,
+                s.transport,
+                s.ip_version,
+                s.l4,
+                s.frame_bytes,
+            ));
+        }
+    }
+
+    let mut metrics = Vec::new();
+    for point in &baseline.points {
+        // queues == 1 is the efficiency baseline (always 1.0) → no signal.
+        if point.queues < 2 {
+            continue;
+        }
+        let base_val = point.scaling_efficiency;
+        if !base_val.is_finite() || base_val <= 0.0 {
+            continue; // no defined reference to take a fractional change from
+        }
+
+        let sample_vals: Vec<f64> = samples
+            .iter()
+            .filter_map(|s| s.points.iter().find(|p| p.queues == point.queues))
+            .map(|p| p.scaling_efficiency)
+            .filter(|e| e.is_finite())
+            .collect();
+        let Some(median_val) = median(&sample_vals) else {
+            continue; // no current evidence for this width
+        };
+        let stddev = sample_stddev(&sample_vals);
+
+        let change = (median_val - base_val) / base_val;
+        // Efficiency is advantage-like: a drop is the regression.
+        let exceeds_threshold = change <= -threshold;
+        let noise_band = sigma * stddev;
+        let outside_noise_band = (median_val - base_val).abs() > noise_band;
+
+        metrics.push(StatMetric {
+            metric: format!("q={} wire-scaling-efficiency", point.queues),
+            baseline: base_val,
+            median: median_val,
+            stddev,
+            samples: sample_vals.len(),
+            change_fraction: change,
+            exceeds_threshold,
+            outside_noise_band,
+            flagged: exceeds_threshold && outside_noise_band,
+        });
+    }
+
+    Ok(StatRegressionReport {
+        sigma,
+        threshold,
+        sample_count: samples.len(),
+        metrics,
+    })
+}
+
 /// `numerator / denominator`, or `None` when the denominator is zero.
 fn ratio(numerator: f64, denominator: f64) -> Option<f64> {
     if denominator == 0.0 {
@@ -2362,5 +2470,68 @@ mod tests {
         let md = wire_report("dry-run", &[(1, 1e5, 0.40, 1.0), (4, 3e5, 1.19, 0.75)]).to_markdown();
         assert!(md.contains("craft-only"), "dry-run must flag the craft-only ceiling: {md}");
         assert!(!md.contains("really crafted and pushed"), "dry-run must not claim a wire number");
+    }
+
+    #[test]
+    fn wire_scaling_gate_flags_real_efficiency_collapse() {
+        // Baseline: efficiency holds at 0.90/0.80 across 2/4 streams.
+        let base = wire_report("af-packet", &[(1, 1e5, 0.37, 1.0), (2, 2e5, 0.66, 0.90), (4, 3.5e5, 1.18, 0.80)]);
+        // Current: q=4 collapses 0.80 -> 0.50 (~38% drop); q=2 holds.
+        let sample = wire_report("af-packet", &[(1, 1e5, 0.37, 1.0), (2, 2e5, 0.66, 0.90), (4, 2.4e5, 0.74, 0.50)]);
+        let rr = detect_wire_scaling_regression_stats(&base, &[sample], 0.15, 2.0).unwrap();
+        assert!(rr.has_regression(), "a real scaling collapse must flag: {rr:?}");
+        let q4 = rr.metrics.iter().find(|m| m.metric.contains("q=4")).unwrap();
+        assert!(q4.flagged, "q=4 must be the flagged width: {q4:?}");
+    }
+
+    #[test]
+    fn wire_scaling_gate_ignores_minor_scatter() {
+        let base = wire_report("af-packet", &[(1, 1e5, 0.37, 1.0), (2, 2e5, 0.66, 0.90), (4, 3.5e5, 1.18, 0.80)]);
+        // A few percent of scatter, well inside the 15% threshold.
+        let sample = wire_report("af-packet", &[(1, 1e5, 0.37, 1.0), (2, 2e5, 0.65, 0.88), (4, 3.5e5, 1.15, 0.78)]);
+        let rr = detect_wire_scaling_regression_stats(&base, &[sample], 0.15, 2.0).unwrap();
+        assert!(!rr.has_regression(), "minor scatter must not flag: {rr:?}");
+    }
+
+    #[test]
+    fn wire_scaling_gate_rejects_empty_and_mismatched_sweeps() {
+        let base = wire_report("af-packet", &[(1, 1e5, 0.37, 1.0), (2, 2e5, 0.66, 0.90)]);
+        assert!(detect_wire_scaling_regression_stats(&base, &[], 0.15, 2.0).is_err());
+
+        // A dry-run craft ceiling must never be gated against a live wire curve.
+        let dry = wire_report("dry-run", &[(1, 1e5, 0.37, 1.0), (2, 2e5, 0.66, 0.90)]);
+        assert!(
+            detect_wire_scaling_regression_stats(&base, &[dry], 0.15, 2.0).is_err(),
+            "comparing dry-run vs af-packet must error"
+        );
+
+        let mut wrong_ipv = wire_report("af-packet", &[(2, 2e5, 0.66, 0.90)]);
+        wrong_ipv.ip_version = "v6".to_string();
+        assert!(detect_wire_scaling_regression_stats(&base, &[wrong_ipv], 0.15, 2.0).is_err());
+
+        let mut wrong_l4 = wire_report("af-packet", &[(2, 2e5, 0.66, 0.90)]);
+        wrong_l4.l4 = "tcp-syn".to_string();
+        assert!(detect_wire_scaling_regression_stats(&base, &[wrong_l4], 0.15, 2.0).is_err());
+
+        let mut wrong_frame = wire_report("af-packet", &[(2, 2e5, 0.66, 0.90)]);
+        wrong_frame.frame_bytes = 64;
+        assert!(detect_wire_scaling_regression_stats(&base, &[wrong_frame], 0.15, 2.0).is_err());
+
+        let mut wrong_schema = wire_report("af-packet", &[(2, 2e5, 0.66, 0.90)]);
+        wrong_schema.schema_version = WIRE_SCALING_SCHEMA_VERSION + 1;
+        assert!(detect_wire_scaling_regression_stats(&base, &[wrong_schema], 0.15, 2.0).is_err());
+    }
+
+    #[test]
+    fn wire_scaling_gate_single_noisy_sample_within_band_does_not_flag() {
+        let base = wire_report("af-packet", &[(1, 1e5, 0.37, 1.0), (4, 3.5e5, 1.18, 0.80)]);
+        // Several samples scattering around 0.79; median move tiny, σ small.
+        let samples = [
+            wire_report("af-packet", &[(4, 3.5e5, 1.18, 0.81)]),
+            wire_report("af-packet", &[(4, 3.5e5, 1.18, 0.78)]),
+            wire_report("af-packet", &[(4, 3.5e5, 1.18, 0.80)]),
+        ];
+        let rr = detect_wire_scaling_regression_stats(&base, &samples, 0.15, 2.0).unwrap();
+        assert!(!rr.has_regression(), "scatter across samples must not flag: {rr:?}");
     }
 }
