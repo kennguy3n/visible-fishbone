@@ -29,8 +29,8 @@ use sng_bench::report::{
     ResourceResult, RunDimensions, SCHEMA_VERSION, ThroughputResult, detect_regression,
 };
 use sng_bench::traffic_gen::{
-    DryRunGenerator, FiveTupleSampler, L4Proto, PacketBuilder, PacketConfig, RawSocketGenerator,
-    Subnet, TrafficError, TrafficGenerator,
+    DryRunGenerator, FiveTupleSampler, IpVersion, L4Proto, PacketBuilder, PacketConfig,
+    RawSocketGenerator, TrafficError, TrafficGenerator,
 };
 
 /// Top-level harness errors.
@@ -712,7 +712,6 @@ fn run_multi_queue(args: &MultiQueueArgs) -> Result<std::process::ExitCode, Benc
 
 fn run_wire_scaling(args: &WireScalingArgs) -> Result<std::process::ExitCode, BenchError> {
     use sng_bench::report::{WIRE_SCALING_SCHEMA_VERSION, WireScalingReport};
-    use sng_bench::traffic_gen::{IpVersion, L4Proto};
     use sng_bench::wire_scaling::{self, WireScalingConfig};
 
     let profile = load_profile(&args.profile)?;
@@ -1296,35 +1295,13 @@ fn build_emitter(spec: &RunSpec, l4: L4Proto) -> Result<Box<dyn TrafficGenerator
 }
 
 fn build_sampler(spec: &RunSpec) -> Result<FiveTupleSampler, BenchError> {
-    let (src, dst) = match spec.ip_version {
-        CliIpVersion::V4 => (
-            Subnet::V4 {
-                base: std::net::Ipv4Addr::new(10, 0, 0, 0),
-                prefix: 8,
-            },
-            Subnet::V4 {
-                base: std::net::Ipv4Addr::new(198, 18, 0, 0),
-                prefix: 15, // RFC 2544 benchmarking range
-            },
-        ),
-        CliIpVersion::V6 => (
-            Subnet::V6 {
-                base: std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
-                prefix: 32,
-            },
-            Subnet::V6 {
-                base: std::net::Ipv6Addr::new(0x2001, 0xdb8, 0xffff, 0, 0, 0, 0, 0),
-                prefix: 32,
-            },
-        ),
+    let ip_version = match spec.ip_version {
+        CliIpVersion::V4 => IpVersion::V4,
+        CliIpVersion::V6 => IpVersion::V6,
     };
-    Ok(FiveTupleSampler::new(
-        src,
-        dst,
-        (1024, 65_535),
-        (1, 1024),
-        spec.seed,
-    )?)
+    // Canonical RFC-2544 benchmark flow space, shared with the multi-queue
+    // `wire-scaling` leg so the floor and the scaling curve are comparable.
+    Ok(FiveTupleSampler::rfc2544_benchmark(ip_version, spec.seed)?)
 }
 
 /// Run one `(mode, spec)` against `profile` and assemble its report.

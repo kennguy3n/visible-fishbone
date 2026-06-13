@@ -183,6 +183,45 @@ impl FiveTupleSampler {
         })
     }
 
+    /// Build the canonical RFC-2544 benchmarking sampler: `10.0.0.0/8` →
+    /// `198.18.0.0/15` (or `2001:db8::/32` → `2001:db8:ffff::/32` for v6),
+    /// ephemeral source ports `1024..=65535` to well-known destination
+    /// ports `1..=1024`.
+    ///
+    /// This is the single source of truth for the benchmark flow space, so
+    /// the single-stream `throughput` floor and the multi-queue
+    /// `wire-scaling` curve sample byte-identical 5-tuples and stay directly
+    /// comparable. Do not inline these ranges at call sites.
+    ///
+    /// # Errors
+    /// Propagates [`TrafficError::InvalidConfig`] from [`Self::new`] (cannot
+    /// occur for these fixed, well-formed ranges).
+    pub fn rfc2544_benchmark(ip_version: IpVersion, seed: u64) -> Result<Self, TrafficError> {
+        let (src, dst) = match ip_version {
+            IpVersion::V4 => (
+                Subnet::V4 {
+                    base: Ipv4Addr::new(10, 0, 0, 0),
+                    prefix: 8,
+                },
+                Subnet::V4 {
+                    base: Ipv4Addr::new(198, 18, 0, 0),
+                    prefix: 15, // RFC 2544 benchmarking range
+                },
+            ),
+            IpVersion::V6 => (
+                Subnet::V6 {
+                    base: Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
+                    prefix: 32,
+                },
+                Subnet::V6 {
+                    base: Ipv6Addr::new(0x2001, 0xdb8, 0xffff, 0, 0, 0, 0, 0),
+                    prefix: 32,
+                },
+            ),
+        };
+        Self::new(src, dst, (1024, 65_535), (1, 1024), seed)
+    }
+
     /// The IP version this sampler emits.
     #[must_use]
     pub fn ip_version(&self) -> IpVersion {
