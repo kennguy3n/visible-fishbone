@@ -972,7 +972,13 @@ func buildRouter(
 	)
 	if cfg.Hibernation.Enabled {
 		hibRegistry = hibernation.NewRegistry()
-		hibMetrics = hibernation.NewMetrics(mx.Registry(), mx.Namespace())
+		// mx is nil when metrics are disabled; guard the registry /
+		// namespace access exactly as the other call sites do.
+		// NewMetrics treats a nil registerer as "metrics off" and
+		// returns a nil *Metrics whose record methods no-op.
+		if mx != nil {
+			hibMetrics = hibernation.NewMetrics(mx.Registry(), mx.Namespace())
+		}
 		hibStore := store.NewTenantHibernationRepository()
 		hibSyncer = hibernation.NewSyncer(hibStore, hibRegistry, logger)
 		hibCoordinator = hibernation.NewCoordinator(hibRegistry, hibStore,
