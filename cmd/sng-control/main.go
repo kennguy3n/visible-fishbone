@@ -559,6 +559,24 @@ func run() error {
 			slog.Duration("interval", cfg.MobileAuth.DirectorySyncInterval))
 	}
 
+	// WS-5 NoOps auto-promoter. Nil unless ROLLOUT_AUTOPILOT_ENABLED=true
+	// (the fleet-level default-OFF gate), so this is a no-op by default —
+	// an upgrade never silently starts auto-promoting. Leader-gated so a
+	// multi-replica deployment advances each tenant/capability exactly
+	// once per interval; runs in its own goroutine because RunIfLeader
+	// blocks until rootCtx is cancelled. Autopilot.Run sweeps once
+	// immediately on leadership acquisition, then on each interval tick.
+	if rc.RolloutAutopilot != nil {
+		autopilot := rc.RolloutAutopilot
+		go elector.RunIfLeader(rootCtx, "rollout-autopilot", func(ctx context.Context) {
+			autopilot.Run(ctx, cfg.RolloutAutopilot.Interval)
+		})
+		logger.Info("sng-control: rollout NoOps autopilot enabled (leader-gated)",
+			slog.Duration("interval", autopilotSweepInterval(cfg.RolloutAutopilot.Interval)),
+			slog.Bool("auto_enrol", cfg.RolloutAutopilot.AutoEnrol),
+			slog.Duration("dwell_window", cfg.RolloutAutopilot.DwellWindow))
+	}
+
 	// Producer half of the human-in-the-loop DLP review queue: an async,
 	// bounded adapter that turns coach-action DLP events off the
 	// telemetry hot path into review-queue enqueues. Drained on shutdown
@@ -858,6 +876,11 @@ type routerComponents struct {
 	// activity observer; the control-plane signal is wired into the
 	// router here in buildRouter.
 	ActivityRecorder *activity.Recorder
+	// RolloutAutopilot is the WS-5 NoOps auto-promoter. Nil unless
+	// ROLLOUT_AUTOPILOT_ENABLED=true (the fleet-level default-OFF gate),
+	// in which case main() runs its leader-only sweep via
+	// elector.RunIfLeader on cfg.RolloutAutopilot.Interval.
+	RolloutAutopilot *rollout.Autopilot
 }
 
 // buildRouter wires every repository / service / handler against
@@ -1092,10 +1115,22 @@ func buildRouter(
 			MaxErrorRate: 0.05,
 			MinSamples:   50,
 		}),
+		// Audit every transition — operator-driven AND the WS-5
+		// autopilot's enrol/promote and the framework's auto-demote — so
+		// the staged-enablement history is reconstructable for compliance
+		// (a freshly-seeded tenant's zero-click path to enforce leaves an
+		// audit trail proving the guardrails held throughout).
+		rollout.WithTransitionSink(newRolloutAuditSink(auditRepo, logger)),
 	)
 	if err != nil {
 		return routerComponents{}, fmt.Errorf("rollout framework: %w", err)
 	}
+	// Shared monitor-phase evidence cache for the WS-5 NoOps auto-promoter:
+	// capabilities running in monitor (dry-run) record the metrics they
+	// observe here, and the autopilot reads them as promotion evidence.
+	// Always constructed (cheap, in-memory); only consulted when the
+	// autopilot is enabled.
+	rolloutMonitorMetrics := rollout.NewMonitorMetricsRecorder(nil)
 
 	// Per-tenant shadow-IT NoOps engine (migration 061). It classifies
 	// each discovered app, records an immutable audit row and recommends
@@ -1699,7 +1734,11 @@ func buildRouter(
 			// mutating nothing), and only enforce performs the full sync —
 			// so flipping directory sync on for a tenant never off-boards
 			// users until it has been rehearsed in monitor.
-			WithRolloutGate(rolloutSvc)
+			WithRolloutGate(rolloutSvc).
+			// Record each monitor (dry-run) pass's metrics so the WS-5
+			// NoOps auto-promoter can read them as promotion evidence. A
+			// no-op for the guardrail itself; it only feeds the promoter.
+			WithMonitorMetricsSink(rolloutMonitorMetrics)
 		logger.Info("idp directory sync: enabled (leader-gated)",
 			slog.Duration("interval", cfg.MobileAuth.DirectorySyncInterval))
 	}
@@ -2016,6 +2055,18 @@ func buildRouter(
 	// admin `POST /admin/app-registry/sync` endpoint is the only
 	// way to refresh vendor endpoints — which contradicts
 	// docs/TRAFFIC_CLASSIFICATION.md's "24h cadence" contract.
+
+	// WS-5 NoOps auto-promoter. Built behind the
+	// cfg.RolloutAutopilot.Enabled default-OFF gate (returns nil when
+	// disabled); main() schedules it leader-only. NewAutopilot rejects a
+	// policy whose promotion ceiling is looser than the rollout demote
+	// threshold, so a mis-tuned guardrail fails boot rather than silently
+	// auto-promoting past a breach.
+	rolloutAutopilot, err := buildRolloutAutopilot(cfg, rolloutSvc, tenantRepo, rolloutMonitorMetrics, mx, logger)
+	if err != nil {
+		return routerComponents{}, err
+	}
+
 	return routerComponents{
 		Router:              router,
 		WebhookWorker:       webhookWorker,
@@ -2036,6 +2087,7 @@ func buildRouter(
 		IDPSyncService:      idpSyncSvc,
 		DLPReviewService:    dlpReviewSvc,
 		ActivityRecorder:    activityRecorder,
+		RolloutAutopilot:    rolloutAutopilot,
 	}, nil
 }
 
