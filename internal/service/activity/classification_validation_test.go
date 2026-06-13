@@ -64,9 +64,12 @@ func waitFor(timeout time.Duration, cond func() bool) bool {
 func TestFleetClassification_AfterCoverage(t *testing.T) {
 	now := time.Date(2026, 6, 13, 12, 0, 0, 0, time.UTC)
 	ct := &captureToucher{}
-	// MinInterval 0 so each distinct seen lands (we drive event-time
-	// directly); clock fixed so the test is deterministic.
-	r := activity.NewRecorder(ct, activity.WithMinInterval(0), activity.WithClock(func() time.Time { return now }))
+	// Each tenant is observed exactly once, so the per-tenant debounce
+	// window never matters here (the first touch for a tenant always
+	// passes the gate); a small positive MinInterval keeps the config
+	// explicit rather than relying on the package default. The clock is
+	// fixed so the test is deterministic.
+	r := activity.NewRecorder(ct, activity.WithMinInterval(time.Nanosecond), activity.WithClock(func() time.Time { return now }))
 	go r.Run()
 
 	// Four tenants, each active only through a single ingress path at a

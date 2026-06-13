@@ -52,6 +52,7 @@ const (
 	outcomeDebounced = "debounced"
 	outcomeDropped   = "dropped"
 	outcomeWritten   = "written"
+	outcomeFailed    = "failed"
 )
 
 // NewActivityCollector builds an activity-recorder collector. A
@@ -105,6 +106,7 @@ func (c *ActivityCollector) record(s activity.Stats, queueLen int) {
 		c.add(src, outcomeDebounced, st.Debounced)
 		c.add(src, outcomeDropped, st.Dropped)
 		c.add(src, outcomeWritten, st.Written)
+		c.add(src, outcomeFailed, st.Failed)
 	}
 	c.metrics.ActivityQueueDepth.Set(float64(queueLen))
 }

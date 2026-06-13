@@ -144,7 +144,7 @@ type Metrics struct {
 	// --- Activity (dormancy signal) -----------------------------
 	// ActivityTouches counts per-tenant activity touches by the
 	// ingress `source` they came from and their `outcome`
-	// (enqueued|debounced|dropped|written). It is the WS-2 coverage
+	// (enqueued|debounced|dropped|written|failed). It is the WS-2 coverage
 	// metric: a non-zero count under every source proves last_active_at
 	// is fed by all tenant-activity paths (telemetry, authenticated
 	// API, device enrol, mobile token/refresh), not just the data
@@ -448,7 +448,7 @@ func New(cfg config.Metrics) *Metrics {
 		Namespace: ns,
 		Subsystem: "activity",
 		Name:      "touches_total",
-		Help:      "Per-tenant activity touches feeding last_active_at, by ingress source and outcome (enqueued|debounced|dropped|written).",
+		Help:      "Per-tenant activity touches feeding last_active_at, by ingress source and outcome (enqueued|debounced|dropped|written|failed).",
 	}, []string{"source", "outcome"})
 	m.ActivityQueueDepth = f.NewGauge(prometheus.GaugeOpts{
 		Namespace: ns,

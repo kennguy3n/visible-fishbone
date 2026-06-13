@@ -417,6 +417,31 @@ func TestRecorder_PerSourceAttribution(t *testing.T) {
 	}
 }
 
+// TestRecorder_PerSourceFailedAttribution proves a persist failure is
+// counted under the originating source's Failed bucket (not only the
+// aggregate), so Enqueued reconciles with Written+Failed per source.
+func TestRecorder_PerSourceFailedAttribution(t *testing.T) {
+	f := &fakeToucher{err: errors.New("boom")}
+	r := NewRecorder(f, WithMinInterval(time.Hour))
+	go r.Run()
+	defer r.Stop()
+
+	id := uuid.New()
+	r.From(SourceEnroll).Observe(id, time.Now())
+
+	if !drainUntil(time.Second, func() bool { return r.Stats().Failed == 1 }) {
+		t.Fatalf("failed touch never recorded: %+v", r.Stats())
+	}
+	st := r.Stats().BySource[SourceEnroll]
+	if st.Enqueued != 1 || st.Failed != 1 || st.Written != 0 {
+		t.Fatalf("enroll source stats = %+v, want Enqueued=1 Failed=1 Written=0", st)
+	}
+	// The failing source's Enqueued reconciles with Written+Failed.
+	if st.Enqueued != st.Written+st.Failed {
+		t.Fatalf("enqueued %d != written %d + failed %d", st.Enqueued, st.Written, st.Failed)
+	}
+}
+
 func TestNewRecorder_NilRepoPanics(t *testing.T) {
 	defer func() {
 		if recover() == nil {

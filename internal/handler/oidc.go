@@ -524,9 +524,12 @@ func (h *OIDCHandler) mobileToken(w http.ResponseWriter, r *http.Request) {
 		WriteRepositoryError(w, err)
 		return
 	}
-	// RequireTenant already proved the path tenant; recording it as
-	// active is safe and async (debounced by the recorder).
-	recordActivity(h.tokenActivity, tenantID)
+	// Record activity against the tenant the service actually validated
+	// the identity into (res.Identity.TenantID), not the request's path
+	// tenant_id — matching the defensive attribution in enrollDevice so
+	// a touch can never be credited to a tenant the exchange did not
+	// authorise. The touch is async (debounced by the recorder).
+	recordActivity(h.tokenActivity, res.Identity.TenantID)
 	WriteJSON(w, http.StatusOK, toMobileSessionResponse(res))
 }
 
@@ -564,6 +567,8 @@ func (h *OIDCHandler) mobileRefresh(w http.ResponseWriter, r *http.Request) {
 		WriteRepositoryError(w, err)
 		return
 	}
-	recordActivity(h.refreshActivity, tenantID)
+	// As in mobileToken, attribute the touch to the validated identity's
+	// tenant rather than the path tenant_id.
+	recordActivity(h.refreshActivity, res.Identity.TenantID)
 	WriteJSON(w, http.StatusOK, toMobileSessionResponse(res))
 }

@@ -121,6 +121,12 @@ type SourceStat struct {
 	// Written is the number of touches from this source successfully
 	// persisted.
 	Written uint64
+	// Failed is the number of touches from this source whose persist
+	// returned an error (excluding shutdown cancellation). Tracked
+	// per-source so Enqueued reconciles with Written+Failed+in-flight
+	// for each ingress, letting an operator spot a source whose writes
+	// systematically fail rather than only seeing it in the aggregate.
+	Failed uint64
 }
 
 // Stats is a point-in-time snapshot of Recorder counters for
@@ -155,6 +161,7 @@ type sourceCounter struct {
 	debounced atomic.Uint64
 	dropped   atomic.Uint64
 	written   atomic.Uint64
+	failed    atomic.Uint64
 }
 
 // Recorder debounces and asynchronously persists per-tenant activity.
@@ -478,6 +485,7 @@ func (r *Recorder) write(t touch) {
 	defer cancel()
 	if err := r.repo.TouchLastActive(wctx, t.tenantID, t.seen); err != nil {
 		r.failed.Add(1)
+		r.counterFor(t.src).failed.Add(1)
 		// A touch for a tenant that has since been deleted, or any
 		// transient store error, is benign here: the activity signal
 		// is best-effort. Log at debug to avoid noise on the hot path.
@@ -504,6 +512,7 @@ func (r *Recorder) Stats() Stats {
 			Debounced: sc.debounced.Load(),
 			Dropped:   sc.dropped.Load(),
 			Written:   sc.written.Load(),
+			Failed:    sc.failed.Load(),
 		}
 	}
 	return Stats{

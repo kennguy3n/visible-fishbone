@@ -210,6 +210,9 @@ func TestActivityCollectorRecord(t *testing.T) {
 	if got := enq(activity.SourceEnroll); got != 2 {
 		t.Errorf("enroll enqueued = %v, want 2", got)
 	}
+	if got := testutil.ToFloat64(m.ActivityTouches.WithLabelValues(string(activity.SourceTelemetry), outcomeWritten)); got != 9 {
+		t.Errorf("telemetry written = %v, want 9", got)
+	}
 	if got := testutil.ToFloat64(m.ActivityQueueDepth); got != 5 {
 		t.Errorf("queue_depth = %v, want 5", got)
 	}
