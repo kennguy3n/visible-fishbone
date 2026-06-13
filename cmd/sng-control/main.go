@@ -2796,6 +2796,12 @@ func startTelemetry(
 			// (defer to DefaultRetentionDays); the writer clamps every
 			// result to [MinRetentionDays, MaxRetentionDays], so hibernation
 			// can only push a tenant down to the 30-day floor, never below.
+			//
+			// If a future change introduces a base retention resolver (e.g.
+			// per-tier 90d/30d), wrap it here — pass it as the inner so the
+			// hibernation floor only applies on top of it for parked tenants:
+			// NewRetentionResolver(hibRegistry, baseResolver, ...). Passing
+			// nil then would silently discard that base policy.
 			chCfg.Retention = hibernation.NewRetentionResolver(hibRegistry, nil, hibernation.DefaultHibernatedRetentionDays)
 		}
 		if cfg.TelemetryAnalytics.ClickHouseSharding {
