@@ -412,11 +412,17 @@ func (c Config) tierRowsPerSec() (active, idle, dormant float64) {
 	return active, idle, dormant
 }
 
-// effectiveEventsPerSec is the rate the throughput models size against.
-// A live MeasuredEventsPerSec always wins — it already reflects whatever
-// sampling production is doing. Otherwise, when the WS-4 tier-sampling
-// policy is modelled the rate is the post-sampling cohort sum; with the
-// policy off it is the synthetic full-fidelity per-class projection.
+// effectiveEventsPerSec is the rate the ClickHouse write model sizes
+// against — the rate of rows actually stored. A live MeasuredEventsPerSec
+// always wins (it already reflects whatever sampling production is doing);
+// otherwise, when the WS-4 tier-sampling policy is modelled the rate is
+// the post-sampling cohort sum, and with the policy off it is the
+// synthetic full-fidelity per-class projection.
+//
+// It is deliberately NOT used by the NATS model: tier sampling is applied
+// by the telemetry consumer AFTER messages traverse NATS, so the stream
+// carries the full pre-sampling publish rate regardless of the policy.
+// See natsEventsPerSec.
 func (c Config) effectiveEventsPerSec() float64 {
 	if c.MeasuredEventsPerSec > 0 {
 		return c.MeasuredEventsPerSec
@@ -424,6 +430,21 @@ func (c Config) effectiveEventsPerSec() float64 {
 	if c.TierSampling {
 		a, i, d := c.tierRowsPerSec()
 		return a + i + d
+	}
+	return c.modelledEventsPerSec()
+}
+
+// natsEventsPerSec is the rate the NATS subject/storage model sizes
+// against: the full pre-sampling publish rate. The JetStream stream
+// carries every message a tenant publishes — the WS-4 tier sampler runs
+// in the telemetry consumer downstream of NATS, so unlike the ClickHouse
+// write path the stream cost does NOT shrink when tier sampling is on.
+// A live MeasuredEventsPerSec (the observed publish rate, which is itself
+// the NATS rate) wins; otherwise it is the synthetic full-fidelity
+// per-class projection — never the tier-sampled cohort sum.
+func (c Config) natsEventsPerSec() float64 {
+	if c.MeasuredEventsPerSec > 0 {
+		return c.MeasuredEventsPerSec
 	}
 	return c.modelledEventsPerSec()
 }
@@ -842,7 +863,7 @@ func planNATSSubjects(cfg Config) NATSSubjectPlan {
 		maxPerPartition = distinct
 	}
 
-	msgsPerSec := cfg.effectiveEventsPerSec()
+	msgsPerSec := cfg.natsEventsPerSec()
 	retentionSec := cfg.NATSRetentionHours * 3600
 	bytesPerMsg := float64(cfg.BytesPerEvent + cfg.NATSMsgOverheadBytes)
 	streamBytesHot := int64(msgsPerSec * retentionSec * bytesPerMsg)

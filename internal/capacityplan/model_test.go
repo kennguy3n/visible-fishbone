@@ -149,6 +149,34 @@ func TestMeasuredEventsOverrideThroughputNotCardinality(t *testing.T) {
 	}
 }
 
+func TestTierSamplingShrinksClickHouseNotNATS(t *testing.T) {
+	// Tier sampling is applied by the telemetry consumer downstream of
+	// NATS, so it shrinks what ClickHouse stores but NOT what the
+	// JetStream stream carries. Same fleet, sampling off vs on.
+	base := Run(Config{TenantCount: 5000})
+	s := Run(Config{TenantCount: 5000, TierSampling: true})
+
+	if s.TierSampling == nil {
+		t.Fatal("tier-sampling section nil with the policy enabled")
+	}
+	// ClickHouse stores only the post-sampling rows, so its write rate
+	// drops below the full-fidelity baseline.
+	if s.ClickHouse.TotalRowsPerSec >= base.ClickHouse.TotalRowsPerSec {
+		t.Fatalf("clickhouse rows/s with sampling (%.1f) should be below baseline (%.1f)",
+			s.ClickHouse.TotalRowsPerSec, base.ClickHouse.TotalRowsPerSec)
+	}
+	// NATS carries every published message regardless of sampling, so
+	// its msgs/s and stream bytes must match the full-rate baseline.
+	if s.NATS.MsgsPerSec != base.NATS.MsgsPerSec {
+		t.Fatalf("nats msgs/s with sampling (%.1f) should equal the full-rate baseline (%.1f); the stream carries pre-sampling traffic",
+			s.NATS.MsgsPerSec, base.NATS.MsgsPerSec)
+	}
+	if s.NATS.StreamBytesHot != base.NATS.StreamBytesHot {
+		t.Fatalf("nats stream bytes with sampling (%d) should equal the full-rate baseline (%d)",
+			s.NATS.StreamBytesHot, base.NATS.StreamBytesHot)
+	}
+}
+
 func TestClickHouseShardsWhenBatchCapped(t *testing.T) {
 	s := Run(Config{TenantCount: 1_000_000})
 	ch := s.ClickHouse
