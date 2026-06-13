@@ -12,6 +12,14 @@ package main
 // historical type names and the markdown renderer as thin aliases /
 // forwarders over that package so the report schema and CLI output are
 // unchanged.
+//
+// The first three sub-models mirror the three horizontal-scaling axes
+// the platform exposes (Postgres pool, ClickHouse write throughput,
+// NATS subject cardinality). A fourth sub-model captures the control-
+// plane (not data-plane) cost the dormancy work targets: how many
+// tenants the periodic per-tenant sweeps visit per cycle, before vs
+// after the activity-tiered SweepPlanner gating (the WS-1 dormancy
+// dividend).
 
 import (
 	"fmt"
@@ -29,14 +37,15 @@ type (
 	PostgresPoolPlan    = capacityplan.PostgresPoolPlan
 	ClickHouseWritePlan = capacityplan.ClickHouseWritePlan
 	NATSSubjectPlan     = capacityplan.NATSSubjectPlan
+	PeriodicSweepPlan   = capacityplan.PeriodicSweepPlan
 )
 
 // DefaultCapacityPlanConfig models the headline 5,000-tenant tier with
 // the platform's documented default knobs.
 func DefaultCapacityPlanConfig() CapacityPlanConfig { return capacityplan.DefaultConfig() }
 
-// RunCapacityPlan evaluates the three sub-models and returns the
-// assembled section.
+// RunCapacityPlan evaluates the sub-models and returns the assembled
+// section.
 func RunCapacityPlan(cfg CapacityPlanConfig) *CapacityPlanSection { return capacityplan.Run(cfg) }
 
 // boolPtr returns a pointer to v, for the tri-state PGBouncerMode field.
@@ -71,4 +80,16 @@ func (r *BusinessBenchmarkReport) writeCapacityPlanMarkdown(b *strings.Builder) 
 	fmt.Fprintf(b, "- %d distinct subjects across %d partition(s) = %.1f avg (busiest ~%d)\n", n.DistinctSubjects, n.Partitions, n.SubjectsPerPartitionAvg, n.SubjectsPerPartitionMax)
 	fmt.Fprintf(b, "- %.1f msgs/s, %.0fh retention → ~%d bytes hot JetStream storage\n", n.MsgsPerSec, n.RetentionHours, n.StreamBytesHot)
 	fmt.Fprintf(b, "- recommended NATS_PARTITIONS: %d — %s\n\n", n.RecommendedPartitions, n.Note)
+
+	sw := cp.PeriodicSweep
+	b.WriteString("**Periodic per-tenant sweep cost (dormancy dividend, WS-1)**\n\n")
+	fmt.Fprintf(b, "- activity mix: %d active / %d idle / %d dormant (idle every %d cycles, dormant every %d)\n",
+		sw.ActiveTenants, sw.IdleTenants, sw.DormantTenants, sw.IdleEvery, sw.DormantEvery)
+	fmt.Fprintf(b, "- tiered jobs (`%s`)\n", strings.Join(sw.Jobs, "`, `"))
+	fmt.Fprintf(b, "- per job: %d tenants/cycle (untiered) → %.1f tenants/cycle (tiered) = **%.1fx** fewer\n",
+		sw.UntieredVisitsPerCyclePerJob, sw.TieredVisitsPerCyclePerJob, sw.ReductionFactor)
+	fmt.Fprintf(b, "- tiered breakdown/cycle: %.1f active + %.1f idle + %.1f dormant\n",
+		sw.ActiveVisitsPerCycle, sw.IdleVisitsPerCycle, sw.DormantVisitsPerCycle)
+	fmt.Fprintf(b, "- tail dividend: idle **%.1fx**, dormant **%.1fx** fewer visits/cycle\n\n",
+		sw.IdleReductionFactor, sw.DormantReductionFactor)
 }

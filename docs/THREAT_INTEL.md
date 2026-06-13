@@ -27,6 +27,7 @@ in `cmd/sng-control`.
 | `feed_csvjson.go` | Generic CSV (header- or index-addressed) + JSON (bare/wrapped array) parsers |
 | `feed_otx.go` | AlienVault OTX pulses |
 | `feed_abusech.go` | abuse.ch URLhaus / MalwareBazaar / Feodo Tracker |
+| `feed_misp.go` | MISP events/attributes export (nested Event→Attribute, composite types, `to_ids` filter) |
 | `feed_manager.go` | Per-feed scheduler (default hourly), warm-up refresh, TTL sweeper, `OnUpdate` hook, per-feed telemetry |
 | `ioc_enforcement.go` | `IOCEnforcementCompiler` (IOC→`policy.Rule` + malware hashes) and `DemotionBridge` (domain IOC → demotion engine) |
 
@@ -55,6 +56,8 @@ only for configured feeds.
 | `THREATINTEL_FEODOTRACKER_URL` | — | abuse.ch Feodo Tracker (C2 IPs) |
 | `THREATINTEL_CSV_URL` | — | Generic CERT CSV (indicator/type/confidence columns) |
 | `THREATINTEL_JSON_URL` | — | Generic CERT JSON (array of objects) |
+| `THREATINTEL_MISP_URL` / `THREATINTEL_MISP_AUTH_KEY` | — | MISP feed (events/attributes export; key → `Authorization`) |
+| `THREATINTEL_MISP_INCLUDE_NON_IDS` | `false` | Ingest MISP attributes not flagged `to_ids` (default: `to_ids:true` only) |
 
 ## Data flow
 

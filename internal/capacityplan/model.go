@@ -27,6 +27,8 @@ import (
 	"fmt"
 	"math"
 	"sort"
+
+	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy"
 )
 
 // secondsPerMonth is the month length used to project monthly row
@@ -146,6 +148,35 @@ type Config struct {
 	// ClassRates is the per-class per-tenant event rate. Unset uses
 	// DefaultClassRates.
 	ClassRates []ClassEventRate
+
+	// --- Periodic per-tenant sweep (WS-1 dormancy dividend) ---------
+	//
+	// SweepActiveFraction / SweepIdleFraction / SweepDormantFraction are
+	// the modelled activity mix of the fleet: the share of tenants the
+	// SweepPlanner classifies active (seen < IdleAfter), idle (seen <
+	// DormantAfter) and dormant (never/long-since seen). At ~5000 SME
+	// tenants where most are dormant trials the tail dominates, so the
+	// defaults are deliberately dormant-heavy. They need not sum to
+	// exactly 1.0 — planPeriodicSweep normalises them — but the defaults
+	// do. Each is a fraction in [0,1].
+	SweepActiveFraction  float64
+	SweepIdleFraction    float64
+	SweepDormantFraction float64
+	// SweepJobs is the set of periodic per-tenant sweep loops wired
+	// through tenancy.TieredSweep. Unset uses DefaultSweepJobs.
+	SweepJobs []string
+}
+
+// DefaultSweepJobs is the set of periodic per-tenant sweep loops that
+// adopt the shared tenancy.TieredSweep helper (the {job} label values of
+// the sweep_tenants_visited metric). The capacity model fans the
+// dormancy dividend across exactly these.
+func DefaultSweepJobs() []string {
+	return []string{
+		"idp_directory_sync",
+		"casb_noops_reconcile",
+		"alert_feedback_tuning",
+	}
 }
 
 // DefaultConfig models the headline 5,000-tenant tier with the
@@ -171,6 +202,12 @@ func DefaultConfig() Config {
 		NATSRetentionHours:       24,
 		NATSMsgOverheadBytes:     64,
 		ClassRates:               DefaultClassRates(),
+		// Dormant-heavy trial mix: most of a 5000-SME fleet are
+		// long-idle trials. 8% active / 12% idle / 80% dormant.
+		SweepActiveFraction:  0.08,
+		SweepIdleFraction:    0.12,
+		SweepDormantFraction: 0.80,
+		SweepJobs:            DefaultSweepJobs(),
 	}
 }
 
@@ -230,6 +267,25 @@ func (c Config) withDefaults() Config {
 	if len(c.ClassRates) == 0 {
 		c.ClassRates = d.ClassRates
 	}
+	// The three sweep fractions are filled as a group: if none was set
+	// (all <= 0) apply the default mix; a partially-specified mix is left
+	// as given and normalised by planPeriodicSweep.
+	if c.SweepActiveFraction <= 0 && c.SweepIdleFraction <= 0 && c.SweepDormantFraction <= 0 {
+		c.SweepActiveFraction = d.SweepActiveFraction
+		c.SweepIdleFraction = d.SweepIdleFraction
+		c.SweepDormantFraction = d.SweepDormantFraction
+	} else {
+		// A partially-specified mix may carry a stray negative weight;
+		// clamp each to 0 so a single negative fraction can never produce
+		// a negative tenant count (the normalisation in planPeriodicSweep
+		// divides by the sum, which a negative term could otherwise skew).
+		c.SweepActiveFraction = max(c.SweepActiveFraction, 0)
+		c.SweepIdleFraction = max(c.SweepIdleFraction, 0)
+		c.SweepDormantFraction = max(c.SweepDormantFraction, 0)
+	}
+	if len(c.SweepJobs) == 0 {
+		c.SweepJobs = d.SweepJobs
+	}
 	return c
 }
 
@@ -268,6 +324,55 @@ type Section struct {
 	ClickHouse ClickHouseWritePlan `json:"clickhouse"`
 	// NATS is the subject-cardinality + JetStream storage projection.
 	NATS NATSSubjectPlan `json:"nats"`
+	// PeriodicSweep is the control-plane dormancy-dividend projection:
+	// tenants-visited/cycle for the periodic per-tenant sweeps, before
+	// vs after activity-tiered gating (WS-1).
+	PeriodicSweep PeriodicSweepPlan `json:"periodic_sweep"`
+}
+
+// PeriodicSweepPlan projects the WS-1 dormancy dividend: how many
+// tenants the periodic per-tenant sweeps (idp_directory_sync,
+// casb_noops_reconcile, alert_feedback_tuning) visit per cycle once the
+// shared tenancy.TieredSweep gates them by activity tier, versus the
+// legacy every-tenant-every-cycle fan-out. The dominant avoidable
+// control-plane cost at a dormant-heavy 5000-SME fleet.
+type PeriodicSweepPlan struct {
+	// Jobs is the set of sweep loops modelled (the {job} label values
+	// of sweep_tenants_visited).
+	Jobs []string `json:"jobs"`
+	// JobCount is len(Jobs), surfaced for the aggregate roll-up.
+	JobCount int `json:"job_count"`
+	// IdleEvery / DormantEvery are the planner cadences the model used
+	// (idle tenants visited every Nth cycle, dormant every Mth).
+	IdleEvery    int64 `json:"idle_every"`
+	DormantEvery int64 `json:"dormant_every"`
+	// ActiveTenants / IdleTenants / DormantTenants is the modelled
+	// activity-tier breakdown of the fleet.
+	ActiveTenants  int `json:"active_tenants"`
+	IdleTenants    int `json:"idle_tenants"`
+	DormantTenants int `json:"dormant_tenants"`
+	// UntieredVisitsPerCyclePerJob is the legacy cost: every tenant,
+	// every cycle (== TenantCount).
+	UntieredVisitsPerCyclePerJob int `json:"untiered_visits_per_cycle_per_job"`
+	// TieredVisitsPerCyclePerJob is the steady-state cost after tiering,
+	// averaged over one full cadence period.
+	TieredVisitsPerCyclePerJob float64 `json:"tiered_visits_per_cycle_per_job"`
+	// ActiveVisitsPerCycle / IdleVisitsPerCycle / DormantVisitsPerCycle
+	// decompose the tiered per-job cost by tier.
+	ActiveVisitsPerCycle  float64 `json:"active_visits_per_cycle"`
+	IdleVisitsPerCycle    float64 `json:"idle_visits_per_cycle"`
+	DormantVisitsPerCycle float64 `json:"dormant_visits_per_cycle"`
+	// UntieredVisitsPerCycleTotal / TieredVisitsPerCycleTotal aggregate
+	// across all modelled jobs.
+	UntieredVisitsPerCycleTotal int     `json:"untiered_visits_per_cycle_total"`
+	TieredVisitsPerCycleTotal   float64 `json:"tiered_visits_per_cycle_total"`
+	// ReductionFactor is untiered/tiered per job (aggregate dividend).
+	ReductionFactor float64 `json:"reduction_factor"`
+	// IdleReductionFactor / DormantReductionFactor are the per-tier
+	// dividends on the idle/dormant tail (the headline 10-100x).
+	IdleReductionFactor    float64 `json:"idle_reduction_factor"`
+	DormantReductionFactor float64 `json:"dormant_reduction_factor"`
+	Note                   string  `json:"note"`
 }
 
 // PostgresPoolPlan projects connection-pool pressure at scale.
@@ -329,7 +434,107 @@ func Run(cfg Config) *Section {
 		Postgres:         planPostgresPool(cfg),
 		ClickHouse:       planClickHouseWrite(cfg),
 		NATS:             planNATSSubjects(cfg),
+		PeriodicSweep:    planPeriodicSweep(cfg),
 	}
+}
+
+// planPeriodicSweep models the WS-1 dormancy dividend: how many tenants
+// each periodic per-tenant sweep visits per cycle, before vs after the
+// activity-tiered SweepPlanner gating, fanned across the jobs that adopt
+// tenancy.TieredSweep.
+//
+// Fidelity: it does NOT re-derive the cadence arithmetic — it drives the
+// real tenancy.DefaultPlanner().ShouldVisit over one full DormantEvery
+// period and averages the per-tier visit rate, so the model and the
+// shipped gate can never silently diverge. Cycle 0 is the full startup
+// sweep, so it is included in the period average (every tier is visited
+// on cycle 0), which is why the per-tier rates are marginally above the
+// raw 1/IdleEvery and 1/DormantEvery cadences.
+func planPeriodicSweep(cfg Config) PeriodicSweepPlan {
+	planner := tenancy.DefaultPlanner()
+
+	// Normalise the activity mix to fractions of the fleet.
+	total := cfg.SweepActiveFraction + cfg.SweepIdleFraction + cfg.SweepDormantFraction
+	if total <= 0 {
+		// Degenerate config: treat everyone active (the planner's own
+		// fail-safe posture — more work, never less).
+		total = 1
+		cfg.SweepActiveFraction = 1
+	}
+	activeFrac := cfg.SweepActiveFraction / total
+	idleFrac := cfg.SweepIdleFraction / total
+	dormantFrac := cfg.SweepDormantFraction / total
+
+	n := float64(cfg.TenantCount)
+	activeN := activeFrac * n
+	idleN := idleFrac * n
+	dormantN := dormantFrac * n
+
+	// Average per-cycle visit rate per tier over one full cadence
+	// period, using the real gate so this stays in lock-step with
+	// production. The period is DormantEvery (the longest cadence); a
+	// non-positive cadence (fail-safe planner) collapses to period 1.
+	period := planner.DormantEvery
+	if period <= 0 {
+		period = 1
+	}
+	visitRate := func(tier tenancy.Tier) float64 {
+		visits := 0
+		for cycle := int64(0); cycle < period; cycle++ {
+			if planner.ShouldVisit(tier, cycle) {
+				visits++
+			}
+		}
+		return float64(visits) / float64(period)
+	}
+	activeRate := visitRate(tenancy.TierActive)
+	idleRate := visitRate(tenancy.TierIdle)
+	dormantRate := visitRate(tenancy.TierDormant)
+
+	activeVisits := activeN * activeRate
+	idleVisits := idleN * idleRate
+	dormantVisits := dormantN * dormantRate
+	tieredPerJob := activeVisits + idleVisits + dormantVisits
+
+	jobCount := len(cfg.SweepJobs)
+	untieredPerJob := n // legacy fan-out visits every tenant every cycle
+
+	plan := PeriodicSweepPlan{
+		Jobs:           append([]string(nil), cfg.SweepJobs...),
+		JobCount:       jobCount,
+		IdleEvery:      planner.IdleEvery,
+		DormantEvery:   planner.DormantEvery,
+		ActiveTenants:  int(math.Round(activeN)),
+		IdleTenants:    int(math.Round(idleN)),
+		DormantTenants: int(math.Round(dormantN)),
+
+		UntieredVisitsPerCyclePerJob: int(math.Round(untieredPerJob)),
+		TieredVisitsPerCyclePerJob:   round1(tieredPerJob),
+
+		ActiveVisitsPerCycle:  round1(activeVisits),
+		IdleVisitsPerCycle:    round1(idleVisits),
+		DormantVisitsPerCycle: round1(dormantVisits),
+
+		UntieredVisitsPerCycleTotal: int(math.Round(untieredPerJob * float64(jobCount))),
+		TieredVisitsPerCycleTotal:   round1(tieredPerJob * float64(jobCount)),
+	}
+	// Reduction factors: aggregate, and per-tier on the dormant tail
+	// (the headline 10-100x). Guard against divide-by-zero on a
+	// degenerate (all-active) mix.
+	if tieredPerJob > 0 {
+		plan.ReductionFactor = round1(untieredPerJob / tieredPerJob)
+	}
+	if idleRate > 0 {
+		plan.IdleReductionFactor = round1(1 / idleRate)
+	}
+	if dormantRate > 0 {
+		plan.DormantReductionFactor = round1(1 / dormantRate)
+	}
+	plan.Note = fmt.Sprintf(
+		"%d job(s) tiered: %.0f tenants/cycle/job → %.1f (%.1fx); idle tail %.1fx, dormant tail %.1fx.",
+		jobCount, untieredPerJob, plan.TieredVisitsPerCyclePerJob, plan.ReductionFactor,
+		plan.IdleReductionFactor, plan.DormantReductionFactor)
+	return plan
 }
 
 // planPostgresPool models connection-pool pressure. Concurrent in-flight

@@ -95,6 +95,7 @@ type Config struct {
 	TenantMigration    TenantMigration
 	Activity           Activity
 	Capacity           Capacity
+	AlertFeedback      AlertFeedback
 }
 
 // Capacity carries the runtime knobs for the WS6 capacity autopilot
@@ -137,6 +138,29 @@ type Capacity struct {
 	// existing config; max_connections has no other home, so it lives
 	// here.
 	PGMaxConnections int
+}
+
+// AlertFeedback carries the runtime knobs for the leader-only alert
+// false-positive feedback tuning loop (internal/service/alert
+// feedback.go). The loop walks every (tenant, dimension, window)
+// baseline and nudges its anomaly-detection Z-threshold from the
+// accumulated operator-feedback false-positive rate.
+//
+// DEFAULT-OFF: TuningEnabled gates whether the loop is registered at
+// all, so a fresh deployment never starts mutating baseline thresholds
+// on upgrade — the loop only runs once an operator opts in. When
+// enabled, the sweep is activity-tiered (tenancy.TieredSweep) so dormant
+// trials are re-tuned at a reduced cadence instead of every cycle, while
+// active tenants stay on the per-cycle cadence and cycle 0 still tunes
+// everyone.
+type AlertFeedback struct {
+	// TuningEnabled registers the leader-only tuning loop. Default
+	// false (the loop is constructed regardless for on-demand
+	// TuneDimension calls, but the periodic sweep is off).
+	TuningEnabled bool
+	// TuningInterval is the cadence of the tuning sweep. Defaults to
+	// 30m. Only consulted when TuningEnabled is true.
+	TuningInterval time.Duration
 }
 
 // Activity carries the runtime knobs for per-tenant activity tracking
@@ -524,6 +548,17 @@ type ThreatIntel struct {
 	// in CSV (indicator-per-row) or JSON (array-of-objects) form.
 	CSVURL  string
 	JSONURL string
+	// MISPURL / MISPAuthKey configure a MISP feed (events or
+	// attributes REST-search export, or a static event JSON). The
+	// key, when set, is sent as the MISP "Authorization" header.
+	MISPURL     string
+	MISPAuthKey string
+	// MISPIncludeNonIDs, when true, ingests MISP attributes that are
+	// NOT flagged `to_ids`. Defaults to false: only `to_ids:true`
+	// attributes (MISP's "intended for automated detection"
+	// convention) become enforceable IOCs, so contextual attributes
+	// never cause a false-positive block.
+	MISPIncludeNonIDs bool
 	// Persistence snapshots the in-memory IOC store to Postgres and
 	// restores it on boot, so a control-plane restart does not open
 	// an enforcement gap until every feed re-fetches during warm-up
@@ -1682,6 +1717,9 @@ func Load() (Config, error) {
 			FeodoTrackerURL:      getStr("THREATINTEL_FEODOTRACKER_URL", ""),
 			CSVURL:               getStr("THREATINTEL_CSV_URL", ""),
 			JSONURL:              getStr("THREATINTEL_JSON_URL", ""),
+			MISPURL:              getStr("THREATINTEL_MISP_URL", ""),
+			MISPAuthKey:          getStr("THREATINTEL_MISP_AUTH_KEY", ""),
+			MISPIncludeNonIDs:    getBoolLenient("THREATINTEL_MISP_INCLUDE_NON_IDS", false),
 			Persistence:          getBoolLenient("THREATINTEL_PERSISTENCE", true),
 			PersistInterval:      getDuration("THREATINTEL_PERSIST_INTERVAL", 5*time.Minute),
 			AutoRecompile:        getBoolLenient("THREATINTEL_AUTO_RECOMPILE", true),
@@ -1858,6 +1896,9 @@ func Load() (Config, error) {
 		// WS6 capacity-autopilot reconcile cadence (only consulted when
 		// CAPACITY_AUTOPILOT_ENABLED). Defaults to 5m.
 		{"CAPACITY_AUTOPILOT_INTERVAL", 5 * time.Minute, &cfg.Capacity.Interval},
+		// Alert false-positive feedback tuning sweep cadence (only
+		// consulted when ALERT_FEEDBACK_TUNING_ENABLED). Defaults to 30m.
+		{"ALERT_FEEDBACK_TUNING_INTERVAL", 30 * time.Minute, &cfg.AlertFeedback.TuningInterval},
 	}
 	strictFloats := []struct {
 		key string
@@ -1931,6 +1972,11 @@ func Load() (Config, error) {
 		// strictly so a typo fails boot rather than silently leaving the
 		// autopilot off when an operator meant to turn it on.
 		{"CAPACITY_AUTOPILOT_ENABLED", false, &cfg.Capacity.Enabled},
+		// Alert false-positive feedback tuning loop. DEFAULT-OFF: the
+		// leader-only sweep mutates baseline Z-thresholds, so it is only
+		// registered when an operator explicitly opts in. Parsed strictly
+		// so a typo fails boot rather than silently leaving it off.
+		{"ALERT_FEEDBACK_TUNING_ENABLED", false, &cfg.AlertFeedback.TuningEnabled},
 	}
 
 	var strictErrs []error
@@ -2324,6 +2370,14 @@ func (c Config) validate() error {
 	// pipeline is enabled — the default-off path ignores the interval.
 	if c.ManagedDNSFeeds.Enabled && c.ManagedDNSFeeds.RefreshInterval <= 0 {
 		return fmt.Errorf("THREAT_INTEL_REFRESH_INTERVAL must be > 0 when THREAT_INTEL_ENABLED=true, got %s", c.ManagedDNSFeeds.RefreshInterval)
+	}
+	// Alert feedback tuning loop: when enabled its cadence must be
+	// positive (a <= 0 interval would be silently overridden by the
+	// service's default rather than the cadence the operator chose).
+	// Only enforced when the loop is enabled — the default-off path
+	// ignores the interval.
+	if c.AlertFeedback.TuningEnabled && c.AlertFeedback.TuningInterval <= 0 {
+		return fmt.Errorf("ALERT_FEEDBACK_TUNING_INTERVAL must be > 0 when ALERT_FEEDBACK_TUNING_ENABLED=true, got %s", c.AlertFeedback.TuningInterval)
 	}
 	// Likewise, a <= 0 discovery-cache TTL would silently fall back to
 	// the service's 24h default rather than the configured value.

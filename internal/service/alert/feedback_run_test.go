@@ -143,6 +143,38 @@ func TestFeedback_TickOnce_BoundsConcurrentTenantFanout(t *testing.T) {
 	}
 }
 
+// TestFeedback_Run_ImmediateFirstPass pins the round-4 review fix: Run
+// executes one pass immediately on entry (cycle 0, the TieredSweep startup
+// full sweep) rather than waiting a full interval, matching the IdP-sync
+// and CASB reconcile loops. With a long interval the only way the
+// enumerator is consulted promptly is the immediate pass.
+func TestFeedback_Run_ImmediateFirstPass(t *testing.T) {
+	t.Parallel()
+	tb := &trackingBaseline{release: make(chan struct{})}
+	close(tb.release) // never block List; the tick completes immediately
+	fb := NewFeedback(stubFeedback{}, nil, tb, FeedbackTuningOptions{RunConcurrency: 4})
+
+	enumerated := make(chan struct{}, 1)
+	tenantsFn := func(context.Context) ([]uuid.UUID, error) {
+		select {
+		case enumerated <- struct{}{}:
+		default:
+		}
+		return nil, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go fb.Run(ctx, time.Hour, tenantsFn) // long interval: only the immediate pass can fire in time
+
+	select {
+	case <-enumerated:
+		// immediate pass happened well before the 1h tick — correct.
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not perform an immediate first pass on entry")
+	}
+}
+
 // pagingBaseline returns multiple cursor pages on List so the
 // round-4 fix to tickOnce (cursor-loop instead of hardcoded page
 // limit) can be pinned: every page MUST be visited and every
