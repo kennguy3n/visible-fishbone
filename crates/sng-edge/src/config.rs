@@ -462,7 +462,9 @@ impl Default for IpsConfig {
 pub enum CaptureThreadsSetting {
     /// The `"auto"` keyword — match the NIC's RSS-queue count.
     Keyword(CaptureThreadsKeyword),
-    /// An explicit thread count.
+    /// An explicit thread count. `0` normalizes to `1` (the safe
+    /// single-stream floor) at [`Self::into_lib`], so the stored library
+    /// value is always the effective one — see there.
     Count(u16),
 }
 
@@ -485,11 +487,21 @@ impl Default for CaptureThreadsSetting {
 
 impl CaptureThreadsSetting {
     /// Convert to the library enum the IPS config generator expects.
+    ///
+    /// `Count(0)` normalizes to `Fixed(1)` here, at the config boundary,
+    /// rather than only being clamped later at YAML render time. This is
+    /// deliberately fail-safe toward *more* inspection (one capture thread
+    /// always runs; we never refuse to boot the way `event_channel_capacity`
+    /// does for `0`), and normalizing at the boundary keeps the stored
+    /// library value equal to the effective one — anything inspecting
+    /// `CaptureThreads` directly sees `Fixed(1)`, not a `Fixed(0)` that
+    /// silently renders as `1`. `CaptureThreads::yaml_value` keeps the same
+    /// clamp as defense-in-depth.
     #[must_use]
     pub const fn into_lib(self) -> sng_ips::CaptureThreads {
         match self {
             Self::Keyword(CaptureThreadsKeyword::Auto) => sng_ips::CaptureThreads::Auto,
-            Self::Count(n) => sng_ips::CaptureThreads::Fixed(n),
+            Self::Count(n) => sng_ips::CaptureThreads::Fixed(if n == 0 { 1 } else { n }),
         }
     }
 }
@@ -1596,6 +1608,21 @@ client_key  = "/etc/sng/client.key"
         assert_eq!(
             fixed.ips.capture_threads.into_lib(),
             sng_ips::CaptureThreads::Fixed(6)
+        );
+    }
+
+    #[test]
+    fn ips_capture_threads_zero_normalizes_to_one_at_boundary() {
+        // `capture_threads = 0` is fail-safe toward MORE inspection: it
+        // normalizes to a single capture thread at the config boundary, so
+        // the stored library value equals the effective one (no `Fixed(0)`
+        // that silently renders as `1`), and we never refuse to boot.
+        let zero = config_with_ips_block("capture_threads = 0").unwrap();
+        assert_eq!(zero.ips.capture_threads, CaptureThreadsSetting::Count(0));
+        assert_eq!(
+            zero.ips.capture_threads.into_lib(),
+            sng_ips::CaptureThreads::Fixed(1),
+            "Count(0) must normalize to Fixed(1) at the boundary"
         );
     }
 
