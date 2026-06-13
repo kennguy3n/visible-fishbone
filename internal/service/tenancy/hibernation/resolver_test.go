@@ -132,6 +132,44 @@ func TestRegistryReplaceAndClear(t *testing.T) {
 	}
 }
 
+// TestRegistryWakeGraceSuppressesReHibernate proves the wake/sync race
+// is closed: after Clear (an inline wake), a Replace driven by a store
+// snapshot that still lists the tenant as hibernated must NOT re-park it
+// within the grace window, but must honor the store again once the grace
+// has lapsed.
+func TestRegistryWakeGraceSuppressesReHibernate(t *testing.T) {
+	id := uuid.New()
+	now := time.Now()
+	clock := func() time.Time { return now }
+	reg := NewRegistry(WithWakeGrace(time.Minute), WithRegistryClock(clock))
+
+	reg.Replace([]uuid.UUID{id})
+	if !reg.IsHibernated(id) {
+		t.Fatal("tenant should be parked after initial Replace")
+	}
+
+	// Inline wake clears the marker.
+	reg.Clear(id)
+	if reg.IsHibernated(id) {
+		t.Fatal("tenant should be cleared after wake")
+	}
+
+	// A syncer refresh with a pre-wake snapshot (still lists id) must not
+	// re-park within the grace window.
+	now = now.Add(30 * time.Second)
+	reg.Replace([]uuid.UUID{id})
+	if reg.IsHibernated(id) {
+		t.Fatal("woke tenant must not be re-parked within wake grace")
+	}
+
+	// Once the grace lapses, the durable store wins again.
+	now = now.Add(2 * time.Minute)
+	reg.Replace([]uuid.UUID{id})
+	if !reg.IsHibernated(id) {
+		t.Fatal("after grace lapses, a still-hibernated store record should re-park")
+	}
+}
+
 // TestSyncerReconcilesRegistry verifies the syncer pulls only hibernated
 // records into the registry.
 func TestSyncerReconcilesRegistry(t *testing.T) {
