@@ -133,6 +133,13 @@ type Store interface {
 // retention tightening is handled by [RetentionResolver]; this hook is
 // the optional one-shot trigger for migrating already-resident hot
 // partitions (or a no-op when that is left to natural TTL ageing).
+//
+// Implementations MUST be idempotent. The controller's hibernate path
+// applies cold-archive → NATS condense → persist and fails safe: if a
+// later step errors the tenant stays active and the whole sequence —
+// including ArchiveTenant — is retried on the next reconcile cycle, so
+// a re-archive of already-cold partitions must be a no-op rather than an
+// error or a double-migration.
 type ColdArchiver interface {
 	ArchiveTenant(ctx context.Context, tenantID uuid.UUID) error
 }

@@ -71,7 +71,7 @@ func NewMetrics(reg prometheus.Registerer, namespace string) *Metrics {
 			Namespace: namespace,
 			Subsystem: "hibernation",
 			Name:      "sampled_events_total",
-			Help:      "Telemetry events seen for a hibernated tenant and subject to the hibernation sample rate, by traffic class (inspect_full is exempt via the sampler's 1:1 floor).",
+			Help:      "Resolver decisions: telemetry events for a hibernated tenant for which the near-zero hibernation sample rate was returned, by traffic class. This counts decisions at the resolver, NOT events actually shed: the inspect_full label still appears here, but those events are recaptured at full 1:1 fidelity by the sampler's mandatory floor downstream and are never dropped.",
 		}, []string{"traffic_class"}),
 	}
 }
