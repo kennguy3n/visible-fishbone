@@ -70,15 +70,40 @@ func (p MISPParser) Name() string {
 }
 
 // mispAttribute is one MISP attribute (an indicator plus its
-// metadata). `to_ids` is a pointer so an absent flag is
-// distinguishable from an explicit false.
+// metadata). An absent `to_ids` decodes to the zero value (false),
+// which the precision gate treats the same as an explicit false.
 type mispAttribute struct {
-	Type      string `json:"type"`
-	Value     string `json:"value"`
-	Category  string `json:"category"`
-	Comment   string `json:"comment"`
-	ToIDs     *bool  `json:"to_ids"`
-	Timestamp string `json:"timestamp"`
+	Type      string   `json:"type"`
+	Value     string   `json:"value"`
+	Category  string   `json:"category"`
+	Comment   string   `json:"comment"`
+	ToIDs     mispBool `json:"to_ids"`
+	Timestamp string   `json:"timestamp"`
+}
+
+// mispBool tolerates the several JSON encodings MISP has used for its
+// boolean flags across versions and export formats: a real JSON bool
+// (modern REST API), the strings "0"/"1"/"true"/"false" (older
+// instances and some file exports), or the numbers 0/1. Without this a
+// single legacy `"to_ids":"1"` would make encoding/json fail the whole
+// document parse rather than just that attribute. An absent or null
+// value leaves the zero value (false).
+type mispBool bool
+
+// UnmarshalJSON implements json.Unmarshaler.
+func (b *mispBool) UnmarshalJSON(data []byte) error {
+	s := strings.Trim(strings.TrimSpace(string(data)), `"`)
+	switch strings.ToLower(s) {
+	case "", "null":
+		// leave zero value
+	case "1", "true":
+		*b = true
+	case "0", "false":
+		*b = false
+	default:
+		return fmt.Errorf("ai/feed: invalid MISP boolean %q", s)
+	}
+	return nil
 }
 
 // mispObject is a MISP object — a typed bundle of related
@@ -219,7 +244,7 @@ func (p MISPParser) iocsFromAttributes(attrs []mispAttribute, ev mispAttribution
 	for _, a := range attrs {
 		// Precision gate: skip attributes not meant for automated
 		// detection unless the operator opts in to ingest all.
-		if !p.IncludeNonIDs && (a.ToIDs == nil || !*a.ToIDs) {
+		if !p.IncludeNonIDs && !bool(a.ToIDs) {
 			continue
 		}
 		meta := IOCMeta{
@@ -249,7 +274,15 @@ func mispAttrIOCs(attrType, value string, meta IOCMeta) []IOC {
 		return nil
 	}
 	typeParts := strings.Split(attrType, "|")
-	valueParts := strings.Split(value, "|")
+	// Only a composite TYPE means the value is a "|"-joined tuple. For a
+	// single type the value is taken whole — a lone `url` whose value
+	// legitimately contains a "|" (e.g. a query string) must not be
+	// truncated. SplitN caps the parts at the number of type components
+	// so any "|" inside the final component is preserved.
+	valueParts := []string{value}
+	if len(typeParts) > 1 {
+		valueParts = strings.SplitN(value, "|", len(typeParts))
+	}
 	var out []IOC
 	for i, tp := range typeParts {
 		iocType, ok := mispScalarType(tp)

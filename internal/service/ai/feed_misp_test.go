@@ -214,6 +214,65 @@ func TestMISPParser_MalformedRowsSkipped(t *testing.T) {
 	}
 }
 
+func TestMISPParser_SingleTypeValueWithPipeNotTruncated(t *testing.T) {
+	t.Parallel()
+	// A single-type `url` attribute whose value legitimately contains a
+	// "|" must be taken whole, not split on the pipe. A composite type
+	// in the same batch must still split.
+	raw := []byte(`{"Event":{"Attribute":[
+      {"type":"url","value":"http://evil.example/shell?cmd=a|b|c","to_ids":true},
+      {"type":"domain|ip","value":"c2.example.net|198.51.100.7","to_ids":true}
+    ]}}`)
+	p := MISPParser{Source: "misp", DefaultConfidence: 0.5}
+	iocs, err := p.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	by := indexByKey(iocs)
+	if _, ok := by[string(IOCTypeURL)+"\x00"+"http://evil.example/shell?cmd=a|b|c"]; !ok {
+		t.Errorf("single-type url value should be preserved whole; got %#v", iocs)
+	}
+	// Composite still decomposes into both halves.
+	if _, ok := by[string(IOCTypeDomain)+"\x00"+"c2.example.net"]; !ok {
+		t.Errorf("composite domain half missing")
+	}
+	if _, ok := by[string(IOCTypeIP)+"\x00"+"198.51.100.7"]; !ok {
+		t.Errorf("composite ip half missing")
+	}
+}
+
+func TestMISPParser_ToIDsEncodings(t *testing.T) {
+	t.Parallel()
+	// MISP has serialized to_ids as a bool, the strings "0"/"1" and
+	// "true"/"false", and the numbers 0/1 across versions. None of
+	// these may fail the document parse, and each must gate correctly.
+	raw := []byte(`{"Event":{"Attribute":[
+      {"type":"domain","value":"bool-true.example","to_ids":true},
+      {"type":"domain","value":"str-one.example","to_ids":"1"},
+      {"type":"domain","value":"str-true.example","to_ids":"true"},
+      {"type":"domain","value":"num-one.example","to_ids":1},
+      {"type":"domain","value":"str-zero.example","to_ids":"0"},
+      {"type":"domain","value":"num-zero.example","to_ids":0},
+      {"type":"domain","value":"absent.example"}
+    ]}}`)
+	p := MISPParser{Source: "misp", DefaultConfidence: 0.5}
+	iocs, err := p.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse must tolerate mixed to_ids encodings: %v", err)
+	}
+	by := indexByKey(iocs)
+	for _, want := range []string{"bool-true.example", "str-one.example", "str-true.example", "num-one.example"} {
+		if _, ok := by[string(IOCTypeDomain)+"\x00"+want]; !ok {
+			t.Errorf("actionable to_ids %q should be ingested", want)
+		}
+	}
+	for _, drop := range []string{"str-zero.example", "num-zero.example", "absent.example"} {
+		if _, ok := by[string(IOCTypeDomain)+"\x00"+drop]; ok {
+			t.Errorf("non-actionable to_ids %q should be dropped", drop)
+		}
+	}
+}
+
 func TestMISPParser_EmptyAndGarbage(t *testing.T) {
 	t.Parallel()
 	p := MISPParser{Source: "misp"}
@@ -264,8 +323,7 @@ func TestMISPParser_Efficacy(t *testing.T) {
 	// Build one event carrying the whole corpus.
 	var attrs []mispAttribute
 	for _, r := range corpus {
-		tv := r.toIDs
-		attrs = append(attrs, mispAttribute{Type: r.attrType, Value: r.value, ToIDs: &tv})
+		attrs = append(attrs, mispAttribute{Type: r.attrType, Value: r.value, ToIDs: mispBool(r.toIDs)})
 	}
 	ev := mispEvent{Info: "efficacy", Attribute: attrs}
 	p := MISPParser{Source: "misp", DefaultConfidence: 0.5}
