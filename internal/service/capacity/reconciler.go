@@ -96,8 +96,19 @@ type RuntimeKnobs struct {
 	PGMaxConnections     int
 	PGBouncerMode        bool
 	ClickHouseShards     int
-	ClickHouseBatchSize  int
-	NATSPartitions       int
+	// ClickHouseBatchSize is the *effective* batch size in force, not
+	// the boot-time config: when the WS12 autotuner owns this knob the
+	// caller passes the live retuned value so the gauge stays truthful.
+	ClickHouseBatchSize int
+	// ClickHouseBatchAutotuned is true when the WS12 closed-loop
+	// autotuner (internal/service/telemetry/autotune.go) is driving the
+	// batch size at runtime. When set, the reconciler still reports the
+	// current-vs-recommended batch as context but never flags the knob
+	// as pending — the autotuner already holds it at the right value, so
+	// flagging it would raise a permanent false "under-provisioned"
+	// alert on an operator dashboard.
+	ClickHouseBatchAutotuned bool
+	NATSPartitions           int
 }
 
 // MetricSink is the narrow metrics surface the reconciler writes to.
@@ -317,10 +328,18 @@ func gradeAxes(k RuntimeKnobs, plan *capacityplan.Section) []AxisStatus {
 			ceilingDelta(AxisPostgres, "backend_conns", pg.BackendConnsRequired, pg.MaxConnections, !pg.WithinMaxConnections),
 		},
 	}
+	batch := knobDelta(AxisClickHouse, "batch_size", k.ClickHouseBatchSize, ch.RecommendedBatchSize)
+	if k.ClickHouseBatchAutotuned {
+		// The WS12 autotuner owns this knob and holds it at the right
+		// value at runtime; surface the comparison but never flag it
+		// pending (else an operator dashboard alerts forever even while
+		// the autotuner is doing its job).
+		batch.Pending = false
+	}
 	clickhouse := AxisStatus{
 		Axis: AxisClickHouse,
 		Deltas: []KnobDelta{
-			knobDelta(AxisClickHouse, "batch_size", k.ClickHouseBatchSize, ch.RecommendedBatchSize),
+			batch,
 			knobDelta(AxisClickHouse, "shards", k.ClickHouseShards, ch.RecommendedShards),
 		},
 	}

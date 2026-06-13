@@ -445,31 +445,6 @@ func run() error {
 		logger.Info("sng-control: pop rebalance loop disabled (POP_REBALANCE_ENABLED=false)")
 	}
 
-	// WS6 capacity autopilot. DEFAULT-OFF (CAPACITY_AUTOPILOT_ENABLED):
-	// a singleton reconciler that reads the live fleet size, runs the
-	// same analytical model as the offline `bench/controlplane
-	// capacity-plan` artifact (internal/capacityplan), and surfaces
-	// current-vs-recommended sizing per axis (Postgres pool / ClickHouse
-	// / NATS) as metrics + log lines. It only observes and recommends —
-	// it never mutates a runtime knob, restarts a service, or takes any
-	// destructive action. Leader-only so a multi-replica deployment emits
-	// one recommendation per interval rather than N. RunIfLeader blocks
-	// until rootCtx is cancelled, so it runs in its own goroutine.
-	if cfg.Capacity.Enabled {
-		capacityReconciler := capacity.New(capacity.Config{
-			Observer: capacity.NewRepoFleetObserver(rc.TenantRepo, 0, nil),
-			Knobs:    capacityKnobs(&cfg),
-			Metrics:  mx,
-			Interval: cfg.Capacity.Interval,
-			Logger:   logger,
-		})
-		go elector.RunIfLeader(rootCtx, "capacity-autopilot", capacityReconciler.Run)
-		logger.Info("sng-control: capacity autopilot registered (runs on leader only)",
-			slog.Duration("interval", cfg.Capacity.Interval))
-	} else {
-		logger.Info("sng-control: capacity autopilot disabled (CAPACITY_AUTOPILOT_ENABLED=false)")
-	}
-
 	// SOC2 evidence collection is a singleton background workload:
 	// only the leader runs the weekly collection / monthly aggregation
 	// / gap-detection loop, so a multi-replica deployment produces one
@@ -613,7 +588,7 @@ func run() error {
 			slog.Duration("min_interval", cfg.Activity.MinInterval))
 	}
 
-	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer, dlpReviewIngest, rc.SampleRateResolver, rc.ActivityRecorder)
+	rawTelShutdown, chStats, chReaderFactory, chLiveBatch, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer, dlpReviewIngest, rc.SampleRateResolver, rc.ActivityRecorder)
 	if err != nil {
 		return fmt.Errorf("start telemetry: %w", err)
 	}
@@ -676,6 +651,36 @@ func run() error {
 			logger.Error("telemetry shutdown failed", slog.Any("error", err))
 		}
 	}()
+
+	// WS6 capacity autopilot. DEFAULT-OFF (CAPACITY_AUTOPILOT_ENABLED):
+	// a singleton reconciler that reads the live fleet size, runs the
+	// same analytical model as the offline `bench/controlplane
+	// capacity-plan` artifact (internal/capacityplan), and surfaces
+	// current-vs-recommended sizing per axis (Postgres pool / ClickHouse
+	// / NATS) as metrics + log lines. It only observes and recommends —
+	// it never mutates a runtime knob, restarts a service, or takes any
+	// destructive action. Leader-only so a multi-replica deployment emits
+	// one recommendation per interval rather than N. RunIfLeader blocks
+	// until rootCtx is cancelled, so it runs in its own goroutine. Wired
+	// here (after startTelemetry) so the ClickHouse batch-size knob can
+	// be read live from the writers — when the WS12 autotuner owns it,
+	// the gauge tracks the retuned value instead of the boot config.
+	if cfg.Capacity.Enabled {
+		chBatchAutotuned := cfg.TelemetryAnalytics.ClickHouseAutoTuneEnabled && chStats != nil
+		capacityReconciler := capacity.New(capacity.Config{
+			Observer: capacity.NewRepoFleetObserver(rc.TenantRepo, 0, nil),
+			Knobs:    capacityKnobs(&cfg, chLiveBatch, chBatchAutotuned),
+			Metrics:  mx,
+			Interval: cfg.Capacity.Interval,
+			Logger:   logger,
+		})
+		go elector.RunIfLeader(rootCtx, "capacity-autopilot", capacityReconciler.Run)
+		logger.Info("sng-control: capacity autopilot registered (runs on leader only)",
+			slog.Duration("interval", cfg.Capacity.Interval),
+			slog.Bool("clickhouse_batch_autotuned", chBatchAutotuned))
+	} else {
+		logger.Info("sng-control: capacity autopilot disabled (CAPACITY_AUTOPILOT_ENABLED=false)")
+	}
 
 	// Internal metrics surface. Bound to a dedicated port
 	// (METRICS_PORT, default 9090) — never the public API
@@ -2650,7 +2655,7 @@ func startTelemetry(
 	dlpObserver telemetry.DLPReviewObserver,
 	sampleResolver *telemetry.MapSampleRateResolver,
 	activityObserver *activity.Recorder,
-) (func(context.Context) error, handler.TelemetryClassQuerier, func() (policy.TelemetrySource, error), error) {
+) (func(context.Context) error, handler.TelemetryClassQuerier, func() (policy.TelemetrySource, error), func() int, error) {
 	var hot telemetry.HotWriter
 	var cold telemetry.ColdWriter
 	var hotStop func(context.Context) error
@@ -2684,12 +2689,12 @@ func startTelemetry(
 		if cfg.TelemetryAnalytics.ClickHouseSharding {
 			sw, err := chwriter.NewShardedWriter(ctx, chCfg, logger)
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("clickhouse sharded writer: %w", err)
+				return nil, nil, nil, nil, fmt.Errorf("clickhouse sharded writer: %w", err)
 			}
 			if cfg.TelemetryAnalytics.ClickHouseEnsureSchema {
 				if err := sw.EnsureSchema(ctx); err != nil {
 					_ = sw.Stop(ctx)
-					return nil, nil, nil, fmt.Errorf("clickhouse schema: %w", err)
+					return nil, nil, nil, nil, fmt.Errorf("clickhouse schema: %w", err)
 				}
 			}
 			hot = sw
@@ -2707,12 +2712,12 @@ func startTelemetry(
 		} else {
 			w, err := chwriter.New(ctx, chCfg, logger)
 			if err != nil {
-				return nil, nil, nil, fmt.Errorf("clickhouse writer: %w", err)
+				return nil, nil, nil, nil, fmt.Errorf("clickhouse writer: %w", err)
 			}
 			if cfg.TelemetryAnalytics.ClickHouseEnsureSchema {
 				if err := w.EnsureSchema(ctx); err != nil {
 					_ = w.Stop(ctx)
-					return nil, nil, nil, fmt.Errorf("clickhouse schema: %w", err)
+					return nil, nil, nil, nil, fmt.Errorf("clickhouse schema: %w", err)
 				}
 			}
 			hot = w
@@ -2733,7 +2738,7 @@ func startTelemetry(
 			if hotStop != nil {
 				_ = hotStop(ctx)
 			}
-			return nil, nil, nil, fmt.Errorf("aws config: %w", err)
+			return nil, nil, nil, nil, fmt.Errorf("aws config: %w", err)
 		}
 		s3Cfg := s3writer.Config{
 			Bucket:             cfg.TelemetryAnalytics.S3Bucket,
@@ -2748,7 +2753,7 @@ func startTelemetry(
 			if hotStop != nil {
 				_ = hotStop(ctx)
 			}
-			return nil, nil, nil, fmt.Errorf("s3 writer: %w", err)
+			return nil, nil, nil, nil, fmt.Errorf("s3 writer: %w", err)
 		}
 		cold = w
 		coldStop = w.Stop
@@ -2796,7 +2801,7 @@ func startTelemetry(
 		if coldStop != nil {
 			_ = coldStop(ctx)
 		}
-		return nil, nil, nil, fmt.Errorf("telemetry service: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("telemetry service: %w", err)
 	}
 	svc.WithDLQ(pub)
 	// WS8 cost control on the telemetry hot path. Both are additive,
@@ -2861,7 +2866,7 @@ func startTelemetry(
 		if coldStop != nil {
 			_ = coldStop(ctx)
 		}
-		return nil, nil, nil, fmt.Errorf("telemetry start: %w", err)
+		return nil, nil, nil, nil, fmt.Errorf("telemetry start: %w", err)
 	}
 	logger.Info("telemetry: consumer started")
 
@@ -2903,7 +2908,26 @@ func startTelemetry(
 		}
 		return firstErr
 	}
-	return shutdown, chStats, chReaderFactory, nil
+
+	// liveBatchSize reports the *effective* ClickHouse batch size in
+	// force, so the WS6 capacity autopilot's gauge reflects any runtime
+	// retuning by the auto-tuner rather than the stale boot-time config.
+	// Sharded writers can carry per-shard batch sizes; report the
+	// minimum (the most conservative — the shard nearest its
+	// insert-frequency ceiling). Returns 0 when no hot tier is
+	// configured, signalling the caller to fall back to the config value.
+	tuned := tunables
+	liveBatchSize := func() int {
+		smallest := 0
+		for i, t := range tuned {
+			b := t.BatchSize()
+			if i == 0 || b < smallest {
+				smallest = b
+			}
+		}
+		return smallest
+	}
+	return shutdown, chStats, chReaderFactory, liveBatchSize, nil
 }
 
 // loadAWSConfig resolves an AWS config for the cold-path writer.
@@ -3485,25 +3509,39 @@ func runPoPRebalance(ctx context.Context, svc *pop.Service, interval time.Durati
 // capacityKnobs returns a closure that snapshots the capacity-relevant
 // runtime settings the WS6 autopilot grades against. It is read once per
 // reconcile cycle (rather than captured once) so a value that can change
-// at runtime is reflected. The ClickHouse shard count mirrors the
-// ShardedWriter's "one shard per endpoint" rule (clickhouse/sharding.go)
-// — len(endpoints) in shard-aware mode, else a single logical
-// destination — without reaching into the writer, which lives in a
-// different wiring scope.
-func capacityKnobs(cfg *config.Config) func() capacity.RuntimeKnobs {
+// at runtime — chiefly the ClickHouse batch size, which the WS12
+// auto-tuner retunes live — is reflected rather than stale. The
+// ClickHouse shard count mirrors the ShardedWriter's "one shard per
+// endpoint" rule (clickhouse/sharding.go) — len(endpoints) in
+// shard-aware mode, else a single logical destination — without
+// reaching into the writer, which lives in a different wiring scope.
+//
+// liveBatch reports the effective batch size from the live writers (0
+// when no hot tier is configured, in which case the boot-time config
+// value is the effective value since nothing retunes it). batchAutotuned
+// is true when the WS12 auto-tuner owns the knob, so the reconciler
+// surfaces the batch comparison but does not flag it pending.
+func capacityKnobs(cfg *config.Config, liveBatch func() int, batchAutotuned bool) func() capacity.RuntimeKnobs {
 	return func() capacity.RuntimeKnobs {
 		shards := 1
 		if cfg.TelemetryAnalytics.ClickHouseSharding && len(cfg.TelemetryAnalytics.ClickHouseEndpoints) > 0 {
 			shards = len(cfg.TelemetryAnalytics.ClickHouseEndpoints)
 		}
+		batch := cfg.TelemetryAnalytics.ClickHouseBatchSize
+		if liveBatch != nil {
+			if b := liveBatch(); b > 0 {
+				batch = b
+			}
+		}
 		return capacity.RuntimeKnobs{
-			ControlPlaneReplicas: cfg.Capacity.ControlPlaneReplicas,
-			PGMaxOpenConns:       cfg.Postgres.MaxOpenConns,
-			PGMaxConnections:     cfg.Capacity.PGMaxConnections,
-			PGBouncerMode:        cfg.Postgres.PgBouncerMode,
-			ClickHouseShards:     shards,
-			ClickHouseBatchSize:  cfg.TelemetryAnalytics.ClickHouseBatchSize,
-			NATSPartitions:       cfg.NATS.Partitions,
+			ControlPlaneReplicas:     cfg.Capacity.ControlPlaneReplicas,
+			PGMaxOpenConns:           cfg.Postgres.MaxOpenConns,
+			PGMaxConnections:         cfg.Capacity.PGMaxConnections,
+			PGBouncerMode:            cfg.Postgres.PgBouncerMode,
+			ClickHouseShards:         shards,
+			ClickHouseBatchSize:      batch,
+			ClickHouseBatchAutotuned: batchAutotuned,
+			NATSPartitions:           cfg.NATS.Partitions,
 		}
 	}
 }

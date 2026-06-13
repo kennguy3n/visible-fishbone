@@ -175,6 +175,44 @@ func TestReconcileGradesAxes(t *testing.T) {
 	}
 }
 
+// TestAutotunedBatchNotFlaggedPending: when the WS12 autotuner owns the
+// ClickHouse batch size, the reconciler still surfaces the
+// current-vs-recommended comparison but must NOT flag the knob pending —
+// otherwise an operator dashboard alerts forever while the autotuner is
+// holding the batch at the right value. The reconciler is fed the live
+// (already-tuned) batch via the knobs snapshot, so the gauge is truthful.
+func TestAutotunedBatchNotFlaggedPending(t *testing.T) {
+	knobs := docKnobs()
+	// Live batch is still climbing toward the 13250 recommendation, so a
+	// naive "recommended > current" would flag it — but the autotuner
+	// owns it, so it must be advisory only.
+	knobs.ClickHouseBatchSize = 4096
+	knobs.ClickHouseBatchAutotuned = true
+	sink := newFakeSink()
+	r := newTestReconciler(FleetObservation{TenantCount: 5000}, knobs, sink)
+
+	rec, err := r.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	byAxis := map[string]AxisStatus{}
+	for _, a := range rec.Axes {
+		byAxis[a.Axis] = a
+	}
+	if byAxis[AxisClickHouse].Pending {
+		t.Error("clickhouse axis must not be pending when the autotuner owns batch_size")
+	}
+	if sink.pending[AxisClickHouse] {
+		t.Error("clickhouse pending flag must be false (autotuner owns batch_size)")
+	}
+	// The comparison is still surfaced for context: current is the live
+	// tuned value, recommended is the model's target.
+	if got := sink.settings[settingKey{AxisClickHouse, "batch_size"}]; got[0] != 4096 || got[1] != 13250 {
+		t.Errorf("clickhouse batch_size gauge = %v, want [4096 13250]", got)
+	}
+}
+
 // TestNoPendingWhenAdequatelyProvisioned: a fleet whose knobs already
 // meet the recommendation reports no pending action and over-
 // provisioning is never flagged (fail-safe toward more capacity).
