@@ -661,8 +661,12 @@ func TestReconcileActivityTiered(t *testing.T) {
 	e.WithDormancyPlanner(&planner)
 
 	// Cycle 0: full sweep over the three active tenants (suspended skipped).
-	if err := e.Reconcile(context.Background()); err != nil {
+	sweep0, err := e.Reconcile(context.Background())
+	if err != nil {
 		t.Fatalf("Reconcile cycle 0: %v", err)
+	}
+	if sweep0.Cycle != 1 || sweep0.TenantsVisited != 3 {
+		t.Fatalf("cycle 0 sweep = %+v, want Cycle 1 / TenantsVisited 3", sweep0)
 	}
 	if s := e.Stats(); s.TenantsVisited != 3 {
 		t.Fatalf("cycle 0 visited = %d, want 3", s.TenantsVisited)
@@ -670,8 +674,23 @@ func TestReconcileActivityTiered(t *testing.T) {
 
 	// Cycle 1: active visited; idle (every 10) and dormant (every 100)
 	// both skipped.
-	if err := e.Reconcile(context.Background()); err != nil {
+	sweep1, err := e.Reconcile(context.Background())
+	if err != nil {
 		t.Fatalf("Reconcile cycle 1: %v", err)
+	}
+	// The per-sweep return describes only THIS pass — one active tenant
+	// visited, one idle + one dormant skipped — not the lifetime totals.
+	if sweep1.Cycle != 2 {
+		t.Errorf("cycle 1 sweep.Cycle = %d, want 2", sweep1.Cycle)
+	}
+	if sweep1.TenantsVisited != 1 {
+		t.Errorf("cycle 1 sweep.TenantsVisited = %d, want 1", sweep1.TenantsVisited)
+	}
+	if sweep1.SkippedIdle != 1 {
+		t.Errorf("cycle 1 sweep.SkippedIdle = %d, want 1", sweep1.SkippedIdle)
+	}
+	if sweep1.SkippedDormant != 1 {
+		t.Errorf("cycle 1 sweep.SkippedDormant = %d, want 1", sweep1.SkippedDormant)
 	}
 	s := e.Stats()
 	if s.TenantsVisited != 4 { // 3 from cycle 0 + 1 active on cycle 1
@@ -705,7 +724,7 @@ func TestReconcileNoPlannerVisitsAll(t *testing.T) {
 	e.SetClock(fixedClock(now))
 
 	for i := 0; i < 3; i++ {
-		if err := e.Reconcile(context.Background()); err != nil {
+		if _, err := e.Reconcile(context.Background()); err != nil {
 			t.Fatalf("Reconcile: %v", err)
 		}
 	}
@@ -717,7 +736,7 @@ func TestReconcileNoPlannerVisitsAll(t *testing.T) {
 func TestReconcileRequiresLister(t *testing.T) {
 	t.Parallel()
 	e := newTestAutopilot(t, &apReporter{}, &apAnomalies{}, &apCapManager{})
-	if err := e.Reconcile(context.Background()); err == nil {
+	if _, err := e.Reconcile(context.Background()); err == nil {
 		t.Fatal("expected an error when no tenant lister is wired")
 	}
 }

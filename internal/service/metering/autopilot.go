@@ -494,9 +494,14 @@ func (e *MarginAutopilot) anomalyRecommendations(ctx context.Context, tenantID u
 // always caught within that bound — the sweep fails safe toward MORE
 // work, never less. Per-tenant errors are logged and counted; the sweep
 // continues so one tenant cannot starve the rest.
-func (e *MarginAutopilot) Reconcile(ctx context.Context) error {
+//
+// It returns an AutopilotSweep describing the work done by THIS pass
+// (per-sweep, not cumulative), so the caller can log meaningful single-
+// sweep figures; the lifetime counters Stats exposes are advanced in
+// parallel for the /stats endpoint.
+func (e *MarginAutopilot) Reconcile(ctx context.Context) (AutopilotSweep, error) {
 	if e.tenants == nil {
-		return fmt.Errorf("metering: autopilot: Reconcile requires a tenant lister")
+		return AutopilotSweep{}, fmt.Errorf("metering: autopilot: Reconcile requires a tenant lister")
 	}
 	// cycle is 0-based for the planner's cadence gate; stats.cycles is
 	// the 1-based lifetime count Stats reports. Derive both from one
@@ -504,37 +509,39 @@ func (e *MarginAutopilot) Reconcile(ctx context.Context) error {
 	cycle := e.stats.cycles.Add(1) - 1
 	now := e.nowFunc()
 
-	var (
-		page            repository.Page
-		active, skipped int
-	)
+	sweep := AutopilotSweep{Cycle: cycle + 1}
+	var page repository.Page
 	for {
 		res, err := e.tenants.List(ctx, page)
 		if err != nil {
-			return fmt.Errorf("metering: autopilot: list tenants: %w", err)
+			return sweep, fmt.Errorf("metering: autopilot: list tenants: %w", err)
 		}
 		for _, t := range res.Items {
 			if t.Status != repository.TenantStatusActive {
 				continue
 			}
-			active++
 			if e.planner != nil {
 				tier := e.planner.Classify(now, t.LastActiveAt)
 				if !e.planner.ShouldVisit(tier, cycle) {
-					skipped++
 					e.countSkip(tier)
+					sweep.countSkip(tier)
 					continue
 				}
 			}
 			e.stats.tenantsVisited.Add(1)
-			if _, err := e.EvaluateTenant(ctx, t.ID); err != nil {
+			sweep.TenantsVisited++
+			recs, err := e.EvaluateTenant(ctx, t.ID)
+			if err != nil {
 				e.stats.evalErrors.Add(1)
+				sweep.EvalErrors++
 				e.logger.WarnContext(ctx, "metering: autopilot evaluate tenant failed",
 					slog.String("tenant_id", t.ID.String()),
 					slog.Any("error", err))
+			} else {
+				sweep.countRecommendations(recs)
 			}
 			if err := ctx.Err(); err != nil {
-				return err
+				return sweep, err
 			}
 		}
 		if res.NextCursor == "" {
@@ -542,14 +549,13 @@ func (e *MarginAutopilot) Reconcile(ctx context.Context) error {
 		}
 		page.After = res.NextCursor
 	}
-	if e.planner != nil && skipped > 0 {
+	if e.planner != nil && (sweep.SkippedIdle+sweep.SkippedDormant) > 0 {
 		e.logger.DebugContext(ctx, "metering: autopilot activity-tiered sweep",
 			slog.Int64("cycle", cycle),
-			slog.Int("active", active),
-			slog.Int("visited", active-skipped),
-			slog.Int("skipped", skipped))
+			slog.Int64("visited", sweep.TenantsVisited),
+			slog.Int64("skipped", sweep.SkippedIdle+sweep.SkippedDormant))
 	}
-	return nil
+	return sweep, nil
 }
 
 // autoActMode resolves the tenant's opt-in decision once per evaluation.
@@ -654,6 +660,56 @@ type AutopilotStats struct {
 	OpenUpsell       int64 `json:"open_upsell"`
 	ReviewAnomaly    int64 `json:"review_anomaly"`
 	CapsEnforced     int64 `json:"caps_enforced"`
+}
+
+// AutopilotSweep is the summary of a SINGLE Reconcile pass — the work
+// that one sweep did, not the lifetime totals. Reconcile returns it so a
+// caller can log meaningful per-sweep figures (cumulative Stats counters
+// grow monotonically and would misreport a single sweep's workload).
+type AutopilotSweep struct {
+	// Cycle is the 1-based number of this sweep over the engine's
+	// lifetime (the first sweep is cycle 1).
+	Cycle            int64 `json:"cycle"`
+	TenantsVisited   int64 `json:"tenants_visited"`
+	SkippedIdle      int64 `json:"skipped_idle"`
+	SkippedDormant   int64 `json:"skipped_dormant"`
+	EvalErrors       int64 `json:"eval_errors"`
+	Recommendations  int64 `json:"recommendations"`
+	EnforceBudgetCap int64 `json:"enforce_budget_cap"`
+	ThrottleMeter    int64 `json:"throttle_meter"`
+	OpenUpsell       int64 `json:"open_upsell"`
+	ReviewAnomaly    int64 `json:"review_anomaly"`
+	CapsEnforced     int64 `json:"caps_enforced"`
+}
+
+func (s *AutopilotSweep) countSkip(tier tenancy.Tier) {
+	switch tier {
+	case tenancy.TierIdle:
+		s.SkippedIdle++
+	case tenancy.TierDormant:
+		s.SkippedDormant++
+	}
+}
+
+// countRecommendations folds one tenant's recommendations into the
+// per-sweep tally, mirroring the per-kind lifetime bookkeeping in record.
+func (s *AutopilotSweep) countRecommendations(recs []Recommendation) {
+	for _, rec := range recs {
+		s.Recommendations++
+		switch rec.Kind {
+		case RecEnforceBudgetCap:
+			s.EnforceBudgetCap++
+			if rec.Applied {
+				s.CapsEnforced++
+			}
+		case RecThrottleMeter:
+			s.ThrottleMeter++
+		case RecOpenUpsell:
+			s.OpenUpsell++
+		case RecReviewAnomaly:
+			s.ReviewAnomaly++
+		}
+	}
 }
 
 // Stats returns a snapshot of the engine's lifetime counters.

@@ -3590,7 +3590,8 @@ func runMarginAutopilot(ctx context.Context, engine *metering.MarginAutopilot, i
 		interval = time.Hour
 	}
 	sweep := func() {
-		if err := engine.Reconcile(ctx); err != nil {
+		s, err := engine.Reconcile(ctx)
+		if err != nil {
 			// A cancelled context is a normal shutdown, not a failure, and
 			// leaves the sweep partial — don't warn and don't log a
 			// misleading "complete" line in either case.
@@ -3599,9 +3600,10 @@ func runMarginAutopilot(ctx context.Context, engine *metering.MarginAutopilot, i
 			}
 			return
 		}
-		s := engine.Stats()
+		// s is per-sweep (this pass only), not cumulative, so the
+		// figures describe the workload of the sweep that just finished.
 		logger.Info("metering: margin autopilot sweep complete",
-			slog.Int64("cycle", s.Cycles),
+			slog.Int64("cycle", s.Cycle),
 			slog.Int64("visited", s.TenantsVisited),
 			slog.Int64("skipped_idle", s.SkippedIdle),
 			slog.Int64("skipped_dormant", s.SkippedDormant),
