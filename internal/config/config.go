@@ -1445,6 +1445,30 @@ type TelemetryAnalytics struct {
 	// place. The healthy per-shard ceiling is ~1–2 inserts/sec.
 	ClickHouseAutoTuneTargetInsertsPerSec float64
 
+	// ClickHouseTierSamplingEnabled toggles the WS-4 activity-tier-aware
+	// telemetry sampling policy on the ClickHouse hot path (env
+	// CLICKHOUSE_TIER_SAMPLING_ENABLED). DEFAULT-OFF: enabling it makes
+	// idle tenants sample more aggressively and dormant tenants write
+	// security-events-only, so it is opt-in to avoid silently changing
+	// retention on upgrade. Security-relevant events (IPS / ZTNA / DLP)
+	// and the inspect_full compliance record are always preserved at
+	// 1:1 regardless. Only consulted when an adaptive sampler is wired.
+	ClickHouseTierSamplingEnabled bool
+	// ClickHouseTierSamplingIdleMultiplier scales the keep probability
+	// for idle-tier tenants when tier sampling is enabled (env
+	// CLICKHOUSE_TIER_SAMPLING_IDLE_MULTIPLIER). <= 0 ⇒ use the
+	// telemetry package default (0.25), so the default lives in one
+	// place. Clamped to (0,1]; dormant tenants are always
+	// security-events-only and are not tunable here.
+	ClickHouseTierSamplingIdleMultiplier float64
+	// ClickHouseTierSamplingRefreshInterval bounds how stale a tenant's
+	// activity tier may be on the hot path (env
+	// CLICKHOUSE_TIER_SAMPLING_REFRESH_INTERVAL). <= 0 ⇒ use the
+	// telemetry package default (60s). A waking dormant tenant is
+	// re-classified active within one interval, so the security floor
+	// plus this bound cap how long a now-active tenant is under-sampled.
+	ClickHouseTierSamplingRefreshInterval time.Duration
+
 	// S3: bucket name. Empty disables the cold-path sink.
 	S3Bucket string
 	// S3Prefix is the top-level key prefix under which archive
@@ -1847,6 +1871,10 @@ func Load() (Config, error) {
 		{"BRUTEFORCE_AUTH_COOLDOWN", 30 * time.Second, &cfg.BruteForce.AuthCooldown},
 		{"BRUTEFORCE_ENROLL_COOLDOWN", 5 * time.Minute, &cfg.BruteForce.EnrollCooldown},
 		{"CLICKHOUSE_FLUSH_INTERVAL", 2 * time.Second, &cfg.TelemetryAnalytics.ClickHouseFlushInterval},
+		// WS-4 tier-sampling activity-tier refresh cadence. 0 ⇒ use the
+		// telemetry package default (60s). Bounds how stale a tenant's
+		// tier may be on the hot path.
+		{"CLICKHOUSE_TIER_SAMPLING_REFRESH_INTERVAL", 0, &cfg.TelemetryAnalytics.ClickHouseTierSamplingRefreshInterval},
 		{"S3_TELEMETRY_FLUSH_INTERVAL", 30 * time.Second, &cfg.TelemetryAnalytics.S3FlushInterval},
 		{"APP_REGISTRY_SYNC_INTERVAL", 24 * time.Hour, &cfg.AppRegistry.SyncInterval},
 		{"CASB_NOOPS_RECONCILE_INTERVAL", time.Hour, &cfg.CASB.NoOpsReconcileInterval},
@@ -1905,6 +1933,10 @@ func Load() (Config, error) {
 		// telemetry package default (~2/sec). Parsed strictly so a typo
 		// can't silently revert the "too many parts" health target.
 		{"CLICKHOUSE_AUTOTUNE_TARGET_INSERTS_PER_SEC", 0, &cfg.TelemetryAnalytics.ClickHouseAutoTuneTargetInsertsPerSec},
+		// WS-4 tier-sampling idle-tier keep multiplier. 0 ⇒ use the
+		// telemetry package default (0.25). Parsed strictly so a typo
+		// can't silently change idle-tenant retention.
+		{"CLICKHOUSE_TIER_SAMPLING_IDLE_MULTIPLIER", 0, &cfg.TelemetryAnalytics.ClickHouseTierSamplingIdleMultiplier},
 	}
 	// Boolean fields parsed strictly. Both entries below toggle
 	// security- or correctness-adjacent behaviour:
@@ -1935,6 +1967,7 @@ func Load() (Config, error) {
 		{"CLICKHOUSE_ROW_LIMIT_ENABLED", true, &cfg.TelemetryAnalytics.ClickHouseRowLimitEnabled},
 		{"CLICKHOUSE_ROW_LIMIT_ADAPTIVE", false, &cfg.TelemetryAnalytics.ClickHouseRowLimitAdaptive},
 		{"CLICKHOUSE_AUTOTUNE_ENABLED", true, &cfg.TelemetryAnalytics.ClickHouseAutoTuneEnabled},
+		{"CLICKHOUSE_TIER_SAMPLING_ENABLED", false, &cfg.TelemetryAnalytics.ClickHouseTierSamplingEnabled},
 		{"S3_TELEMETRY_MANAGE_LIFECYCLE", true, &cfg.TelemetryAnalytics.S3ManageLifecycle},
 		{"APP_REGISTRY_SYNC_ENABLED", true, &cfg.AppRegistry.SyncEnabled},
 		{"CASB_NOOPS_ENABLED", false, &cfg.CASB.NoOpsEnabled},

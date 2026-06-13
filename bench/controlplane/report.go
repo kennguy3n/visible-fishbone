@@ -297,10 +297,33 @@ type CapacityPlanSection struct {
 	ClickHouse ClickHouseWritePlan `json:"clickhouse"`
 	// NATS is the subject-cardinality + JetStream storage projection.
 	NATS NATSSubjectPlan `json:"nats"`
+	// TierSampling is the WS-4 activity-tier sampling breakdown. Present
+	// only when the policy is modelled (default-OFF), so the baseline
+	// projection's JSON is byte-for-byte unchanged.
+	TierSampling *TierSamplingPlan `json:"tier_sampling,omitempty"`
 	// PeriodicSweep is the control-plane dormancy-dividend projection:
 	// tenants-visited/cycle for the periodic per-tenant sweeps, before
 	// vs after activity-tiered gating (WS-1).
 	PeriodicSweep PeriodicSweepPlan `json:"periodic_sweep"`
+}
+
+// TierSamplingPlan decomposes the fleet write rate by activity tier
+// under the WS-4 sampling policy: active tenants write full fidelity,
+// idle tenants sample at IdleSampleMultiplier, dormant tenants write
+// security-events-only. It is the metric proving dormant-tenant rows/s
+// collapse and that total write cost tracks the active cohort.
+type TierSamplingPlan struct {
+	IdleSampleMultiplier float64 `json:"idle_sample_multiplier"`
+	ActiveTenants        int     `json:"active_tenants"`
+	IdleTenants          int     `json:"idle_tenants"`
+	DormantTenants       int     `json:"dormant_tenants"`
+	ActiveRowsPerSec     float64 `json:"active_rows_per_sec"`
+	IdleRowsPerSec       float64 `json:"idle_rows_per_sec"`
+	DormantRowsPerSec    float64 `json:"dormant_rows_per_sec"`
+	SampledRowsPerSec    float64 `json:"sampled_rows_per_sec"`
+	BaselineRowsPerSec   float64 `json:"baseline_rows_per_sec"`
+	ReductionPct         float64 `json:"reduction_pct"`
+	ActiveCohortSharePct float64 `json:"active_cohort_share_pct"`
 }
 
 // PeriodicSweepPlan projects the WS-1 dormancy dividend: how many
@@ -371,11 +394,12 @@ type ClickHouseWritePlan struct {
 	InsertsPerSecPerShard float64 `json:"inserts_per_sec_per_shard"`
 	MonthlyRows           int64   `json:"monthly_rows"`
 	// PerTenantMonthlyRows is the FLEET-WIDE AVERAGE rows/month (total ÷
-	// full tenant count). With DormantFraction > 0 this is a blended
-	// average — active tenants write more than this and dormant tenants
-	// near-zero — not what any individual tenant writes. Use
-	// PerActiveTenantMonthlyRows for per-tenant sizing when hibernation is
-	// modelled. Equals PerActiveTenantMonthlyRows when DormantFraction=0.
+	// full tenant count). With DormantFraction > 0 (or tier sampling on)
+	// this is a blended average — active tenants write more than this and
+	// dormant tenants near-zero — not what any individual tenant writes.
+	// Use PerActiveTenantMonthlyRows (or the tier_sampling section) for
+	// per-tenant sizing when a reduction is modelled. Equals
+	// PerActiveTenantMonthlyRows when DormantFraction=0.
 	PerTenantMonthlyRows int64 `json:"per_tenant_monthly_rows"`
 	// PerActiveTenantMonthlyRows is rows/month per ACTIVE (emitting)
 	// tenant: total ÷ active-tenant count. This is the number to size an
