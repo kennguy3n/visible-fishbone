@@ -152,8 +152,9 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 				count++
 			}
 		case tier != tenancy.TierDormant && isHibernated:
-			c.wake(ctx, act.ID, "tenant left dormant tier: "+tier.String())
-			count--
+			if c.wake(ctx, act.ID, "tenant left dormant tier: "+tier.String()) {
+				count--
+			}
 		}
 	}
 	c.metrics.setHibernatedCount(count)
@@ -192,8 +193,11 @@ func (c *Controller) hibernate(ctx context.Context, tenantID uuid.UUID, tier ten
 
 // wake is the controller's backstop wake (the fast path is the
 // Coordinator). It resumes subscriptions best-effort and always marks
-// the tenant active — the safe direction is more work.
-func (c *Controller) wake(ctx context.Context, tenantID uuid.UUID, reason string) {
+// the tenant active — the safe direction is more work. Returns true when
+// the active state was persisted, so the caller can keep the
+// hibernated_tenants gauge in step (a failed persist leaves the tenant
+// hibernated in the store and is retried next cycle).
+func (c *Controller) wake(ctx context.Context, tenantID uuid.UUID, reason string) bool {
 	if err := c.subs.Resume(ctx, tenantID); err != nil {
 		c.logger.Warn("hibernation: nats resume failed; marking active anyway",
 			slog.String("tenant", tenantID.String()), slog.Any("error", err))
@@ -201,11 +205,12 @@ func (c *Controller) wake(ctx context.Context, tenantID uuid.UUID, reason string
 	if _, err := c.store.SetActive(ctx, tenantID, reason, c.now()); err != nil {
 		c.logger.Warn("hibernation: persist active state failed",
 			slog.String("tenant", tenantID.String()), slog.Any("error", err))
-		return
+		return false
 	}
 	c.metrics.incWake()
 	c.logger.Info("hibernation: tenant woken (controller backstop)",
 		slog.String("tenant", tenantID.String()), slog.String("reason", reason))
+	return true
 }
 
 // Run drives RunOnce immediately, then on every tick until ctx is

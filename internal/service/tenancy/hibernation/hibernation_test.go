@@ -238,6 +238,34 @@ func TestControllerGaugeCountsStoreHibernatedNotInActivityList(t *testing.T) {
 	}
 }
 
+// TestControllerGaugeUnchangedOnFailedWake verifies a failed backstop
+// wake (store persist error) does NOT decrement the hibernated_tenants
+// gauge: the tenant is still hibernated in the store, so it must stay
+// counted until a later cycle actually persists the active state.
+func TestControllerGaugeUnchangedOnFailedWake(t *testing.T) {
+	now := time.Now().UTC()
+	id := uuid.New()
+	store := newMemStore()
+	if _, err := store.SetHibernated(context.Background(), id, "seed", now.Add(-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	store.failWrite = true // SetActive will now fail
+
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg, "sng")
+	ctrl, _ := New(dormantClassifier(), store,
+		listActivity{acts: []TenantActivity{{ID: id, LastActiveAt: ptr(now)}}}, // active → wake attempted
+		WithMetrics(m),
+		WithClock(func() time.Time { return now }),
+	)
+	if err := ctrl.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := testutil.ToFloat64(m.hibernatedTenants); got != 1 {
+		t.Fatalf("hibernated_tenants gauge = %v, want 1 (failed wake must not decrement)", got)
+	}
+}
+
 // TestCoordinatorWakeOnActivity verifies the fast wake path clears the
 // registry, persists active, resumes subs, and records a latency.
 func TestCoordinatorWakeOnActivity(t *testing.T) {
