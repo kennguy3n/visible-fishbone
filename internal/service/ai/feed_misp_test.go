@@ -253,6 +253,7 @@ func TestMISPParser_ToIDsEncodings(t *testing.T) {
       {"type":"domain","value":"num-one.example","to_ids":1},
       {"type":"domain","value":"str-zero.example","to_ids":"0"},
       {"type":"domain","value":"num-zero.example","to_ids":0},
+      {"type":"domain","value":"junk.example","to_ids":2},
       {"type":"domain","value":"absent.example"}
     ]}}`)
 	p := MISPParser{Source: "misp", DefaultConfidence: 0.5}
@@ -266,7 +267,9 @@ func TestMISPParser_ToIDsEncodings(t *testing.T) {
 			t.Errorf("actionable to_ids %q should be ingested", want)
 		}
 	}
-	for _, drop := range []string{"str-zero.example", "num-zero.example", "absent.example"} {
+	// "0", 0, an unrecognised token (2), and an absent flag are all
+	// treated as non-actionable and dropped — never fatal to the batch.
+	for _, drop := range []string{"str-zero.example", "num-zero.example", "junk.example", "absent.example"} {
 		if _, ok := by[string(IOCTypeDomain)+"\x00"+drop]; ok {
 			t.Errorf("non-actionable to_ids %q should be dropped", drop)
 		}

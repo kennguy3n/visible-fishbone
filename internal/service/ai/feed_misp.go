@@ -86,22 +86,22 @@ type mispAttribute struct {
 // (modern REST API), the strings "0"/"1"/"true"/"false" (older
 // instances and some file exports), or the numbers 0/1. Without this a
 // single legacy `"to_ids":"1"` would make encoding/json fail the whole
-// document parse rather than just that attribute. An absent or null
-// value leaves the zero value (false).
+// document parse rather than just that attribute.
+//
+// Decoding never errors: it follows the parser's "a malformed
+// attribute is skipped, never fatal to the batch" contract. An absent,
+// null, or unrecognised token leaves the zero value (false), i.e.
+// "not actionable" — the fail-safe default that keeps a junk flag from
+// ever causing enforcement.
 type mispBool bool
 
 // UnmarshalJSON implements json.Unmarshaler.
 func (b *mispBool) UnmarshalJSON(data []byte) error {
-	s := strings.Trim(strings.TrimSpace(string(data)), `"`)
-	switch strings.ToLower(s) {
-	case "", "null":
-		// leave zero value
+	switch strings.ToLower(strings.Trim(strings.TrimSpace(string(data)), `"`)) {
 	case "1", "true":
 		*b = true
-	case "0", "false":
-		*b = false
 	default:
-		return fmt.Errorf("ai/feed: invalid MISP boolean %q", s)
+		*b = false
 	}
 	return nil
 }
