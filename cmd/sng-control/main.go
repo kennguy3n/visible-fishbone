@@ -1789,8 +1789,10 @@ func buildRouter(
 	// Read-only threat-intel feed coverage surface. Feeds are
 	// platform-global, so the route is platform-gated (threatfeeds:read)
 	// and reads the shared FeedManager's live health + indicator
-	// cardinality. Wired only when a feed manager exists; nil leaves the
-	// route unregistered.
+	// cardinality. feedMgr is always constructed above, so the handler's
+	// nil-source guard is purely defensive here; if feedMgr ever becomes
+	// conditional, gate this construction on feedMgr != nil so a typed-nil
+	// never reaches the interface parameter.
 	threatFeedHandler := handler.NewThreatFeedHandler(feedMgr, rbacSvc)
 
 	// --- WORKSTREAM 11: cross-region tenant migration -----------------
