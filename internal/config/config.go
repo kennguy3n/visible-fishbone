@@ -94,6 +94,30 @@ type Config struct {
 	RBI                RBI
 	TenantMigration    TenantMigration
 	Activity           Activity
+	AlertFeedback      AlertFeedback
+}
+
+// AlertFeedback carries the runtime knobs for the leader-only alert
+// false-positive feedback tuning loop (internal/service/alert
+// feedback.go). The loop walks every (tenant, dimension, window)
+// baseline and nudges its anomaly-detection Z-threshold from the
+// accumulated operator-feedback false-positive rate.
+//
+// DEFAULT-OFF: TuningEnabled gates whether the loop is registered at
+// all, so a fresh deployment never starts mutating baseline thresholds
+// on upgrade — the loop only runs once an operator opts in. When
+// enabled, the sweep is activity-tiered (tenancy.TieredSweep) so dormant
+// trials are re-tuned at a reduced cadence instead of every cycle, while
+// active tenants stay on the per-cycle cadence and cycle 0 still tunes
+// everyone.
+type AlertFeedback struct {
+	// TuningEnabled registers the leader-only tuning loop. Default
+	// false (the loop is constructed regardless for on-demand
+	// TuneDimension calls, but the periodic sweep is off).
+	TuningEnabled bool
+	// TuningInterval is the cadence of the tuning sweep. Defaults to
+	// 30m. Only consulted when TuningEnabled is true.
+	TuningInterval time.Duration
 }
 
 // Activity carries the runtime knobs for per-tenant activity tracking
@@ -1806,6 +1830,9 @@ func Load() (Config, error) {
 		{"POP_GEODNS_PUBLISH_INTERVAL", 30 * time.Second, &cfg.PoP.GeoDNSPublishInterval},
 		{"POP_REBALANCE_INTERVAL", 60 * time.Second, &cfg.PoP.RebalanceInterval},
 		{"WS11_MIGRATION_RESUME_INTERVAL", 5 * time.Minute, &cfg.TenantMigration.ResumeInterval},
+		// Alert false-positive feedback tuning sweep cadence (only
+		// consulted when ALERT_FEEDBACK_TUNING_ENABLED). Defaults to 30m.
+		{"ALERT_FEEDBACK_TUNING_INTERVAL", 30 * time.Minute, &cfg.AlertFeedback.TuningInterval},
 	}
 	strictFloats := []struct {
 		key string
@@ -1874,6 +1901,11 @@ func Load() (Config, error) {
 		// planner sees every tenant as dormant. Cheap (debounced, async)
 		// so there is no reason to ship it off by default.
 		{"ACTIVITY_TRACKING_ENABLED", true, &cfg.Activity.Enabled},
+		// Alert false-positive feedback tuning loop. DEFAULT-OFF: the
+		// leader-only sweep mutates baseline Z-thresholds, so it is only
+		// registered when an operator explicitly opts in. Parsed strictly
+		// so a typo fails boot rather than silently leaving it off.
+		{"ALERT_FEEDBACK_TUNING_ENABLED", false, &cfg.AlertFeedback.TuningEnabled},
 	}
 
 	var strictErrs []error
@@ -2267,6 +2299,14 @@ func (c Config) validate() error {
 	// pipeline is enabled — the default-off path ignores the interval.
 	if c.ManagedDNSFeeds.Enabled && c.ManagedDNSFeeds.RefreshInterval <= 0 {
 		return fmt.Errorf("THREAT_INTEL_REFRESH_INTERVAL must be > 0 when THREAT_INTEL_ENABLED=true, got %s", c.ManagedDNSFeeds.RefreshInterval)
+	}
+	// Alert feedback tuning loop: when enabled its cadence must be
+	// positive (a <= 0 interval would be silently overridden by the
+	// service's default rather than the cadence the operator chose).
+	// Only enforced when the loop is enabled — the default-off path
+	// ignores the interval.
+	if c.AlertFeedback.TuningEnabled && c.AlertFeedback.TuningInterval <= 0 {
+		return fmt.Errorf("ALERT_FEEDBACK_TUNING_INTERVAL must be > 0 when ALERT_FEEDBACK_TUNING_ENABLED=true, got %s", c.AlertFeedback.TuningInterval)
 	}
 	// Likewise, a <= 0 discovery-cache TTL would silently fall back to
 	// the service's 24h default rather than the configured value.

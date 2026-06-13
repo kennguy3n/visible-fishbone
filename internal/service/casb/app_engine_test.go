@@ -316,8 +316,7 @@ func TestReconcile_SkipsInactiveTenants(t *testing.T) {
 
 func TestReconcile_ActivityTieredSkipsDormant(t *testing.T) {
 	fx := newEngineFixture(t)
-	p := tenancy.DefaultPlanner()
-	fx.engine.WithDormancyPlanner(&p)
+	fx.engine.WithDormancyPlanner(tenancy.NewTieredSweep("casb_noops_reconcile", tenancy.DefaultPlanner(), nil))
 	ctx := context.Background()
 	devices := 9
 

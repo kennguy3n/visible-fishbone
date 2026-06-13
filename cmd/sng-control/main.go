@@ -559,6 +559,24 @@ func run() error {
 			slog.Duration("interval", cfg.MobileAuth.DirectorySyncInterval))
 	}
 
+	// Leader-only alert false-positive feedback tuning loop. DEFAULT-OFF
+	// (cfg.AlertFeedback.TuningEnabled): the sweep mutates baseline
+	// Z-thresholds, so it is registered only when an operator opts in.
+	// Leader-gated so only the lock holder tunes, and activity-tiered
+	// (the configured TieredSweep) so dormant trials are re-tuned at a
+	// reduced cadence while active tenants stay on the per-tick cadence.
+	// Own goroutine because RunIfLeader blocks until rootCtx is cancelled.
+	if cfg.AlertFeedback.TuningEnabled && rc.AlertFeedback != nil {
+		feedbackSvc := rc.AlertFeedback
+		tenantsFn := rc.AlertFeedbackTenants
+		interval := cfg.AlertFeedback.TuningInterval
+		go elector.RunIfLeader(rootCtx, "alert-feedback-tuning", func(ctx context.Context) {
+			feedbackSvc.Run(ctx, interval, tenantsFn)
+		})
+		logger.Info("sng-control: alert feedback tuning loop enabled (runs on leader only)",
+			slog.Duration("interval", interval))
+	}
+
 	// Producer half of the human-in-the-loop DLP review queue: an async,
 	// bounded adapter that turns coach-action DLP events off the
 	// telemetry hot path into review-queue enqueues. Drained on shutdown
@@ -858,6 +876,19 @@ type routerComponents struct {
 	// activity observer; the control-plane signal is wired into the
 	// router here in buildRouter.
 	ActivityRecorder *activity.Recorder
+	// AlertFeedback is the alert false-positive feedback tuning service.
+	// Always non-nil (it also backs on-demand TuneDimension via the alert
+	// handler). main() registers its leader-only, activity-tiered tuning
+	// loop (AlertFeedback.Run) only when cfg.AlertFeedback.TuningEnabled
+	// — DEFAULT-OFF so an upgrade never starts mutating baseline
+	// thresholds unprompted.
+	AlertFeedback *alert.Feedback
+	// AlertFeedbackTenants is the legacy full-fanout tenant lister handed
+	// to AlertFeedback.Run as its fallback enumeration. The configured
+	// dormancy sweep gates the actual cadence; this is only consulted if
+	// the sweep is ever unset, so it stays correct (never starves) by
+	// listing every tenant.
+	AlertFeedbackTenants func(context.Context) ([]uuid.UUID, error)
 }
 
 // buildRouter wires every repository / service / handler against
@@ -1119,9 +1150,12 @@ func buildRouter(
 	// re-classify thousands of dormant trial tenants' inventories every
 	// interval. Active tenants are still visited every cycle; the planner
 	// only skips quiet tenants whose tier is not yet due. The status
-	// filter is unchanged. Same DefaultPlanner the IdP sync uses.
-	casbReconcilePlanner := tenancy.DefaultPlanner()
-	appNoOpsEngine.WithDormancyPlanner(&casbReconcilePlanner)
+	// filter is unchanged. Same DefaultPlanner the IdP sync uses, wired
+	// through the shared tenancy.TieredSweep so the saving lands on the
+	// sweep_tenants_visited{job,tier} metric.
+	sweepObs := newSweepObserver(mx)
+	casbReconcileSweep := tenancy.NewTieredSweep("casb_noops_reconcile", tenancy.DefaultPlanner(), sweepObs)
+	appNoOpsEngine.WithDormancyPlanner(casbReconcileSweep)
 	// Both gates, not just NoOpsAutoEnforce: the engine only acts at all
 	// when NoOpsEnabled (the discovery hook and reconcile loop in main()
 	// are both gated on it), so wiring the enforcer also requires
@@ -1423,6 +1457,14 @@ func buildRouter(
 	// `component=alert-feedback` to triage missing threshold
 	// adjustments without scrolling through every router log.
 	alertFeedback.SetLogger(logger.With(slog.String("component", "alert-feedback")))
+	// Activity-tiered tuning cadence: the leader-only tuning loop
+	// re-tunes active tenants every cycle and idle/dormant trials at a
+	// reduced cadence instead of walking every tenant's baselines every
+	// tick. Wired through the shared TieredSweep so the saving lands on
+	// sweep_tenants_visited{job="alert_feedback_tuning"}. tenantRepo
+	// supplies the cheap (id, last_active_at) projection.
+	alertFeedbackSweep := tenancy.NewTieredSweep("alert_feedback_tuning", tenancy.DefaultPlanner(), sweepObs)
+	alertFeedback.WithDormancySweep(alertFeedbackSweep, tenantRepo)
 	// NOTE: baseline.NewService(baselineRepo) is intentionally
 	// NOT constructed here. The Service / Detector pair is
 	// wired by the telemetry consumer (future block) once the
@@ -1680,8 +1722,9 @@ func buildRouter(
 
 		// Activity-tiered cadence so dormant trials are not reconciled
 		// every cycle. tenantRepo satisfies both the activity projection
-		// and (via idpTenantSource) the full-fanout fallback.
-		planner := tenancy.DefaultPlanner()
+		// and (via idpTenantSource) the full-fanout fallback. The shared
+		// TieredSweep reports the saving on sweep_tenants_visited.
+		idpSyncSweep := tenancy.NewTieredSweep("idp_directory_sync", tenancy.DefaultPlanner(), sweepObs)
 		idpSyncSvc = identity.NewSyncService(
 			idpConfigRepo,
 			userRepo,
@@ -1692,7 +1735,7 @@ func buildRouter(
 			identity.DefaultDirectoryClientFactory{},
 			identity.NewNATSRevocationPublisher(natsAlertAdapter{p: telPub}),
 			logger,
-		).WithDormancyPlanner(&planner, tenantRepo).
+		).WithDormancyPlanner(idpSyncSweep, tenantRepo).
 			// Gate directory sync (#177) through the staged-enablement
 			// framework: off skips a tenant entirely, monitor dry-runs the
 			// reconcile (reporting would-have provisions/off-boards but
@@ -2017,25 +2060,27 @@ func buildRouter(
 	// way to refresh vendor endpoints — which contradicts
 	// docs/TRAFFIC_CLASSIFICATION.md's "24h cadence" contract.
 	return routerComponents{
-		Router:              router,
-		WebhookWorker:       webhookWorker,
-		IntegrationWorker:   integrationWorker,
-		AppRegistry:         appRegHandler,
-		AppSyncer:           appSyncer,
-		PolicySim:           policySimHandler,
-		AI:                  aiSvc,
-		Metering:            meteringSvc,
-		PoP:                 popSvc,
-		RegionMigrator:      tenantMigrator,
-		EvidenceScheduler:   evidenceScheduler,
-		FeedManager:         feedMgr,
-		AppNoOpsEngine:      appNoOpsEngine,
-		Recompiler:          recompiler,
-		DLPReviewRecompiler: dlpReviewRecompiler,
-		SampleRateResolver:  sampleRateResolver,
-		IDPSyncService:      idpSyncSvc,
-		DLPReviewService:    dlpReviewSvc,
-		ActivityRecorder:    activityRecorder,
+		Router:               router,
+		WebhookWorker:        webhookWorker,
+		IntegrationWorker:    integrationWorker,
+		AppRegistry:          appRegHandler,
+		AppSyncer:            appSyncer,
+		PolicySim:            policySimHandler,
+		AI:                   aiSvc,
+		Metering:             meteringSvc,
+		PoP:                  popSvc,
+		RegionMigrator:       tenantMigrator,
+		EvidenceScheduler:    evidenceScheduler,
+		FeedManager:          feedMgr,
+		AppNoOpsEngine:       appNoOpsEngine,
+		Recompiler:           recompiler,
+		DLPReviewRecompiler:  dlpReviewRecompiler,
+		SampleRateResolver:   sampleRateResolver,
+		IDPSyncService:       idpSyncSvc,
+		DLPReviewService:     dlpReviewSvc,
+		ActivityRecorder:     activityRecorder,
+		AlertFeedback:        alertFeedback,
+		AlertFeedbackTenants: idpTenantSource{activity: tenantRepo}.ListTenants,
 	}, nil
 }
 
@@ -3786,6 +3831,17 @@ func (s idpTenantSource) ListTenants(ctx context.Context) ([]uuid.UUID, error) {
 		ids[i] = a.ID
 	}
 	return ids, nil
+}
+
+// newSweepObserver returns a tenancy.SweepObserver backed by mx, or nil
+// when metrics are disabled (mx == nil). A nil observer is the documented
+// "disable emission" contract of TieredSweep, so the tiered sweeps still
+// gate correctly with metrics off — they simply publish nothing.
+func newSweepObserver(mx *metrics.Metrics) tenancy.SweepObserver {
+	if mx == nil {
+		return nil
+	}
+	return mx.SweepObserver()
 }
 
 // hostnameForSyslog returns the local hostname used as the
