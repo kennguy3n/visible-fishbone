@@ -180,8 +180,9 @@ func (f *Feedback) SetClock(fn func() time.Time) {
 // shared tenancy.TieredSweep helper. Once set, each tick loads the cheap
 // (id, last_active_at) projection from `activity` and lets the sweep
 // decide which tenants to re-tune this cycle: active tenants every tick,
-// idle/dormant ones at a reduced cadence. Cycle 0 (the first tick) tunes
-// every tenant, so enabling this never delays a tenant's first tuning.
+// idle/dormant ones at a reduced cadence. Cycle 0 (the first pass, which
+// Run executes immediately on entry) tunes every tenant, so enabling this
+// never delays a tenant's first tuning.
 // Passing a nil sweep or activity source is a no-op (legacy every-tenant
 // fan-out via the tenantsFn given to Run is retained), so wiring is
 // fail-safe. Returns the receiver for chaining at construction.
@@ -349,6 +350,15 @@ func (f *Feedback) TuneDimension(
 // the repository knows about. Cancellation through ctx stops
 // the loop.
 //
+// It runs one pass immediately on entry, then on each tick —
+// matching the IdP-sync and CASB reconcile loops, which also
+// sweep once on leadership acquisition. This makes the cycle-0
+// full sweep (the TieredSweep startup guarantee) fire promptly
+// when the loop is enabled or a leader takes over a crashed
+// predecessor, rather than after a full interval (default 30m).
+// Run is invoked through elector.RunIfLeader, so the immediate
+// pass is leader-gated exactly like the per-tick passes.
+//
 // Each tick processes every baseline for every tenant. Tenant
 // fan-out is bounded by opts.RunConcurrency (default 16) so
 // the tick produces at most that many in-flight per-tenant
@@ -368,6 +378,7 @@ func (f *Feedback) Run(
 	}
 	t := time.NewTicker(interval)
 	defer t.Stop()
+	f.tickOnce(ctx, tenantsFn)
 	for {
 		select {
 		case <-ctx.Done():
