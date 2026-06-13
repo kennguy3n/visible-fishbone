@@ -96,6 +96,12 @@ enum Command {
     /// scaling-efficiency regression. Hardware-invariant: gates the
     /// dimensionless per-width scaling efficiency, not absolute Gbps.
     MultiQueueCompare(MultiQueueCompareArgs),
+    /// Measure real multi-queue *wire* transmit throughput: N concurrent
+    /// `AF_PACKET` transmit streams (one per NIC TX ring), reporting the
+    /// aggregate wire ceiling and per-stream scaling versus the
+    /// single-stream wire floor. `--dry-run` crafts frames in-process
+    /// without a socket so the leg is self-testable without `CAP_NET_RAW`.
+    WireScaling(WireScalingArgs),
 }
 
 /// Forwarding inspection-depth selector for the multi-queue sweep.
@@ -504,6 +510,61 @@ struct MultiQueueCompareArgs {
     sigma: f64,
 }
 
+#[derive(Debug, Args)]
+struct WireScalingArgs {
+    /// Path to the edge-SKU profile TOML (sets the representative frame
+    /// size, queue fan-out, and published target for context).
+    #[arg(long, env = "SNG_BENCH_PROFILE")]
+    profile: PathBuf,
+
+    /// TX-fanout widths to measure (comma-separated). A single-stream
+    /// (`1`) wire floor is always measured regardless. Empty (the default)
+    /// derives a curve of `1, 2, 4, …` up to the SKU's queue fan-out, the
+    /// host's available parallelism, and the next power of two above it.
+    #[arg(long, value_delimiter = ',')]
+    queues: Vec<usize>,
+
+    /// Egress interface to transmit synthetic frames on (live runs).
+    #[arg(long, default_value = "lo")]
+    interface: String,
+
+    /// Per-stream measured window in milliseconds.
+    #[arg(long, default_value_t = 1000)]
+    duration_ms: u64,
+
+    /// Wire frame size in bytes. `0` uses the profile's
+    /// `[datapath] packet_bytes`.
+    #[arg(long, default_value_t = 0)]
+    packet_size: u32,
+
+    /// IP version of the generated traffic.
+    #[arg(long, value_enum, default_value_t = CliIpVersion::V4)]
+    ip_version: CliIpVersion,
+
+    /// L4 protocol of the generated traffic.
+    #[arg(long, value_enum, default_value_t = CliL4::Udp)]
+    l4: CliL4,
+
+    /// RNG seed for reproducible 5-tuple sampling. Stream `q` is seeded
+    /// `seed + q` so each TX socket emits a distinct flow set.
+    #[arg(long, default_value_t = 0)]
+    seed: u64,
+
+    /// Craft frames in-process and discard them (no raw socket, no root)
+    /// instead of transmitting. Produces a craft-rate ceiling, not a wire
+    /// number; reported as transport `dry-run`.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Where to write the JSON artifact. Omitted prints to stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
+
+    /// Git commit recorded in the artifact.
+    #[arg(long, env = "SNG_BENCH_GIT_SHA")]
+    git_sha: Option<String>,
+}
+
 /// Clap parser that accepts only finite, non-negative `f64` values. Used to
 /// reject footgun inputs (negative `--threshold`/`--sigma`, `NaN`, `inf`)
 /// that would quietly weaken or invert the regression gate.
@@ -544,6 +605,7 @@ fn run(cli: Cli) -> Result<std::process::ExitCode, BenchError> {
         Command::Datasheet(args) => run_datasheet(&args),
         Command::MultiQueue(args) => run_multi_queue(&args),
         Command::MultiQueueCompare(args) => run_multi_queue_compare(&args),
+        Command::WireScaling(args) => run_wire_scaling(&args),
     }
 }
 
@@ -630,6 +692,75 @@ fn run_multi_queue(args: &MultiQueueArgs) -> Result<std::process::ExitCode, Benc
         rule_count,
         packet_bytes,
         packets_per_queue,
+        available_parallelism: parallelism,
+        target_gbps: profile.target_gbps,
+        points,
+    };
+
+    // Always print the human-readable summary so a live run is legible on
+    // the console; write the machine-readable JSON when an `--out` is given.
+    eprintln!("{}", report.to_markdown());
+    let json = report.to_json()?;
+    if let Some(out) = &args.out {
+        write_file(out, &json)?;
+        eprintln!("wrote {}", out.display());
+    } else {
+        println!("{json}");
+    }
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+fn run_wire_scaling(args: &WireScalingArgs) -> Result<std::process::ExitCode, BenchError> {
+    use sng_bench::report::{WIRE_SCALING_SCHEMA_VERSION, WireScalingReport};
+    use sng_bench::traffic_gen::{IpVersion, L4Proto};
+    use sng_bench::wire_scaling::{self, WireScalingConfig};
+
+    let profile = load_profile(&args.profile)?;
+    let parallelism = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+
+    let frame_size = if args.packet_size > 0 {
+        args.packet_size
+    } else {
+        profile.datapath.packet_bytes
+    };
+    let queue_counts = if args.queues.is_empty() {
+        default_queue_curve(profile.effective_nic_queues(), parallelism)
+    } else {
+        args.queues.clone()
+    };
+    let ip_version = match args.ip_version {
+        CliIpVersion::V4 => IpVersion::V4,
+        CliIpVersion::V6 => IpVersion::V6,
+    };
+    let l4 = match args.l4 {
+        CliL4::Udp => L4Proto::Udp,
+        CliL4::TcpSyn => L4Proto::TcpSyn,
+    };
+
+    let config = WireScalingConfig {
+        queue_counts,
+        duration: Duration::from_millis(args.duration_ms),
+        frame_size,
+        l4,
+        ip_version,
+        seed: args.seed,
+        interface: args.interface.clone(),
+        dry_run: args.dry_run,
+    };
+
+    let points = wire_scaling::measure_wire_scaling(&config)?;
+
+    let report = WireScalingReport {
+        schema_version: WIRE_SCALING_SCHEMA_VERSION,
+        profile: profile.name.clone(),
+        unix_time_secs: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+        git_sha: args.git_sha.clone(),
+        transport: config.transport_label().to_string(),
+        interface: args.interface.clone(),
+        frame_bytes: frame_size,
+        duration_ms: args.duration_ms,
         available_parallelism: parallelism,
         target_gbps: profile.target_gbps,
         points,

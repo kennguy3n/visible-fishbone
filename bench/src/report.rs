@@ -924,6 +924,210 @@ impl MultiQueueReport {
     }
 }
 
+/// Schema version for the [`WireScalingReport`] artifact. Bumped
+/// independently of the forwarding/throughput schemas because the wire
+/// scaling artifact has its own consumers (the `wire-scaling` leg).
+pub const WIRE_SCALING_SCHEMA_VERSION: u32 = 1;
+
+/// One measured wire stream — a single `AF_PACKET` transmit socket pinned
+/// to a worker thread for the duration of a fanout point. Unlike
+/// [`MultiQueueStreamMeasurement`], these frames are actually crafted and
+/// pushed at the kernel transmit path (or, in `--dry-run`, crafted and
+/// discarded), so the numbers are a *wire* measurement, not an in-process
+/// forwarding-decision model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WireStreamMeasurement {
+    /// Stream / TX-socket index, `0..queues`.
+    pub queue_index: usize,
+    /// Frames this stream transmitted in its measured window.
+    pub packets: u64,
+    /// Wire bytes this stream transmitted (sum of per-frame sizes).
+    pub bytes: u64,
+    /// This stream's transmit rate in packets per second, measured while
+    /// every stream at this fanout width was running concurrently.
+    pub pps: f64,
+    /// This stream's transmit rate in Gbps over the same window.
+    pub gbps: f64,
+    /// The stream's own measured wall-clock window in milliseconds. Each
+    /// stream times itself so a thread that is scheduled late never
+    /// inflates another stream's rate.
+    pub elapsed_ms: f64,
+}
+
+/// Aggregate result at one TX-fanout width (`queues` parallel `AF_PACKET`
+/// transmit streams running concurrently). The `queues == 1` point is the
+/// single-stream *wire floor* — the ~5.5 Gbps number the blog quotes; the
+/// widest point is the multi-queue *wire ceiling*.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WireScalePoint {
+    /// Number of concurrent transmit streams at this point.
+    pub queues: usize,
+    /// Sum of every stream's transmit rate — the aggregate wire rate the
+    /// box sustains at this fanout width.
+    pub aggregate_pps: f64,
+    /// Aggregate transmit rate in Gbps at this fanout width.
+    pub aggregate_gbps: f64,
+    /// Mean per-stream transmit rate in Gbps (`aggregate_gbps / queues`).
+    /// Falls as the fanout exceeds the host's physical cores — the
+    /// contention a single-stream number structurally cannot reveal.
+    pub mean_gbps_per_queue: f64,
+    /// Scaling efficiency: `aggregate_pps / (queues × single_stream_pps)`,
+    /// where the single-stream rate is the `queues == 1` aggregate. `1.0`
+    /// is ideal linear scaling; below `1.0` is the real, contended ceiling.
+    pub scaling_efficiency: f64,
+    /// Per-stream detail for this fanout width.
+    pub streams: Vec<WireStreamMeasurement>,
+}
+
+/// A multi-queue *wire* transmit scaling report: a curve from a single
+/// `AF_PACKET` transmit stream up to the widest fanout, recording the
+/// aggregate wire rate and per-stream scaling at each width.
+///
+/// This is the artifact that retires the "single-stream floor" caveat with
+/// a *real wire* number: every frame is crafted and handed to the kernel
+/// transmit path across N sockets on N cores, exactly the way a
+/// multi-queue NIC fans transmit across TX rings. It remains
+/// software-on-a-VM, not an ASIC — [`Self::to_markdown`] carries that
+/// caveat. When `transport` is `dry-run` the figures are a craft-rate
+/// ceiling (no socket), never to be quoted as a wire number.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WireScalingReport {
+    /// Artifact schema version.
+    pub schema_version: u32,
+    /// SKU profile name the sweep ran against.
+    pub profile: String,
+    /// Wall-clock time the report was produced (Unix seconds).
+    pub unix_time_secs: u64,
+    /// Source revision, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_sha: Option<String>,
+    /// Transmit transport: `af-packet` for a live wire run, `dry-run` for
+    /// the in-process craft-only ceiling. Recorded so a dry-run number is
+    /// never silently published as a wire measurement.
+    pub transport: String,
+    /// Egress interface the live run transmitted on (`lo`, `eth0`, ...).
+    pub interface: String,
+    /// Representative on-wire frame size in bytes.
+    pub frame_bytes: u32,
+    /// Per-stream measured window in milliseconds.
+    pub duration_ms: u64,
+    /// `std::thread::available_parallelism()` on the measuring host — the
+    /// core budget the scaling curve is bounded by.
+    pub available_parallelism: usize,
+    /// The SKU's published acceptance target in Gbps, for context.
+    pub target_gbps: f64,
+    /// The scaling curve, in ascending queue-count order.
+    pub points: Vec<WireScalePoint>,
+}
+
+impl WireScalingReport {
+    /// Serialize to pretty JSON.
+    ///
+    /// # Errors
+    /// Propagates a `serde_json` failure (never expected for this plain
+    /// struct).
+    pub fn to_json(&self) -> Result<String, ReportError> {
+        Ok(serde_json::to_string_pretty(self)?)
+    }
+
+    /// Parse from JSON.
+    ///
+    /// # Errors
+    /// Returns [`ReportError::Json`] on malformed input.
+    pub fn from_json(s: &str) -> Result<Self, ReportError> {
+        Ok(serde_json::from_str(s)?)
+    }
+
+    /// The single-stream wire floor (`queues == 1`), if measured.
+    #[must_use]
+    pub fn single_stream(&self) -> Option<&WireScalePoint> {
+        self.points.iter().find(|p| p.queues == 1)
+    }
+
+    /// The widest-fanout wire ceiling, if any point was measured.
+    #[must_use]
+    pub fn ceiling(&self) -> Option<&WireScalePoint> {
+        self.points.iter().max_by_key(|p| p.queues)
+    }
+
+    /// Render the markdown summary: the scaling table, the floor→ceiling
+    /// headline, and the standing honesty caveat.
+    #[must_use]
+    pub fn to_markdown(&self) -> String {
+        let mut out = String::new();
+        let _ = writeln!(out, "### Multi-queue wire throughput: `{}`", self.profile);
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "Transport `{}` · interface `{}` · frame {} B · {} ms/stream · host parallelism {}.",
+            self.transport, self.interface, self.frame_bytes, self.duration_ms, self.available_parallelism
+        );
+        let _ = writeln!(out);
+
+        let _ = writeln!(
+            out,
+            "| Streams | Aggregate Mpps | Aggregate Gbps | Per-stream Gbps | Scaling eff. |"
+        );
+        let _ = writeln!(out, "| ---: | ---: | ---: | ---: | ---: |");
+        for p in &self.points {
+            let _ = writeln!(
+                out,
+                "| {} | {:.2} | {:.3} | {:.3} | {:.0}% |",
+                p.queues,
+                p.aggregate_pps / 1e6,
+                p.aggregate_gbps,
+                p.mean_gbps_per_queue,
+                p.scaling_efficiency * 100.0,
+            );
+        }
+        let _ = writeln!(out);
+
+        if let (Some(floor), Some(ceil)) = (self.single_stream(), self.ceiling())
+            && ceil.queues > floor.queues
+        {
+            let lift = if floor.aggregate_gbps > 0.0 {
+                ceil.aggregate_gbps / floor.aggregate_gbps
+            } else {
+                0.0
+            };
+            let _ = writeln!(
+                out,
+                "Single-stream wire floor: **{:.3} Gbps** ({} stream). \
+                 Multi-queue wire ceiling: **{:.3} Gbps** ({} streams) — a **{:.2}×** lift.",
+                floor.aggregate_gbps, floor.queues, ceil.aggregate_gbps, ceil.queues, lift
+            );
+            let _ = writeln!(out);
+        }
+
+        if self.target_gbps > 0.0 {
+            let _ = writeln!(
+                out,
+                "SKU published acceptance target: **{:.3} Gbps**.",
+                self.target_gbps
+            );
+            let _ = writeln!(out);
+        }
+
+        let caveat = if self.transport == "dry-run" {
+            "> **Read this honestly.** This is a `--dry-run` craft-only ceiling: frames are \
+             built and discarded, never handed to a socket, so the figure is the host's \
+             packet-*crafting* rate across N cores, not a wire number. Run without \
+             `--dry-run` (with `CAP_NET_RAW`) for the real `AF_PACKET` transmit measurement."
+        } else {
+            "> **Read this honestly.** These frames are really crafted and pushed at the \
+             kernel `AF_PACKET` transmit path across N sockets on a generic x86 VM — a real \
+             *wire* measurement, but still software-on-x86, not a multi-queue physical NIC \
+             and not an ASIC. The single-stream row is the conservative floor the blog \
+             quotes; the wider rows show how transmit scales when the box uses all its cores. \
+             Treat the ceiling as an apples-*closer* figure to a vendor's multi-queue \
+             line-rate number, still not apples-to-apples."
+        };
+        let _ = writeln!(out, "{caveat}");
+
+        out
+    }
+}
+
 /// Direction in which a forwarding metric regresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RegressDir {
@@ -2081,5 +2285,64 @@ mod tests {
         assert!(rr.has_regression());
         assert_eq!(rr.regressions.len(), 1);
         assert!(rr.regressions[0].metric.contains("q=4"));
+    }
+
+    fn wire_report(transport: &str, points: &[(usize, f64, f64, f64)]) -> WireScalingReport {
+        WireScalingReport {
+            schema_version: WIRE_SCALING_SCHEMA_VERSION,
+            profile: "micro".to_string(),
+            unix_time_secs: 0,
+            git_sha: None,
+            transport: transport.to_string(),
+            interface: "lo".to_string(),
+            frame_bytes: 1500,
+            duration_ms: 1000,
+            available_parallelism: 8,
+            target_gbps: 0.8,
+            points: points
+                .iter()
+                .map(|&(queues, agg_pps, agg_gbps, eff)| WireScalePoint {
+                    queues,
+                    aggregate_pps: agg_pps,
+                    aggregate_gbps: agg_gbps,
+                    mean_gbps_per_queue: agg_gbps / queues as f64,
+                    scaling_efficiency: eff,
+                    streams: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn wire_scaling_json_roundtrips() {
+        let r = wire_report("af-packet", &[(1, 1e5, 0.37, 1.0), (8, 4.5e5, 1.64, 0.56)]);
+        let json = r.to_json().unwrap();
+        let back = WireScalingReport::from_json(&json).unwrap();
+        assert_eq!(r, back);
+    }
+
+    #[test]
+    fn wire_scaling_floor_and_ceiling_resolve_by_value() {
+        // Out-of-order points: floor/ceiling must key on queue count, not
+        // position.
+        let r = wire_report("af-packet", &[(8, 4.5e5, 1.64, 0.56), (1, 1e5, 0.37, 1.0)]);
+        assert_eq!(r.single_stream().unwrap().queues, 1);
+        assert_eq!(r.ceiling().unwrap().queues, 8);
+    }
+
+    #[test]
+    fn wire_scaling_markdown_headlines_lift_and_keeps_wire_caveat() {
+        let md = wire_report("af-packet", &[(1, 1e5, 0.40, 1.0), (8, 4.5e5, 1.60, 0.56)]).to_markdown();
+        // Floor→ceiling lift is 1.60 / 0.40 = 4.00×.
+        assert!(md.contains("4.00×"), "markdown must headline the lift: {md}");
+        assert!(md.contains("AF_PACKET"), "wire run must keep the wire caveat");
+        assert!(!md.contains("craft-only"), "wire run must not show the dry-run caveat");
+    }
+
+    #[test]
+    fn wire_scaling_markdown_marks_dry_run_as_craft_only() {
+        let md = wire_report("dry-run", &[(1, 1e5, 0.40, 1.0), (4, 3e5, 1.19, 0.75)]).to_markdown();
+        assert!(md.contains("craft-only"), "dry-run must flag the craft-only ceiling: {md}");
+        assert!(!md.contains("really crafted and pushed"), "dry-run must not claim a wire number");
     }
 }
