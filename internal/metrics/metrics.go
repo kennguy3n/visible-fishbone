@@ -179,6 +179,20 @@ type Metrics struct {
 	// registered sweep loops, so cardinality stays low (no tenant ids).
 	SweepTenantsVisited *prometheus.CounterVec
 	SweepTenantsSkipped *prometheus.CounterVec
+
+	// --- Activity (dormancy signal) -----------------------------
+	// ActivityTouches counts per-tenant activity touches by the
+	// ingress `source` they came from and their `outcome`
+	// (enqueued|debounced|dropped|written|failed). It is the WS-2 coverage
+	// metric: a non-zero count under every source proves last_active_at
+	// is fed by all tenant-activity paths (telemetry, authenticated
+	// API, device enrol, mobile token/refresh), not just the data
+	// plane. Fed from activity.Recorder.Stats() by the ActivityCollector.
+	ActivityTouches *prometheus.CounterVec
+	// ActivityQueueDepth is the depth of the recorder's drain queue at
+	// the last scrape — a saturation signal (sustained growth ⇒ the
+	// writer is shedding touches via the dropped outcome).
+	ActivityQueueDepth prometheus.Gauge
 }
 
 // New constructs a Metrics value, registering every collector
@@ -481,6 +495,20 @@ func New(cfg config.Metrics) *Metrics {
 		Name:      "tenants_skipped_total",
 		Help:      "Total tenants a periodic per-tenant sweep skipped because their tier was not due this cycle, by job and tier.",
 	}, []string{"job", "tier"})
+
+	// --- Activity (dormancy signal) ---------------------------------
+	m.ActivityTouches = f.NewCounterVec(prometheus.CounterOpts{
+		Namespace: ns,
+		Subsystem: "activity",
+		Name:      "touches_total",
+		Help:      "Per-tenant activity touches feeding last_active_at, by ingress source and outcome (enqueued|debounced|dropped|written|failed).",
+	}, []string{"source", "outcome"})
+	m.ActivityQueueDepth = f.NewGauge(prometheus.GaugeOpts{
+		Namespace: ns,
+		Subsystem: "activity",
+		Name:      "queue_depth",
+		Help:      "Pending touches buffered in the activity recorder's async drain queue at the last scrape.",
+	})
 
 	return m
 }
