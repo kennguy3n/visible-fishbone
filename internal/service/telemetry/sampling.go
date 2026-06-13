@@ -63,6 +63,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
+	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy"
 )
 
 // DefaultSamplingWindow is the per-tenant rate-estimation window.
@@ -378,6 +379,14 @@ type SamplerConfig struct {
 	// rate and the adaptive per-tenant policy. Nil means "no overrides":
 	// the sampler keeps its built-in behaviour unchanged.
 	RateResolver SampleRateResolver
+	// TierPolicy layers the WS-4 activity-tier-aware sampling policy on
+	// top of the base keep probability: idle tenants are sampled more
+	// aggressively and dormant tenants drop everything but their
+	// security / compliance events. Nil means the feature is OFF — the
+	// sampler behaves exactly as it did before WS-4 (DecideClass path),
+	// so an upgrade never silently changes retention. See
+	// tier_sampling.go.
+	TierPolicy *TierSamplingPolicy
 	// NowFunc returns the current time. Injected so tests can pin the
 	// clock; production passes time.Now.
 	NowFunc func() time.Time
@@ -390,6 +399,7 @@ type SamplerConfig struct {
 type AdaptiveSampler struct {
 	resolver     LimitResolver
 	rateResolver SampleRateResolver
+	tierPolicy   *TierSamplingPolicy
 	window       time.Duration
 	minRate      float64
 	now          func() time.Time
@@ -437,6 +447,7 @@ func NewAdaptiveSampler(cfg SamplerConfig) *AdaptiveSampler {
 	return &AdaptiveSampler{
 		resolver:     resolver,
 		rateResolver: cfg.RateResolver,
+		tierPolicy:   cfg.TierPolicy,
 		window:       window,
 		minRate:      minRate,
 		now:          now,
@@ -460,6 +471,7 @@ func (s *AdaptiveSampler) ForPartition() *AdaptiveSampler {
 	return &AdaptiveSampler{
 		resolver:     s.resolver,
 		rateResolver: s.rateResolver,
+		tierPolicy:   s.tierPolicy,
 		window:       s.window,
 		minRate:      s.minRate,
 		now:          s.now,
@@ -504,20 +516,7 @@ func (s *AdaptiveSampler) DecideClass(ctx context.Context, tenantID, eventID uui
 	if s == nil {
 		return true, 1.0
 	}
-	if r, ok := s.overrideRate(ctx, tenantID, trafficClass); ok {
-		// Operator-configured per-tenant / per-class override wins over
-		// the built-in class rate and the adaptive policy. Same
-		// deterministic hash threshold, so it is redelivery-stable and
-		// the 1/rate de-bias weight is exact; no adaptive state touched.
-		return hashFraction(eventID) < r, r
-	}
-	if fixed, ok := fixedClassSampleRate(trafficClass); ok {
-		// Fixed class rate: deterministic threshold, no adaptive state
-		// touched (no arrival recorded) — these events bypass the
-		// per-tenant window entirely.
-		return hashFraction(eventID) < fixed, fixed
-	}
-	p := s.keepProb(ctx, tenantID)
+	p := s.resolveBaseKeepProb(ctx, tenantID, trafficClass)
 	if p >= 1.0 {
 		return true, 1.0
 	}
@@ -525,6 +524,146 @@ func (s *AdaptiveSampler) DecideClass(ctx context.Context, tenantID, eventID uui
 		return true, p
 	}
 	return false, p
+}
+
+// resolveBaseKeepProb returns the keep probability for (tenant, class)
+// honouring the same precedence DecideClass relies on — operator
+// override, then fixed class rate, then the adaptive per-tenant policy —
+// without applying the final hash threshold. It is the shared core of
+// DecideClass and the tier-aware DecideEvent so both compose the same
+// base probability. The adaptive branch (only reached when no override
+// or fixed rate applies) records one arrival as a side effect, exactly
+// as DecideClass did before this refactor.
+func (s *AdaptiveSampler) resolveBaseKeepProb(ctx context.Context, tenantID uuid.UUID, trafficClass string) float64 {
+	if r, ok := s.overrideRate(ctx, tenantID, trafficClass); ok {
+		// Operator-configured per-tenant / per-class override wins over
+		// the built-in class rate and the adaptive policy; no adaptive
+		// state touched.
+		return r
+	}
+	if fixed, ok := fixedClassSampleRate(trafficClass); ok {
+		// Fixed class rate: no adaptive state touched (no arrival
+		// recorded) — these events bypass the per-tenant window entirely.
+		return fixed
+	}
+	return s.keepProb(ctx, tenantID)
+}
+
+// DecideEvent is the activity-tier-aware keep/drop decision and the
+// entry point the consumer hot path uses when the WS-4 tier policy is
+// wired (SamplerConfig.TierPolicy). It layers the tenant's activity tier
+// on top of the base keep probability DecideClass computes:
+//
+//   - Security-relevant events (securityRelevant == true) and the
+//     inspect_full compliance class are pinned at 1.0 in EVERY tier, so
+//     a dormant tenant never loses an IPS / ZTNA / DLP signal or a
+//     legally-required audit record.
+//   - TierActive applies the multiplier 1.0 — identical to DecideClass
+//     for non-security classes.
+//   - TierIdle scales the base probability by the idle multiplier
+//     (reduced sampling), keeping the same deterministic hash threshold
+//     so the verdict is redelivery-stable and the 1/rate de-bias weight
+//     is exact. The composite is floored at the adaptive minRate
+//     visibility guarantee (see tierVisibilityFloor) so an idle tenant
+//     stays sampled at 1-in-20 even when also over budget — idle is
+//     reduced, not invisible.
+//   - TierDormant scales by the dormant multiplier (0 by default), so
+//     every non-security, non-compliance event is dropped outright —
+//     "security-events-only".
+//
+// The returned tier is the tier the decision was made under (for the
+// per-tier rows/s metric); tiered reports whether the tier policy was in
+// effect (false when no policy is wired, so callers skip the per-tier
+// metric and the decision is exactly DecideClass).
+//
+// A nil sampler keeps everything at rate 1.0. When no tier policy is
+// wired, DecideEvent delegates to DecideClass — the feature is fully
+// default-OFF.
+func (s *AdaptiveSampler) DecideEvent(ctx context.Context, tenantID, eventID uuid.UUID, trafficClass string, securityRelevant bool) (keep bool, sampleRate float64, tier tenancy.Tier, tiered bool) {
+	if s == nil {
+		return true, 1.0, tenancy.TierActive, false
+	}
+	if s.tierPolicy == nil {
+		k, r := s.DecideClass(ctx, tenantID, eventID, trafficClass)
+		return k, r, tenancy.TierActive, false
+	}
+
+	tier = s.tierPolicy.tierFor(ctx, tenantID)
+
+	// Floor: events that may never be shed on cost grounds. Security
+	// events are pinned at 1.0; inspect_full keeps its compliance floor.
+	// The max of the two is the hard lower bound for this event.
+	floor := 0.0
+	if securityRelevant {
+		floor = 1.0
+	}
+	if f, ok := mandatorySampleRateFloor(trafficClass); ok && f > floor {
+		floor = f
+	}
+	if floor >= 1.0 {
+		// Always keep, never sample, no adaptive state touched. NOTE:
+		// because this returns before resolveBaseKeepProb, a floored
+		// event (security-relevant, or the inspect_full compliance
+		// class) records NO arrival — whereas the pre-tier DecideClass
+		// path counted a security event with an empty traffic class as
+		// one arrival via keepProb. So enabling tier sampling slightly
+		// lowers the measured arrival rate for security-heavy tenants,
+		// making the adaptive sampler a touch less aggressive on their
+		// *non*-security events. This is deliberate and one-sided (it
+		// keeps MORE, never less — the fail-safe direction), and such
+		// tenants are active-tier anyway, so the practical effect is
+		// negligible; flagged here for operators watching keepProb.
+		return true, 1.0, tier, true
+	}
+
+	mult := s.tierPolicy.multiplier(tier)
+	if mult <= 0 {
+		// Dormant security-events-only: drop the non-security,
+		// non-compliance event without computing (or perturbing) the
+		// adaptive base probability — a dormant tenant's shed stream
+		// must not feed the rate estimate.
+		return false, 0, tier, true
+	}
+
+	base := s.resolveBaseKeepProb(ctx, tenantID, trafficClass)
+	// Preserve the pre-tier visibility floor: the idle multiplier
+	// reduces sampling but must not push a non-dormant tenant below the
+	// adaptive minRate guarantee (1-in-20) — idle is "reduced", not
+	// "invisible"; only the dormant tier (handled above) abandons
+	// non-security visibility. tierVisibilityFloor never raises above
+	// base, so an explicitly-configured sub-minRate rate (trusted-class
+	// fixed 1/100, or an operator override) is respected, not inflated.
+	if vis := s.tierVisibilityFloor(base); vis > floor {
+		floor = vis
+	}
+	p := base * mult
+	if p < floor {
+		p = floor
+	}
+	if p >= 1.0 {
+		return true, 1.0, tier, true
+	}
+	if hashFraction(eventID) < p {
+		return true, p, tier, true
+	}
+	return false, p, tier, true
+}
+
+// tierVisibilityFloor is the keep-probability floor a non-dormant tier
+// multiplier must not push below: the adaptive minRate visibility
+// guarantee, but never above the base rate itself. For an adaptive base
+// (always >= minRate) it returns minRate, so an idle tenant keeps the
+// 1-in-20 floor even when over budget. For an explicitly-configured base
+// already below minRate (a trusted-class fixed rate or an operator
+// override) it returns that base, so tiering leaves the configured rate
+// exactly as set rather than raising it. Shared by DecideEvent and
+// SampleRateForEvent so the keep verdict and the recovered de-bias
+// weight stay in agreement.
+func (s *AdaptiveSampler) tierVisibilityFloor(base float64) float64 {
+	if s.minRate < base {
+		return s.minRate
+	}
+	return base
 }
 
 // SampleRateFor returns the keep probability currently in effect for
@@ -580,6 +719,58 @@ func (s *AdaptiveSampler) SampleRateForClass(tenantID uuid.UUID, trafficClass st
 		return fixed
 	}
 	return s.SampleRateFor(tenantID)
+}
+
+// SampleRateForEvent is the activity-tier-aware companion to
+// SampleRateForClass, used to recover a redelivered event's de-bias
+// rate when the WS-4 tier policy is wired. It mirrors DecideEvent's rate
+// arithmetic — security / compliance floor first, then base rate scaled
+// by the tenant's tier multiplier — without recording an arrival (a
+// redelivery is the same event, not new load).
+//
+// A would-have-been-dropped event (tier multiplier 0, non-security) can
+// never be a redelivery: a sampling drop is Ack'd, never redelivered. So
+// the only way control reaches here for such an event is a downstream
+// retry of an already-admitted event, which means it was kept on first
+// delivery; recovering 1.0 (no de-bias) is the conservative, correct
+// weight in that impossible-in-practice case. When no tier policy is
+// wired this defers to SampleRateForClass, preserving prior behaviour.
+func (s *AdaptiveSampler) SampleRateForEvent(tenantID uuid.UUID, trafficClass string, securityRelevant bool) float64 {
+	if s == nil {
+		return 1.0
+	}
+	if s.tierPolicy == nil {
+		return s.SampleRateForClass(tenantID, trafficClass)
+	}
+	tier := s.tierPolicy.tierFor(context.Background(), tenantID)
+	floor := 0.0
+	if securityRelevant {
+		floor = 1.0
+	}
+	if f, ok := mandatorySampleRateFloor(trafficClass); ok && f > floor {
+		floor = f
+	}
+	if floor >= 1.0 {
+		return 1.0
+	}
+	mult := s.tierPolicy.multiplier(tier)
+	if mult <= 0 {
+		return 1.0
+	}
+	base := s.SampleRateForClass(tenantID, trafficClass)
+	// Same visibility floor as DecideEvent so the recovered de-bias
+	// weight (1/rate) exactly matches the rate the keep decision used.
+	if vis := s.tierVisibilityFloor(base); vis > floor {
+		floor = vis
+	}
+	p := base * mult
+	if p < floor {
+		p = floor
+	}
+	if p > 1 {
+		p = 1
+	}
+	return p
 }
 
 // overrideRate consults the configured SampleRateResolver (if any) for a
