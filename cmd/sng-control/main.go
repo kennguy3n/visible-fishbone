@@ -49,6 +49,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/appdb"
 	"github.com/kennguy3n/visible-fishbone/internal/service/audit"
 	"github.com/kennguy3n/visible-fishbone/internal/service/browser"
+	"github.com/kennguy3n/visible-fishbone/internal/service/capacity"
 	"github.com/kennguy3n/visible-fishbone/internal/service/casb"
 	casbconnectors "github.com/kennguy3n/visible-fishbone/internal/service/casb/connectors"
 	"github.com/kennguy3n/visible-fishbone/internal/service/compliance"
@@ -442,6 +443,31 @@ func run() error {
 			slog.Duration("interval", cfg.PoP.RebalanceInterval))
 	} else {
 		logger.Info("sng-control: pop rebalance loop disabled (POP_REBALANCE_ENABLED=false)")
+	}
+
+	// WS6 capacity autopilot. DEFAULT-OFF (CAPACITY_AUTOPILOT_ENABLED):
+	// a singleton reconciler that reads the live fleet size, runs the
+	// same analytical model as the offline `bench/controlplane
+	// capacity-plan` artifact (internal/capacityplan), and surfaces
+	// current-vs-recommended sizing per axis (Postgres pool / ClickHouse
+	// / NATS) as metrics + log lines. It only observes and recommends —
+	// it never mutates a runtime knob, restarts a service, or takes any
+	// destructive action. Leader-only so a multi-replica deployment emits
+	// one recommendation per interval rather than N. RunIfLeader blocks
+	// until rootCtx is cancelled, so it runs in its own goroutine.
+	if cfg.Capacity.Enabled {
+		capacityReconciler := capacity.New(capacity.Config{
+			Observer: capacity.NewRepoFleetObserver(rc.TenantRepo, 0, nil),
+			Knobs:    capacityKnobs(&cfg),
+			Metrics:  mx,
+			Interval: cfg.Capacity.Interval,
+			Logger:   logger,
+		})
+		go elector.RunIfLeader(rootCtx, "capacity-autopilot", capacityReconciler.Run)
+		logger.Info("sng-control: capacity autopilot registered (runs on leader only)",
+			slog.Duration("interval", cfg.Capacity.Interval))
+	} else {
+		logger.Info("sng-control: capacity autopilot disabled (CAPACITY_AUTOPILOT_ENABLED=false)")
 	}
 
 	// SOC2 evidence collection is a singleton background workload:
@@ -858,6 +884,11 @@ type routerComponents struct {
 	// activity observer; the control-plane signal is wired into the
 	// router here in buildRouter.
 	ActivityRecorder *activity.Recorder
+	// TenantRepo is the tenant repository. Exposed so the WS6 capacity
+	// autopilot's fleet observer can enumerate the live tenant count
+	// (it reuses the dormancy planner's cheap ListTenantActivity
+	// projection). Never nil.
+	TenantRepo repository.TenantRepository
 }
 
 // buildRouter wires every repository / service / handler against
@@ -2036,6 +2067,7 @@ func buildRouter(
 		IDPSyncService:      idpSyncSvc,
 		DLPReviewService:    dlpReviewSvc,
 		ActivityRecorder:    activityRecorder,
+		TenantRepo:          tenantRepo,
 	}, nil
 }
 
@@ -3446,6 +3478,32 @@ func runPoPRebalance(ctx context.Context, svc *pop.Service, interval time.Durati
 				logger.Info("pop: rebalance moved tenants off overloaded PoPs",
 					slog.Int("moved", moved))
 			}
+		}
+	}
+}
+
+// capacityKnobs returns a closure that snapshots the capacity-relevant
+// runtime settings the WS6 autopilot grades against. It is read once per
+// reconcile cycle (rather than captured once) so a value that can change
+// at runtime is reflected. The ClickHouse shard count mirrors the
+// ShardedWriter's "one shard per endpoint" rule (clickhouse/sharding.go)
+// — len(endpoints) in shard-aware mode, else a single logical
+// destination — without reaching into the writer, which lives in a
+// different wiring scope.
+func capacityKnobs(cfg *config.Config) func() capacity.RuntimeKnobs {
+	return func() capacity.RuntimeKnobs {
+		shards := 1
+		if cfg.TelemetryAnalytics.ClickHouseSharding && len(cfg.TelemetryAnalytics.ClickHouseEndpoints) > 0 {
+			shards = len(cfg.TelemetryAnalytics.ClickHouseEndpoints)
+		}
+		return capacity.RuntimeKnobs{
+			ControlPlaneReplicas: cfg.Capacity.ControlPlaneReplicas,
+			PGMaxOpenConns:       cfg.Postgres.MaxOpenConns,
+			PGMaxConnections:     cfg.Capacity.PGMaxConnections,
+			PGBouncerMode:        cfg.Postgres.PgBouncerMode,
+			ClickHouseShards:     shards,
+			ClickHouseBatchSize:  cfg.TelemetryAnalytics.ClickHouseBatchSize,
+			NATSPartitions:       cfg.NATS.Partitions,
 		}
 	}
 }

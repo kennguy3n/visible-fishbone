@@ -274,65 +274,9 @@ type PostgresScaleSection struct {
 	IndexSizeBytes map[string]int64 `json:"index_size_bytes"`
 }
 
-// CapacityPlanSection is the deterministic capacity projection: the
-// data-plane footprint at a given tenant count across the three
-// horizontal-scaling axes. See capacity_plan.go for the model.
-type CapacityPlanSection struct {
-	// TenantCount is the modelled fleet size.
-	TenantCount int `json:"tenant_count"`
-	// TelemetryClasses is the set of telemetry classes the throughput
-	// and subject-cardinality models fan out across.
-	TelemetryClasses []string `json:"telemetry_classes"`
-	// Postgres is the connection-pool pressure projection.
-	Postgres PostgresPoolPlan `json:"postgres"`
-	// ClickHouse is the hot-path write-throughput projection.
-	ClickHouse ClickHouseWritePlan `json:"clickhouse"`
-	// NATS is the subject-cardinality + JetStream storage projection.
-	NATS NATSSubjectPlan `json:"nats"`
-}
-
-// PostgresPoolPlan projects connection-pool pressure at scale.
-type PostgresPoolPlan struct {
-	Replicas              int     `json:"replicas"`
-	PoolSizePerReplica    int     `json:"pool_size_per_replica"`
-	TotalAppConns         int     `json:"total_app_conns"`
-	PeakConcurrentQueries float64 `json:"peak_concurrent_queries"`
-	RecommendedPoolSize   int     `json:"recommended_pool_size"`
-	PGBouncerMode         bool    `json:"pgbouncer_mode"`
-	BackendConnsRequired  int     `json:"backend_conns_required"`
-	MaxConnections        int     `json:"max_connections"`
-	WithinMaxConnections  bool    `json:"within_max_connections"`
-	Note                  string  `json:"note"`
-}
-
-// ClickHouseWritePlan projects hot-path write load at scale.
-type ClickHouseWritePlan struct {
-	Shards                 int     `json:"shards"`
-	BatchSize              int     `json:"batch_size"`
-	TotalRowsPerSec        float64 `json:"total_rows_per_sec"`
-	RowsPerSecPerShard     float64 `json:"rows_per_sec_per_shard"`
-	InsertsPerSecPerShard  float64 `json:"inserts_per_sec_per_shard"`
-	MonthlyRows            int64   `json:"monthly_rows"`
-	PerTenantMonthlyRows   int64   `json:"per_tenant_monthly_rows"`
-	HotStorageGBCompressed float64 `json:"hot_storage_gb_compressed"`
-	IngestBytesPerSec      int64   `json:"ingest_bytes_per_sec"`
-	RecommendedShards      int     `json:"recommended_shards"`
-	RecommendedBatchSize   int     `json:"recommended_batch_size"`
-	Note                   string  `json:"note"`
-}
-
-// NATSSubjectPlan projects subject cardinality + JetStream storage.
-type NATSSubjectPlan struct {
-	Partitions              int     `json:"partitions"`
-	DistinctSubjects        int     `json:"distinct_subjects"`
-	SubjectsPerPartitionAvg float64 `json:"subjects_per_partition_avg"`
-	SubjectsPerPartitionMax int     `json:"subjects_per_partition_max"`
-	MsgsPerSec              float64 `json:"msgs_per_sec"`
-	RetentionHours          float64 `json:"retention_hours"`
-	StreamBytesHot          int64   `json:"stream_bytes_hot"`
-	RecommendedPartitions   int     `json:"recommended_partitions"`
-	Note                    string  `json:"note"`
-}
+// The capacity-plan projection types (CapacityPlanSection,
+// PostgresPoolPlan, ClickHouseWritePlan, NATSSubjectPlan) are aliases
+// for the shared internal/capacityplan model — see capacity_plan.go.
 
 // TheoreticalTargets are the design goals the verdicts grade against.
 // Sourced from PROPOSAL.md / ARCHITECTURE.md; see field docs.

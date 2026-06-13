@@ -140,6 +140,24 @@ type Metrics struct {
 	TenantActiveDevices *prometheus.GaugeVec
 	TenantActiveEdges   *prometheus.GaugeVec
 	TenantPolicyVersion *prometheus.GaugeVec
+
+	// --- Capacity autopilot (WS6) -------------------------------
+	// CapacitySetting carries the live capacity reconciler's
+	// current-vs-recommended value for each tunable, labelled by axis
+	// (postgres|clickhouse|nats), the specific knob, and kind
+	// (current|recommended). An operator dashboard alerts on a knob
+	// whose current and recommended series diverge.
+	CapacitySetting *prometheus.GaugeVec
+	// CapacityRecommendationPending is 1 when an axis's current setting
+	// differs from the model's recommendation (the operator has an
+	// action to take), else 0. Labelled by axis.
+	CapacityRecommendationPending *prometheus.GaugeVec
+	// CapacityFleetTenants is the live fleet size the most recent
+	// reconcile observed and fed into the model.
+	CapacityFleetTenants prometheus.Gauge
+	// CapacityReconcileTotal counts completed reconcile passes by
+	// outcome (ok|error), proving the loop is live.
+	CapacityReconcileTotal *prometheus.CounterVec
 }
 
 // New constructs a Metrics value, registering every collector
@@ -429,7 +447,82 @@ func New(cfg config.Metrics) *Metrics {
 		Help:      "Currently distributed policy version per tenant.",
 	}, []string{"tenant"})
 
+	// --- Capacity autopilot (WS6) -----------------------------------
+	m.CapacitySetting = f.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: ns,
+		Subsystem: "capacity",
+		Name:      "setting",
+		Help:      "Capacity reconciler current vs recommended value, by axis (postgres|clickhouse|nats), knob, and kind (current|recommended).",
+	}, []string{"axis", "knob", "kind"})
+	m.CapacityRecommendationPending = f.NewGaugeVec(prometheus.GaugeOpts{
+		Namespace: ns,
+		Subsystem: "capacity",
+		Name:      "recommendation_pending",
+		Help:      "1 when an axis's current setting differs from the model recommendation (operator action available), else 0, by axis.",
+	}, []string{"axis"})
+	m.CapacityFleetTenants = f.NewGauge(prometheus.GaugeOpts{
+		Namespace: ns,
+		Subsystem: "capacity",
+		Name:      "fleet_tenants",
+		Help:      "Live fleet size the most recent capacity reconcile observed and fed into the model.",
+	})
+	m.CapacityReconcileTotal = f.NewCounterVec(prometheus.CounterOpts{
+		Namespace: ns,
+		Subsystem: "capacity",
+		Name:      "reconcile_total",
+		Help:      "Total capacity reconcile passes, by outcome (ok|error).",
+	}, []string{"outcome"})
+
 	return m
+}
+
+// --- Capacity autopilot (WS6) setters -----------------------------
+//
+// These thin setters let the capacity reconciler
+// (internal/service/capacity) update the gauges through a narrow
+// interface without importing the prometheus types or this struct's
+// concrete shape — and crucially without this package importing the
+// capacity service, which would be an import cycle. Every setter is
+// nil-safe on the receiver so wiring can stay unconditional when
+// metrics are disabled (mx == nil).
+
+// SetCapacitySetting records one knob's current and recommended values
+// for an axis.
+func (m *Metrics) SetCapacitySetting(axis, knob string, current, recommended float64) {
+	if m == nil {
+		return
+	}
+	m.CapacitySetting.WithLabelValues(axis, knob, "current").Set(current)
+	m.CapacitySetting.WithLabelValues(axis, knob, "recommended").Set(recommended)
+}
+
+// SetCapacityRecommendationPending sets the per-axis pending-action flag.
+func (m *Metrics) SetCapacityRecommendationPending(axis string, pending bool) {
+	if m == nil {
+		return
+	}
+	v := 0.0
+	if pending {
+		v = 1.0
+	}
+	m.CapacityRecommendationPending.WithLabelValues(axis).Set(v)
+}
+
+// SetCapacityFleetTenants records the observed live fleet size.
+func (m *Metrics) SetCapacityFleetTenants(n int) {
+	if m == nil {
+		return
+	}
+	m.CapacityFleetTenants.Set(float64(n))
+}
+
+// IncCapacityReconcile increments the reconcile-pass counter for an
+// outcome ("ok" or "error").
+func (m *Metrics) IncCapacityReconcile(outcome string) {
+	if m == nil {
+		return
+	}
+	m.CapacityReconcileTotal.WithLabelValues(outcome).Inc()
 }
 
 // Registry returns the underlying Prometheus registry. Exposed so
