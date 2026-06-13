@@ -598,7 +598,18 @@ func (s *AdaptiveSampler) DecideEvent(ctx context.Context, tenantID, eventID uui
 		floor = f
 	}
 	if floor >= 1.0 {
-		// Always keep, never sample, no adaptive state touched.
+		// Always keep, never sample, no adaptive state touched. NOTE:
+		// because this returns before resolveBaseKeepProb, a floored
+		// event (security-relevant, or the inspect_full compliance
+		// class) records NO arrival — whereas the pre-tier DecideClass
+		// path counted a security event with an empty traffic class as
+		// one arrival via keepProb. So enabling tier sampling slightly
+		// lowers the measured arrival rate for security-heavy tenants,
+		// making the adaptive sampler a touch less aggressive on their
+		// *non*-security events. This is deliberate and one-sided (it
+		// keeps MORE, never less — the fail-safe direction), and such
+		// tenants are active-tier anyway, so the practical effect is
+		// negligible; flagged here for operators watching keepProb.
 		return true, 1.0, tier, true
 	}
 

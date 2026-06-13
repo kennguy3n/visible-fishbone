@@ -145,6 +145,12 @@ type CapacityPlanConfig struct {
 	// active / idle cohorts; the remainder is dormant. Only consulted
 	// when TierSampling is true. Defaults model a NoOps fleet where most
 	// tenants are dormant trials (10% active, 15% idle, 75% dormant).
+	//
+	// They are not validated to sum to <= 1: tierTenantCounts clamps the
+	// idle count so active+idle never exceeds TenantCount and derives
+	// dormant as the remainder, so an over-1 sum is silently renormalised
+	// (dormant collapses to 0) rather than rejected. Pass fractions that
+	// sum to <= 1 for the cohort split you intend.
 	ActiveFraction float64
 	IdleFraction   float64
 	// IdleSampleMultiplier is the keep fraction applied to an idle

@@ -145,6 +145,14 @@ type Metrics struct {
 // keeps an out-of-range tier from panicking the hot path.
 const numTiers = 3
 
+// Compile-time assertion that numTiers stays in sync with the
+// tenancy.Tier enum. It evaluates to uint(0) today (numTiers-1 ==
+// int(TierDormant)); if a tier is ever appended past TierDormant
+// without bumping numTiers, the expression goes negative and the
+// uint() conversion fails to compile — forcing the array size and the
+// enum back into agreement rather than silently dropping the new tier.
+const _ = uint(numTiers - 1 - int(tenancy.TierDormant))
+
 // recordTierDecision increments the per-tier kept / dropped counter for
 // a tier-sampling decision. An out-of-range tier (a future enum value
 // reaching an old binary) is ignored rather than panicking the consumer.
