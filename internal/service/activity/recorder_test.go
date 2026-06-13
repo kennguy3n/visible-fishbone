@@ -135,7 +135,11 @@ func TestRecorder_DistinctTenantsNotDebouncedTogether(t *testing.T) {
 func TestRecorder_NilAndZeroAreSafe(t *testing.T) {
 	var r *Recorder
 	r.Observe(uuid.New(), time.Now()) // nil receiver: must not panic
-	if got := r.Stats(); got != (Stats{}) {
+	// Stats now carries a BySource map so it is no longer comparable
+	// with ==; assert the scalar counters are zero and no per-source
+	// breakdown was allocated.
+	if got := r.Stats(); got.Enqueued != 0 || got.Debounced != 0 || got.Dropped != 0 ||
+		got.Written != 0 || got.Failed != 0 || got.BySource != nil {
 		t.Fatalf("nil Stats = %+v, want zero", got)
 	}
 
@@ -342,6 +346,99 @@ func TestRecorder_PruneEvictsStaleTenants(t *testing.T) {
 	}
 	if n != 2 {
 		t.Fatalf("last map size = %d, want 2", n)
+	}
+}
+
+// TestRecorder_PerSourceAttribution proves the coverage metric's data
+// source: a touch made through From(src).Observe is counted under that
+// src in Stats.BySource (enqueued + eventually written), and a debounced
+// repeat lands in that src's Debounced bucket — never another source's.
+func TestRecorder_PerSourceAttribution(t *testing.T) {
+	f := &fakeToucher{}
+	now := time.Date(2026, 6, 11, 12, 0, 0, 0, time.UTC)
+	r := NewRecorder(f, WithMinInterval(time.Hour), WithClock(func() time.Time { return now }))
+	go r.Run()
+	defer r.Stop()
+
+	// One touch per non-unknown source, each for a distinct tenant so
+	// no cross-source debounce interferes.
+	srcs := []Source{SourceTelemetry, SourceAPI, SourceEnroll, SourceMobileToken, SourceMobileRefresh}
+	ids := make(map[Source]uuid.UUID, len(srcs))
+	for _, s := range srcs {
+		id := uuid.New()
+		ids[s] = id
+		r.From(s).Observe(id, now)
+	}
+	// A second touch for one source's tenant within MinInterval must be
+	// debounced and attributed to that same source.
+	r.From(SourceAPI).Observe(ids[SourceAPI], now)
+
+	if !drainUntil(time.Second, func() bool { return len(f.snapshot()) == len(srcs) }) {
+		t.Fatalf("not all sources persisted: got %d, want %d", len(f.snapshot()), len(srcs))
+	}
+
+	stats := r.Stats()
+	if stats.BySource == nil {
+		t.Fatal("Stats.BySource is nil")
+	}
+	// Every Sources() value must have an entry so the metric exporter
+	// can iterate without nil checks.
+	for _, s := range Sources() {
+		if _, ok := stats.BySource[s]; !ok {
+			t.Errorf("BySource missing entry for source %q", s)
+		}
+	}
+	for _, s := range srcs {
+		st := stats.BySource[s]
+		if st.Enqueued != 1 {
+			t.Errorf("source %q enqueued = %d, want 1", s, st.Enqueued)
+		}
+		if st.Written != 1 {
+			t.Errorf("source %q written = %d, want 1", s, st.Written)
+		}
+	}
+	if got := stats.BySource[SourceAPI].Debounced; got != 1 {
+		t.Errorf("api debounced = %d, want 1 (the repeat touch)", got)
+	}
+	if got := stats.BySource[SourceUnknown].Enqueued; got != 0 {
+		t.Errorf("unknown enqueued = %d, want 0 (no un-attributed touches)", got)
+	}
+	// Per-source totals must reconcile with the aggregate counters.
+	var sumEnq, sumWritten uint64
+	for _, st := range stats.BySource {
+		sumEnq += st.Enqueued
+		sumWritten += st.Written
+	}
+	if sumEnq != stats.Enqueued {
+		t.Errorf("sum of per-source enqueued = %d, aggregate = %d", sumEnq, stats.Enqueued)
+	}
+	if sumWritten != stats.Written {
+		t.Errorf("sum of per-source written = %d, aggregate = %d", sumWritten, stats.Written)
+	}
+}
+
+// TestRecorder_PerSourceFailedAttribution proves a persist failure is
+// counted under the originating source's Failed bucket (not only the
+// aggregate), so Enqueued reconciles with Written+Failed per source.
+func TestRecorder_PerSourceFailedAttribution(t *testing.T) {
+	f := &fakeToucher{err: errors.New("boom")}
+	r := NewRecorder(f, WithMinInterval(time.Hour))
+	go r.Run()
+	defer r.Stop()
+
+	id := uuid.New()
+	r.From(SourceEnroll).Observe(id, time.Now())
+
+	if !drainUntil(time.Second, func() bool { return r.Stats().Failed == 1 }) {
+		t.Fatalf("failed touch never recorded: %+v", r.Stats())
+	}
+	st := r.Stats().BySource[SourceEnroll]
+	if st.Enqueued != 1 || st.Failed != 1 || st.Written != 0 {
+		t.Fatalf("enroll source stats = %+v, want Enqueued=1 Failed=1 Written=0", st)
+	}
+	// The failing source's Enqueued reconciles with Written+Failed.
+	if st.Enqueued != st.Written+st.Failed {
+		t.Fatalf("enqueued %d != written %d + failed %d", st.Enqueued, st.Written, st.Failed)
 	}
 }
 

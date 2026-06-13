@@ -316,8 +316,7 @@ func TestReconcile_SkipsInactiveTenants(t *testing.T) {
 
 func TestReconcile_ActivityTieredSkipsDormant(t *testing.T) {
 	fx := newEngineFixture(t)
-	p := tenancy.DefaultPlanner()
-	fx.engine.WithDormancyPlanner(&p)
+	fx.engine.WithDormancyPlanner(tenancy.NewTieredSweep("casb_noops_reconcile", tenancy.DefaultPlanner(), nil))
 	ctx := context.Background()
 	devices := 9
 
@@ -355,6 +354,132 @@ func TestReconcile_ActivityTieredSkipsDormant(t *testing.T) {
 	// The active tenant is still re-evaluated every cycle.
 	if cls, _ := fx.store.ListClassifications(ctx, active); len(cls) != 1 {
 		t.Fatalf("active classifications after cycle 1 = %d, want 1", len(cls))
+	}
+}
+
+// recordingSweepObserver captures ObserveSweep calls so a test can
+// assert the per-tier tallies a sweep published.
+type recordingSweepObserver struct {
+	mu    sync.Mutex
+	calls []sweepObsCall
+}
+
+type sweepObsCall struct {
+	job              string
+	tier             tenancy.Tier
+	visited, skipped int
+}
+
+func (r *recordingSweepObserver) ObserveSweep(job string, tier tenancy.Tier, visited, skipped int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, sweepObsCall{job, tier, visited, skipped})
+}
+
+// pagedThenErrTenants returns one successful page (with a cursor) and
+// then errors on the next List, simulating a tenant-list failure that
+// occurs partway through a paginated reconcile sweep. Only List is
+// implemented; the embedded nil interface would panic on any other
+// method, which Reconcile never calls.
+type pagedThenErrTenants struct {
+	repository.TenantRepository
+	first []repository.Tenant
+	err   error
+}
+
+func (p pagedThenErrTenants) List(_ context.Context, page repository.Page) (repository.PageResult[repository.Tenant], error) {
+	if page.After == "" {
+		return repository.PageResult[repository.Tenant]{Items: p.first, NextCursor: "page2"}, nil
+	}
+	return repository.PageResult[repository.Tenant]{}, p.err
+}
+
+// TestReconcile_PublishesPartialTalliesOnListError pins the round-2
+// Devin Review fix: Begin advances the cycle counter before the
+// paginated loop, so a mid-sweep tenant-list error must still publish
+// the partial per-tier tally (the work that did happen) rather than
+// silently dropping that cycle's observability.
+func TestReconcile_PublishesPartialTalliesOnListError(t *testing.T) {
+	fx := newEngineFixture(t)
+	obs := &recordingSweepObserver{}
+	active := repository.Tenant{ID: uuid.New(), Status: repository.TenantStatusActive, LastActiveAt: &fx.clock}
+	failing := pagedThenErrTenants{first: []repository.Tenant{active}, err: context.DeadlineExceeded}
+
+	engine := casb.NewAppNoOpsEngine(fx.store, fx.apps, failing, nil)
+	engine.SetClock(func() time.Time { return fx.clock })
+	engine.WithDormancyPlanner(tenancy.NewTieredSweep("casb_noops_reconcile", tenancy.DefaultPlanner(), obs))
+
+	if err := engine.Reconcile(context.Background()); err == nil {
+		t.Fatal("expected the mid-sweep list error to propagate")
+	}
+
+	obs.mu.Lock()
+	defer obs.mu.Unlock()
+	if len(obs.calls) == 0 {
+		t.Fatal("Finish must publish the partial tally even when the sweep aborts mid-pagination")
+	}
+	visited := 0
+	for _, c := range obs.calls {
+		if c.job != "casb_noops_reconcile" {
+			t.Fatalf("unexpected job label %q", c.job)
+		}
+		visited += c.visited
+	}
+	if visited != 1 {
+		t.Fatalf("partial visited tally = %d, want 1 (the page-1 tenant visited before the error)", visited)
+	}
+}
+
+// failFirstThenTenants errors on its first List and succeeds afterwards,
+// simulating a transient enumeration failure on the very first reconcile.
+type failFirstThenTenants struct {
+	repository.TenantRepository
+	calls int
+	items []repository.Tenant
+}
+
+func (f *failFirstThenTenants) List(_ context.Context, _ repository.Page) (repository.PageResult[repository.Tenant], error) {
+	f.calls++
+	if f.calls == 1 {
+		return repository.PageResult[repository.Tenant]{}, context.DeadlineExceeded
+	}
+	return repository.PageResult[repository.Tenant]{Items: f.items}, nil
+}
+
+// TestReconcile_FirstPageFailurePreservesCycleZero pins the round-3 Devin
+// Review consistency fix: a transient failure on the very first tenant-list
+// page must NOT burn cycle 0, so the guaranteed startup full sweep still
+// happens on the next attempt (matching the IdP-sync / alert adopters).
+func TestReconcile_FirstPageFailurePreservesCycleZero(t *testing.T) {
+	fx := newEngineFixture(t)
+	obs := &recordingSweepObserver{}
+	// Never-active tenant => dormant tier, which is only due on cycle 0
+	// (or every 100th). If cycle 0 were consumed by the failed attempt,
+	// the next sweep would be cycle 1 and this tenant would be skipped.
+	dormant := repository.Tenant{ID: uuid.New(), Status: repository.TenantStatusActive, LastActiveAt: nil}
+	repo := &failFirstThenTenants{items: []repository.Tenant{dormant}}
+
+	engine := casb.NewAppNoOpsEngine(fx.store, fx.apps, repo, nil)
+	engine.SetClock(func() time.Time { return fx.clock })
+	engine.WithDormancyPlanner(tenancy.NewTieredSweep("casb_noops_reconcile", tenancy.DefaultPlanner(), obs))
+
+	if err := engine.Reconcile(context.Background()); err == nil {
+		t.Fatal("expected first-page list error to propagate")
+	}
+	if err := engine.Reconcile(context.Background()); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+
+	obs.mu.Lock()
+	defer obs.mu.Unlock()
+	dormantVisited := 0
+	for _, c := range obs.calls {
+		if c.tier == tenancy.TierDormant {
+			dormantVisited += c.visited
+		}
+	}
+	if dormantVisited != 1 {
+		t.Fatalf("dormant tenant should be visited on the preserved cycle-0 sweep; dormant visited = %d (cycle 0 was burned by the failed attempt?)", dormantVisited)
 	}
 }
 
