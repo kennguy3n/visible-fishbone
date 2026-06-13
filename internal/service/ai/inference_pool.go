@@ -171,7 +171,10 @@ func (p *InferencePool) Config() InferencePoolConfig { return p.cfg }
 // direct pass-through; otherwise the request is fair-queued by tenant
 // and admitted under the global concurrency cap.
 func (p *InferencePool) Complete(ctx context.Context, req LLMRequest) (LLMResponse, error) {
-	if p == nil || !p.cfg.Enabled {
+	if p == nil {
+		return LLMResponse{}, errors.New("ai/inferencepool: Complete called on nil pool")
+	}
+	if !p.cfg.Enabled {
 		return p.inner.Complete(ctx, req)
 	}
 
@@ -210,19 +213,21 @@ func (p *InferencePool) Complete(ctx context.Context, req LLMRequest) (LLMRespon
 	}
 }
 
-// abandon handles the non-admit exit paths. If the waiter is still
-// queued it is withdrawn and the supplied counter (if any) is bumped.
-// If the dispatcher granted the slot concurrently, we honour and
-// release it so the global inflight count stays exact.
+// abandon handles the non-admit exit paths (caller cancel, wait
+// timeout, pool close). The request returns retErr to the caller
+// regardless, so the supplied counter (if any) is always bumped to keep
+// the cancelled/wait-timeout telemetry exact even when the dispatcher
+// granted a slot in the same instant the caller gave up. In that grant
+// race the waiter is no longer queued, so we release the slot to keep
+// the global inflight count exact; the backend call is never made.
 func (p *InferencePool) abandon(w *poolWaiter, retErr error, count func()) (LLMResponse, error) {
-	if p.withdraw(w) {
-		if count != nil {
-			count()
-		}
-		return LLMResponse{}, retErr
+	if !p.withdraw(w) {
+		// Granted just as we gave up: the slot is ours to release.
+		p.release()
 	}
-	// Granted just as we gave up: the slot is ours to release.
-	p.release()
+	if count != nil {
+		count()
+	}
 	return LLMResponse{}, retErr
 }
 

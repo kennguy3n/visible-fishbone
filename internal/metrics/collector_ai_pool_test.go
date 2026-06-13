@@ -26,9 +26,9 @@ func TestAIPoolCollectorRecordsSnapshot(t *testing.T) {
 	})
 
 	checks := []struct {
-		name  string
-		gauge prometheus.Gauge
-		want  float64
+		name string
+		coll prometheus.Collector
+		want float64
 	}{
 		{"inflight", m.AIPoolInflight, 3},
 		{"peak_inflight", m.AIPoolPeakInflight, 4},
@@ -43,9 +43,39 @@ func TestAIPoolCollectorRecordsSnapshot(t *testing.T) {
 		{"avg_wait_ms", m.AIPoolAvgWaitMS, 12.5},
 	}
 	for _, c := range checks {
-		if got := testutil.ToFloat64(c.gauge); got != c.want {
+		if got := testutil.ToFloat64(c.coll); got != c.want {
 			t.Errorf("%s = %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// TestAIPoolCollectorCountersTrackCumulativeDeltas verifies the
+// cumulative-total counters advance by the per-scrape delta of the
+// pool's process-cumulative snapshot (not by the raw value each scrape),
+// and that a backwards jump (pool recreated) re-baselines instead of
+// emitting a negative delta.
+func TestAIPoolCollectorCountersTrackCumulativeDeltas(t *testing.T) {
+	m := newTestMetrics(t)
+	c := NewAIPoolCollector(m, nil, 0)
+
+	c.record(AIPoolSnapshot{Admitted: 100, Completed: 97})
+	c.record(AIPoolSnapshot{Admitted: 150, Completed: 145})
+	if got := testutil.ToFloat64(m.AIPoolAdmitted); got != 150 {
+		t.Errorf("admitted after delta = %v, want 150", got)
+	}
+	if got := testutil.ToFloat64(m.AIPoolCompleted); got != 145 {
+		t.Errorf("completed after delta = %v, want 145", got)
+	}
+
+	// Source reset (e.g. pool recreated): counter must not go backwards;
+	// it re-baselines and only advances on subsequent growth.
+	c.record(AIPoolSnapshot{Admitted: 5, Completed: 5})
+	c.record(AIPoolSnapshot{Admitted: 12, Completed: 11})
+	if got := testutil.ToFloat64(m.AIPoolAdmitted); got != 157 {
+		t.Errorf("admitted after reset+7 = %v, want 157", got)
+	}
+	if got := testutil.ToFloat64(m.AIPoolCompleted); got != 151 {
+		t.Errorf("completed after reset+6 = %v, want 151", got)
 	}
 }
 

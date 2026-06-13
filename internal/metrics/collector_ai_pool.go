@@ -3,6 +3,8 @@ package metrics
 import (
 	"context"
 	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
 )
 
 // DefaultAIPoolScrapeInterval is how often the shared-inference-pool
@@ -44,6 +46,12 @@ type AIPoolCollector struct {
 	metrics  *Metrics
 	src      AIPoolSource
 	interval time.Duration
+
+	// last-observed cumulative totals, used to convert ai.PoolMetrics'
+	// process-cumulative snapshot into monotonic counter increments. A
+	// value going backwards (pool recreated) is treated as a fresh
+	// baseline rather than a negative delta.
+	last AIPoolSnapshot
 }
 
 // NewAIPoolCollector builds a shared-inference-pool collector. A
@@ -82,18 +90,33 @@ func (c *AIPoolCollector) sample() {
 	c.record(c.src.AIPoolSnapshot())
 }
 
-// record applies one snapshot to the gauges. Split out from sample so
-// the mapping is unit-testable without a live pool.
+// record applies one snapshot to the metrics. Split out from sample so
+// the mapping is unit-testable without a live pool. Instantaneous state
+// is Set() onto gauges; cumulative lifetime totals are Add()ed onto
+// counters as the delta since the previous snapshot (a backwards jump
+// re-baselines instead of producing a negative delta).
 func (c *AIPoolCollector) record(s AIPoolSnapshot) {
 	c.metrics.AIPoolInflight.Set(float64(s.Inflight))
 	c.metrics.AIPoolPeakInflight.Set(float64(s.PeakInflight))
 	c.metrics.AIPoolQueued.Set(float64(s.Queued))
 	c.metrics.AIPoolPeakQueued.Set(float64(s.PeakQueued))
-	c.metrics.AIPoolAdmitted.Set(float64(s.Admitted))
-	c.metrics.AIPoolCompleted.Set(float64(s.Completed))
-	c.metrics.AIPoolErrors.Set(float64(s.Errors))
-	c.metrics.AIPoolRejected.Set(float64(s.Rejected))
-	c.metrics.AIPoolWaitTimeouts.Set(float64(s.WaitTimeouts))
-	c.metrics.AIPoolCancelled.Set(float64(s.Cancelled))
 	c.metrics.AIPoolAvgWaitMS.Set(s.AvgWaitMS)
+
+	addDelta(c.metrics.AIPoolAdmitted, s.Admitted, &c.last.Admitted)
+	addDelta(c.metrics.AIPoolCompleted, s.Completed, &c.last.Completed)
+	addDelta(c.metrics.AIPoolErrors, s.Errors, &c.last.Errors)
+	addDelta(c.metrics.AIPoolRejected, s.Rejected, &c.last.Rejected)
+	addDelta(c.metrics.AIPoolWaitTimeouts, s.WaitTimeouts, &c.last.WaitTimeouts)
+	addDelta(c.metrics.AIPoolCancelled, s.Cancelled, &c.last.Cancelled)
+}
+
+// addDelta advances a counter by cur-*last and records cur as the new
+// baseline. If cur dropped below the baseline (a process-cumulative
+// source reset, e.g. the pool was recreated), it re-baselines without
+// emitting a negative delta.
+func addDelta(c prometheus.Counter, cur int64, last *int64) {
+	if cur > *last {
+		c.Add(float64(cur - *last))
+	}
+	*last = cur
 }
