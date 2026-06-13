@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy"
 )
@@ -196,6 +198,43 @@ func TestControllerWakesReactivatedTenant(t *testing.T) {
 	}
 	if len(subs.resumed) != 1 {
 		t.Fatalf("expected 1 resume call, got %d", len(subs.resumed))
+	}
+}
+
+// TestControllerGaugeCountsStoreHibernatedNotInActivityList verifies the
+// hibernated_tenants gauge is seeded from the store's hibernated set, so a
+// tenant whose hibernation row outlives its activity row (e.g. soft-deleted,
+// excluded by ListTenantActivity) is still counted — matching what the
+// Syncer/Registry would carry — rather than silently under-counted.
+func TestControllerGaugeCountsStoreHibernatedNotInActivityList(t *testing.T) {
+	now := time.Now().UTC()
+	inList := uuid.New()  // dormant + in activity list → counted
+	ghost := uuid.New()   // hibernated in store but absent from activity list
+	leaving := uuid.New() // hibernated but now active → woken, not counted
+
+	store := newMemStore()
+	for _, id := range []uuid.UUID{inList, ghost, leaving} {
+		if _, err := store.SetHibernated(context.Background(), id, "seed", now.Add(-time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reg := prometheus.NewRegistry()
+	m := NewMetrics(reg, "sng")
+	ctrl, _ := New(dormantClassifier(), store,
+		listActivity{acts: []TenantActivity{
+			{ID: inList, LastActiveAt: ptr(now.Add(-30 * 24 * time.Hour))}, // still dormant
+			{ID: leaving, LastActiveAt: ptr(now)},                          // climbed out
+		}},
+		WithMetrics(m),
+		WithClock(func() time.Time { return now }),
+	)
+	if err := ctrl.RunOnce(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	// inList stays hibernated, ghost stays hibernated (never visited),
+	// leaving is woken: 3 seeded - 1 woken = 2.
+	if got := testutil.ToFloat64(m.hibernatedTenants); got != 2 {
+		t.Fatalf("hibernated_tenants gauge = %v, want 2 (ghost tenant must stay counted)", got)
 	}
 }
 

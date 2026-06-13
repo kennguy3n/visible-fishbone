@@ -125,12 +125,21 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 		return fmt.Errorf("hibernation: list state: %w", err)
 	}
 	hibernated := make(map[uuid.UUID]bool, len(recs))
+	// Seed the gauge from the store's hibernated set — the same source of
+	// truth the Syncer/Registry use — rather than from the activity-list
+	// intersection. A tenant whose hibernation row outlives its activity
+	// row (e.g. a soft-deleted tenant excluded by ListTenantActivity but
+	// still present in tenant_hibernation) then stays counted exactly as
+	// it stays in the registry, so the gauge can't silently under-count.
+	count := 0
 	for _, rec := range recs {
 		hibernated[rec.TenantID] = rec.State.Hibernated()
+		if rec.State.Hibernated() {
+			count++
+		}
 	}
 
 	now := c.now()
-	count := 0
 	for _, act := range acts {
 		if act.ID == uuid.Nil {
 			continue
@@ -144,8 +153,7 @@ func (c *Controller) RunOnce(ctx context.Context) error {
 			}
 		case tier != tenancy.TierDormant && isHibernated:
 			c.wake(ctx, act.ID, "tenant left dormant tier: "+tier.String())
-		case isHibernated:
-			count++
+			count--
 		}
 	}
 	c.metrics.setHibernatedCount(count)
