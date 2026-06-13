@@ -971,7 +971,16 @@ func buildRouter(
 		hibMetrics     *hibernation.Metrics
 	)
 	if cfg.Hibernation.Enabled {
-		hibRegistry = hibernation.NewRegistry()
+		// Derive the registry's post-wake re-park suppression window from
+		// the configured sync interval so the wake/sync race stays closed
+		// even when an operator sets an unusually long sync interval: the
+		// grace must outlast the time for a wake's store write to reach
+		// the next refresh. Keep the package default as a floor.
+		wakeGrace := 4 * cfg.Hibernation.RegistrySyncInterval
+		if wakeGrace < hibernation.DefaultWakeGrace {
+			wakeGrace = hibernation.DefaultWakeGrace
+		}
+		hibRegistry = hibernation.NewRegistry(hibernation.WithWakeGrace(wakeGrace))
 		// mx is nil when metrics are disabled; guard the registry /
 		// namespace access exactly as the other call sites do.
 		// NewMetrics treats a nil registerer as "metrics off" and

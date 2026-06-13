@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 
+	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy/hibernation"
 )
 
@@ -85,7 +86,7 @@ func (r *TenantHibernationRepository) SetActive(ctx context.Context, tenantID uu
 // the most recent transition in each direction.
 func (r *TenantHibernationRepository) upsert(ctx context.Context, tenantID uuid.UUID, state hibernation.State, reason string, at time.Time) (hibernation.Record, error) {
 	if tenantID == uuid.Nil || !state.Valid() {
-		return hibernation.Record{}, fmt.Errorf("tenant_hibernation: invalid argument")
+		return hibernation.Record{}, repository.ErrInvalidArgument
 	}
 	if at.IsZero() {
 		at = time.Now()
