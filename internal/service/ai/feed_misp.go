@@ -303,15 +303,10 @@ func eventThreatActor(ev mispEvent) string {
 			}
 		}
 	}
-	// Fall back to the first threat-actor galaxy cluster of any
-	// galaxy type, then to a threat-actor tag.
-	for _, g := range ev.Galaxy {
-		for _, c := range g.GalaxyCluster {
-			if v := strings.TrimSpace(c.Value); v != "" {
-				return v
-			}
-		}
-	}
+	// Fall back to a threat-actor tag. We deliberately do NOT fall
+	// back to a non-threat-actor galaxy cluster: a malware-family or
+	// tool galaxy value is not an actor and labelling it as one would
+	// misattribute the IOC.
 	for _, tag := range ev.Tag {
 		if actor := actorFromTag(tag.Name); actor != "" {
 			return actor
