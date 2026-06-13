@@ -240,6 +240,60 @@ func TestDecideEventIdleReducedSampling(t *testing.T) {
 	}
 }
 
+// TestDecideEventIdlePreservesVisibilityFloor proves the idle multiplier
+// does not stack below the adaptive minRate visibility guarantee: an
+// idle tenant that is also over budget keeps at least minRate (1-in-20),
+// not minRate × idleMult. "Idle = reduced", not invisible — only the
+// dormant tier abandons non-security visibility. The de-bias rate
+// recovered by SampleRateForEvent must match.
+func TestDecideEventIdlePreservesVisibilityFloor(t *testing.T) {
+	clk := newTestClock()
+	tid := uuid.New()
+	const minRate = 0.05
+	const idleMult = 0.25
+	s := NewAdaptiveSampler(SamplerConfig{
+		Resolver:      budgetResolver(10),
+		Window:        time.Second,
+		MinSampleRate: minRate,
+		NowFunc:       clk.now,
+		TierPolicy: NewTierSamplingPolicy(TierSamplingConfig{
+			Resolver:       NewMapTierResolver(map[uuid.UUID]tenancy.Tier{tid: tenancy.TierIdle}),
+			IdleMultiplier: idleMult,
+		}),
+	})
+	ctx := context.Background()
+	r := rand.New(rand.NewSource(17))
+
+	// Drive the tenant far over budget: observed 2000/s vs budget 10/s
+	// clamps the adaptive base to minRate (0.05). base × idleMult would
+	// be 0.0125 without the floor.
+	primeKeepProb(t, s, clk, r, tid, 2000)
+
+	const n = 100_000
+	kept := 0
+	for i := 0; i < n; i++ {
+		keep, sr, tier, tiered := s.DecideEvent(ctx, tid, newRandUUID(r), "", false)
+		if !tiered || tier != tenancy.TierIdle {
+			t.Fatalf("got tiered=%v tier=%v, want true/idle", tiered, tier)
+		}
+		if keep {
+			kept++
+			if math.Abs(sr-minRate) > 1e-9 {
+				t.Fatalf("kept event sample rate = %v, want minRate floor %v (not %v)", sr, minRate, minRate*idleMult)
+			}
+		}
+	}
+	if frac := float64(kept) / n; math.Abs(frac-minRate) > 0.01 {
+		t.Errorf("over-budget idle keep fraction = %.4f, want ~%.2f (the visibility floor, not %.4f)",
+			frac, minRate, minRate*idleMult)
+	}
+	// The recovered de-bias rate must equal the floored keep rate so the
+	// 1/rate weight stays exact.
+	if got := s.SampleRateForEvent(tid, "", false); math.Abs(got-minRate) > 1e-9 {
+		t.Errorf("SampleRateForEvent = %v, want minRate floor %v", got, minRate)
+	}
+}
+
 // TestDecideEventDeterministicAndMonotone proves the tier decision is a
 // pure function of the event ID at a fixed tier rate, and that the kept
 // set for a sparser idle multiplier is a subset of a denser one — the

@@ -563,7 +563,10 @@ func (s *AdaptiveSampler) resolveBaseKeepProb(ctx context.Context, tenantID uuid
 //   - TierIdle scales the base probability by the idle multiplier
 //     (reduced sampling), keeping the same deterministic hash threshold
 //     so the verdict is redelivery-stable and the 1/rate de-bias weight
-//     is exact.
+//     is exact. The composite is floored at the adaptive minRate
+//     visibility guarantee (see tierVisibilityFloor) so an idle tenant
+//     stays sampled at 1-in-20 even when also over budget — idle is
+//     reduced, not invisible.
 //   - TierDormant scales by the dormant multiplier (0 by default), so
 //     every non-security, non-compliance event is dropped outright —
 //     "security-events-only".
@@ -623,6 +626,16 @@ func (s *AdaptiveSampler) DecideEvent(ctx context.Context, tenantID, eventID uui
 	}
 
 	base := s.resolveBaseKeepProb(ctx, tenantID, trafficClass)
+	// Preserve the pre-tier visibility floor: the idle multiplier
+	// reduces sampling but must not push a non-dormant tenant below the
+	// adaptive minRate guarantee (1-in-20) — idle is "reduced", not
+	// "invisible"; only the dormant tier (handled above) abandons
+	// non-security visibility. tierVisibilityFloor never raises above
+	// base, so an explicitly-configured sub-minRate rate (trusted-class
+	// fixed 1/100, or an operator override) is respected, not inflated.
+	if vis := s.tierVisibilityFloor(base); vis > floor {
+		floor = vis
+	}
 	p := base * mult
 	if p < floor {
 		p = floor
@@ -634,6 +647,23 @@ func (s *AdaptiveSampler) DecideEvent(ctx context.Context, tenantID, eventID uui
 		return true, p, tier, true
 	}
 	return false, p, tier, true
+}
+
+// tierVisibilityFloor is the keep-probability floor a non-dormant tier
+// multiplier must not push below: the adaptive minRate visibility
+// guarantee, but never above the base rate itself. For an adaptive base
+// (always >= minRate) it returns minRate, so an idle tenant keeps the
+// 1-in-20 floor even when over budget. For an explicitly-configured base
+// already below minRate (a trusted-class fixed rate or an operator
+// override) it returns that base, so tiering leaves the configured rate
+// exactly as set rather than raising it. Shared by DecideEvent and
+// SampleRateForEvent so the keep verdict and the recovered de-bias
+// weight stay in agreement.
+func (s *AdaptiveSampler) tierVisibilityFloor(base float64) float64 {
+	if s.minRate < base {
+		return s.minRate
+	}
+	return base
 }
 
 // TierAware reports whether a WS-4 activity-tier sampling policy is
@@ -734,7 +764,13 @@ func (s *AdaptiveSampler) SampleRateForEvent(tenantID uuid.UUID, trafficClass st
 	if mult <= 0 {
 		return 1.0
 	}
-	p := s.SampleRateForClass(tenantID, trafficClass) * mult
+	base := s.SampleRateForClass(tenantID, trafficClass)
+	// Same visibility floor as DecideEvent so the recovered de-bias
+	// weight (1/rate) exactly matches the rate the keep decision used.
+	if vis := s.tierVisibilityFloor(base); vis > floor {
+		floor = vis
+	}
+	p := base * mult
 	if p < floor {
 		p = floor
 	}

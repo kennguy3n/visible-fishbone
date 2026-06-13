@@ -151,6 +151,11 @@ type CapacityPlanConfig struct {
 	// dormant as the remainder, so an over-1 sum is silently renormalised
 	// (dormant collapses to 0) rather than rejected. Pass fractions that
 	// sum to <= 1 for the cohort split you intend.
+	//
+	// A zero (or negative) value means "unset" and is replaced with the
+	// default by withDefaults — consistent with every other knob in this
+	// config. To model a fully-dormant fleet, pass a tiny positive
+	// ActiveFraction (e.g. 0.001) rather than 0.
 	ActiveFraction float64
 	IdleFraction   float64
 	// IdleSampleMultiplier is the keep fraction applied to an idle
