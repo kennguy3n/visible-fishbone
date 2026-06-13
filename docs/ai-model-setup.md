@@ -283,13 +283,23 @@ The **AI inference footprint** section reports the offered concurrency
 utilization at the current cap, a recommended slot count to keep
 utilization ≤70%, and the memory saved versus per-tenant residency.
 
+`AI_INFERENCE_POOL_MAX_QUEUE_PER_TENANT` bounds only the *waiting*
+backlog, not in-flight work: a tenant's already-admitted requests are
+counted against the global `AI_INFERENCE_POOL_MAX_CONCURRENT` cap, so a
+single tenant's effective ceiling is `MAX_QUEUE_PER_TENANT` queued **plus**
+up to `MAX_CONCURRENT` in flight. The global cap is the real concurrency
+limiter; the per-tenant queue exists to bound backlog growth and shed
+(degrade to the template path) past it.
+
 ### Observability
 
 When the pool is enabled the control plane exports
-`sng_ai_inference_pool_*` gauges on the `/metrics` endpoint:
-`inflight` / `peak_inflight` (should track the concurrency cap, **not**
-the tenant count), `queued` / `peak_queued`, `admitted_total`,
-`completed_total`, `errors_total`, `rejected_queue_full_total`,
-`wait_timeouts_total`, `cancelled_total`, and `avg_wait_ms`. These prove
+`sng_ai_inference_pool_*` metrics on the `/metrics` endpoint. Gauges for
+instantaneous state: `inflight` / `peak_inflight` (should track the
+concurrency cap, **not** the tenant count), `queued` / `peak_queued`, and
+`avg_wait_ms`. Monotonic counters for lifetime totals (use `rate()`):
+`admitted_total`, `completed_total`, `errors_total`,
+`rejected_queue_full_total`, `wait_timeouts_total`, and `cancelled_total`.
+These prove
 the fleet-scale efficiency curve: a single bounded pool serving the whole
 fleet with fair admission.
