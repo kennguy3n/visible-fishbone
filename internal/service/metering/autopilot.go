@@ -551,7 +551,7 @@ func (e *MarginAutopilot) Reconcile(ctx context.Context) (AutopilotSweep, error)
 	}
 	if e.planner != nil && (sweep.SkippedIdle+sweep.SkippedDormant) > 0 {
 		e.logger.DebugContext(ctx, "metering: autopilot activity-tiered sweep",
-			slog.Int64("cycle", cycle),
+			slog.Int64("cycle", sweep.Cycle),
 			slog.Int64("visited", sweep.TenantsVisited),
 			slog.Int64("skipped", sweep.SkippedIdle+sweep.SkippedDormant))
 	}

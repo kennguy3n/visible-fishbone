@@ -263,6 +263,13 @@ func (d *CostAnomalyDetector) AnomaliesForReport(ctx context.Context, tenantID u
 	if tenantID == uuid.Nil {
 		return nil, fmt.Errorf("metering: anomaly detector: tenant id must not be nil")
 	}
+	// The usage history is fetched for tenantID while the projection is
+	// read from report.Lines, so a report built for a different tenant
+	// would silently cross tenant boundaries. Reject the mismatch rather
+	// than trust the caller — cheap insurance for an exported method.
+	if report.TenantID != uuid.Nil && report.TenantID != tenantID {
+		return nil, fmt.Errorf("metering: anomaly detector: report tenant %s does not match requested tenant %s", report.TenantID, tenantID)
+	}
 	hist, err := d.history.UsageHistory(ctx, tenantID, d.cfg.LookbackMonths)
 	if err != nil {
 		return nil, fmt.Errorf("metering: anomaly detector: history: %w", err)
