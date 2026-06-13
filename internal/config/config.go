@@ -481,6 +481,17 @@ type ThreatIntel struct {
 	// in CSV (indicator-per-row) or JSON (array-of-objects) form.
 	CSVURL  string
 	JSONURL string
+	// MISPURL / MISPAuthKey configure a MISP feed (events or
+	// attributes REST-search export, or a static event JSON). The
+	// key, when set, is sent as the MISP "Authorization" header.
+	MISPURL     string
+	MISPAuthKey string
+	// MISPIncludeNonIDs, when true, ingests MISP attributes that are
+	// NOT flagged `to_ids`. Defaults to false: only `to_ids:true`
+	// attributes (MISP's "intended for automated detection"
+	// convention) become enforceable IOCs, so contextual attributes
+	// never cause a false-positive block.
+	MISPIncludeNonIDs bool
 	// Persistence snapshots the in-memory IOC store to Postgres and
 	// restores it on boot, so a control-plane restart does not open
 	// an enforcement gap until every feed re-fetches during warm-up
@@ -1639,6 +1650,9 @@ func Load() (Config, error) {
 			FeodoTrackerURL:      getStr("THREATINTEL_FEODOTRACKER_URL", ""),
 			CSVURL:               getStr("THREATINTEL_CSV_URL", ""),
 			JSONURL:              getStr("THREATINTEL_JSON_URL", ""),
+			MISPURL:              getStr("THREATINTEL_MISP_URL", ""),
+			MISPAuthKey:          getStr("THREATINTEL_MISP_AUTH_KEY", ""),
+			MISPIncludeNonIDs:    getBoolLenient("THREATINTEL_MISP_INCLUDE_NON_IDS", false),
 			Persistence:          getBoolLenient("THREATINTEL_PERSISTENCE", true),
 			PersistInterval:      getDuration("THREATINTEL_PERSIST_INTERVAL", 5*time.Minute),
 			AutoRecompile:        getBoolLenient("THREATINTEL_AUTO_RECOMPILE", true),

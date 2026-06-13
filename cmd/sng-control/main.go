@@ -2451,6 +2451,13 @@ func buildThreatFeeds(cfg config.ThreatIntel) []aisvc.Feed {
 	if cfg.JSONURL != "" {
 		add("cert-json", aisvc.JSONParser{Source: "cert-json", DefaultConfidence: 0.5}, mkFetcher(cfg.JSONURL, nil))
 	}
+	if cfg.MISPURL != "" {
+		var h http.Header
+		if cfg.MISPAuthKey != "" {
+			h = http.Header{"Authorization": []string{cfg.MISPAuthKey}, "Accept": []string{"application/json"}}
+		}
+		add("misp", aisvc.MISPParser{Source: "misp", DefaultConfidence: 0.5, IncludeNonIDs: cfg.MISPIncludeNonIDs}, mkFetcher(cfg.MISPURL, h))
+	}
 	return feeds
 }
 
