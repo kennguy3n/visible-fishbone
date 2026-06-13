@@ -1258,6 +1258,74 @@ func TestValidateAcceptsZeroNATSDedupWindow(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsNonPositivePoolSizingWhenEnabled locks in the
+// WS-9 fail-fast guard: with the shared inference pool enabled, a
+// non-positive concurrency cap or per-tenant queue depth must be
+// rejected at boot. Without this, ai.InferencePoolConfig.normalize()
+// would silently override a 0/negative value to 4/8, so an operator who
+// set the cap to 0 (expecting "no pooling") would instead get a 4-slot
+// pool they never asked for.
+func TestValidateRejectsNonPositivePoolSizingWhenEnabled(t *testing.T) {
+	cases := []struct {
+		name   string
+		envKey string
+	}{
+		{"max_concurrent", "AI_INFERENCE_POOL_MAX_CONCURRENT"},
+		{"max_queue_per_tenant", "AI_INFERENCE_POOL_MAX_QUEUE_PER_TENANT"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			clearAll(t)
+			withEnv(t, map[string]string{
+				"AI_INFERENCE_POOL_ENABLED": "true",
+				tc.envKey:                   "0",
+			})
+			_, err := Load()
+			if err == nil {
+				t.Fatalf("expected validation error for %s=0 when pool enabled", tc.envKey)
+			}
+			if !strings.Contains(err.Error(), tc.envKey) {
+				t.Errorf("error should mention %s: %v", tc.envKey, err)
+			}
+		})
+	}
+}
+
+// TestValidateAcceptsEnabledPoolWithDefaults guards against a
+// false-positive in the fail-fast check: enabling the pool without
+// overriding the sizing knobs must succeed, picking up the 4 / 8
+// defaults from defaultsInt.
+func TestValidateAcceptsEnabledPoolWithDefaults(t *testing.T) {
+	clearAll(t)
+	withEnv(t, map[string]string{"AI_INFERENCE_POOL_ENABLED": "true"})
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load() with pool enabled and default sizing should succeed, got %v", err)
+	}
+	if cfg.AI.InferencePoolMaxConcurrent != 4 {
+		t.Errorf("InferencePoolMaxConcurrent = %d, want 4", cfg.AI.InferencePoolMaxConcurrent)
+	}
+	if cfg.AI.InferencePoolMaxQueuePerTenant != 8 {
+		t.Errorf("InferencePoolMaxQueuePerTenant = %d, want 8", cfg.AI.InferencePoolMaxQueuePerTenant)
+	}
+}
+
+// TestValidateIgnoresPoolSizingWhenDisabled confirms the guard is
+// gated on the enable flag: a non-positive cap is harmless when the
+// pool is off (the pool is never constructed), so it must not block
+// boot, matching the default-off philosophy of the other gated checks.
+func TestValidateIgnoresPoolSizingWhenDisabled(t *testing.T) {
+	clearAll(t)
+	withEnv(t, map[string]string{
+		"AI_INFERENCE_POOL_ENABLED":        "false",
+		"AI_INFERENCE_POOL_MAX_CONCURRENT": "0",
+	})
+	if _, err := Load(); err != nil {
+		t.Fatalf("Load() with pool disabled should ignore sizing, got %v", err)
+	}
+}
+
 // setRawEnv sets `key` to `value` exactly — including the empty
 // string — and restores the prior state at test cleanup. Unlike
 // `withEnv` (which collapses `""` to unset), this helper preserves

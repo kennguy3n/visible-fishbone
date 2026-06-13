@@ -2310,6 +2310,21 @@ func (c Config) validate() error {
 	if c.ManagedDNSFeeds.Enabled && c.ManagedDNSFeeds.RefreshInterval <= 0 {
 		return fmt.Errorf("THREAT_INTEL_REFRESH_INTERVAL must be > 0 when THREAT_INTEL_ENABLED=true, got %s", c.ManagedDNSFeeds.RefreshInterval)
 	}
+	// WS-9 shared inference pool: when enabled, the concurrency cap and
+	// per-tenant queue depth must be positive. A <= 0 value would
+	// otherwise be silently overridden by InferencePoolConfig.normalize()
+	// (4 / 8 respectively), so an operator who sets the cap to 0 expecting
+	// "no pooling" would instead get a 4-slot pool. Fail loudly rather
+	// than run on sizing the operator never chose. Only enforced when the
+	// pool is enabled — the default-off path ignores these values.
+	if c.AI.InferencePoolEnabled {
+		if c.AI.InferencePoolMaxConcurrent <= 0 {
+			return fmt.Errorf("AI_INFERENCE_POOL_MAX_CONCURRENT must be > 0 when AI_INFERENCE_POOL_ENABLED=true, got %d", c.AI.InferencePoolMaxConcurrent)
+		}
+		if c.AI.InferencePoolMaxQueuePerTenant <= 0 {
+			return fmt.Errorf("AI_INFERENCE_POOL_MAX_QUEUE_PER_TENANT must be > 0 when AI_INFERENCE_POOL_ENABLED=true, got %d", c.AI.InferencePoolMaxQueuePerTenant)
+		}
+	}
 	// Likewise, a <= 0 discovery-cache TTL would silently fall back to
 	// the service's 24h default rather than the configured value.
 	if c.MobileAuth.DiscoveryCacheTTL <= 0 {
