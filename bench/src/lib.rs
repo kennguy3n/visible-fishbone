@@ -31,3 +31,4 @@ pub mod measurement;
 pub mod multiqueue;
 pub mod report;
 pub mod traffic_gen;
+pub mod wire_scaling;

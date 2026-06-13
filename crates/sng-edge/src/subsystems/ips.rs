@@ -149,6 +149,7 @@ fn build_initial_input(cfg: &IpsConfig) -> IpsConfigInput {
         app_layer_enabled: default_app_layer(),
         force_drop_on_alert: None,
         max_pending_packets: Some(1024),
+        capture_threads: cfg.capture_threads.into_lib(),
     }
 }
 
@@ -180,6 +181,16 @@ impl Subsystem for IpsSubsystem {
                 shutdown.wait().await;
                 return Ok(());
             }
+            // Surface the resolved multi-queue fan-out at boot so an
+            // upgrade that flips capture from single-thread to
+            // RSS-wide is never silent (ground rule: no surprise on
+            // upgrade) and the operator dashboard can show it.
+            tracing::info!(
+                target: "sng_edge::ips",
+                interface = %initial.interface,
+                capture_threads = ?initial.capture_threads,
+                "ips capture multi-queue fan-out resolved"
+            );
             // Render config, spawn Suricata.
             manager
                 .start(&initial)
