@@ -46,6 +46,14 @@ type classEventRate struct {
 // (`sng.<tenant>.telemetry.<class>`), each paired with its modelled
 // per-tenant rate. The NATS subject-cardinality and ClickHouse
 // throughput models fan out across exactly these seven.
+//
+// Of these, only "ips" and "ztna" are security-relevant (securityClass),
+// so they alone form the dormant-tier write floor. "dlp" is also
+// security-relevant at runtime but is intentionally NOT in this default
+// set — endpoint DLP volume is modelled as negligible at the SME tier,
+// and the tier-sampling tests are calibrated to the ips+ztna (0.5/tenant)
+// floor. Add a "dlp" entry here (and re-baseline the dormant-floor tests)
+// if DLP telemetry becomes material to the capacity projection.
 func defaultClassRates() []classEventRate {
 	return []classEventRate{
 		{"flow", 2.0},
@@ -464,12 +472,18 @@ func planClickHouseWrite(cfg CapacityPlanConfig) ClickHouseWritePlan {
 	compressedGBPerMonth := uncompressedGBPerMonth / cfg.ClickHouseCompression
 
 	plan := ClickHouseWritePlan{
-		Shards:                 cfg.ClickHouseShards,
-		BatchSize:              cfg.ClickHouseBatchSize,
-		TotalRowsPerSec:        round1(rowsPerSec),
-		RowsPerSecPerShard:     round1(rowsPerSecPerShard),
-		InsertsPerSecPerShard:  round2c(insertsPerSecPerShard),
-		MonthlyRows:            int64(monthlyRows),
+		Shards:                cfg.ClickHouseShards,
+		BatchSize:             cfg.ClickHouseBatchSize,
+		TotalRowsPerSec:       round1(rowsPerSec),
+		RowsPerSecPerShard:    round1(rowsPerSecPerShard),
+		InsertsPerSecPerShard: round2c(insertsPerSecPerShard),
+		MonthlyRows:           int64(monthlyRows),
+		// PerTenantMonthlyRows is the fleet-wide mean (total ÷
+		// TenantCount). Under tier sampling it is NOT any single
+		// tenant's volume — an active tenant writes far more and a
+		// dormant one far less; the TierSampling section carries the
+		// per-cohort breakdown. Without tier sampling every tenant
+		// writes the same rate, so it is the exact per-tenant figure.
 		PerTenantMonthlyRows:   int64(monthlyRows / float64(cfg.TenantCount)),
 		HotStorageGBCompressed: round1(compressedGBPerMonth),
 		IngestBytesPerSec:      int64(rowsPerSec * float64(cfg.BytesPerEvent)),

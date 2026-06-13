@@ -2874,6 +2874,14 @@ func startTelemetry(
 	// exits when ctx is cancelled (graceful shutdown), and a failed
 	// refresh keeps the previous snapshot rather than blanking the tier
 	// signal (which fails safe to active anyway).
+	//
+	// Unlike the autotuner below, the refresher has no explicit Stop():
+	// ctx cancellation is its only shutdown path, and that is sufficient
+	// because it owns nothing to drain or flush. It only reads the
+	// activity projection and swaps an atomic snapshot, so a clean
+	// goroutine exit on ctx.Done leaves no in-flight state — and the
+	// last snapshot survives the goroutine, so the consumer keeps a
+	// valid (bounded-staleness) tier signal through the shutdown window.
 	if tierRefresher != nil {
 		go tierRefresher.Run(ctx)
 		logger.Info("telemetry: activity-tier sampling enabled (idle reduced, dormant security-events-only)")

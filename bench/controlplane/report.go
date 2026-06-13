@@ -330,12 +330,16 @@ type PostgresPoolPlan struct {
 
 // ClickHouseWritePlan projects hot-path write load at scale.
 type ClickHouseWritePlan struct {
-	Shards                 int     `json:"shards"`
-	BatchSize              int     `json:"batch_size"`
-	TotalRowsPerSec        float64 `json:"total_rows_per_sec"`
-	RowsPerSecPerShard     float64 `json:"rows_per_sec_per_shard"`
-	InsertsPerSecPerShard  float64 `json:"inserts_per_sec_per_shard"`
-	MonthlyRows            int64   `json:"monthly_rows"`
+	Shards                int     `json:"shards"`
+	BatchSize             int     `json:"batch_size"`
+	TotalRowsPerSec       float64 `json:"total_rows_per_sec"`
+	RowsPerSecPerShard    float64 `json:"rows_per_sec_per_shard"`
+	InsertsPerSecPerShard float64 `json:"inserts_per_sec_per_shard"`
+	MonthlyRows           int64   `json:"monthly_rows"`
+	// PerTenantMonthlyRows is the fleet-wide mean (monthly_rows ÷
+	// tenant_count). With tier sampling on it is an average across
+	// cohorts, not any individual tenant's volume — read the
+	// tier_sampling section for the per-cohort split.
 	PerTenantMonthlyRows   int64   `json:"per_tenant_monthly_rows"`
 	HotStorageGBCompressed float64 `json:"hot_storage_gb_compressed"`
 	IngestBytesPerSec      int64   `json:"ingest_bytes_per_sec"`
