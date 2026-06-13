@@ -430,6 +430,59 @@ func TestReconcile_PublishesPartialTalliesOnListError(t *testing.T) {
 	}
 }
 
+// failFirstThenTenants errors on its first List and succeeds afterwards,
+// simulating a transient enumeration failure on the very first reconcile.
+type failFirstThenTenants struct {
+	repository.TenantRepository
+	calls int
+	items []repository.Tenant
+}
+
+func (f *failFirstThenTenants) List(_ context.Context, _ repository.Page) (repository.PageResult[repository.Tenant], error) {
+	f.calls++
+	if f.calls == 1 {
+		return repository.PageResult[repository.Tenant]{}, context.DeadlineExceeded
+	}
+	return repository.PageResult[repository.Tenant]{Items: f.items}, nil
+}
+
+// TestReconcile_FirstPageFailurePreservesCycleZero pins the round-3 Devin
+// Review consistency fix: a transient failure on the very first tenant-list
+// page must NOT burn cycle 0, so the guaranteed startup full sweep still
+// happens on the next attempt (matching the IdP-sync / alert adopters).
+func TestReconcile_FirstPageFailurePreservesCycleZero(t *testing.T) {
+	fx := newEngineFixture(t)
+	obs := &recordingSweepObserver{}
+	// Never-active tenant => dormant tier, which is only due on cycle 0
+	// (or every 100th). If cycle 0 were consumed by the failed attempt,
+	// the next sweep would be cycle 1 and this tenant would be skipped.
+	dormant := repository.Tenant{ID: uuid.New(), Status: repository.TenantStatusActive, LastActiveAt: nil}
+	repo := &failFirstThenTenants{items: []repository.Tenant{dormant}}
+
+	engine := casb.NewAppNoOpsEngine(fx.store, fx.apps, repo, nil)
+	engine.SetClock(func() time.Time { return fx.clock })
+	engine.WithDormancyPlanner(tenancy.NewTieredSweep("casb_noops_reconcile", tenancy.DefaultPlanner(), obs))
+
+	if err := engine.Reconcile(context.Background()); err == nil {
+		t.Fatal("expected first-page list error to propagate")
+	}
+	if err := engine.Reconcile(context.Background()); err != nil {
+		t.Fatalf("second reconcile: %v", err)
+	}
+
+	obs.mu.Lock()
+	defer obs.mu.Unlock()
+	dormantVisited := 0
+	for _, c := range obs.calls {
+		if c.tier == tenancy.TierDormant {
+			dormantVisited += c.visited
+		}
+	}
+	if dormantVisited != 1 {
+		t.Fatalf("dormant tenant should be visited on the preserved cycle-0 sweep; dormant visited = %d (cycle 0 was burned by the failed attempt?)", dormantVisited)
+	}
+}
+
 func TestBuildDigest_SummariseAndAdvanceCursor(t *testing.T) {
 	fx := newEngineFixture(t)
 	fx.enforcer.created = true

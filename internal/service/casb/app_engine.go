@@ -242,29 +242,33 @@ func (e *AppNoOpsEngine) Reconcile(ctx context.Context) error {
 	// The TieredSweep owns the 0-based monotonic cycle counter; the
 	// first sweep is cycle 0 (full visit). A nil sweep keeps the legacy
 	// every-active-tenant fan-out.
+	//
+	// Begin is deferred until the first tenant page lists successfully so
+	// a transient failure on the very first enumeration does NOT burn
+	// cycle 0 — the guaranteed startup full sweep is preserved for the
+	// next attempt. This matches the IdP-sync / alert-feedback adopters,
+	// which only Begin after their ListTenantActivity succeeds. Once a
+	// page has listed, the deferred Finish publishes whatever was tallied
+	// even if a later page errors mid-sweep, so partial observability is
+	// never silently dropped.
 	var cyc *tenancy.SweepCycle
-	if e.sweep != nil {
-		cyc = e.sweep.Begin(e.nowFunc())
-		// Publish the per-tier tallies on every return path — including a
-		// mid-sweep tenant-list error — so a transient failure never
-		// silently drops this cycle's observability (Begin already
-		// consumed the cycle number, so the partial counts are the
-		// honest record of the work that did happen).
-		defer func() {
-			cyc.Finish()
-			if summary := cyc.Summary(); summary.Skipped > 0 {
-				e.logger.DebugContext(ctx, "casb: activity-tiered reconcile sweep",
-					slog.Int64("cycle", summary.Cycle),
-					slog.Int("active", active),
-					slog.Int("visited", summary.Visited),
-					slog.Int("skipped", summary.Skipped))
-			}
-		}()
-	}
 	for {
 		res, err := e.tenants.List(ctx, page)
 		if err != nil {
 			return fmt.Errorf("casb: list tenants: %w", err)
+		}
+		if e.sweep != nil && cyc == nil {
+			cyc = e.sweep.Begin(e.nowFunc())
+			defer func() {
+				cyc.Finish()
+				if summary := cyc.Summary(); summary.Skipped > 0 {
+					e.logger.DebugContext(ctx, "casb: activity-tiered reconcile sweep",
+						slog.Int64("cycle", summary.Cycle),
+						slog.Int("active", active),
+						slog.Int("visited", summary.Visited),
+						slog.Int("skipped", summary.Skipped))
+				}
+			}()
 		}
 		for _, t := range res.Items {
 			if t.Status != repository.TenantStatusActive {
