@@ -29,8 +29,8 @@ use sng_bench::report::{
     ResourceResult, RunDimensions, SCHEMA_VERSION, ThroughputResult, detect_regression,
 };
 use sng_bench::traffic_gen::{
-    DryRunGenerator, FiveTupleSampler, L4Proto, PacketBuilder, PacketConfig, RawSocketGenerator,
-    Subnet, TrafficError, TrafficGenerator,
+    DryRunGenerator, FiveTupleSampler, IpVersion, L4Proto, PacketBuilder, PacketConfig,
+    RawSocketGenerator, TrafficError, TrafficGenerator,
 };
 
 /// Top-level harness errors.
@@ -96,6 +96,18 @@ enum Command {
     /// scaling-efficiency regression. Hardware-invariant: gates the
     /// dimensionless per-width scaling efficiency, not absolute Gbps.
     MultiQueueCompare(MultiQueueCompareArgs),
+    /// Measure real multi-queue *wire* transmit throughput: N concurrent
+    /// `AF_PACKET` transmit streams (one per NIC TX ring), reporting the
+    /// aggregate wire ceiling and per-stream scaling versus the
+    /// single-stream wire floor. `--dry-run` crafts frames in-process
+    /// without a socket so the leg is self-testable without `CAP_NET_RAW`.
+    WireScaling(WireScalingArgs),
+    /// Gate current `wire-scaling` artifact(s) against a committed baseline on
+    /// the hardware-invariant per-width transmit scaling efficiency, exiting
+    /// non-zero on a real regression. The wire counterpart to
+    /// `multi-queue-compare`: gates the dimensionless scaling curve, not the
+    /// host-specific absolute Gbps.
+    WireScalingCompare(WireScalingCompareArgs),
 }
 
 /// Forwarding inspection-depth selector for the multi-queue sweep.
@@ -504,6 +516,86 @@ struct MultiQueueCompareArgs {
     sigma: f64,
 }
 
+#[derive(Debug, Args)]
+struct WireScalingArgs {
+    /// Path to the edge-SKU profile TOML (sets the representative frame
+    /// size, queue fan-out, and published target for context).
+    #[arg(long, env = "SNG_BENCH_PROFILE")]
+    profile: PathBuf,
+
+    /// TX-fanout widths to measure (comma-separated). A single-stream
+    /// (`1`) wire floor is always measured regardless. Empty (the default)
+    /// derives a curve of `1, 2, 4, …` up to the SKU's queue fan-out, the
+    /// host's available parallelism, and the next power of two above it.
+    #[arg(long, value_delimiter = ',')]
+    queues: Vec<usize>,
+
+    /// Egress interface to transmit synthetic frames on (live runs).
+    #[arg(long, default_value = "lo")]
+    interface: String,
+
+    /// Per-stream measured window in milliseconds.
+    #[arg(long, default_value_t = 1000)]
+    duration_ms: u64,
+
+    /// Wire frame size in bytes. `0` uses the profile's
+    /// `[datapath] packet_bytes`.
+    #[arg(long, default_value_t = 0)]
+    packet_size: u32,
+
+    /// IP version of the generated traffic.
+    #[arg(long, value_enum, default_value_t = CliIpVersion::V4)]
+    ip_version: CliIpVersion,
+
+    /// L4 protocol of the generated traffic.
+    #[arg(long, value_enum, default_value_t = CliL4::Udp)]
+    l4: CliL4,
+
+    /// RNG seed for reproducible 5-tuple sampling. Stream `q` is seeded
+    /// `seed + q` so each TX socket emits a distinct flow set.
+    #[arg(long, default_value_t = 0)]
+    seed: u64,
+
+    /// Craft frames in-process and discard them (no raw socket, no root)
+    /// instead of transmitting. Produces a craft-rate ceiling, not a wire
+    /// number; reported as transport `dry-run`.
+    #[arg(long)]
+    dry_run: bool,
+
+    /// Where to write the JSON artifact. Omitted prints to stdout.
+    #[arg(long)]
+    out: Option<PathBuf>,
+
+    /// Git commit recorded in the artifact.
+    #[arg(long, env = "SNG_BENCH_GIT_SHA")]
+    git_sha: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct WireScalingCompareArgs {
+    /// Committed baseline wire-scaling artifact.
+    #[arg(long)]
+    baseline: PathBuf,
+    /// Current wire-scaling artifact(s). Pass `--current` once per sample
+    /// (the `wire-scaling` sweep re-run N times on this host); the gate
+    /// aggregates the samples by median and tests the move against a noise
+    /// band. A single `--current` reproduces a one-shot compare.
+    #[arg(long, required = true, num_args = 1..)]
+    current: Vec<PathBuf>,
+    /// Fractional *drop* in per-width transmit scaling efficiency of the
+    /// sample *median* that counts as a regression. Must be finite and
+    /// non-negative (a negative threshold would flag every run).
+    #[arg(long, default_value_t = 0.15, value_parser = parse_nonneg_f64)]
+    threshold: f64,
+    /// Noise-band width in sample standard deviations. A metric is flagged
+    /// only when the median move clears the threshold *and* is larger than
+    /// `sigma × σ` of the samples, so single-run scatter on a shared CI
+    /// runner does not fail the build. `0` disables the band (threshold
+    /// only); the default of ~2σ covers ~95% of Gaussian noise.
+    #[arg(long, default_value_t = 2.0, value_parser = parse_nonneg_f64)]
+    sigma: f64,
+}
+
 /// Clap parser that accepts only finite, non-negative `f64` values. Used to
 /// reject footgun inputs (negative `--threshold`/`--sigma`, `NaN`, `inf`)
 /// that would quietly weaken or invert the regression gate.
@@ -544,6 +636,8 @@ fn run(cli: Cli) -> Result<std::process::ExitCode, BenchError> {
         Command::Datasheet(args) => run_datasheet(&args),
         Command::MultiQueue(args) => run_multi_queue(&args),
         Command::MultiQueueCompare(args) => run_multi_queue_compare(&args),
+        Command::WireScaling(args) => run_wire_scaling(&args),
+        Command::WireScalingCompare(args) => run_wire_scaling_compare(&args),
     }
 }
 
@@ -646,6 +740,165 @@ fn run_multi_queue(args: &MultiQueueArgs) -> Result<std::process::ExitCode, Benc
         println!("{json}");
     }
     Ok(std::process::ExitCode::SUCCESS)
+}
+
+fn run_wire_scaling(args: &WireScalingArgs) -> Result<std::process::ExitCode, BenchError> {
+    use sng_bench::report::{WIRE_SCALING_SCHEMA_VERSION, WireScalingReport};
+    use sng_bench::wire_scaling::{self, WireScalingConfig};
+
+    // Reject a zero measurement window, matching `throughput`/`multi-queue`.
+    // A zero duration would make every worker loop exit before sending a
+    // frame and emit an all-zero artifact — worse than an error, since it
+    // could be committed as a garbage baseline the compare gate then trusts.
+    if args.duration_ms == 0 {
+        return Err(BenchError::Config("duration-ms must be > 0".to_string()));
+    }
+
+    let profile = load_profile(&args.profile)?;
+    let parallelism = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+
+    let frame_size = if args.packet_size > 0 {
+        args.packet_size
+    } else {
+        profile.datapath.packet_bytes
+    };
+    let queue_counts = if args.queues.is_empty() {
+        default_queue_curve(profile.effective_nic_queues(), parallelism)
+    } else {
+        args.queues.clone()
+    };
+    let ip_version = match args.ip_version {
+        CliIpVersion::V4 => IpVersion::V4,
+        CliIpVersion::V6 => IpVersion::V6,
+    };
+    let l4 = match args.l4 {
+        CliL4::Udp => L4Proto::Udp,
+        CliL4::TcpSyn => L4Proto::TcpSyn,
+    };
+
+    let config = WireScalingConfig {
+        queue_counts,
+        duration: Duration::from_millis(args.duration_ms),
+        frame_size,
+        l4,
+        ip_version,
+        seed: args.seed,
+        interface: args.interface.clone(),
+        dry_run: args.dry_run,
+    };
+
+    let points = wire_scaling::measure_wire_scaling(&config)?;
+
+    let report = WireScalingReport {
+        schema_version: WIRE_SCALING_SCHEMA_VERSION,
+        profile: profile.name.clone(),
+        unix_time_secs: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs()),
+        git_sha: args.git_sha.clone(),
+        transport: config.transport_label().to_string(),
+        interface: args.interface.clone(),
+        frame_bytes: frame_size,
+        ip_version: config.ip_version.label().to_string(),
+        l4: config.l4.label().to_string(),
+        duration_ms: args.duration_ms,
+        available_parallelism: parallelism,
+        target_gbps: profile.target_gbps,
+        points,
+    };
+
+    // Always print the human-readable summary so a live run is legible on
+    // the console; write the machine-readable JSON when an `--out` is given.
+    eprintln!("{}", report.to_markdown());
+    let json = report.to_json()?;
+    if let Some(out) = &args.out {
+        write_file(out, &json)?;
+        eprintln!("wrote {}", out.display());
+    } else {
+        println!("{json}");
+    }
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+fn load_wire_scaling_report(path: &Path) -> Result<report::WireScalingReport, BenchError> {
+    let s = std::fs::read_to_string(path).map_err(|source| BenchError::Io {
+        path: path.display().to_string(),
+        source,
+    })?;
+    Ok(report::WireScalingReport::from_json(&s)?)
+}
+
+/// Gate one-or-more current wire-scaling artifacts against a committed
+/// baseline on the hardware-invariant per-width transmit scaling
+/// efficiency, exiting 2 on a real regression. The wire counterpart to
+/// `run_multi_queue_compare`: it surfaces the full statistical picture
+/// (median, σ, noise band) for every gated width so an engineer can see
+/// *why* the gate did or did not fire.
+fn run_wire_scaling_compare(
+    args: &WireScalingCompareArgs,
+) -> Result<std::process::ExitCode, BenchError> {
+    let baseline = load_wire_scaling_report(&args.baseline)?;
+    let samples = args
+        .current
+        .iter()
+        .map(|p| load_wire_scaling_report(p))
+        .collect::<Result<Vec<_>, _>>()?;
+    let label = samples.first().map_or_else(
+        || format!("{}/{}/{}/{}", baseline.profile, baseline.transport, baseline.ip_version, baseline.l4),
+        |s| format!("{}/{}/{}/{}", s.profile, s.transport, s.ip_version, s.l4),
+    );
+
+    let rr = report::detect_wire_scaling_regression_stats(
+        &baseline,
+        &samples,
+        args.threshold,
+        args.sigma,
+    )
+    .map_err(BenchError::Regression)?;
+
+    eprintln!(
+        "wire-scaling gate: {label}, {} sample(s), threshold {:.0}%, noise band {:.1}σ",
+        rr.sample_count,
+        args.threshold * 100.0,
+        args.sigma,
+    );
+    for m in &rr.metrics {
+        let verdict = if m.flagged {
+            "REGRESSION"
+        } else if m.exceeds_threshold {
+            "within-noise" // crossed threshold but inside the σ band
+        } else {
+            "ok"
+        };
+        eprintln!(
+            "  [{verdict}] {}: baseline {:.4} -> median {:.4} ({:+.1}%), σ={:.4} (n={}), band=±{:.4}",
+            m.metric,
+            m.baseline,
+            m.median,
+            m.change_fraction * 100.0,
+            m.stddev,
+            m.samples,
+            args.sigma * m.stddev,
+        );
+    }
+
+    if rr.has_regression() {
+        eprintln!(
+            "WIRE-SCALING REGRESSION DETECTED ({label}): {} width(s) cleared both the {:.0}% threshold and the {:.1}σ noise band.",
+            rr.flagged().count(),
+            args.threshold * 100.0,
+            args.sigma,
+        );
+        Ok(std::process::ExitCode::from(EXIT_REGRESSION))
+    } else {
+        println!(
+            "no wire-scaling regression: {label} median within {:.0}% threshold / {:.1}σ noise band across {} sample(s)",
+            args.threshold * 100.0,
+            args.sigma,
+            rr.sample_count,
+        );
+        Ok(std::process::ExitCode::SUCCESS)
+    }
 }
 
 fn load_multiqueue_report(path: &Path) -> Result<report::MultiQueueReport, BenchError> {
@@ -1165,35 +1418,13 @@ fn build_emitter(spec: &RunSpec, l4: L4Proto) -> Result<Box<dyn TrafficGenerator
 }
 
 fn build_sampler(spec: &RunSpec) -> Result<FiveTupleSampler, BenchError> {
-    let (src, dst) = match spec.ip_version {
-        CliIpVersion::V4 => (
-            Subnet::V4 {
-                base: std::net::Ipv4Addr::new(10, 0, 0, 0),
-                prefix: 8,
-            },
-            Subnet::V4 {
-                base: std::net::Ipv4Addr::new(198, 18, 0, 0),
-                prefix: 15, // RFC 2544 benchmarking range
-            },
-        ),
-        CliIpVersion::V6 => (
-            Subnet::V6 {
-                base: std::net::Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 0),
-                prefix: 32,
-            },
-            Subnet::V6 {
-                base: std::net::Ipv6Addr::new(0x2001, 0xdb8, 0xffff, 0, 0, 0, 0, 0),
-                prefix: 32,
-            },
-        ),
+    let ip_version = match spec.ip_version {
+        CliIpVersion::V4 => IpVersion::V4,
+        CliIpVersion::V6 => IpVersion::V6,
     };
-    Ok(FiveTupleSampler::new(
-        src,
-        dst,
-        (1024, 65_535),
-        (1, 1024),
-        spec.seed,
-    )?)
+    // Canonical RFC-2544 benchmark flow space, shared with the multi-queue
+    // `wire-scaling` leg so the floor and the scaling curve are comparable.
+    Ok(FiveTupleSampler::rfc2544_benchmark(ip_version, spec.seed)?)
 }
 
 /// Run one `(mode, spec)` against `profile` and assemble its report.
@@ -1837,6 +2068,34 @@ mod tests {
                 "{} has a positive-weight traffic mix",
                 p.name
             );
+        }
+    }
+
+    #[test]
+    fn wire_scaling_rejects_zero_duration() {
+        // Parity with `throughput`/`multi-queue`: a zero measurement window
+        // must error out front rather than emit an all-zero artifact that
+        // could be committed as a garbage baseline. The check precedes
+        // profile loading, so a non-existent profile path is irrelevant.
+        let cli = Cli::try_parse_from([
+            "sng-bench",
+            "wire-scaling",
+            "--profile",
+            "/nonexistent/profile.toml",
+            "--duration-ms",
+            "0",
+            "--dry-run",
+        ])
+        .unwrap();
+        let Command::WireScaling(args) = cli.command else {
+            panic!("expected wire-scaling subcommand");
+        };
+        match run_wire_scaling(&args) {
+            Err(BenchError::Config(msg)) => assert!(
+                msg.contains("duration-ms must be > 0"),
+                "unexpected message: {msg}"
+            ),
+            other => panic!("expected a Config error for zero duration, got {other:?}"),
         }
     }
 }

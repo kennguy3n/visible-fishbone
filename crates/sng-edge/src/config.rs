@@ -407,6 +407,14 @@ pub struct IpsConfig {
     /// back-pressure within seconds.
     #[serde(default = "default_ips_event_channel_capacity")]
     pub event_channel_capacity: usize,
+    /// Multi-queue (RSS) fan-out of Suricata's `af-packet` capture
+    /// path. Accepts `"auto"` (the default — match the NIC's RSS
+    /// queues, fail safe to one thread on a single-queue NIC) or a
+    /// positive integer to pin an explicit thread count. This is what
+    /// lets the inspection data path scale across cores toward line
+    /// rate instead of being capped by a single capture thread.
+    #[serde(default)]
+    pub capture_threads: CaptureThreadsSetting,
 }
 
 impl Default for IpsConfig {
@@ -429,6 +437,71 @@ impl Default for IpsConfig {
             external_net: default_ips_external_net(),
             runtime: default_ips_runtime(),
             event_channel_capacity: default_ips_event_channel_capacity(),
+            capture_threads: CaptureThreadsSetting::default(),
+        }
+    }
+}
+
+/// Wire-friendly mirror of [`sng_ips::CaptureThreads`]. Deserializes
+/// ergonomically from TOML as either the bareword/string `"auto"` or a
+/// positive integer, e.g. `capture_threads = "auto"` or
+/// `capture_threads = 4`. Converted at the config boundary by
+/// [`Self::into_lib`].
+///
+/// `auto` is the multi-queue default; it fails safe to a single capture
+/// thread when the NIC exposes one RSS queue, so making it the default
+/// never sheds traffic — it only adds parallelism where the hardware
+/// allows it.
+///
+/// Variant order is load-bearing: `#[serde(untagged)]` tries variants top to
+/// bottom and takes the first that deserializes. `Keyword` must stay first so
+/// the string `"auto"` is matched as the keyword before serde would attempt
+/// to read it as a `Count(u16)`. Do not reorder these variants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(untagged)]
+pub enum CaptureThreadsSetting {
+    /// The `"auto"` keyword — match the NIC's RSS-queue count.
+    Keyword(CaptureThreadsKeyword),
+    /// An explicit thread count. `0` normalizes to `1` (the safe
+    /// single-stream floor) at [`Self::into_lib`], so the stored library
+    /// value is always the effective one — see there.
+    Count(u16),
+}
+
+/// The only accepted string form for [`CaptureThreadsSetting`]. A
+/// dedicated unit enum (rather than a free `String`) means serde
+/// rejects a typo like `"atuo"` at parse time instead of silently
+/// accepting it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CaptureThreadsKeyword {
+    /// Match the capture-thread count to the NIC's RSS queues.
+    Auto,
+}
+
+impl Default for CaptureThreadsSetting {
+    fn default() -> Self {
+        Self::Keyword(CaptureThreadsKeyword::Auto)
+    }
+}
+
+impl CaptureThreadsSetting {
+    /// Convert to the library enum the IPS config generator expects.
+    ///
+    /// `Count(0)` normalizes to `Fixed(1)` here, at the config boundary,
+    /// rather than only being clamped later at YAML render time. This is
+    /// deliberately fail-safe toward *more* inspection (one capture thread
+    /// always runs; we never refuse to boot the way `event_channel_capacity`
+    /// does for `0`), and normalizing at the boundary keeps the stored
+    /// library value equal to the effective one — anything inspecting
+    /// `CaptureThreads` directly sees `Fixed(1)`, not a `Fixed(0)` that
+    /// silently renders as `1`. `CaptureThreads::yaml_value` keeps the same
+    /// clamp as defense-in-depth.
+    #[must_use]
+    pub const fn into_lib(self) -> sng_ips::CaptureThreads {
+        match self {
+            Self::Keyword(CaptureThreadsKeyword::Auto) => sng_ips::CaptureThreads::Auto,
+            Self::Count(n) => sng_ips::CaptureThreads::Fixed(if n == 0 { 1 } else { n }),
         }
     }
 }
@@ -1482,6 +1555,85 @@ interface = "eth1"
         assert!(
             IpsConfig::default().enable,
             "IpsConfig::default() must match the field-level serde default"
+        );
+    }
+
+    fn config_with_ips_block(ips_body: &str) -> Result<EdgeConfig, ConfigError> {
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(
+            f.path(),
+            format!(
+                r#"
+[identity]
+tenant_id = "11111111-1111-1111-1111-111111111111"
+device_id = "22222222-2222-2222-2222-222222222222"
+site_id   = "33333333-3333-3333-3333-333333333333"
+
+[comms]
+endpoint    = "control.example.com:443"
+client_cert = "/etc/sng/client.pem"
+client_key  = "/etc/sng/client.key"
+
+[ips]
+{ips_body}
+"#
+            ),
+        )
+        .unwrap();
+        load_from_path(f.path())
+    }
+
+    #[test]
+    fn ips_capture_threads_defaults_to_auto_multiqueue() {
+        // The whole point of the WS-8 change: an operator who sets
+        // nothing gets multi-queue (`auto`), not the single-thread floor.
+        let cfg = config_with_ips_block("interface = \"eth1\"").unwrap();
+        assert_eq!(cfg.ips.capture_threads, CaptureThreadsSetting::default());
+        assert_eq!(
+            cfg.ips.capture_threads.into_lib(),
+            sng_ips::CaptureThreads::Auto
+        );
+    }
+
+    #[test]
+    fn ips_capture_threads_accepts_auto_keyword_and_integer() {
+        let auto = config_with_ips_block("capture_threads = \"auto\"").unwrap();
+        assert_eq!(
+            auto.ips.capture_threads,
+            CaptureThreadsSetting::Keyword(CaptureThreadsKeyword::Auto)
+        );
+
+        let fixed = config_with_ips_block("capture_threads = 6").unwrap();
+        assert_eq!(fixed.ips.capture_threads, CaptureThreadsSetting::Count(6));
+        assert_eq!(
+            fixed.ips.capture_threads.into_lib(),
+            sng_ips::CaptureThreads::Fixed(6)
+        );
+    }
+
+    #[test]
+    fn ips_capture_threads_zero_normalizes_to_one_at_boundary() {
+        // `capture_threads = 0` is fail-safe toward MORE inspection: it
+        // normalizes to a single capture thread at the config boundary, so
+        // the stored library value equals the effective one (no `Fixed(0)`
+        // that silently renders as `1`), and we never refuse to boot.
+        let zero = config_with_ips_block("capture_threads = 0").unwrap();
+        assert_eq!(zero.ips.capture_threads, CaptureThreadsSetting::Count(0));
+        assert_eq!(
+            zero.ips.capture_threads.into_lib(),
+            sng_ips::CaptureThreads::Fixed(1),
+            "Count(0) must normalize to Fixed(1) at the boundary"
+        );
+    }
+
+    #[test]
+    fn ips_capture_threads_rejects_unknown_keyword() {
+        // A typo'd keyword must be a hard parse error, never a silent
+        // fall-through to single-threaded capture.
+        let err = config_with_ips_block("capture_threads = \"atuo\"").unwrap_err();
+        assert!(
+            matches!(err, ConfigError::Parse { .. }),
+            "expected a parse error, got {err:?}"
         );
     }
 
