@@ -3,7 +3,24 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/kennguy3n/visible-fishbone/internal/service/telemetry"
 )
+
+// TestCapacityPlanIdleMultiplierTracksRuntime guards against the bench
+// model's idle keep fraction silently drifting from the runtime sampler
+// default. The two constants live in separate packages on purpose (the
+// bench is an analytical projection, not a runtime import in its hot
+// path), so this test — not a shared symbol — is what keeps the
+// capacity projection honest about what the deployed sampler actually
+// does. If the runtime default changes, update defaultIdleSampleMultiplier
+// (and the calibrated expectations in the tier-sampling tests) to match.
+func TestCapacityPlanIdleMultiplierTracksRuntime(t *testing.T) {
+	if defaultIdleSampleMultiplier != telemetry.DefaultIdleSampleMultiplier {
+		t.Fatalf("bench defaultIdleSampleMultiplier = %v, runtime telemetry.DefaultIdleSampleMultiplier = %v; the bench projection has drifted from the deployed sampler",
+			defaultIdleSampleMultiplier, telemetry.DefaultIdleSampleMultiplier)
+	}
+}
 
 func TestCapacityPlanDefaultsAndCardinality(t *testing.T) {
 	s := RunCapacityPlan(CapacityPlanConfig{})

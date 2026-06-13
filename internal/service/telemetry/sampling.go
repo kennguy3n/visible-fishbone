@@ -666,13 +666,6 @@ func (s *AdaptiveSampler) tierVisibilityFloor(base float64) float64 {
 	return base
 }
 
-// TierAware reports whether a WS-4 activity-tier sampling policy is
-// wired. Callers on the hot path use it to recover a redelivered event's
-// de-bias rate through SampleRateForEvent rather than SampleRateForClass.
-func (s *AdaptiveSampler) TierAware() bool {
-	return s != nil && s.tierPolicy != nil
-}
-
 // SampleRateFor returns the keep probability currently in effect for
 // the tenant WITHOUT recording an arrival or rolling the window. It is
 // a read-only companion to Decide, used to recover the de-bias rate
