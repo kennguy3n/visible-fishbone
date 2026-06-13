@@ -49,6 +49,7 @@ func TestCapabilityValidAndAllCapabilities(t *testing.T) {
 		CapabilityClamAVSWG:        false,
 		CapabilityNoOpsAutoEnforce: false,
 		CapabilityIDPDirectorySync: false,
+		CapabilityMarginAutopilot:  false,
 	}
 	for _, c := range AllCapabilities() {
 		if _, ok := want[c]; ok {
