@@ -126,7 +126,10 @@ fn generator_for(
     if config.dry_run {
         Ok(Box::new(DryRunGenerator::new(builder)))
     } else {
-        Ok(Box::new(RawSocketGenerator::open(&config.interface, builder)?))
+        Ok(Box::new(RawSocketGenerator::open(
+            &config.interface,
+            builder,
+        )?))
     }
 }
 
@@ -176,15 +179,20 @@ fn run_fanout(
         .map(|q| generator_for(config, config.seed.wrapping_add(q as u64)))
         .collect::<Result<_, _>>()?;
 
-    let gate = Arc::new((Mutex::new(StartGate { go: false, abort: false }), Condvar::new()));
+    let gate = Arc::new((
+        Mutex::new(StartGate {
+            go: false,
+            abort: false,
+        }),
+        Condvar::new(),
+    ));
     let mut handles = Vec::with_capacity(queues);
     let mut spawn_err: Option<std::io::Error> = None;
 
     for (q, mut emitter) in generators.into_iter().enumerate() {
         let gate = Arc::clone(&gate);
-        let spawned = thread::Builder::new()
-            .name(format!("wire-mq-{q}"))
-            .spawn(move || -> Result<StreamOutcome, TrafficError> {
+        let spawned = thread::Builder::new().name(format!("wire-mq-{q}")).spawn(
+            move || -> Result<StreamOutcome, TrafficError> {
                 // Park until released (go) or cancelled (abort). Checking the
                 // predicate under the lock before waiting closes the
                 // lost-wakeup window: a worker that reaches the gate after the
@@ -230,7 +238,8 @@ fn run_fanout(
                         elapsed,
                     }),
                 }
-            });
+            },
+        );
         match spawned {
             Ok(h) => handles.push(h),
             Err(e) => {
@@ -434,6 +443,9 @@ mod tests {
         let mut fb = vec![0u8; b.frame_len()];
         a.next(&mut fa).unwrap();
         b.next(&mut fb).unwrap();
-        assert_ne!(fa, fb, "distinct per-stream seeds must craft distinct frames");
+        assert_ne!(
+            fa, fb,
+            "distinct per-stream seeds must craft distinct frames"
+        );
     }
 }
