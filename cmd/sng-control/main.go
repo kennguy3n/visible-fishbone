@@ -1007,6 +1007,17 @@ func buildRouter(
 		hibController = ctrl
 		if activityRecorder != nil {
 			activityRecorder.SetWakeNotifier(hibCoordinator.Notify)
+		} else {
+			// No activity recorder means the fast wake-on-activity path is
+			// not wired: a parked tenant can then only be rehydrated by the
+			// leader controller's backstop sweep (SweepInterval, 1h by
+			// default), not on its first request. Still correct, but the
+			// wake-latency SLA does not hold — warn the operator since this
+			// usually means HIBERNATION_ENABLED was set without the activity
+			// recorder (which is on by default and is what the dormancy
+			// signal depends on).
+			logger.Warn("hibernation: activity recorder disabled; fast wake-on-activity is OFF, tenants wake only via the controller backstop",
+				slog.Duration("backstop_interval", cfg.Hibernation.SweepInterval))
 		}
 		logger.Info("hibernation: enabled (leader-gated controller + per-replica wake)",
 			slog.Duration("sweep_interval", cfg.Hibernation.SweepInterval),

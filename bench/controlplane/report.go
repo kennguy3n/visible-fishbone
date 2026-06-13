@@ -315,18 +315,29 @@ type PostgresPoolPlan struct {
 
 // ClickHouseWritePlan projects hot-path write load at scale.
 type ClickHouseWritePlan struct {
-	Shards                 int     `json:"shards"`
-	BatchSize              int     `json:"batch_size"`
-	TotalRowsPerSec        float64 `json:"total_rows_per_sec"`
-	RowsPerSecPerShard     float64 `json:"rows_per_sec_per_shard"`
-	InsertsPerSecPerShard  float64 `json:"inserts_per_sec_per_shard"`
-	MonthlyRows            int64   `json:"monthly_rows"`
-	PerTenantMonthlyRows   int64   `json:"per_tenant_monthly_rows"`
-	HotStorageGBCompressed float64 `json:"hot_storage_gb_compressed"`
-	IngestBytesPerSec      int64   `json:"ingest_bytes_per_sec"`
-	RecommendedShards      int     `json:"recommended_shards"`
-	RecommendedBatchSize   int     `json:"recommended_batch_size"`
-	Note                   string  `json:"note"`
+	Shards                int     `json:"shards"`
+	BatchSize             int     `json:"batch_size"`
+	TotalRowsPerSec       float64 `json:"total_rows_per_sec"`
+	RowsPerSecPerShard    float64 `json:"rows_per_sec_per_shard"`
+	InsertsPerSecPerShard float64 `json:"inserts_per_sec_per_shard"`
+	MonthlyRows           int64   `json:"monthly_rows"`
+	// PerTenantMonthlyRows is the FLEET-WIDE AVERAGE rows/month (total ÷
+	// full tenant count). With DormantFraction > 0 this is a blended
+	// average — active tenants write more than this and dormant tenants
+	// near-zero — not what any individual tenant writes. Use
+	// PerActiveTenantMonthlyRows for per-tenant sizing when hibernation is
+	// modelled. Equals PerActiveTenantMonthlyRows when DormantFraction=0.
+	PerTenantMonthlyRows int64 `json:"per_tenant_monthly_rows"`
+	// PerActiveTenantMonthlyRows is rows/month per ACTIVE (emitting)
+	// tenant: total ÷ active-tenant count. This is the number to size an
+	// individual active tenant against. Equals PerTenantMonthlyRows when
+	// DormantFraction=0.
+	PerActiveTenantMonthlyRows int64   `json:"per_active_tenant_monthly_rows"`
+	HotStorageGBCompressed     float64 `json:"hot_storage_gb_compressed"`
+	IngestBytesPerSec          int64   `json:"ingest_bytes_per_sec"`
+	RecommendedShards          int     `json:"recommended_shards"`
+	RecommendedBatchSize       int     `json:"recommended_batch_size"`
+	Note                       string  `json:"note"`
 }
 
 // NATSSubjectPlan projects subject cardinality + JetStream storage.

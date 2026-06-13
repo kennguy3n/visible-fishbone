@@ -265,6 +265,18 @@ func (c CapacityPlanConfig) effectiveTelemetryTenants() float64 {
 	return active + dormant*c.HibernatedSampleRate
 }
 
+// activeTenants is the count of full-fidelity (non-hibernated) tenants.
+// It is the denominator for per-active-tenant sizing. Floored at 1 so a
+// 100%-dormant fleet never divides by zero.
+func (c CapacityPlanConfig) activeTenants() float64 {
+	dormant := math.Round(float64(c.TenantCount) * c.DormantFraction)
+	active := float64(c.TenantCount) - dormant
+	if active < 1 {
+		active = 1
+	}
+	return active
+}
+
 // totalEventsPerSec is the fleet-wide telemetry publish rate: every
 // tenant emits every class at its per-class rate.
 func (c CapacityPlanConfig) totalEventsPerSec() float64 {
@@ -369,17 +381,18 @@ func planClickHouseWrite(cfg CapacityPlanConfig) ClickHouseWritePlan {
 	compressedGBPerMonth := uncompressedGBPerMonth / cfg.ClickHouseCompression
 
 	plan := ClickHouseWritePlan{
-		Shards:                 cfg.ClickHouseShards,
-		BatchSize:              cfg.ClickHouseBatchSize,
-		TotalRowsPerSec:        round1(rowsPerSec),
-		RowsPerSecPerShard:     round1(rowsPerSecPerShard),
-		InsertsPerSecPerShard:  round2c(insertsPerSecPerShard),
-		MonthlyRows:            int64(monthlyRows),
-		PerTenantMonthlyRows:   int64(monthlyRows / float64(cfg.TenantCount)),
-		HotStorageGBCompressed: round1(compressedGBPerMonth),
-		IngestBytesPerSec:      int64(rowsPerSec * float64(cfg.BytesPerEvent)),
-		RecommendedShards:      cfg.ClickHouseShards,
-		RecommendedBatchSize:   cfg.ClickHouseBatchSize,
+		Shards:                     cfg.ClickHouseShards,
+		BatchSize:                  cfg.ClickHouseBatchSize,
+		TotalRowsPerSec:            round1(rowsPerSec),
+		RowsPerSecPerShard:         round1(rowsPerSecPerShard),
+		InsertsPerSecPerShard:      round2c(insertsPerSecPerShard),
+		MonthlyRows:                int64(monthlyRows),
+		PerTenantMonthlyRows:       int64(monthlyRows / float64(cfg.TenantCount)),
+		PerActiveTenantMonthlyRows: int64(monthlyRows / cfg.activeTenants()),
+		HotStorageGBCompressed:     round1(compressedGBPerMonth),
+		IngestBytesPerSec:          int64(rowsPerSec * float64(cfg.BytesPerEvent)),
+		RecommendedShards:          cfg.ClickHouseShards,
+		RecommendedBatchSize:       cfg.ClickHouseBatchSize,
 	}
 
 	const insertCeilingPerShard = 1.0
@@ -493,7 +506,11 @@ func (r *BusinessBenchmarkReport) writeCapacityPlanMarkdown(b *strings.Builder) 
 	b.WriteString("**ClickHouse write throughput**\n\n")
 	fmt.Fprintf(b, "- %.1f rows/s total across %d shard(s) = %.1f rows/s/shard\n", ch.TotalRowsPerSec, ch.Shards, ch.RowsPerSecPerShard)
 	fmt.Fprintf(b, "- %.2f inserts/s/shard @ batch %d (recommended: batch %d across %d shard(s))\n", ch.InsertsPerSecPerShard, ch.BatchSize, ch.RecommendedBatchSize, ch.RecommendedShards)
-	fmt.Fprintf(b, "- %d rows/month (%d/tenant), ~%.1f GB/month compressed hot storage\n", ch.MonthlyRows, ch.PerTenantMonthlyRows, ch.HotStorageGBCompressed)
+	if cp.DormantFraction > 0 {
+		fmt.Fprintf(b, "- %d rows/month (%d/tenant fleet-avg, %d/active-tenant), ~%.1f GB/month compressed hot storage\n", ch.MonthlyRows, ch.PerTenantMonthlyRows, ch.PerActiveTenantMonthlyRows, ch.HotStorageGBCompressed)
+	} else {
+		fmt.Fprintf(b, "- %d rows/month (%d/tenant), ~%.1f GB/month compressed hot storage\n", ch.MonthlyRows, ch.PerTenantMonthlyRows, ch.HotStorageGBCompressed)
+	}
 	fmt.Fprintf(b, "- %s\n\n", ch.Note)
 
 	n := cp.NATS

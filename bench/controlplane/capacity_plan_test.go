@@ -3,7 +3,22 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy/hibernation"
 )
+
+// TestHibernatedSampleRateMatchesService guards against silent drift
+// between the bench model's DefaultHibernatedSampleRate and the
+// control-plane sampler's. The bench binary deliberately re-declares the
+// constant to stay free of any service-layer import; this test-only
+// import keeps that decoupling while still failing CI if the two values
+// diverge.
+func TestHibernatedSampleRateMatchesService(t *testing.T) {
+	if DefaultHibernatedSampleRate != hibernation.DefaultHibernatedSampleRate {
+		t.Fatalf("bench DefaultHibernatedSampleRate (%v) drifted from hibernation.DefaultHibernatedSampleRate (%v); keep them in lock-step",
+			DefaultHibernatedSampleRate, hibernation.DefaultHibernatedSampleRate)
+	}
+}
 
 func TestCapacityPlanDefaultsAndCardinality(t *testing.T) {
 	s := RunCapacityPlan(CapacityPlanConfig{})
