@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -217,16 +216,14 @@ type SyncService struct {
 	nowFunc func() time.Time
 
 	// Optional activity-tiered planning (see WithDormancyPlanner).
-	// When planner+activity are both set, syncAll consults the planner
-	// each cycle to skip tenants not yet due for their tier. When nil,
+	// When sweep+activity are both set, syncAll consults the shared
+	// TieredSweep helper each cycle to skip tenants not yet due for their
+	// tier (and to export the sweep_tenants_visited metric). When nil,
 	// the runner falls back to the legacy "every tenant every cycle"
-	// fan-out via tenants.ListTenants.
-	planner  *tenancy.SweepPlanner
+	// fan-out via tenants.ListTenants. The TieredSweep owns the monotonic
+	// cycle counter, so the service no longer tracks its own.
+	sweep    *tenancy.TieredSweep
 	activity TenantActivitySource
-	// cycle is the monotonic 0-based sweep counter consumed by the
-	// planner's cadence gate. Atomic because Run drives it but tests
-	// may invoke syncAll concurrently.
-	cycle atomic.Uint64
 
 	// rolloutGate gates directory sync through the staged-enablement
 	// framework (see RolloutGate). Optional: nil preserves the legacy
@@ -263,18 +260,18 @@ func NewSyncService(
 	}
 }
 
-// WithDormancyPlanner enables activity-tiered sweep cadence. Once set,
-// each pass loads the cheap (id, last_active_at) projection from
-// `activity` and lets `planner` decide which tenants are due this
-// cycle: active tenants every cycle, idle/dormant ones at a reduced
-// cadence. Cycle 0 (the immediate startup pass) always reconciles
-// every tenant, so enabling this never delays a tenant's first sync.
-// Passing a nil planner or activity source is a no-op (legacy
-// every-tenant fan-out is retained), so wiring is fail-safe. Returns
-// the receiver for chaining at construction.
-func (s *SyncService) WithDormancyPlanner(planner *tenancy.SweepPlanner, activity TenantActivitySource) *SyncService {
-	if planner != nil && activity != nil {
-		s.planner = planner
+// WithDormancyPlanner enables activity-tiered sweep cadence using the
+// shared tenancy.TieredSweep helper. Once set, each pass loads the cheap
+// (id, last_active_at) projection from `activity` and lets the sweep
+// decide which tenants are due this cycle: active tenants every cycle,
+// idle/dormant ones at a reduced cadence. Cycle 0 (the immediate startup
+// pass) always reconciles every tenant, so enabling this never delays a
+// tenant's first sync. Passing a nil sweep or activity source is a no-op
+// (legacy every-tenant fan-out is retained), so wiring is fail-safe.
+// Returns the receiver for chaining at construction.
+func (s *SyncService) WithDormancyPlanner(sweep *tenancy.TieredSweep, activity TenantActivitySource) *SyncService {
+	if sweep != nil && activity != nil {
+		s.sweep = sweep
 		s.activity = activity
 	}
 	return s
@@ -324,8 +321,7 @@ func (s *SyncService) Run(ctx context.Context, interval time.Duration) error {
 // cheap activity projection and skips tenants not yet due for their
 // tier; otherwise it falls back to the legacy full fan-out.
 func (s *SyncService) syncAll(ctx context.Context) {
-	cycle := int64(s.cycle.Add(1) - 1) // 0-based: first pass is cycle 0
-	tenants, err := s.dueTenants(ctx, cycle)
+	tenants, err := s.dueTenants(ctx)
 	if err != nil {
 		s.logger.Error("idp_sync: list tenants failed", slog.Any("error", err))
 		return
@@ -367,25 +363,27 @@ func (s *SyncService) syncAll(ctx context.Context) {
 	}
 }
 
-// dueTenants returns the tenant ids to reconcile on `cycle`. With a
-// dormancy planner configured it loads the cheap (id, last_active_at)
-// projection and lets the planner gate by activity tier, logging how
-// many tenants were skipped this cycle so the saving is observable.
-// Without a planner it returns the full tenant list (legacy fan-out).
-func (s *SyncService) dueTenants(ctx context.Context, cycle int64) ([]uuid.UUID, error) {
-	if s.planner == nil || s.activity == nil {
+// dueTenants returns the tenant ids to reconcile this pass. With a
+// dormancy sweep configured it loads the cheap (id, last_active_at)
+// projection and lets the shared TieredSweep gate by activity tier —
+// advancing the cycle counter, exporting the per-tier metric, and
+// logging how many tenants were skipped this cycle so the saving is
+// observable. Without a sweep it returns the full tenant list (legacy
+// fan-out).
+func (s *SyncService) dueTenants(ctx context.Context) ([]uuid.UUID, error) {
+	if s.sweep == nil || s.activity == nil {
 		return s.tenants.ListTenants(ctx)
 	}
 	acts, err := s.activity.ListTenantActivity(ctx)
 	if err != nil {
 		return nil, err
 	}
-	now := s.nowFunc()
-	due := s.planner.Plan(now, cycle, acts)
-	if skipped := len(acts) - len(due); skipped > 0 {
-		summary := s.planner.Summarize(now, cycle, acts)
+	cyc := s.sweep.Begin(s.nowFunc())
+	due := cyc.Due(acts)
+	cyc.Finish()
+	if summary := cyc.Summary(); summary.Skipped > 0 {
 		s.logger.Debug("idp_sync: activity-tiered sweep",
-			slog.Int64("cycle", cycle),
+			slog.Int64("cycle", summary.Cycle),
 			slog.Int("total", summary.Total),
 			slog.Int("visited", summary.Visited),
 			slog.Int("skipped", summary.Skipped),

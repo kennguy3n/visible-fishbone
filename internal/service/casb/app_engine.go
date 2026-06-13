@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -76,18 +75,16 @@ type AppNoOpsEngine struct {
 	// never stalls the pipeline. Zero selects defaultRefineTimeout.
 	refineTimeout time.Duration
 
-	// planner, when set (via WithDormancyPlanner), makes the periodic
-	// Reconcile sweep activity-tiered: active tenants are re-evaluated
-	// every cycle, idle/dormant ones at a reduced cadence, instead of
-	// reconciling all ~5000 tenants' inventories every cycle. nil keeps
-	// the legacy "every active tenant every cycle" fan-out. Drift
-	// detection stays bounded because cycle 0 sweeps everyone and the
-	// planner caps how stale any tier's reconcile can get.
-	planner *tenancy.SweepPlanner
-	// cycle is the monotonic 0-based sweep counter the planner's cadence
-	// gate consumes. Atomic because the sweep loop drives it but tests
-	// may invoke Reconcile concurrently.
-	cycle atomic.Uint64
+	// sweep, when set (via WithDormancyPlanner), makes the periodic
+	// Reconcile sweep activity-tiered via the shared tenancy.TieredSweep
+	// helper: active tenants are re-evaluated every cycle, idle/dormant
+	// ones at a reduced cadence, instead of reconciling all ~5000
+	// tenants' inventories every cycle. nil keeps the legacy "every
+	// active tenant every cycle" fan-out. Drift detection stays bounded
+	// because cycle 0 sweeps everyone and the planner caps how stale any
+	// tier's reconcile can get. The TieredSweep owns the monotonic cycle
+	// counter and exports the sweep_tenants_visited metric.
+	sweep *tenancy.TieredSweep
 }
 
 const defaultRefineTimeout = 3 * time.Second
@@ -141,16 +138,16 @@ func (e *AppNoOpsEngine) SetAuditLog(a repository.AuditLogRepository) { e.audit 
 func (e *AppNoOpsEngine) SetRolloutGate(g AutoEnforceGate) { e.rolloutGate = g }
 
 // WithDormancyPlanner makes the periodic Reconcile sweep activity-tiered
-// using the shared SweepPlanner: active tenants are re-evaluated every
-// cycle, idle ones at IdleEvery cadence, dormant ones at DormantEvery.
-// The status filter is unchanged — only active tenants are ever
-// reconciled — so this strictly removes redundant re-evaluation of
-// quiet tenants' inventories. A nil planner is a no-op (legacy
+// using the shared tenancy.TieredSweep helper: active tenants are
+// re-evaluated every cycle, idle ones at IdleEvery cadence, dormant ones
+// at DormantEvery. The status filter is unchanged — only active tenants
+// are ever reconciled — so this strictly removes redundant re-evaluation
+// of quiet tenants' inventories. A nil sweep is a no-op (legacy
 // every-active-tenant fan-out retained), so wiring is fail-safe.
 // Returns the receiver for chaining at construction.
-func (e *AppNoOpsEngine) WithDormancyPlanner(planner *tenancy.SweepPlanner) *AppNoOpsEngine {
-	if planner != nil {
-		e.planner = planner
+func (e *AppNoOpsEngine) WithDormancyPlanner(sweep *tenancy.TieredSweep) *AppNoOpsEngine {
+	if sweep != nil {
+		e.sweep = sweep
 	}
 	return e
 }
@@ -237,30 +234,60 @@ func (e *AppNoOpsEngine) Reconcile(ctx context.Context) error {
 	if e.tenants == nil {
 		return fmt.Errorf("casb: Reconcile requires a tenant repository")
 	}
-	// 0-based monotonic cycle: the first sweep is cycle 0 (full visit).
-	cycle := int64(e.cycle.Add(1) - 1)
-	now := e.nowFunc()
 	var (
-		firstErr        error
-		page            repository.Page
-		active, skipped int
+		firstErr error
+		page     repository.Page
+		active   int
 	)
+	// The TieredSweep owns the 0-based monotonic cycle counter; the
+	// first sweep is cycle 0 (full visit). A nil sweep keeps the legacy
+	// every-active-tenant fan-out.
+	//
+	// Begin is deferred until the first tenant page lists successfully so
+	// a transient failure on the very first enumeration does NOT burn
+	// cycle 0 — the guaranteed startup full sweep is preserved for the
+	// next attempt. This matches the IdP-sync / alert-feedback adopters,
+	// which only Begin after their ListTenantActivity succeeds. Once a
+	// page has listed, the deferred Finish publishes whatever was tallied
+	// even if a later page errors mid-sweep, so partial observability is
+	// never silently dropped.
+	var cyc *tenancy.SweepCycle
 	for {
 		res, err := e.tenants.List(ctx, page)
 		if err != nil {
 			return fmt.Errorf("casb: list tenants: %w", err)
+		}
+		// The cyc==nil guard registers the deferred Finish at most once,
+		// even though the defer sits inside the pagination loop: after the
+		// first successful page sets cyc, later iterations skip this block.
+		if e.sweep != nil && cyc == nil {
+			cyc = e.sweep.Begin(e.nowFunc())
+			defer func() {
+				cyc.Finish()
+				if summary := cyc.Summary(); summary.Skipped > 0 {
+					e.logger.DebugContext(ctx, "casb: activity-tiered reconcile sweep",
+						slog.Int64("cycle", summary.Cycle),
+						slog.Int("active", active),
+						slog.Int("visited", summary.Visited),
+						slog.Int("skipped", summary.Skipped))
+				}
+			}()
 		}
 		for _, t := range res.Items {
 			if t.Status != repository.TenantStatusActive {
 				continue
 			}
 			active++
-			if e.planner != nil {
-				tier := e.planner.Classify(now, t.LastActiveAt)
-				if !e.planner.ShouldVisit(tier, cycle) {
-					skipped++
-					continue
-				}
+			// Only active-status tenants reach the tier gate, so the
+			// metric's tally reflects the activity-tier distribution among
+			// reconcilable tenants — NOT the whole fleet. Suspended/deleted
+			// tenants are filtered above and are invisible to the sweep
+			// metric, so sweep_tenants_*{job="casb_noops_reconcile"} total
+			// is intentionally smaller than the fleet size (and than the
+			// IdP-sync / alert jobs, which enumerate all tenants). Account
+			// for that when comparing jobs on a dashboard.
+			if cyc != nil && !cyc.Visit(t.LastActiveAt) {
+				continue
 			}
 			if err := e.ReconcileTenant(ctx, t.ID); err != nil && firstErr == nil {
 				firstErr = err
@@ -270,13 +297,6 @@ func (e *AppNoOpsEngine) Reconcile(ctx context.Context) error {
 			break
 		}
 		page.After = res.NextCursor
-	}
-	if e.planner != nil && skipped > 0 {
-		e.logger.DebugContext(ctx, "casb: activity-tiered reconcile sweep",
-			slog.Int64("cycle", cycle),
-			slog.Int("active", active),
-			slog.Int("visited", active-skipped),
-			slog.Int("skipped", skipped))
 	}
 	return firstErr
 }

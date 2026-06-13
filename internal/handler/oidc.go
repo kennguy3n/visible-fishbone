@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
 )
@@ -26,6 +27,17 @@ type OIDCHandler struct {
 	// Nil when directory sync is not wired, in which case those routes
 	// are not registered at all.
 	dirCreds *identity.CredentialVault
+	// tokenActivity / refreshActivity, when set, receive an activity
+	// touch on a successful mobile token exchange and refresh
+	// respectively. These public endpoints bypass the authenticated
+	// chain (the agent has no SNG session yet), so the RecordActivity
+	// middleware never sees them; recording here is what lets a mobile
+	// login / recurring session refresh count as tenant activity for the
+	// dormancy planner. They are kept distinct so the coverage metric
+	// can tell a one-off login from the recurring check-in. Nil disables
+	// the touch on that path.
+	tokenActivity   middleware.ActivityObserver
+	refreshActivity middleware.ActivityObserver
 }
 
 // NewOIDCHandler returns a ready-to-use OIDC handler. maxProviders
@@ -43,6 +55,18 @@ func (h *OIDCHandler) WithDirectoryCredentials(vault *identity.CredentialVault) 
 	if vault != nil {
 		h.dirCreds = vault
 	}
+	return h
+}
+
+// WithActivityObservers attaches the per-tenant activity recorder so a
+// successful mobile token exchange (token) or refresh (refresh)
+// advances the tenant's last_active_at. The two are separate so each
+// can be attributed to its own ingress source in the coverage metric.
+// A nil observer on either is a no-op (that touch is skipped), keeping
+// wiring fail-safe. Returns the receiver for chaining.
+func (h *OIDCHandler) WithActivityObservers(token, refresh middleware.ActivityObserver) *OIDCHandler {
+	h.tokenActivity = token
+	h.refreshActivity = refresh
 	return h
 }
 
@@ -500,7 +524,22 @@ func (h *OIDCHandler) mobileToken(w http.ResponseWriter, r *http.Request) {
 		WriteRepositoryError(w, err)
 		return
 	}
+	// Record activity against the tenant the service actually validated
+	// the identity into (res.Identity.TenantID), not the request's path
+	// tenant_id — matching the defensive attribution in enrollDevice so
+	// a touch can never be credited to a tenant the exchange did not
+	// authorise. The touch is async (debounced by the recorder).
+	recordActivity(h.tokenActivity, res.Identity.TenantID)
 	WriteJSON(w, http.StatusOK, toMobileSessionResponse(res))
+}
+
+// recordActivity reports a successful mobile auth as tenant activity.
+// A nil observer or nil tenant is a no-op.
+func recordActivity(obs middleware.ActivityObserver, tenantID uuid.UUID) {
+	if obs == nil || tenantID == uuid.Nil {
+		return
+	}
+	obs.Observe(tenantID, time.Now())
 }
 
 func (h *OIDCHandler) mobileRefresh(w http.ResponseWriter, r *http.Request) {
@@ -528,5 +567,8 @@ func (h *OIDCHandler) mobileRefresh(w http.ResponseWriter, r *http.Request) {
 		WriteRepositoryError(w, err)
 		return
 	}
+	// As in mobileToken, attribute the touch to the validated identity's
+	// tenant rather than the path tenant_id.
+	recordActivity(h.refreshActivity, res.Identity.TenantID)
 	WriteJSON(w, http.StatusOK, toMobileSessionResponse(res))
 }

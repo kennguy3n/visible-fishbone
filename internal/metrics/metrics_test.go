@@ -11,6 +11,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/kennguy3n/visible-fishbone/internal/config"
+	"github.com/kennguy3n/visible-fishbone/internal/service/activity"
 )
 
 func discardLogger() *slog.Logger {
@@ -185,5 +186,62 @@ func TestNATSCollectorPrunesStaleSeries(t *testing.T) {
 	}
 	if _, ok := c.tracked[[2]string{"EVENTS", "c3"}]; !ok {
 		t.Error("EVENTS/c3 should remain tracked (stream not scraped this round)")
+	}
+}
+
+func TestActivityCollectorRecord(t *testing.T) {
+	m := newTestMetrics(t)
+	c := NewActivityCollector(m, nil, 0)
+
+	enq := func(src activity.Source) float64 {
+		return testutil.ToFloat64(m.ActivityTouches.WithLabelValues(string(src), outcomeEnqueued))
+	}
+
+	// First snapshot establishes the baseline; the counter jumps by the
+	// full cumulative value on first record. Two sources prove the
+	// per-source label dimension is wired.
+	c.record(activity.Stats{BySource: map[activity.Source]activity.SourceStat{
+		activity.SourceTelemetry: {Enqueued: 10, Written: 9},
+		activity.SourceEnroll:    {Enqueued: 2, Written: 2},
+	}}, 5)
+	if got := enq(activity.SourceTelemetry); got != 10 {
+		t.Errorf("telemetry enqueued = %v, want 10", got)
+	}
+	if got := enq(activity.SourceEnroll); got != 2 {
+		t.Errorf("enroll enqueued = %v, want 2", got)
+	}
+	if got := testutil.ToFloat64(m.ActivityTouches.WithLabelValues(string(activity.SourceTelemetry), outcomeWritten)); got != 9 {
+		t.Errorf("telemetry written = %v, want 9", got)
+	}
+	if got := testutil.ToFloat64(m.ActivityQueueDepth); got != 5 {
+		t.Errorf("queue_depth = %v, want 5", got)
+	}
+
+	// A higher cumulative value adds only the delta (10 -> 13 = +3).
+	c.record(activity.Stats{BySource: map[activity.Source]activity.SourceStat{
+		activity.SourceTelemetry: {Enqueued: 13, Written: 12},
+	}}, 1)
+	if got := enq(activity.SourceTelemetry); got != 13 {
+		t.Errorf("telemetry enqueued = %v, want 13", got)
+	}
+	if got := testutil.ToFloat64(m.ActivityQueueDepth); got != 1 {
+		t.Errorf("queue_depth = %v, want 1", got)
+	}
+
+	// A backwards value (recorder replaced) rebaselines without emitting
+	// a negative delta — the counter holds steady.
+	c.record(activity.Stats{BySource: map[activity.Source]activity.SourceStat{
+		activity.SourceTelemetry: {Enqueued: 1},
+	}}, 0)
+	if got := enq(activity.SourceTelemetry); got != 13 {
+		t.Errorf("telemetry enqueued = %v, want 13 after rebaseline", got)
+	}
+
+	// Growth resumes from the new baseline (1 -> 4 = +3 ⇒ 13+3 = 16).
+	c.record(activity.Stats{BySource: map[activity.Source]activity.SourceStat{
+		activity.SourceTelemetry: {Enqueued: 4},
+	}}, 0)
+	if got := enq(activity.SourceTelemetry); got != 16 {
+		t.Errorf("telemetry enqueued = %v, want 16", got)
 	}
 }

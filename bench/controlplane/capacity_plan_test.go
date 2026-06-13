@@ -149,7 +149,7 @@ func TestCapacityPlanRendersInMarkdown(t *testing.T) {
 	}
 	r.Grade()
 	md := r.ToMarkdown()
-	for _, want := range []string{"Capacity plan @ 5000 tenants", "Postgres connection-pool pressure", "ClickHouse write throughput", "NATS subject cardinality", "AI inference footprint (WS-9 shared pool)"} {
+	for _, want := range []string{"Capacity plan @ 5000 tenants", "Postgres connection-pool pressure", "ClickHouse write throughput", "NATS subject cardinality", "AI inference footprint (WS-9 shared pool)", "Periodic per-tenant sweep cost"} {
 		if !strings.Contains(md, want) {
 			t.Errorf("markdown missing %q", want)
 		}
@@ -177,5 +177,90 @@ func TestCapacityPlanRoundTripsThroughJSON(t *testing.T) {
 	}
 	if got.CapacityPlan.NATS.DistinctSubjects != r.CapacityPlan.NATS.DistinctSubjects {
 		t.Fatalf("distinct subjects mismatch after round-trip")
+	}
+	if got.CapacityPlan.PeriodicSweep.ReductionFactor != r.CapacityPlan.PeriodicSweep.ReductionFactor {
+		t.Fatalf("sweep reduction factor mismatch after round-trip")
+	}
+}
+
+func TestCapacityPlanPeriodicSweepDividend(t *testing.T) {
+	s := RunCapacityPlan(CapacityPlanConfig{})
+	sw := s.PeriodicSweep
+
+	// Default dormant-heavy mix sums to the fleet.
+	if sw.ActiveTenants+sw.IdleTenants+sw.DormantTenants != s.TenantCount {
+		t.Fatalf("tier breakdown %d+%d+%d != %d",
+			sw.ActiveTenants, sw.IdleTenants, sw.DormantTenants, s.TenantCount)
+	}
+	// Untiered cost is one full fan-out per job.
+	if sw.UntieredVisitsPerCyclePerJob != s.TenantCount {
+		t.Fatalf("untiered/job = %d, want %d", sw.UntieredVisitsPerCyclePerJob, s.TenantCount)
+	}
+	// Tiering must strictly reduce per-cycle work and never below the
+	// active floor (active tenants are always visited).
+	if sw.TieredVisitsPerCyclePerJob >= float64(sw.UntieredVisitsPerCyclePerJob) {
+		t.Fatalf("tiered (%.1f) should be below untiered (%d)",
+			sw.TieredVisitsPerCyclePerJob, sw.UntieredVisitsPerCyclePerJob)
+	}
+	if sw.TieredVisitsPerCyclePerJob < float64(sw.ActiveTenants) {
+		t.Fatalf("tiered (%.1f) below active floor (%d) — active tenants must always be visited",
+			sw.TieredVisitsPerCyclePerJob, sw.ActiveTenants)
+	}
+	// The headline tail dividends: idle ~10x (every 10th cycle) and
+	// dormant ~100x (every 100th), matching the default planner cadence.
+	if sw.IdleReductionFactor != 10 {
+		t.Fatalf("idle reduction = %.1f, want 10", sw.IdleReductionFactor)
+	}
+	if sw.DormantReductionFactor != 100 {
+		t.Fatalf("dormant reduction = %.1f, want 100", sw.DormantReductionFactor)
+	}
+	// Aggregate scales with the job count.
+	if sw.JobCount < 1 {
+		t.Fatalf("expected at least one tiered job, got %d", sw.JobCount)
+	}
+	if sw.UntieredVisitsPerCycleTotal != sw.UntieredVisitsPerCyclePerJob*sw.JobCount {
+		t.Fatalf("aggregate untiered %d != per-job %d × jobs %d",
+			sw.UntieredVisitsPerCycleTotal, sw.UntieredVisitsPerCyclePerJob, sw.JobCount)
+	}
+}
+
+func TestCapacityPlanPeriodicSweepClampsNegativeFraction(t *testing.T) {
+	// A stray negative weight in a partially-specified mix must be
+	// clamped to 0 so it can never produce a negative tenant count.
+	s := RunCapacityPlan(CapacityPlanConfig{
+		TenantCount:          1000,
+		SweepActiveFraction:  -0.1,
+		SweepIdleFraction:    0.5,
+		SweepDormantFraction: 0.5,
+	})
+	sw := s.PeriodicSweep
+	if sw.ActiveTenants < 0 || sw.IdleTenants < 0 || sw.DormantTenants < 0 {
+		t.Fatalf("negative tenant count after clamp: %d/%d/%d",
+			sw.ActiveTenants, sw.IdleTenants, sw.DormantTenants)
+	}
+	if sw.ActiveTenants != 0 {
+		t.Fatalf("clamped active fraction should yield 0 active tenants, got %d", sw.ActiveTenants)
+	}
+	if sw.ActiveTenants+sw.IdleTenants+sw.DormantTenants != s.TenantCount {
+		t.Fatalf("tier breakdown %d+%d+%d != %d after clamp",
+			sw.ActiveTenants, sw.IdleTenants, sw.DormantTenants, s.TenantCount)
+	}
+}
+
+func TestCapacityPlanPeriodicSweepAllActiveNoDividend(t *testing.T) {
+	// A fully-active fleet (fail-safe / no dormancy) must show no
+	// reduction: every tenant is visited every cycle.
+	s := RunCapacityPlan(CapacityPlanConfig{
+		TenantCount:          1000,
+		SweepActiveFraction:  1,
+		SweepIdleFraction:    0,
+		SweepDormantFraction: 0,
+	})
+	sw := s.PeriodicSweep
+	if sw.TieredVisitsPerCyclePerJob != 1000 {
+		t.Fatalf("all-active tiered/job = %.1f, want 1000", sw.TieredVisitsPerCyclePerJob)
+	}
+	if sw.ReductionFactor != 1 {
+		t.Fatalf("all-active reduction = %.1f, want 1", sw.ReductionFactor)
 	}
 }
