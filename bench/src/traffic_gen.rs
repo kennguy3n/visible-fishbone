@@ -89,6 +89,17 @@ pub enum IpVersion {
     V6,
 }
 
+impl IpVersion {
+    /// Stable lowercase label used in reports and markdown.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::V4 => "v4",
+            Self::V6 => "v6",
+        }
+    }
+}
+
 /// L4 protocol shape for the generated traffic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum L4Proto {
@@ -96,6 +107,17 @@ pub enum L4Proto {
     Udp,
     /// TCP SYN segments (flow-table insertion stress).
     TcpSyn,
+}
+
+impl L4Proto {
+    /// Stable kebab-case label used in reports and markdown.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Udp => "udp",
+            Self::TcpSyn => "tcp-syn",
+        }
+    }
 }
 
 /// An IPv4 or IPv6 subnet the sampler draws source/destination addresses

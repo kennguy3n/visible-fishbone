@@ -1009,6 +1009,12 @@ pub struct WireScalingReport {
     pub interface: String,
     /// Representative on-wire frame size in bytes.
     pub frame_bytes: u32,
+    /// IP version of the crafted traffic (`v4` / `v6`). Recorded so two
+    /// artifacts from the same profile but different IP versions are
+    /// self-describing and never conflated by a future compare gate.
+    pub ip_version: String,
+    /// L4 protocol shape of the crafted traffic (`udp` / `tcp-syn`).
+    pub l4: String,
     /// Per-stream measured window in milliseconds.
     pub duration_ms: u64,
     /// `std::thread::available_parallelism()` on the measuring host — the
@@ -1059,8 +1065,8 @@ impl WireScalingReport {
         let _ = writeln!(out);
         let _ = writeln!(
             out,
-            "Transport `{}` · interface `{}` · frame {} B · {} ms/stream · host parallelism {}.",
-            self.transport, self.interface, self.frame_bytes, self.duration_ms, self.available_parallelism
+            "Transport `{}` · interface `{}` · {} {} · frame {} B · {} ms/stream · host parallelism {}.",
+            self.transport, self.interface, self.ip_version, self.l4, self.frame_bytes, self.duration_ms, self.available_parallelism
         );
         let _ = writeln!(out);
 
@@ -2296,6 +2302,8 @@ mod tests {
             transport: transport.to_string(),
             interface: "lo".to_string(),
             frame_bytes: 1500,
+            ip_version: "v4".to_string(),
+            l4: "udp".to_string(),
             duration_ms: 1000,
             available_parallelism: 8,
             target_gbps: 0.8,
@@ -2337,6 +2345,16 @@ mod tests {
         assert!(md.contains("4.00×"), "markdown must headline the lift: {md}");
         assert!(md.contains("AF_PACKET"), "wire run must keep the wire caveat");
         assert!(!md.contains("craft-only"), "wire run must not show the dry-run caveat");
+        // The run's flow shape is self-describing in the metadata line.
+        assert!(md.contains("v4 udp"), "markdown must record ip version + l4: {md}");
+    }
+
+    #[test]
+    fn wire_scaling_metadata_roundtrips_ip_version_and_l4() {
+        let r = wire_report("af-packet", &[(1, 1e5, 0.37, 1.0)]);
+        let back = WireScalingReport::from_json(&r.to_json().unwrap()).unwrap();
+        assert_eq!(back.ip_version, "v4");
+        assert_eq!(back.l4, "udp");
     }
 
     #[test]

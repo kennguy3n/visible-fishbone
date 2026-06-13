@@ -452,6 +452,11 @@ impl Default for IpsConfig {
 /// thread when the NIC exposes one RSS queue, so making it the default
 /// never sheds traffic — it only adds parallelism where the hardware
 /// allows it.
+///
+/// Variant order is load-bearing: `#[serde(untagged)]` tries variants top to
+/// bottom and takes the first that deserializes. `Keyword` must stay first so
+/// the string `"auto"` is matched as the keyword before serde would attempt
+/// to read it as a `Count(u16)`. Do not reorder these variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
 #[serde(untagged)]
 pub enum CaptureThreadsSetting {

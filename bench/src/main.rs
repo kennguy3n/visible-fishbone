@@ -759,6 +759,8 @@ fn run_wire_scaling(args: &WireScalingArgs) -> Result<std::process::ExitCode, Be
         transport: config.transport_label().to_string(),
         interface: args.interface.clone(),
         frame_bytes: frame_size,
+        ip_version: config.ip_version.label().to_string(),
+        l4: config.l4.label().to_string(),
         duration_ms: args.duration_ms,
         available_parallelism: parallelism,
         target_gbps: profile.target_gbps,
