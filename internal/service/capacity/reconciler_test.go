@@ -15,15 +15,16 @@ import (
 
 // docKnobs is the documented default knob set docs/scaling.md grades
 // its tier tables against (3 replicas, PG_MAX_OPEN_CONNS=20, PgBouncer
-// on, max_connections=200, 2 ClickHouse shards, batch 1024, 16 NATS
-// partitions). The reconciler grades the live fleet against exactly
-// these, so its recommendation reproduces the documented numbers.
+// on, max_connections=200, ClickHouse hot tier on with 2 shards, batch
+// 1024, 16 NATS partitions). The reconciler grades the live fleet against
+// exactly these, so its recommendation reproduces the documented numbers.
 func docKnobs() RuntimeKnobs {
 	return RuntimeKnobs{
 		ControlPlaneReplicas: 3,
 		PGMaxOpenConns:       20,
 		PGMaxConnections:     200,
 		PGBouncerMode:        true,
+		ClickHouseEnabled:    true,
 		ClickHouseShards:     2,
 		ClickHouseBatchSize:  1024,
 		NATSPartitions:       16,
@@ -210,6 +211,70 @@ func TestAutotunedBatchNotFlaggedPending(t *testing.T) {
 	// tuned value, recommended is the model's target.
 	if got := sink.settings[settingKey{AxisClickHouse, "batch_size"}]; got[0] != 4096 || got[1] != 13250 {
 		t.Errorf("clickhouse batch_size gauge = %v, want [4096 13250]", got)
+	}
+}
+
+// TestClickHouseDisabledNeverPending: a cold-only deployment (no hot
+// tier) must never flag the ClickHouse axis pending — the sizing is
+// hypothetical, so flagging it would alert forever on a subsystem the
+// operator deliberately does not run. The comparison is still surfaced.
+func TestClickHouseDisabledNeverPending(t *testing.T) {
+	knobs := docKnobs()
+	knobs.ClickHouseEnabled = false
+	// Boot default batch that would otherwise grade pending at 5K.
+	knobs.ClickHouseBatchSize = 1024
+	sink := newFakeSink()
+	r := newTestReconciler(FleetObservation{TenantCount: 5000}, knobs, sink)
+
+	rec, err := r.Reconcile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	byAxis := map[string]AxisStatus{}
+	for _, a := range rec.Axes {
+		byAxis[a.Axis] = a
+	}
+	if byAxis[AxisClickHouse].Pending {
+		t.Error("clickhouse axis must not be pending when no hot tier is configured")
+	}
+	if sink.pending[AxisClickHouse] {
+		t.Error("clickhouse pending flag must be false when no hot tier is configured")
+	}
+	// The comparison is still published for context.
+	if got := sink.settings[settingKey{AxisClickHouse, "batch_size"}]; got[0] != 1024 || got[1] != 13250 {
+		t.Errorf("clickhouse batch_size gauge = %v, want [1024 13250]", got)
+	}
+}
+
+// TestZeroFleetClearsPending: if the fleet drops to zero after a cycle
+// that flagged an axis pending, the next reconcile must clear the pending
+// gauges so a stale alert does not fire against an empty fleet.
+func TestZeroFleetClearsPending(t *testing.T) {
+	sink := newFakeSink()
+	obs := &fakeObserver{obs: FleetObservation{TenantCount: 5000}}
+	r := New(Config{
+		Observer: obs,
+		Knobs:    docKnobs,
+		Metrics:  sink,
+		NowFunc:  func() time.Time { return time.Unix(0, 0) },
+	})
+
+	if _, err := r.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !sink.pending[AxisClickHouse] {
+		t.Fatal("precondition: clickhouse should be pending at 5K with batch 1024")
+	}
+
+	obs.obs = FleetObservation{TenantCount: 0}
+	if _, err := r.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, axis := range []string{AxisPostgres, AxisClickHouse, AxisNATS} {
+		if sink.pending[axis] {
+			t.Errorf("%s pending must be cleared once the fleet is empty", axis)
+		}
 	}
 }
 

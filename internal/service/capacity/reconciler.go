@@ -95,7 +95,15 @@ type RuntimeKnobs struct {
 	PGMaxOpenConns       int
 	PGMaxConnections     int
 	PGBouncerMode        bool
-	ClickHouseShards     int
+	// ClickHouseEnabled is true when a ClickHouse hot tier is actually
+	// configured. When false the deployment ingests telemetry without
+	// the hot analytics tier, so the ClickHouse sizing is hypothetical
+	// ("what to set IF you enable it") — the reconciler still surfaces
+	// the numbers for context but never flags the axis pending, else an
+	// operator who deliberately runs cold-only gets a permanent false
+	// "ClickHouse under-provisioned" alert.
+	ClickHouseEnabled bool
+	ClickHouseShards  int
 	// ClickHouseBatchSize is the *effective* batch size in force, not
 	// the boot-time config: when the WS12 autotuner owns this knob the
 	// caller passes the live retuned value so the gauge stays truthful.
@@ -265,7 +273,13 @@ func (r *Reconciler) Reconcile(ctx context.Context) (Recommendation, error) {
 		// A brand-new install with no tenants: nothing to size yet.
 		// Record a clean pass (the fleet gauge is already 0) but do not
 		// run the model — passing 0 would make the model substitute its
-		// default tier and publish a fabricated recommendation.
+		// default tier and publish a fabricated recommendation. Clear the
+		// per-axis pending gauges so a recommendation left over from a
+		// prior non-empty cycle does not keep an operator alert firing
+		// against an empty fleet.
+		for _, axis := range []string{AxisPostgres, AxisClickHouse, AxisNATS} {
+			r.metricsSetPending(axis, false)
+		}
 		r.logger.Info("capacity: no live tenants yet; skipping sizing")
 		r.metricsIncReconcile("ok")
 		return Recommendation{Observation: obs, At: r.now()}, nil
@@ -329,18 +343,28 @@ func gradeAxes(k RuntimeKnobs, plan *capacityplan.Section) []AxisStatus {
 		},
 	}
 	batch := knobDelta(AxisClickHouse, "batch_size", k.ClickHouseBatchSize, ch.RecommendedBatchSize)
-	if k.ClickHouseBatchAutotuned {
-		// The WS12 autotuner owns this knob and holds it at the right
-		// value at runtime; surface the comparison but never flag it
-		// pending (else an operator dashboard alerts forever even while
-		// the autotuner is doing its job).
+	shards := knobDelta(AxisClickHouse, "shards", k.ClickHouseShards, ch.RecommendedShards)
+	switch {
+	case !k.ClickHouseEnabled:
+		// No hot tier configured: the ClickHouse sizing is hypothetical.
+		// Surface the numbers for context but never flag the axis pending
+		// (else a cold-only deployment alerts forever on a subsystem it
+		// does not run).
+		batch.Pending = false
+		shards.Pending = false
+	case k.ClickHouseBatchAutotuned:
+		// The WS12 autotuner owns the batch size and holds it at the
+		// right value at runtime; surface the comparison but never flag
+		// it pending (else an operator dashboard alerts forever even
+		// while the autotuner is doing its job). Shard count is still a
+		// real, operator-set knob and is graded normally.
 		batch.Pending = false
 	}
 	clickhouse := AxisStatus{
 		Axis: AxisClickHouse,
 		Deltas: []KnobDelta{
 			batch,
-			knobDelta(AxisClickHouse, "shards", k.ClickHouseShards, ch.RecommendedShards),
+			shards,
 		},
 	}
 	nats := AxisStatus{
@@ -388,9 +412,9 @@ func ceilingDelta(axis, knob string, current, ceiling int, pending bool) KnobDel
 
 // publish mirrors the recommendation onto metrics and logs the per-axis
 // state — INFO when an axis is under-provisioned (operator action
-// available), DEBUG when it is healthy.
+// available), DEBUG when it is healthy. The fleet gauge is already set by
+// Reconcile before the model runs, so it is not re-set here.
 func (r *Reconciler) publish(rec Recommendation) {
-	r.metricsSetFleet(rec.Observation.TenantCount)
 	for _, a := range rec.Axes {
 		for _, d := range a.Deltas {
 			r.metricsSetSetting(d.Axis, d.Knob, d.Current, d.Recommended)

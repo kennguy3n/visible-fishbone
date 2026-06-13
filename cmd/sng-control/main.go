@@ -666,10 +666,15 @@ func run() error {
 	// be read live from the writers — when the WS12 autotuner owns it,
 	// the gauge tracks the retuned value instead of the boot config.
 	if cfg.Capacity.Enabled {
-		chBatchAutotuned := cfg.TelemetryAnalytics.ClickHouseAutoTuneEnabled && chStats != nil
+		// chStats is non-nil exactly when a ClickHouse hot tier is
+		// configured (single Writer or sharded). It gates both whether
+		// the batch size is autotuned and whether the ClickHouse axis is
+		// graded as a real (vs hypothetical) recommendation.
+		chEnabled := chStats != nil
+		chBatchAutotuned := cfg.TelemetryAnalytics.ClickHouseAutoTuneEnabled && chEnabled
 		capacityReconciler := capacity.New(capacity.Config{
 			Observer: capacity.NewRepoFleetObserver(rc.TenantRepo, 0, nil),
-			Knobs:    capacityKnobs(&cfg, chLiveBatch, chBatchAutotuned),
+			Knobs:    capacityKnobs(&cfg, chLiveBatch, chEnabled, chBatchAutotuned),
 			Metrics:  mx,
 			Interval: cfg.Capacity.Interval,
 			Logger:   logger,
@@ -677,6 +682,7 @@ func run() error {
 		go elector.RunIfLeader(rootCtx, "capacity-autopilot", capacityReconciler.Run)
 		logger.Info("sng-control: capacity autopilot registered (runs on leader only)",
 			slog.Duration("interval", cfg.Capacity.Interval),
+			slog.Bool("clickhouse_enabled", chEnabled),
 			slog.Bool("clickhouse_batch_autotuned", chBatchAutotuned))
 	} else {
 		logger.Info("sng-control: capacity autopilot disabled (CAPACITY_AUTOPILOT_ENABLED=false)")
@@ -3518,10 +3524,13 @@ func runPoPRebalance(ctx context.Context, svc *pop.Service, interval time.Durati
 //
 // liveBatch reports the effective batch size from the live writers (0
 // when no hot tier is configured, in which case the boot-time config
-// value is the effective value since nothing retunes it). batchAutotuned
-// is true when the WS12 auto-tuner owns the knob, so the reconciler
-// surfaces the batch comparison but does not flag it pending.
-func capacityKnobs(cfg *config.Config, liveBatch func() int, batchAutotuned bool) func() capacity.RuntimeKnobs {
+// value is the effective value since nothing retunes it). chEnabled is
+// true when a ClickHouse hot tier is actually configured (so the
+// ClickHouse axis is graded as a real recommendation rather than a
+// hypothetical one). batchAutotuned is true when the WS12 auto-tuner owns
+// the batch knob, so the reconciler surfaces the batch comparison but
+// does not flag it pending.
+func capacityKnobs(cfg *config.Config, liveBatch func() int, chEnabled, batchAutotuned bool) func() capacity.RuntimeKnobs {
 	return func() capacity.RuntimeKnobs {
 		shards := 1
 		if cfg.TelemetryAnalytics.ClickHouseSharding && len(cfg.TelemetryAnalytics.ClickHouseEndpoints) > 0 {
@@ -3538,6 +3547,7 @@ func capacityKnobs(cfg *config.Config, liveBatch func() int, batchAutotuned bool
 			PGMaxOpenConns:           cfg.Postgres.MaxOpenConns,
 			PGMaxConnections:         cfg.Capacity.PGMaxConnections,
 			PGBouncerMode:            cfg.Postgres.PgBouncerMode,
+			ClickHouseEnabled:        chEnabled,
 			ClickHouseShards:         shards,
 			ClickHouseBatchSize:      batch,
 			ClickHouseBatchAutotuned: batchAutotuned,
