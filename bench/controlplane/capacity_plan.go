@@ -90,6 +90,9 @@ func (r *BusinessBenchmarkReport) writeCapacityPlanMarkdown(b *strings.Builder) 
 		sw.UntieredVisitsPerCyclePerJob, sw.TieredVisitsPerCyclePerJob, sw.ReductionFactor)
 	fmt.Fprintf(b, "- tiered breakdown/cycle: %.1f active + %.1f idle + %.1f dormant\n",
 		sw.ActiveVisitsPerCycle, sw.IdleVisitsPerCycle, sw.DormantVisitsPerCycle)
-	fmt.Fprintf(b, "- tail dividend: idle **%.1fx**, dormant **%.1fx** fewer visits/cycle\n\n",
+	fmt.Fprintf(b, "- tail dividend: idle **%.1fx**, dormant **%.1fx** fewer visits/cycle\n",
 		sw.IdleReductionFactor, sw.DormantReductionFactor)
+	fmt.Fprintf(b, "- aggregate across %d job(s): %d → %.1f tenants/cycle\n",
+		sw.JobCount, sw.UntieredVisitsPerCycleTotal, sw.TieredVisitsPerCycleTotal)
+	fmt.Fprintf(b, "- %s\n\n", sw.Note)
 }
