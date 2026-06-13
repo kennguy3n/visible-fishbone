@@ -468,11 +468,23 @@ type zohoDirectoryClient struct {
 type zohoID string
 
 func (z *zohoID) UnmarshalJSON(b []byte) error {
-	s := strings.Trim(string(b), `"`)
-	if s == "null" {
-		s = ""
+	// A JSON string: decode it properly so escapes are handled, rather
+	// than naively trimming quotes.
+	if len(b) > 0 && b[0] == '"' {
+		var s string
+		if err := json.Unmarshal(b, &s); err != nil {
+			return err
+		}
+		*z = zohoID(s)
+		return nil
 	}
-	*z = zohoID(s)
+	// A JSON number (Zoho's usual ZUID shape) or null. json.Number keeps
+	// the integer exact (no float rounding); null decodes to empty.
+	var n json.Number
+	if err := json.Unmarshal(b, &n); err != nil {
+		return err
+	}
+	*z = zohoID(n.String())
 	return nil
 }
 

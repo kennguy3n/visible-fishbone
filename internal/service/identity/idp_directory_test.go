@@ -2,6 +2,7 @@ package identity
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,32 @@ import (
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
+
+func TestZohoIDUnmarshal(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"number", `101`, "101"},
+		{"quoted number", `"102"`, "102"},
+		{"large number keeps precision", `90071992547409930`, "90071992547409930"},
+		{"escaped string", `"a\"b"`, `a"b`},
+		{"null", `null`, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var z zohoID
+			if err := json.Unmarshal([]byte(tc.in), &z); err != nil {
+				t.Fatalf("Unmarshal(%s): %v", tc.in, err)
+			}
+			if string(z) != tc.want {
+				t.Errorf("Unmarshal(%s) = %q, want %q", tc.in, string(z), tc.want)
+			}
+		})
+	}
+}
 
 // --- Okta -----------------------------------------------------------------
 
