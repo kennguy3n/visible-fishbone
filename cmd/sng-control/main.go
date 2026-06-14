@@ -739,10 +739,21 @@ func run() error {
 		// graded as a real (vs hypothetical) recommendation.
 		chEnabled := chStats != nil
 		chBatchAutotuned := cfg.TelemetryAnalytics.ClickHouseAutoTuneEnabled && chEnabled
+		// Pass a genuine nil MetricSink when metrics are disabled. mx is a
+		// nil *metrics.Metrics here; assigning it straight into the
+		// interface field would make a typed-nil (non-nil at the interface
+		// level), so the reconciler's `if r.metrics != nil` guard would
+		// always pass and only avoid a panic because *metrics.Metrics has
+		// nil-receiver guards. Keeping the interface a true nil honours the
+		// MetricSink "nil sink is fine" contract at the interface level.
+		var capMetrics capacity.MetricSink
+		if mx != nil {
+			capMetrics = mx
+		}
 		capacityReconciler := capacity.New(capacity.Config{
 			Observer: capacity.NewRepoFleetObserver(rc.TenantRepo, 0, nil),
 			Knobs:    capacityKnobs(&cfg, chLiveBatch, chEnabled, chBatchAutotuned),
-			Metrics:  mx,
+			Metrics:  capMetrics,
 			Interval: cfg.Capacity.Interval,
 			Logger:   logger,
 		})
