@@ -200,6 +200,10 @@ type Metrics struct {
 	WebhookDeliveryLatency *prometheus.HistogramVec
 	WebhookQueueDepth      *prometheus.GaugeVec
 
+	// --- Identity / IdP directory sync --------------------------
+	IdentityDirectorySyncTotal   *prometheus.CounterVec
+	IdentityDirectoryUsersListed *prometheus.CounterVec
+
 	// --- Per-tenant gauges --------------------------------------
 	TenantActiveDevices *prometheus.GaugeVec
 	TenantActiveEdges   *prometheus.GaugeVec
@@ -542,6 +546,26 @@ func New(cfg config.Metrics) *Metrics {
 		Name:      "queue_depth",
 		Help:      "Pending undelivered items in the outbound delivery queue, by integration kind.",
 	}, []string{"kind"})
+
+	// --- Identity / IdP directory sync ------------------------------
+	// These prove IdP directory-connector breadth and fleet-scale
+	// directory pull volume: which provider connectors are actually
+	// exercised, how often each read succeeds vs. errors, and how many
+	// directory users are pulled per provider per cycle. `provider` is
+	// bounded by the IDPProviderType enum and `outcome` by {success,
+	// error}, so cardinality stays small.
+	m.IdentityDirectorySyncTotal = f.NewCounterVec(prometheus.CounterOpts{
+		Namespace: ns,
+		Subsystem: "identity",
+		Name:      "directory_sync_total",
+		Help:      "Total IdP directory ListUsers attempts, by provider and outcome (success|error).",
+	}, []string{"provider", "outcome"})
+	m.IdentityDirectoryUsersListed = f.NewCounterVec(prometheus.CounterOpts{
+		Namespace: ns,
+		Subsystem: "identity",
+		Name:      "directory_users_listed_total",
+		Help:      "Total directory users returned by IdP directory connectors, by provider.",
+	}, []string{"provider"})
 
 	// --- Per-tenant gauges ------------------------------------------
 	m.TenantActiveDevices = f.NewGaugeVec(prometheus.GaugeOpts{

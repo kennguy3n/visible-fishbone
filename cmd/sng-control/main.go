@@ -1996,6 +1996,12 @@ func buildRouter(
 			// NoOps auto-promoter can read them as promotion evidence. A
 			// no-op for the guardrail itself; it only feeds the promoter.
 			WithMonitorMetricsSink(rolloutMonitorMetrics)
+		if mx != nil {
+			// Per-provider directory-read telemetry (which connectors run,
+			// success/error, users pulled) — proves connector breadth and
+			// fleet-scale directory volume.
+			idpSyncSvc.WithDirectoryObserver(metricsDirectoryObserver{m: mx})
+		}
 		logger.Info("idp directory sync: enabled (leader-gated)",
 			slog.Duration("interval", cfg.MobileAuth.DirectorySyncInterval))
 	}
@@ -2723,6 +2729,26 @@ func (o metricsFeedObserver) ObserveStoreSize(c aisvc.IOCCounts) {
 	o.m.ThreatIntelStoreIOCs.WithLabelValues("ip").Set(float64(c.IPs))
 	o.m.ThreatIntelStoreIOCs.WithLabelValues("url").Set(float64(c.URLs))
 	o.m.ThreatIntelStoreIOCs.WithLabelValues("hash").Set(float64(c.Hashes))
+}
+
+// metricsDirectoryObserver adapts the Prometheus registry to the
+// identity.DirectoryObserver interface so per-provider IdP directory
+// reads land as metrics without the identity package importing
+// internal/metrics. Constructed only when metrics are enabled (mx !=
+// nil), so each method can dereference o.m unconditionally.
+type metricsDirectoryObserver struct {
+	m *metrics.Metrics
+}
+
+func (o metricsDirectoryObserver) ObserveDirectoryList(provider string, users int, err error) {
+	outcome := "success"
+	if err != nil {
+		outcome = "error"
+	}
+	o.m.IdentityDirectorySyncTotal.WithLabelValues(provider, outcome).Inc()
+	if err == nil {
+		o.m.IdentityDirectoryUsersListed.WithLabelValues(provider).Add(float64(users))
+	}
 }
 
 // aiPoolMetricsSource adapts the WS-9 shared inference pool onto the
