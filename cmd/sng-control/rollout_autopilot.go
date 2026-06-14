@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -160,6 +161,7 @@ func buildRolloutAutopilot(
 	if err != nil {
 		return nil, err
 	}
+	exclusions := parseAutopilotExclusions(ac.Exclude, logger)
 	policy := rollout.AutopilotPolicy{
 		Capabilities: caps,
 		AutoEnrol:    ac.AutoEnrol,
@@ -170,6 +172,7 @@ func buildRolloutAutopilot(
 			MaxDenyRate:  ac.MaxDenyRate,
 			MinSamples:   ac.MinSamples,
 		},
+		Exclusions: exclusions,
 	}
 	ap, err := rollout.NewAutopilot(svc, autopilotTenantLister{tenants: tenants}, source, policy,
 		rollout.WithAutopilotLogger(logger),
@@ -198,6 +201,47 @@ func parseAutopilotCapabilities(ids []string) ([]rollout.Capability, error) {
 		out = append(out, c)
 	}
 	return out, nil
+}
+
+// parseAutopilotExclusions maps the configured ROLLOUT_AUTOPILOT_EXCLUDE
+// entries to a rollout.AutopilotExclusions set. Each entry is either
+// "<tenantID>" (exclude the tenant for every capability) or
+// "<tenantID>:<capability>" (one capability only). A malformed entry — a
+// bad UUID or an unknown capability — is logged and skipped rather than
+// failing boot, so a single typo never takes the whole autopilot down;
+// an unparsed exclusion is fail-safe toward MORE operator control (the
+// tenant is simply not excluded, i.e. the autopilot still respects every
+// other guardrail before touching it).
+func parseAutopilotExclusions(entries []string, logger *slog.Logger) rollout.AutopilotExclusions {
+	var (
+		whole []uuid.UUID
+		pairs []rollout.TenantCapability
+	)
+	for _, raw := range entries {
+		tenantPart, capPart, hasCap := strings.Cut(raw, ":")
+		tenantID, err := uuid.Parse(strings.TrimSpace(tenantPart))
+		if err != nil {
+			if logger != nil {
+				logger.Warn("rollout autopilot: ignoring malformed ROLLOUT_AUTOPILOT_EXCLUDE entry (bad tenant id)",
+					slog.String("entry", raw))
+			}
+			continue
+		}
+		if !hasCap {
+			whole = append(whole, tenantID)
+			continue
+		}
+		c := rollout.Capability(strings.TrimSpace(capPart))
+		if !c.Valid() {
+			if logger != nil {
+				logger.Warn("rollout autopilot: ignoring ROLLOUT_AUTOPILOT_EXCLUDE entry (unknown capability)",
+					slog.String("entry", raw))
+			}
+			continue
+		}
+		pairs = append(pairs, rollout.TenantCapability{TenantID: tenantID, Capability: c})
+	}
+	return rollout.NewAutopilotExclusions(whole, pairs)
 }
 
 // autopilotSweepInterval returns the configured sweep cadence, falling

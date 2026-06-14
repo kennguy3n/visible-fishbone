@@ -908,6 +908,15 @@ func run() error {
 			logger.Warn("sng-control: dlp review recompiler drain incomplete", slog.Any("error", err))
 		}
 	}
+	// Flush any in-flight best-effort monitor-evidence persistence the
+	// rollout recorder dispatched out of band, so a snapshot recorded by
+	// the final reconcile sweep still reaches the store (and a new leader)
+	// before pool.Close. Each write self-bounds via the recorder's store
+	// timeout, so this can never hang the shutdown path; rootCtx is
+	// already cancelled, so no new sweep is launching more.
+	if rc.RolloutMonitorMetrics != nil {
+		rc.RolloutMonitorMetrics.Wait()
+	}
 
 	if err := telShutdown(shutdownCtx); err != nil {
 		logger.Warn("sng-control: telemetry shutdown error", slog.Any("error", err))
@@ -1012,6 +1021,12 @@ type routerComponents struct {
 	// in which case main() runs its leader-only sweep via
 	// elector.RunIfLeader on cfg.RolloutAutopilot.Interval.
 	RolloutAutopilot *rollout.Autopilot
+	// RolloutMonitorMetrics is the shared monitor-evidence recorder the
+	// capabilities feed and the autopilot reads. Always non-nil. main()
+	// flushes its out-of-band persistence on shutdown via Wait so a
+	// snapshot recorded by the final reconcile sweep still reaches the
+	// store (and a new leader) before the pool closes.
+	RolloutMonitorMetrics *rollout.MonitorMetricsRecorder
 	// MarginAutopilot is the margin/cost NoOps engine (WS-7). main()
 	// runs its leader-only Reconcile sweep when cfg.Metering.AutopilotEnabled.
 	// Always non-nil; the engine is recommend-only unless a tenant opts
@@ -1396,8 +1411,17 @@ func buildRouter(
 	// capabilities running in monitor (dry-run) record the metrics they
 	// observe here, and the autopilot reads them as promotion evidence.
 	// Always constructed (cheap, in-memory); only consulted when the
-	// autopilot is enabled.
-	rolloutMonitorMetrics := rollout.NewMonitorMetricsRecorder(nil)
+	// autopilot is enabled. The recorder is write-through backed by the
+	// rollout_monitor_evidence table (migration 069) so the promotion
+	// clock survives a leader failover: a new leader rehydrates the latest
+	// snapshot instead of restarting the dwell window from empty. The
+	// freshness gate still discards any snapshot older than the current
+	// monitor entry, so persistence only ever speeds a safe promotion.
+	rolloutEvidenceStore := postgres.NewRolloutMonitorEvidenceRepository(store)
+	rolloutMonitorMetrics := rollout.NewMonitorMetricsRecorder(nil,
+		rollout.WithMonitorMetricsStore(rolloutEvidenceStore),
+		rollout.WithRecorderLogger(logger),
+	)
 
 	// Per-tenant shadow-IT NoOps engine (migration 061). It classifies
 	// each discovered app, records an immutable audit row and recommends
@@ -1417,6 +1441,11 @@ func buildRouter(
 	// whose noops_autoenforce rollout state is enforce; monitor dry-runs
 	// it (records the would-have action) and off/unreadable disables it.
 	appNoOpsEngine.SetRolloutGate(rolloutSvc)
+	// Feed the noops_autoenforce dry-run (monitor) evidence into the same
+	// shared recorder idp_directory_sync uses, so the WS-5 autopilot can
+	// actually auto-promote this capability: each monitor-phase reconcile
+	// records the per-tenant would-have auto-enforce verdicts it observed.
+	appNoOpsEngine.SetMonitorMetricsSink(rolloutMonitorMetrics)
 	// Activity-tiered reconcile cadence so the periodic sweep does not
 	// re-classify thousands of dormant trial tenants' inventories every
 	// interval. Active tenants are still visited every cycle; the planner
@@ -2402,7 +2431,18 @@ func buildRouter(
 	// policy whose promotion ceiling is looser than the rollout demote
 	// threshold, so a mis-tuned guardrail fails boot rather than silently
 	// auto-promoting past a breach.
-	rolloutAutopilot, err := buildRolloutAutopilot(cfg, rolloutSvc, tenantRepo, rolloutMonitorMetrics, mx, logger)
+	// Route each capability's promotion evidence through a per-capability
+	// source mux. idp_directory_sync and noops_autoenforce both feed the
+	// shared recorder (the fallback), which already keys snapshots by
+	// (tenant, capability). clamav_swg is the seam's reason to exist: its
+	// dry-run runs entirely at the SWG edge (crates/sng-swg), so the
+	// control plane never observes its would-have-block verdict in-process
+	// and has no honest in-process evidence to record — it is left
+	// unregistered (yielding "no evidence", so it never auto-promotes)
+	// until an edge->control-plane telemetry feed is wired, at which point
+	// it is one Register call here. See the autopilot follow-up notes.
+	autopilotSource := rollout.NewCapabilitySourceMux(rolloutMonitorMetrics)
+	rolloutAutopilot, err := buildRolloutAutopilot(cfg, rolloutSvc, tenantRepo, autopilotSource, mx, logger)
 	if err != nil {
 		return routerComponents{}, err
 	}
@@ -2429,6 +2469,7 @@ func buildRouter(
 		ActivityRecorder:       activityRecorder,
 		TenantRepo:             tenantRepo,
 		RolloutAutopilot:       rolloutAutopilot,
+		RolloutMonitorMetrics:  rolloutMonitorMetrics,
 		MarginAutopilot:        marginAutopilot,
 		AIInferencePool:        aiInferencePool,
 		HibernationRegistry:    hibRegistry,

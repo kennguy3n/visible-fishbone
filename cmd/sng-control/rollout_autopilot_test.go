@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/kennguy3n/visible-fishbone/internal/config"
 	"github.com/kennguy3n/visible-fishbone/internal/metrics"
@@ -67,6 +70,35 @@ func TestParseAutopilotCapabilities(t *testing.T) {
 
 	if _, err := parseAutopilotCapabilities([]string{"not_a_capability"}); err == nil {
 		t.Fatal("unknown capability accepted, want error")
+	}
+}
+
+func TestParseAutopilotExclusions(t *testing.T) {
+	t.Parallel()
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	whole := uuid.New()
+	paired := uuid.New()
+
+	// Empty -> excludes nothing.
+	if ex := parseAutopilotExclusions(nil, logger); !ex.Empty() {
+		t.Fatal("empty config must exclude nothing")
+	}
+
+	ex := parseAutopilotExclusions([]string{
+		whole.String(),
+		paired.String() + ":" + string(rollout.CapabilityNoOpsAutoEnforce),
+		"not-a-uuid",                      // malformed tenant -> skipped
+		uuid.New().String() + ":boguscap", // unknown capability -> skipped
+	}, logger)
+
+	if !ex.Excludes(whole, rollout.CapabilityIDPDirectorySync) {
+		t.Fatal("whole-tenant entry must exclude every capability")
+	}
+	if !ex.Excludes(paired, rollout.CapabilityNoOpsAutoEnforce) {
+		t.Fatal("pair entry must exclude its capability")
+	}
+	if ex.Excludes(paired, rollout.CapabilityIDPDirectorySync) {
+		t.Fatal("pair entry must not exclude other capabilities")
 	}
 }
 
