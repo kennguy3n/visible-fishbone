@@ -80,6 +80,18 @@ fn validator_for(name: &str) -> Option<Validator> {
         "slack_token" => validators::slack_token,
         "stripe_secret_key" => validators::stripe_secret_key,
         "jwt" => validators::jwt,
+        // Crypto-wallet + AI-provider/SaaS credentials (see
+        // `builtin_pattern`). Each re-derives a structural checksum or
+        // re-asserts an exact prefix/charset/length.
+        "btc_address_base58" => validators::btc_address_base58,
+        "btc_address_bech32" => validators::btc_address_bech32,
+        "eth_address" => validators::eth_address,
+        "openai_api_key" => validators::openai_api_key,
+        "anthropic_api_key" => validators::anthropic_api_key,
+        "gitlab_pat" => validators::gitlab_pat,
+        "sendgrid_api_key" => validators::sendgrid_api_key,
+        "npm_token" => validators::npm_token,
+        "twilio_api_key" => validators::twilio_api_key,
         // The jurisdiction detector catalog supplies validators for the
         // remaining national / regional identifiers (UK NINO + NHS,
         // Canada SIN, Australia TFN + Medicare, Germany, France, Brazil,
@@ -1212,6 +1224,23 @@ pub fn builtin_pattern(name: &str) -> Option<&'static str> {
         "slack_token" => r"\bxox[abprs]-[0-9A-Za-z-]{10,}\b",
         "stripe_secret_key" => r"\b(?:sk|rk)_live_[0-9A-Za-z]{16,}\b",
         "jwt" => r"\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
+
+        // Crypto-wallet addresses. The base58 / bech32 / 40-hex shapes
+        // are common enough that the structural checksum in
+        // `validator_for` — not the regex — is what suppresses
+        // false positives. Mirror `builtinPatterns` in `regex.go`.
+        "btc_address_base58" => r"\b[13][1-9A-HJ-NP-Za-km-z]{25,34}\b",
+        "btc_address_bech32" => r"\bbc1[ac-hj-np-z02-9]{6,87}\b",
+        "eth_address" => r"\b0x[0-9a-fA-F]{40}\b",
+
+        // AI-provider / SaaS credentials. Distinctive vendor prefixes;
+        // each resolves to an exact prefix + charset + length validator.
+        "openai_api_key" => r"\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b",
+        "anthropic_api_key" => r"\bsk-ant-[A-Za-z0-9_-]{20,}\b",
+        "gitlab_pat" => r"\bglpat-[A-Za-z0-9_-]{20,}\b",
+        "sendgrid_api_key" => r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b",
+        "npm_token" => r"\bnpm_[A-Za-z0-9]{36}\b",
+        "twilio_api_key" => r"\b(?:AC|SK)[0-9a-f]{32}\b",
 
         // The jurisdiction detector catalog supplies the regex shapes
         // for the remaining national / regional identifiers.
