@@ -383,8 +383,13 @@ func TestInferencePool_CloseReleasesQueuedWaiters(t *testing.T) {
 	}()
 	waitFor(t, func() bool { return p.Metrics().Snapshot().Queued == 1 })
 
-	close(inner.release) // let the in-flight call finish
+	// Close while the waiter is still queued and the slot is still held
+	// by the in-flight call, so the waiter is released via closedCh with
+	// ErrPoolClosed. Freeing the slot first (close(inner.release) before
+	// Close) would let the dispatcher admit the waiter and complete it
+	// with a nil error, racing the assertion on a loaded host.
 	p.Close()
+	close(inner.release) // let the in-flight call finish
 
 	select {
 	case err := <-done:
