@@ -122,6 +122,11 @@ func (c *IOCEnforcementCompiler) compileIOCRules(snap IOCSnapshot) ([]policy.Rul
 	// Single-IP and CIDR-range IOCs share one NGFW destination-CIDR
 	// deny matcher: a host address folds to a /32 (or /128) so both
 	// ride the same dst_cidr predicate the edge firewall enforces.
+	// seenDstCIDR collapses functionally-identical denies — a host
+	// IP folded to /32 and an explicit /32 CIDR for the same address
+	// produce the same matcher, so the second is dropped. IPs are
+	// emitted before CIDRs, so the host-IOC rule wins.
+	seenDstCIDR := make(map[string]struct{}, len(snap.IPs)+len(snap.CIDRs))
 	for _, ioc := range snap.IPs {
 		if ioc.Confidence < c.minConfidence {
 			continue
@@ -133,6 +138,10 @@ func (c *IOCEnforcementCompiler) compileIOCRules(snap IOCSnapshot) ([]policy.Rul
 			// the edge would reject.
 			continue
 		}
+		if _, dup := seenDstCIDR[cidr]; dup {
+			continue
+		}
+		seenDstCIDR[cidr] = struct{}{}
 		pred, err := flowDstCIDRPredicate(cidr)
 		if err != nil {
 			return nil, err
@@ -150,6 +159,10 @@ func (c *IOCEnforcementCompiler) compileIOCRules(snap IOCSnapshot) ([]policy.Rul
 		if ioc.Confidence < c.minConfidence {
 			continue
 		}
+		if _, dup := seenDstCIDR[ioc.Value]; dup {
+			continue
+		}
+		seenDstCIDR[ioc.Value] = struct{}{}
 		pred, err := flowDstCIDRPredicate(ioc.Value)
 		if err != nil {
 			return nil, err
