@@ -104,6 +104,46 @@ Edge config lives under `[dns.managed_feed]`: `keys` (pinned
 `{key_id, public_key_hex}` Ed25519 verifying keys) and
 `category_actions` (`category -> allow|log|block`, default `allow`).
 
+### Retro-hunt (`retrohunt.go`, `retrohunt_coordinator.go`)
+
+Enforcement is forward-looking: a freshly-ingested indicator only
+blocks traffic that happens *after* it lands. Retro-hunt is the
+backward-looking dual — when the store learns a NEW domain/IP/CIDR is
+malicious, it sweeps recent **ClickHouse** telemetry to surface the
+prior exposure that predates enforcement ("we now know `evil.example`
+is a C2; did anyone resolve it last week?").
+
+- `RetroHunter` runs a single per-tenant sweep over the same
+  `Reader.ListEvents` the policy simulator consumes: it pulls
+  DNS / flow / HTTP envelopes for a bounded window, decodes each
+  payload, and matches it against a `RetroIndicatorSet` — DNS query
+  and HTTP host/SNI against **domain** IOCs (apex + subdomain), flow
+  `DstIP` against **IP** IOCs (exact) and **CIDR** IOCs (containment).
+  JA3/URL/hash IOCs are not hunted (no network-telemetry surface).
+- `RetroHuntCoordinator` makes it "on new IOC": each tick it snapshots
+  the store, diffs the active indicators against the set already swept,
+  and hunts ONLY the new ones across every active tenant. The first
+  tick primes the baseline (records the existing set as seen WITHOUT
+  hunting) so enabling the feature never floods the reader with a
+  backlog sweep — only indicators that arrive after enablement are
+  hunted, and each exactly once.
+- Findings go to logs + the `threatintel_retrohunt_hits_total` metric
+  (by indicator type). Routing them to the alert/NATS pipeline is the
+  deferred transport follow-up shared with the DNS and IPS bundle
+  producers.
+
+The producer is leader-gated (one sweep per interval across the fleet,
+not one per replica) and **default-OFF**. It requires the ClickHouse
+hot tier; without a reader it is a no-op with a loud log.
+
+| Env var | Default | Meaning |
+|---------|---------|---------|
+| `THREAT_INTEL_RETROHUNT` | `false` | Enable the retro-hunt producer (strict bool; typo fails boot) |
+| `THREAT_INTEL_RETROHUNT_LOOKBACK` | `7d` | How far back each sweep reaches (fits inside the telemetry retention floor) |
+| `THREAT_INTEL_RETROHUNT_INTERVAL` | `0` → `THREATINTEL_REFRESH_INTERVAL` | Cadence at which new indicators are checked + swept |
+| `THREAT_INTEL_RETROHUNT_MAX_EVENTS` | `100000` | Per-tenant scan cap (bounds a wide-window hunt on a busy tenant) |
+| `THREAT_INTEL_RETROHUNT_MIN_CONFIDENCE` | `0.5` | Confidence floor an indicator must clear to be hunted |
+
 ## Data flow
 
 ```

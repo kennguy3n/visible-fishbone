@@ -735,6 +735,24 @@ func run() error {
 				}
 			}
 		}
+
+		// Threat-intel retro-hunt producer. DEFAULT-OFF
+		// (THREAT_INTEL_RETROHUNT) and gated separately from the DNS /
+		// IPS producers. When enabled, the leader diffs the IOC store
+		// each interval and, for every NEWLY-arrived domain/IP/CIDR
+		// indicator, sweeps every active tenant's recent ClickHouse
+		// telemetry (DNS / flow / HTTP) for prior exposure that
+		// predates enforcement. Wired here because it needs the
+		// ClickHouse hot tier; a no-op with a loud log when the reader
+		// or feed manager is unavailable. Findings go to logs + the
+		// threatintel_retrohunt_hits_total metric; routing them to the
+		// alert/NATS pipeline is the deferred transport follow-up shared
+		// with the DNS and IPS bundle producers.
+		if cfg.ManagedDNSFeeds.RetroHuntEnabled {
+			startRetroHunt(rootCtx, &cfg, logger, mx, elector, feedMgr, rc.TenantRepo, chReaderFactory)
+		}
+	} else if cfg.ManagedDNSFeeds.RetroHuntEnabled {
+		logger.Warn("sng-control: THREAT_INTEL_RETROHUNT=true but no clickhouse hot tier is configured; retro-hunt not started")
 	}
 
 	// Wire the AI summarizer. Template mode works without
@@ -1127,6 +1145,120 @@ func (l hibernationActivityLister) ListTenantActivity(ctx context.Context) ([]hi
 		out[i] = hibernation.TenantActivity{ID: a.ID, LastActiveAt: a.LastActiveAt}
 	}
 	return out, nil
+}
+
+// retroTenantLister adapts the tenant repository's cheap activity
+// projection to ai.RetroTenantLister, projecting to bare tenant IDs
+// at the boundary so the ai package keeps its inward-pointing
+// dependency rule. The retro-hunt sweeps every live tenant; it reuses
+// the same indexed scan the dormancy planner already reads, so it
+// adds no new query shape.
+type retroTenantLister struct {
+	repo repository.TenantRepository
+}
+
+func (l retroTenantLister) ListRetroHuntTenants(ctx context.Context) ([]uuid.UUID, error) {
+	acts, err := l.repo.ListTenantActivity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]uuid.UUID, 0, len(acts))
+	for _, a := range acts {
+		out = append(out, a.ID)
+	}
+	return out, nil
+}
+
+// startRetroHunt wires and launches the leader-only threat-intel
+// retro-hunt producer. It is a no-op with a loud log when the feed
+// manager or the ClickHouse reader is unavailable, so a
+// misconfigured retro-hunt degrades to "disabled" rather than
+// failing boot. Called only when THREAT_INTEL_RETROHUNT=true and a
+// ClickHouse hot tier is configured.
+func startRetroHunt(
+	rootCtx context.Context,
+	cfg *config.Config,
+	logger *slog.Logger,
+	mx *metrics.Metrics,
+	elector *leader.LeaderElector,
+	feedMgr *aisvc.FeedManager,
+	tenantRepo repository.TenantRepository,
+	chReaderFactory func() (policy.TelemetrySource, error),
+) {
+	if feedMgr == nil {
+		logger.Warn("sng-control: THREAT_INTEL_RETROHUNT=true but no feed manager is configured; retro-hunt not started")
+		return
+	}
+	retroReader, err := chReaderFactory()
+	if err != nil {
+		logger.Warn("sng-control: THREAT_INTEL_RETROHUNT=true but clickhouse reader unavailable; retro-hunt not started",
+			slog.String("error", err.Error()))
+		return
+	}
+	hunter := aisvc.NewRetroHunter(retroReader,
+		aisvc.WithRetroMaxEvents(cfg.ManagedDNSFeeds.RetroHuntMaxEvents))
+	coord := aisvc.NewRetroHuntCoordinator(aisvc.RetroHuntConfig{
+		Hunter:        hunter,
+		Snapshot:      feedMgr.Snapshot,
+		Tenants:       retroTenantLister{repo: tenantRepo},
+		Sink:          newRetroHitSink(logger, mx),
+		Lookback:      cfg.ManagedDNSFeeds.RetroHuntLookback,
+		MinConfidence: cfg.ManagedDNSFeeds.RetroHuntMinConfidence,
+		Logger:        logger,
+	})
+	if coord == nil {
+		logger.Warn("sng-control: retro-hunt coordinator construction failed; retro-hunt not started")
+		return
+	}
+	// Resolve the tick cadence to a non-zero value here rather than
+	// relying on Run's fallback: retro-hunt is independent of
+	// THREAT_INTEL_ENABLED, so RefreshInterval is not guaranteed to be
+	// validated > 0 on this path. Prefer the dedicated interval, then
+	// the shared feed interval, then the package default.
+	interval := cfg.ManagedDNSFeeds.RetroHuntInterval
+	if interval <= 0 {
+		interval = cfg.ManagedDNSFeeds.RefreshInterval
+	}
+	if interval <= 0 {
+		interval = aisvc.DefaultRetroHuntInterval
+	}
+	go elector.RunIfLeader(rootCtx, "threatintel-retrohunt", func(ctx context.Context) {
+		coord.Run(ctx, interval)
+	})
+	logger.Info("sng-control: threat-intel retro-hunt producer enabled (runs on leader only)",
+		slog.Duration("interval", interval),
+		slog.Float64("min_confidence", cfg.ManagedDNSFeeds.RetroHuntMinConfidence))
+}
+
+// newRetroHitSink builds the default retro-hunt sink: it logs each
+// tenant's findings (one structured summary line plus a debug line
+// per hit) and increments the threatintel_retrohunt_hits_total
+// counter by matched indicator type. mx may be nil (metrics
+// disabled); the counter is guarded accordingly.
+func newRetroHitSink(logger *slog.Logger, mx *metrics.Metrics) aisvc.RetroHitSink {
+	return aisvc.RetroHitSinkFunc(func(_ context.Context, report aisvc.RetroReport) {
+		logger.Warn("threatintel.retrohunt: prior exposure to a newly-known IOC found in historical telemetry",
+			slog.String("tenant_id", report.TenantID.String()),
+			slog.Int("hits", len(report.Hits)),
+			slog.Int("distinct_devices", report.DistinctDevices),
+			slog.Int("events_scanned", report.EventsScanned),
+			slog.Time("since", report.Since),
+			slog.Time("until", report.Until))
+		for _, hit := range report.Hits {
+			if mx != nil && mx.ThreatIntelRetroHits != nil {
+				mx.ThreatIntelRetroHits.WithLabelValues(string(hit.IndicatorType)).Inc()
+			}
+			logger.Debug("threatintel.retrohunt: hit",
+				slog.String("tenant_id", report.TenantID.String()),
+				slog.String("indicator", hit.Indicator),
+				slog.String("indicator_type", string(hit.IndicatorType)),
+				slog.String("event_class", string(hit.EventClass)),
+				slog.String("matched_value", hit.MatchedValue),
+				slog.String("device_id", hit.DeviceID.String()),
+				slog.String("verdict", string(hit.Verdict)),
+				slog.Time("seen_at", hit.Timestamp))
+		}
+	})
 }
 
 // buildRouter wires every repository / service / handler against
