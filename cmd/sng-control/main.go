@@ -705,6 +705,14 @@ func run() error {
 			streamNames = append(streamNames, s.Name)
 		}
 		go metrics.NewNATSCollector(mx, js, streamNames, metrics.DefaultConsumerScrapeInterval, logger).Run(rootCtx)
+		// WS-9 shared inference pool gauges. Only wired when the pool
+		// is enabled (rc.AIInferencePool non-nil); the collector mirrors
+		// the lock-free pool snapshot onto Prometheus so peak_inflight
+		// staying pinned at the concurrency cap (not the tenant count)
+		// is directly observable.
+		if rc.AIInferencePool != nil {
+			go metrics.NewAIPoolCollector(mx, aiPoolMetricsSource{pool: rc.AIInferencePool}, metrics.DefaultAIPoolScrapeInterval).Run(rootCtx)
+		}
 
 		// WS-2: bridge the activity recorder's per-source touch counters
 		// onto the activity_touches_total metric so the dormancy-signal
@@ -798,6 +806,12 @@ func run() error {
 		recompiler.Stop()
 	}
 	feedMgr.Stop()
+	// Stop the WS-9 shared inference pool dispatcher and release any
+	// queued waiters. In-flight backend calls finish on their own
+	// context; only the scheduler goroutine and the queue are torn down.
+	if rc.AIInferencePool != nil {
+		rc.AIInferencePool.Close()
+	}
 	// Drain any in-flight operator-block recompiles so a decision made
 	// just before shutdown still lands in the stored bundle. Bounded by
 	// shutdownCtx so it can never hang the shutdown path.
@@ -900,6 +914,11 @@ type routerComponents struct {
 	// activity observer; the control-plane signal is wired into the
 	// router here in buildRouter.
 	ActivityRecorder *activity.Recorder
+	// AIInferencePool is the WS-9 fleet-scale shared inference pool. Nil
+	// unless AI_INFERENCE_POOL_ENABLED and an AI_LLM_ENDPOINT are set.
+	// main() closes it on shutdown so the scheduler goroutine exits and
+	// any queued waiters are released.
+	AIInferencePool *aisvc.InferencePool
 	// Hibernation* wire the dormant-tenant scale-to-zero subsystem. All
 	// are nil unless cfg.Hibernation.Enabled (DEFAULT-OFF): the registry
 	// is the per-replica parked-set snapshot the telemetry sampler /
@@ -1750,7 +1769,7 @@ func buildRouter(
 	}
 	meteringHandler := handler.NewMeteringHandler(meteringSvc, budgetEnforcer, meteringReports, meteringAnomalies, meteringReports, rbacSvc)
 
-	aiHandler, aiSvc := buildAIHandler(cfg, policySvc, store.NewAICorrelationRepository(), alertRepo, auditSvc, aiSuggestionRepo,
+	aiHandler, aiSvc, aiInferencePool := buildAIHandler(cfg, policySvc, store.NewAICorrelationRepository(), alertRepo, auditSvc, aiSuggestionRepo,
 		metering.NewGuardrailBudgetGate(budgetEnforcer), metering.NewGuardrailUsageRecorder(meteringSvc), iocStore, userRepo, roleRepo, logger)
 
 	// --- Operational automation wiring (Session 5) --------------------
@@ -2239,6 +2258,7 @@ func buildRouter(
 		IDPSyncService:         idpSyncSvc,
 		DLPReviewService:       dlpReviewSvc,
 		ActivityRecorder:       activityRecorder,
+		AIInferencePool:        aiInferencePool,
 		HibernationRegistry:    hibRegistry,
 		HibernationSyncer:      hibSyncer,
 		HibernationCoordinator: hibCoordinator,
@@ -2351,7 +2371,7 @@ func (a popControlAdapter) SetAssignment(ctx context.Context, tenantID, popID uu
 // buildAIHandler constructs the AI handler with an optional LLM
 // provider. When AI_LLM_ENDPOINT is not set, the service runs in
 // template-only mode and suggest-policy / troubleshoot return 503.
-func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRepo repository.AICorrelationRepository, alertRepo repository.AlertRepository, auditSvc *audit.Service, aiSuggestionRepo repository.AISuggestionRepository, budgetGate aisvc.BudgetGate, usageRecorder aisvc.UsageRecorder, iocFeed aisvc.ThreatFeedProvider, userRepo repository.UserRepository, roleRepo repository.RoleRepository, logger *slog.Logger) (*handler.AIHandler, *aisvc.Service) {
+func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRepo repository.AICorrelationRepository, alertRepo repository.AlertRepository, auditSvc *audit.Service, aiSuggestionRepo repository.AISuggestionRepository, budgetGate aisvc.BudgetGate, usageRecorder aisvc.UsageRecorder, iocFeed aisvc.ThreatFeedProvider, userRepo repository.UserRepository, roleRepo repository.RoleRepository, logger *slog.Logger) (*handler.AIHandler, *aisvc.Service, *aisvc.InferencePool) {
 	var llm aisvc.LLMProvider
 	if cfg.AI.Endpoint != "" {
 		// When an endpoint is set but no model is named, default to the
@@ -2395,7 +2415,32 @@ func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRe
 	// usage; it is nil (503) when no LLM is configured.
 	var guardrails *aisvc.GuardrailedProvider
 	var effectiveLLM aisvc.LLMProvider
+	var inferencePool *aisvc.InferencePool
 	if llm != nil {
+		// WS-9 fleet-scale shared inference: optionally interpose a
+		// fair, tenant-aware admission pool between the per-tenant
+		// guardrails and the single shared LLM backend. The guardrails
+		// (rate limit, budget, content filter) run FIRST so cheap
+		// rejections never enter the pool queue; the pool then bounds
+		// global concurrency and round-robins across tenants so one
+		// bursty tenant cannot starve the fleet's shared model.
+		// DEFAULT-OFF: when AI_INFERENCE_POOL_ENABLED is false the
+		// backend is the raw provider and behaviour is unchanged.
+		backend := llm
+		if cfg.AI.InferencePoolEnabled {
+			inferencePool = aisvc.NewInferencePool(llm, aisvc.InferencePoolConfig{
+				Enabled:           true,
+				MaxConcurrent:     cfg.AI.InferencePoolMaxConcurrent,
+				MaxQueuePerTenant: cfg.AI.InferencePoolMaxQueuePerTenant,
+				MaxWait:           cfg.AI.InferencePoolMaxWait,
+			}, logger)
+			backend = inferencePool
+			poolCfg := inferencePool.Config()
+			logger.Info("ai: fleet-scale shared inference pool enabled",
+				slog.Int("max_concurrent", poolCfg.MaxConcurrent),
+				slog.Int("max_queue_per_tenant", poolCfg.MaxQueuePerTenant),
+				slog.Duration("max_wait", poolCfg.MaxWait))
+		}
 		var gopts []aisvc.GuardrailOption
 		// When the audit service is available, persist every AI
 		// interaction durably (in addition to the in-memory ring
@@ -2415,7 +2460,7 @@ func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRe
 		if usageRecorder != nil {
 			gopts = append(gopts, aisvc.WithUsageRecorder(usageRecorder))
 		}
-		guardrails = aisvc.NewGuardrailedProvider(llm, aisvc.GuardrailConfig{
+		guardrails = aisvc.NewGuardrailedProvider(backend, aisvc.GuardrailConfig{
 			MaxRequestsPerMinute: cfg.AI.GuardrailMaxRequestsPerMinute,
 			MaxTokensPerDay:      cfg.AI.GuardrailMaxTokensPerDay,
 		}, logger, gopts...)
@@ -2493,7 +2538,7 @@ func buildAIHandler(cfg *config.Config, policySvc *policy.Service, correlationRe
 	// silently bypassing guardrails with the raw provider.
 	h.SetTighteningService(aisvc.NewTighteningService(effectiveLLM, logger))
 
-	return h, svc
+	return h, svc, inferencePool
 }
 
 // threatFeedDemotionEmitter adapts *appdb.DemotionEngine onto the
@@ -2551,6 +2596,31 @@ func (o metricsFeedObserver) ObserveStoreSize(c aisvc.IOCCounts) {
 	o.m.ThreatIntelStoreIOCs.WithLabelValues("ip").Set(float64(c.IPs))
 	o.m.ThreatIntelStoreIOCs.WithLabelValues("url").Set(float64(c.URLs))
 	o.m.ThreatIntelStoreIOCs.WithLabelValues("hash").Set(float64(c.Hashes))
+}
+
+// aiPoolMetricsSource adapts the WS-9 shared inference pool onto the
+// metrics package's narrow AIPoolSource seam, so the metrics package
+// never imports internal/service/ai (mirroring metricsFeedObserver).
+// The collector samples this on its scrape interval.
+type aiPoolMetricsSource struct {
+	pool *aisvc.InferencePool
+}
+
+func (s aiPoolMetricsSource) AIPoolSnapshot() metrics.AIPoolSnapshot {
+	snap := s.pool.Metrics().Snapshot()
+	return metrics.AIPoolSnapshot{
+		Inflight:     snap.Inflight,
+		PeakInflight: snap.PeakInflight,
+		Queued:       snap.Queued,
+		PeakQueued:   snap.PeakQueued,
+		Admitted:     snap.Admitted,
+		Completed:    snap.Completed,
+		Errors:       snap.Errors,
+		Rejected:     snap.Rejected,
+		WaitTimeouts: snap.WaitTimeouts,
+		Cancelled:    snap.Cancelled,
+		AvgWaitMS:    snap.AvgWaitMS,
+	}
 }
 
 // recompileAllTenants recompiles every active tenant's policy bundle.

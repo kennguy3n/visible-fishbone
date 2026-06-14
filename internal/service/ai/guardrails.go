@@ -484,7 +484,10 @@ func ContextWithTenantID(ctx context.Context, tenantID uuid.UUID) context.Contex
 	return context.WithValue(ctx, tenantContextKey, tenantID)
 }
 
-func tenantIDFromContext(ctx context.Context) uuid.UUID {
+// TenantIDFromContext returns the tenant ID set by ContextWithTenantID,
+// or uuid.Nil when none is present. It is the read counterpart to
+// ContextWithTenantID so callers can confirm tenant attribution.
+func TenantIDFromContext(ctx context.Context) uuid.UUID {
 	v := ctx.Value(tenantContextKey)
 	if v == nil {
 		return uuid.Nil
@@ -494,6 +497,10 @@ func tenantIDFromContext(ctx context.Context) uuid.UUID {
 		return uuid.Nil
 	}
 	return id
+}
+
+func tenantIDFromContext(ctx context.Context) uuid.UUID {
+	return TenantIDFromContext(ctx)
 }
 
 // ValidateOutput checks that an AI output string is well-formed.
