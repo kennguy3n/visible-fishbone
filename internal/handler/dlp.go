@@ -6,6 +6,7 @@
 //	GET/POST /api/v1/tenants/{tenant_id}/dlp/policies
 //	GET/PATCH/DELETE /api/v1/tenants/{tenant_id}/dlp/policies/{id}
 //	POST /api/v1/tenants/{tenant_id}/dlp/policies/{id}/test
+//	POST /api/v1/tenants/{tenant_id}/dlp/rules/advise
 //	GET /api/v1/tenants/{tenant_id}/dlp/templates
 //	POST /api/v1/tenants/{tenant_id}/dlp/templates/{template_id}/apply
 //	POST /api/v1/tenants/{tenant_id}/dlp/classify
@@ -20,6 +21,7 @@ import (
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/service/dlp"
+	"github.com/kennguy3n/visible-fishbone/internal/service/dlp/engine"
 )
 
 // DLPHandler exposes the DLP REST surface.
@@ -40,6 +42,7 @@ func (h *DLPHandler) Register(mux *http.ServeMux) {
 	MountTenantScoped(mux, "PATCH /api/v1/tenants/{tenant_id}/dlp/policies/{id}", h.updatePolicy)
 	MountTenantScoped(mux, "DELETE /api/v1/tenants/{tenant_id}/dlp/policies/{id}", h.deletePolicy)
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/dlp/policies/{id}/test", h.testPolicy)
+	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/dlp/rules/advise", h.adviseRule)
 	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/dlp/templates", h.listTemplates)
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/dlp/templates/{template_id}/apply", h.applyTemplate)
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/dlp/classify", h.classify)
@@ -108,6 +111,75 @@ type dlpMatch struct {
 	Length     int     `json:"length"`
 	Snippet    string  `json:"snippet"`
 	Confidence float64 `json:"confidence"`
+}
+
+type dlpAdviseRequest struct {
+	Rule    dlpAdviseRule      `json:"rule"`
+	Samples []dlpLabeledSample `json:"samples"`
+}
+
+type dlpAdviseRule struct {
+	Type    string `json:"type"`
+	Pattern string `json:"pattern"`
+}
+
+type dlpLabeledSample struct {
+	Text        string `json:"text"`
+	ShouldMatch bool   `json:"should_match"`
+}
+
+type dlpAdviseResponse struct {
+	Quality      dlpRuleQuality  `json:"quality"`
+	Suggestions  []dlpSuggestion `json:"suggestions"`
+	SafeToEnable bool            `json:"safe_to_enable"`
+}
+
+type dlpRuleQuality struct {
+	Positives         int     `json:"positives"`
+	Negatives         int     `json:"negatives"`
+	TruePositives     int     `json:"true_positives"`
+	FalsePositives    int     `json:"false_positives"`
+	FalseNegatives    int     `json:"false_negatives"`
+	TrueNegatives     int     `json:"true_negatives"`
+	Precision         float64 `json:"precision"`
+	Recall            float64 `json:"recall"`
+	FalsePositiveRate float64 `json:"false_positive_rate"`
+	FalseNegativeRate float64 `json:"false_negative_rate"`
+	F1                float64 `json:"f1"`
+}
+
+type dlpSuggestion struct {
+	Code     string `json:"code"`
+	Severity string `json:"severity"`
+	Message  string `json:"message"`
+}
+
+func toDLPAdviseResponse(a engine.Advice) dlpAdviseResponse {
+	suggestions := make([]dlpSuggestion, len(a.Suggestions))
+	for i, s := range a.Suggestions {
+		suggestions[i] = dlpSuggestion{
+			Code:     string(s.Code),
+			Severity: s.Severity,
+			Message:  s.Message,
+		}
+	}
+	return dlpAdviseResponse{
+		Quality: dlpRuleQuality{
+			Positives:         a.Quality.Positives,
+			Negatives:         a.Quality.Negatives,
+			TruePositives:     a.Quality.TruePositives,
+			FalsePositives:    a.Quality.FalsePositives,
+			FalseNegatives:    a.Quality.FalseNegatives,
+			TrueNegatives:     a.Quality.TrueNegatives,
+			Precision:         a.Quality.Precision,
+			Recall:            a.Quality.Recall,
+			FalsePositiveRate: a.Quality.FalsePositiveRate,
+			FalseNegativeRate: a.Quality.FalseNegativeRate,
+			F1:                a.Quality.F1,
+		},
+		Suggestions:  suggestions,
+		SafeToEnable: a.SafeToEnable,
+	}
 }
 
 type dlpClassifyRequest struct {
@@ -292,6 +364,31 @@ func (h *DLPHandler) testPolicy(w http.ResponseWriter, r *http.Request) {
 		Action:  string(result.Action),
 		Matches: toDLPMatches(result.Matches),
 	})
+}
+
+func (h *DLPHandler) adviseRule(w http.ResponseWriter, r *http.Request) {
+	tid, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	var req dlpAdviseRequest
+	if !DecodeJSON(w, r, &req) {
+		return
+	}
+	rule := repository.DLPRule{
+		Type:    repository.DLPRuleType(req.Rule.Type),
+		Pattern: req.Rule.Pattern,
+	}
+	samples := make([]engine.LabeledSample, len(req.Samples))
+	for i, s := range req.Samples {
+		samples[i] = engine.LabeledSample{Text: s.Text, ShouldMatch: s.ShouldMatch}
+	}
+	advice, err := h.svc.AdviseRule(r.Context(), tid, rule, samples)
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, toDLPAdviseResponse(advice))
 }
 
 func (h *DLPHandler) listTemplates(w http.ResponseWriter, _ *http.Request) {
