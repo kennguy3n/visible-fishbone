@@ -279,6 +279,36 @@ func TestCapacityPlanRendersInMarkdown(t *testing.T) {
 	}
 }
 
+// TestCapacityPlanMarkdownSurfacesPerActiveTenantRows guards the
+// hibernation branch of the ClickHouse section: when DormantFraction > 0
+// the fleet-average rows/tenant averages in the near-zero parked
+// telemetry, so the report must additionally surface the per-active-tenant
+// figure (the rate the tenants that still write full fidelity drive). The
+// baseline render (no hibernation) must stay on the single-figure line.
+func TestCapacityPlanMarkdownSurfacesPerActiveTenantRows(t *testing.T) {
+	render := func(cfg CapacityPlanConfig) string {
+		r := &BusinessBenchmarkReport{
+			SchemaVersion: SchemaVersion,
+			Mode:          ModeCapacityPlan,
+			Theoretical:   DefaultTheoreticalTargets(),
+			Competitor:    DefaultCompetitorBaselines(),
+			CapacityPlan:  RunCapacityPlan(cfg),
+		}
+		r.Grade()
+		return r.ToMarkdown()
+	}
+
+	hib := render(CapacityPlanConfig{DormantFraction: 0.8})
+	if !strings.Contains(hib, "active-tenant") {
+		t.Errorf("hibernated render must surface the per-active-tenant rows/month figure; got:\n%s", hib)
+	}
+
+	base := render(CapacityPlanConfig{})
+	if strings.Contains(base, "active-tenant") {
+		t.Errorf("baseline render (no hibernation) must not show the per-active-tenant figure; got:\n%s", base)
+	}
+}
+
 func TestCapacityPlanRoundTripsThroughJSON(t *testing.T) {
 	r := &BusinessBenchmarkReport{
 		SchemaVersion: SchemaVersion,

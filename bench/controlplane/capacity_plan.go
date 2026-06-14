@@ -79,7 +79,15 @@ func (r *BusinessBenchmarkReport) writeCapacityPlanMarkdown(b *strings.Builder) 
 	b.WriteString("**ClickHouse write throughput**\n\n")
 	fmt.Fprintf(b, "- %.1f rows/s total across %d shard(s) = %.1f rows/s/shard\n", ch.TotalRowsPerSec, ch.Shards, ch.RowsPerSecPerShard)
 	fmt.Fprintf(b, "- %.2f inserts/s/shard @ batch %d (recommended: batch %d across %d shard(s))\n", ch.InsertsPerSecPerShard, ch.BatchSize, ch.RecommendedBatchSize, ch.RecommendedShards)
-	fmt.Fprintf(b, "- %d rows/month (%d/tenant), ~%.1f GB/month compressed hot storage\n", ch.MonthlyRows, ch.PerTenantMonthlyRows, ch.HotStorageGBCompressed)
+	if cp.DormantFraction > 0 {
+		// Under hibernation the fleet-average rows/tenant averages in the
+		// near-zero dormant telemetry; surface the per-active-tenant figure
+		// too so an operator can size for the tenants that still write full
+		// fidelity.
+		fmt.Fprintf(b, "- %d rows/month (%d/tenant fleet-avg, %d/active-tenant), ~%.1f GB/month compressed hot storage\n", ch.MonthlyRows, ch.PerTenantMonthlyRows, ch.PerActiveTenantMonthlyRows, ch.HotStorageGBCompressed)
+	} else {
+		fmt.Fprintf(b, "- %d rows/month (%d/tenant), ~%.1f GB/month compressed hot storage\n", ch.MonthlyRows, ch.PerTenantMonthlyRows, ch.HotStorageGBCompressed)
+	}
 	fmt.Fprintf(b, "- %s\n\n", ch.Note)
 
 	n := cp.NATS
