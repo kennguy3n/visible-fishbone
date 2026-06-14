@@ -173,3 +173,61 @@ func TestRetroCoordinator_MissingDepsReturnsNil(t *testing.T) {
 		t.Error("expected nil coordinator when required deps are missing")
 	}
 }
+
+// A sub-threshold indicator present at prime time must NOT be recorded
+// as seen, so a later confidence upgrade above the floor is treated as
+// newly-huntable and swept rather than permanently suppressed.
+func TestRetroCoordinator_ConfidenceUpgradeBecomesHuntable(t *testing.T) {
+	t.Parallel()
+	store := NewIOCStore()
+	store.Upsert(mkIOC(IOCTypeDomain, "rising.example", 0.3)) // below the 0.5 floor
+	hitTime := time.Date(2026, 1, 10, 12, 0, 0, 0, time.UTC)
+	src := &stubEventSource{events: []schema.Envelope{
+		dnsEnvelope(t, hitTime, "rising.example"),
+	}}
+	sink := &captureSink{}
+	tenant := uuid.New()
+	c := newTestCoordinator(t, store, src, []uuid.UUID{tenant}, sink)
+
+	// Prime: sub-threshold indicator must not be baselined as seen.
+	if err := c.Tick(context.Background()); err != nil {
+		t.Fatalf("prime tick: %v", err)
+	}
+	// Still sub-threshold: nothing to hunt, source untouched.
+	if err := c.Tick(context.Background()); err != nil {
+		t.Fatalf("sub-threshold tick: %v", err)
+	}
+	if src.calls != 0 {
+		t.Fatalf("sub-threshold indicator triggered a sweep (calls=%d, want 0)", src.calls)
+	}
+	if len(sink.all()) != 0 {
+		t.Fatalf("sub-threshold indicator emitted %d reports, want 0", len(sink.all()))
+	}
+
+	// Feed re-ingest upgrades confidence above the floor.
+	store.Upsert(mkIOC(IOCTypeDomain, "rising.example", 0.9))
+	if err := c.Tick(context.Background()); err != nil {
+		t.Fatalf("upgrade tick: %v", err)
+	}
+	reports := sink.all()
+	if len(reports) != 1 {
+		t.Fatalf("upgrade emitted %d reports, want 1", len(reports))
+	}
+	if len(reports[0].Hits) != 1 || reports[0].Hits[0].Indicator != "rising.example" {
+		t.Fatalf("expected a single hit on rising.example, got %+v", reports[0].Hits)
+	}
+}
+
+// DefaultRetroHuntInterval is the tick cadence fallback and must stay
+// distinct from DefaultRetroLookback (the sweep window): conflating
+// them once made Run poll only once per week.
+func TestRetroCoordinator_DefaultIntervalIsTickCadenceNotWindow(t *testing.T) {
+	t.Parallel()
+	if DefaultRetroHuntInterval <= 0 {
+		t.Fatalf("DefaultRetroHuntInterval = %v, want > 0", DefaultRetroHuntInterval)
+	}
+	if DefaultRetroHuntInterval >= DefaultRetroLookback {
+		t.Fatalf("DefaultRetroHuntInterval (%v) should be much smaller than the lookback window (%v)",
+			DefaultRetroHuntInterval, DefaultRetroLookback)
+	}
+}

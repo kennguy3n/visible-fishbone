@@ -96,6 +96,14 @@ type RetroHuntConfig struct {
 // per-tenant retention floor while bounding the scan.
 const DefaultRetroLookback = 7 * 24 * time.Hour
 
+// DefaultRetroHuntInterval is the default cadence at which the
+// coordinator checks for newly-arrived indicators to hunt. It is the
+// poll/tick fallback — distinct from DefaultRetroLookback, which is
+// the telemetry *window* a sweep reaches back over. Mirrors the
+// THREAT_INTEL_REFRESH_INTERVAL default so a new indicator is swept
+// about as soon as the feed loop ingests it.
+const DefaultRetroHuntInterval = time.Hour
+
 // NewRetroHuntCoordinator builds a coordinator. Returns nil when a
 // required dependency is missing, so the caller can treat a
 // misconfigured retro-hunt as "disabled" rather than crash.
@@ -136,7 +144,7 @@ func (c *RetroHuntCoordinator) Run(ctx context.Context, interval time.Duration) 
 		return
 	}
 	if interval <= 0 {
-		interval = DefaultRetroLookback
+		interval = DefaultRetroHuntInterval
 	}
 	if err := c.Tick(ctx); err != nil && ctx.Err() == nil {
 		c.logger.Warn("ai/retrohunt: tick failed", slog.String("error", err.Error()))
@@ -167,6 +175,13 @@ func (c *RetroHuntCoordinator) Tick(ctx context.Context) error {
 
 	if !c.primed {
 		for _, ioc := range huntableIOCs(snap) {
+			// Gate the baseline by the same confidence floor as the
+			// hunt: a sub-threshold indicator is left un-seen so a
+			// later confidence upgrade above the floor still triggers
+			// a hunt rather than being permanently suppressed.
+			if !c.meetsFloor(ioc) {
+				continue
+			}
 			c.seen[ioc.Key()] = struct{}{}
 		}
 		c.primed = true
@@ -222,10 +237,21 @@ func (c *RetroHuntCoordinator) Tick(ctx context.Context) error {
 // diffNew returns the subset of snap's huntable indicators not yet
 // seen, marking them seen so each is hunted exactly once. The
 // returned snapshot carries only the new indicators.
+//
+// Indicators below the confidence floor are skipped WITHOUT being
+// marked seen: they are neither hunted now nor recorded, so if a
+// later feed re-ingest upgrades one above the floor it is treated as
+// newly-huntable and swept then. (NewRetroIndicatorSet applies the
+// same floor downstream; gating here is what keeps the seen-set from
+// permanently suppressing a low-confidence indicator that is later
+// upgraded.)
 func (c *RetroHuntCoordinator) diffNew(snap IOCSnapshot) (IOCSnapshot, int) {
 	var out IOCSnapshot
 	count := 0
 	add := func(ioc IOC, dst *[]IOC) {
+		if !c.meetsFloor(ioc) {
+			return
+		}
 		key := ioc.Key()
 		if _, ok := c.seen[key]; ok {
 			return
@@ -244,6 +270,14 @@ func (c *RetroHuntCoordinator) diffNew(snap IOCSnapshot) (IOCSnapshot, int) {
 		add(ioc, &out.CIDRs)
 	}
 	return out, count
+}
+
+// meetsFloor reports whether an indicator clears the coordinator's
+// confidence floor. It is the single gate shared by baseline priming
+// and the new-indicator diff, matching the floor NewRetroIndicatorSet
+// applies when it builds the lookup set.
+func (c *RetroHuntCoordinator) meetsFloor(ioc IOC) bool {
+	return ioc.Confidence >= c.minConfidence
 }
 
 // huntableIOCs flattens the domain/IP/CIDR indicators a hunt can

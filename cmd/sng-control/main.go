@@ -1210,9 +1210,17 @@ func startRetroHunt(
 		logger.Warn("sng-control: retro-hunt coordinator construction failed; retro-hunt not started")
 		return
 	}
+	// Resolve the tick cadence to a non-zero value here rather than
+	// relying on Run's fallback: retro-hunt is independent of
+	// THREAT_INTEL_ENABLED, so RefreshInterval is not guaranteed to be
+	// validated > 0 on this path. Prefer the dedicated interval, then
+	// the shared feed interval, then the package default.
 	interval := cfg.ManagedDNSFeeds.RetroHuntInterval
 	if interval <= 0 {
 		interval = cfg.ManagedDNSFeeds.RefreshInterval
+	}
+	if interval <= 0 {
+		interval = aisvc.DefaultRetroHuntInterval
 	}
 	go elector.RunIfLeader(rootCtx, "threatintel-retrohunt", func(ctx context.Context) {
 		coord.Run(ctx, interval)
