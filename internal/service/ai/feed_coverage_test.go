@@ -39,6 +39,7 @@ func TestSizeBySourceReconcilesWithSizeByType(t *testing.T) {
 	for _, c := range bySource {
 		sum.Domains += c.Domains
 		sum.IPs += c.IPs
+		sum.CIDRs += c.CIDRs
 		sum.URLs += c.URLs
 		sum.Hashes += c.Hashes
 		sum.Total += c.Total

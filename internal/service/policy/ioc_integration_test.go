@@ -34,11 +34,13 @@ import (
 )
 
 const (
-	iocIP     = "203.0.113.10"
-	iocDomain = "evil.example.com"
-	iocURL    = "http://bad.example/payload"
-	iocHost   = "bad.example"
-	iocHash   = "a1b2c3d4e5f6071829304a5b6c7d8e9f00112233445566778899aabbccddeeff"
+	iocIP      = "203.0.113.10"
+	iocCIDR    = "198.51.100.0/24"
+	iocCIDRHit = "198.51.100.7" // an address inside iocCIDR
+	iocDomain  = "evil.example.com"
+	iocURL     = "http://bad.example/payload"
+	iocHost    = "bad.example"
+	iocHash    = "a1b2c3d4e5f6071829304a5b6c7d8e9f00112233445566778899aabbccddeeff"
 )
 
 // seedStore builds an IOCStore with one high-confidence indicator of
@@ -59,12 +61,13 @@ func seedStore(t *testing.T) *ai.IOCStore {
 	}
 	res := store.Upsert(
 		mk(ai.IOCTypeIP, iocIP, 0.95),
+		mk(ai.IOCTypeCIDR, iocCIDR, 0.95),
 		mk(ai.IOCTypeDomain, iocDomain, 0.92),
 		mk(ai.IOCTypeURL, iocURL, 0.9),
 		mk(ai.IOCTypeHash, iocHash, 0.97),
 	)
-	if res.Added != 4 {
-		t.Fatalf("seed upsert added %d, want 4 (%#v)", res.Added, res)
+	if res.Added != 5 {
+		t.Fatalf("seed upsert added %d, want 5 (%#v)", res.Added, res)
 	}
 	return store
 }
@@ -135,6 +138,7 @@ func TestIOCToBundleToBlock_Integration(t *testing.T) {
 	ruleIDs, ruleByID := decodeRules(t, edge.RawRules)
 	for _, want := range []string{
 		"ti-ngfw-" + iocIP,
+		"ti-ngfw-" + iocCIDR,
 		"ti-dns-" + iocDomain,
 		"ti-swg-" + iocHost,
 	} {
@@ -175,6 +179,7 @@ func TestIOCToBundleToBlock_Integration(t *testing.T) {
 	eval := evaluatorFromBundleRules(t, edge.RawRules)
 
 	assertVerdict(t, eval, flowEnvelope(t, tnt.ID, iocIP), schema.VerdictDeny, "flow to malicious IP")
+	assertVerdict(t, eval, flowEnvelope(t, tnt.ID, iocCIDRHit), schema.VerdictDeny, "flow to IP inside malicious CIDR")
 	assertVerdict(t, eval, dnsEnvelope(t, tnt.ID, iocDomain), schema.VerdictDeny, "DNS query for sinkholed domain")
 	assertVerdict(t, eval, httpEnvelope(t, tnt.ID, iocHost), schema.VerdictDeny, "HTTP request to SWG-denied host")
 
@@ -366,6 +371,7 @@ func TestIOCToDryRunBundle_Integration(t *testing.T) {
 	ruleIDs, ruleByID := decodeRules(t, edge.RawRules)
 	for _, want := range []string{
 		"ti-ngfw-" + iocIP,
+		"ti-ngfw-" + iocCIDR,
 		"ti-dns-" + iocDomain,
 		"ti-swg-" + iocHost,
 	} {
@@ -410,6 +416,7 @@ func TestIOCToDryRunBundle_Integration(t *testing.T) {
 	// does — the whole point of dry-run fidelity.
 	eval := evaluatorFromBundleRules(t, edge.RawRules)
 	assertVerdict(t, eval, flowEnvelope(t, tnt.ID, iocIP), schema.VerdictDeny, "dry-run flow to malicious IP")
+	assertVerdict(t, eval, flowEnvelope(t, tnt.ID, iocCIDRHit), schema.VerdictDeny, "dry-run flow to IP inside malicious CIDR")
 	assertVerdict(t, eval, dnsEnvelope(t, tnt.ID, iocDomain), schema.VerdictDeny, "dry-run DNS query for sinkholed domain")
 	assertVerdict(t, eval, httpEnvelope(t, tnt.ID, iocHost), schema.VerdictDeny, "dry-run HTTP request to SWG-denied host")
 }
@@ -481,6 +488,7 @@ func TestIOCCompileWithoutMalwareCompiler_OmitsMalwareSection(t *testing.T) {
 	ruleIDs, _ := decodeRules(t, edge.RawRules)
 	for _, want := range []string{
 		"ti-ngfw-" + iocIP,
+		"ti-ngfw-" + iocCIDR,
 		"ti-dns-" + iocDomain,
 		"ti-swg-" + iocHost,
 	} {

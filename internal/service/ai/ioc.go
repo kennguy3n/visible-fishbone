@@ -13,9 +13,16 @@ import (
 // IOC pipeline drives (see ioc_enforcement.go):
 //
 //   - IOCTypeDomain -> DNS sinkhole rule + app-registry demotion
-//   - IOCTypeIP     -> NGFW firewall-deny rule
+//   - IOCTypeIP     -> NGFW firewall-deny rule (single address)
+//   - IOCTypeCIDR   -> NGFW firewall-deny rule (address range)
 //   - IOCTypeURL    -> SWG deny-list rule
 //   - IOCTypeHash   -> malware-verdict provider (StaticMalwareList)
+//
+// IOCTypeIP and IOCTypeCIDR drive the SAME enforcement sink (an
+// NGFW destination-CIDR deny); they are kept distinct so the store
+// dedupes a host and a range independently and telemetry can tell
+// "block this address" from "block this network". The compiler
+// folds a single IP into a /32 (or /128) so both ride one matcher.
 //
 // The string values match the ThreatType field already used by
 // IOCMatch / RegionalFeed ("ip", "domain", "hash", "url") so the
@@ -28,16 +35,18 @@ const (
 	IOCTypeDomain IOCType = "domain"
 	// IOCTypeIP is an IPv4 or IPv6 address (no CIDR).
 	IOCTypeIP IOCType = "ip"
+	// IOCTypeCIDR is an IPv4 or IPv6 address range in CIDR notation.
+	IOCTypeCIDR IOCType = "cidr"
 	// IOCTypeURL is an absolute http/https URL.
 	IOCTypeURL IOCType = "url"
 	// IOCTypeHash is a file hash (MD5, SHA-1 or SHA-256), hex.
 	IOCTypeHash IOCType = "hash"
 )
 
-// Valid reports whether t is one of the four known IOC types.
+// Valid reports whether t is one of the known IOC types.
 func (t IOCType) Valid() bool {
 	switch t {
-	case IOCTypeDomain, IOCTypeIP, IOCTypeURL, IOCTypeHash:
+	case IOCTypeDomain, IOCTypeIP, IOCTypeCIDR, IOCTypeURL, IOCTypeHash:
 		return true
 	}
 	return false
@@ -182,6 +191,26 @@ func normalizeIP(s string) (string, bool) {
 	return ip.String(), true
 }
 
+// normalizeCIDR canonicalizes an IP range in CIDR notation via
+// net.ParseCIDR, masking off any host bits so equivalent forms
+// collapse to one network key (e.g. "203.0.113.10/24" ->
+// "203.0.113.0/24", uppercase IPv6 lowercased). A bare address
+// without a prefix length is rejected here — that is a single IP
+// and belongs under IOCTypeIP / normalizeIP, keeping the two
+// types disjoint so a /32 range and a host address don't both
+// claim the same indicator. Returns ("", false) for anything that
+// is not a valid CIDR.
+func normalizeCIDR(s string) (string, bool) {
+	t := strings.TrimSpace(s)
+	_, ipNet, err := net.ParseCIDR(t)
+	if err != nil {
+		return "", false
+	}
+	// ParseCIDR already zeroes host bits in ipNet; String() emits
+	// the canonical masked form.
+	return ipNet.String(), true
+}
+
 // normalizeURL canonicalizes an absolute http/https URL: trims
 // whitespace, lowercases the scheme and host, and requires a
 // host. Returns ("", false) for relative URLs, unsupported
@@ -271,6 +300,12 @@ func NewIOC(t IOCType, rawValue string, opts IOCMeta) (IOC, bool) {
 			return IOC{}, false
 		}
 		ioc.Value = v
+	case IOCTypeCIDR:
+		v, ok := normalizeCIDR(rawValue)
+		if !ok {
+			return IOC{}, false
+		}
+		ioc.Value = v
 	case IOCTypeURL:
 		v, ok := normalizeURL(rawValue)
 		if !ok {
@@ -337,6 +372,9 @@ func classifyIndicator(raw string) (IOCType, bool) {
 	if _, ok := normalizeIP(t); ok {
 		return IOCTypeIP, true
 	}
+	if _, ok := normalizeCIDR(t); ok {
+		return IOCTypeCIDR, true
+	}
 	if _, _, ok := normalizeHash(t); ok {
 		return IOCTypeHash, true
 	}
@@ -344,4 +382,19 @@ func classifyIndicator(raw string) (IOCType, bool) {
 		return IOCTypeDomain, true
 	}
 	return "", false
+}
+
+// ipKindForValue picks the right NGFW-sink IOC type for a value a
+// feed has labelled as an address indicator. Feeds express hosts
+// and ranges under the same address-family attribute type (STIX
+// ipv4-addr, MISP ip-dst, an OTX IPv4 pulse), so the value's shape
+// — a prefix-bearing CIDR vs. a bare address — decides which sink
+// type stores it, rather than dropping the range because the
+// feed's label said "ip". A non-address value falls back to
+// IOCTypeIP, where NewIOC's own normalization rejects it.
+func ipKindForValue(value string) IOCType {
+	if _, ok := normalizeCIDR(value); ok {
+		return IOCTypeCIDR
+	}
+	return IOCTypeIP
 }

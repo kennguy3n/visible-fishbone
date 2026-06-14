@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"sort"
 	"sync"
 	"time"
@@ -18,6 +19,7 @@ import (
 // into the enforcement artefacts the signed policy bundle carries:
 //
 //   - IP indicators   -> NGFW firewall-deny rules (DomainNGFW)
+//   - CIDR indicators  -> NGFW firewall-deny rules (DomainNGFW)
 //   - domain IOCs      -> DNS deny / sinkhole rules (DomainDNS)
 //   - URL indicators   -> SWG host-deny rules       (DomainSWG)
 //   - file-hash IOCs   -> malware verdict entries    (StaticMalwareList)
@@ -115,13 +117,53 @@ func (c *IOCEnforcementCompiler) CompileIOCRules(_ context.Context, _ uuid.UUID)
 // (see policy.IOCSnapshot), rather than each interface method
 // re-snapshotting the store independently.
 func (c *IOCEnforcementCompiler) compileIOCRules(snap IOCSnapshot) ([]policy.Rule, error) {
-	rules := make([]policy.Rule, 0, len(snap.IPs)+len(snap.Domains)+len(snap.URLs))
+	rules := make([]policy.Rule, 0, len(snap.IPs)+len(snap.CIDRs)+len(snap.Domains)+len(snap.URLs))
 
+	// Single-IP and CIDR-range IOCs share one NGFW destination-CIDR
+	// deny matcher: a host address folds to a /32 (or /128) so both
+	// ride the same dst_cidr predicate the edge firewall enforces.
+	// seenDstCIDR collapses functionally-identical denies — a host
+	// IP folded to /32 and an explicit /32 CIDR for the same address
+	// produce the same matcher, so the second is dropped. IPs are
+	// emitted before CIDRs, so the host-IOC rule wins.
+	seenDstCIDR := make(map[string]struct{}, len(snap.IPs)+len(snap.CIDRs))
 	for _, ioc := range snap.IPs {
 		if ioc.Confidence < c.minConfidence {
 			continue
 		}
-		pred, err := flowDstIPPredicate(ioc.Value)
+		cidr, ok := ipToHostCIDR(ioc.Value)
+		if !ok {
+			// A stored IP that no longer parses is a store-
+			// invariant violation; skip rather than emit a rule
+			// the edge would reject.
+			continue
+		}
+		if _, dup := seenDstCIDR[cidr]; dup {
+			continue
+		}
+		seenDstCIDR[cidr] = struct{}{}
+		pred, err := flowDstCIDRPredicate(cidr)
+		if err != nil {
+			return nil, err
+		}
+		rules = append(rules, policy.Rule{
+			ID:          "ti-ngfw-" + ioc.Value,
+			Domain:      policy.DomainNGFW,
+			Verb:        policy.VerbDeny,
+			Predicates:  []policy.Predicate{pred},
+			Description: iocRuleDescription("firewall deny", ioc),
+		})
+	}
+
+	for _, ioc := range snap.CIDRs {
+		if ioc.Confidence < c.minConfidence {
+			continue
+		}
+		if _, dup := seenDstCIDR[ioc.Value]; dup {
+			continue
+		}
+		seenDstCIDR[ioc.Value] = struct{}{}
+		pred, err := flowDstCIDRPredicate(ioc.Value)
 		if err != nil {
 			return nil, err
 		}
@@ -266,12 +308,33 @@ func iocRuleDescription(action string, ioc IOC) string {
 	return desc
 }
 
-// flowDstIPPredicate builds the inline predicate matching a flow's
-// destination IP. The match document shape mirrors the policy
-// evaluator's predicateMatchDoc (dst_ip) and the Rust
-// sng-policy-eval matcher.
-func flowDstIPPredicate(ip string) (policy.Predicate, error) {
-	return inlinePredicate("ti-dst-ip-"+ip, map[string]string{"dst_ip": ip})
+// flowDstCIDRPredicate builds the inline predicate matching a
+// flow whose destination address falls inside a CIDR range. It
+// emits a TAGGED matcher — {"kind":"dst_cidr","cidr":"…"} — so
+// the Rust edge decodes it to sng_policy_eval's
+// PredicateMatch::DstCidr (folded into the firewall rule's
+// dst_cidrs at compile time) rather than to the catch-all
+// Unknown variant that an untagged {"dst_ip":…} document hit,
+// which never matched and left the rule with an empty (match-
+// everything) predicate set. The Go simulator's predicateMatchDoc
+// understands the same tagged shape so dry-run and edge agree.
+func flowDstCIDRPredicate(cidr string) (policy.Predicate, error) {
+	return inlinePredicate("ti-dst-cidr-"+cidr, map[string]string{"kind": "dst_cidr", "cidr": cidr})
+}
+
+// ipToHostCIDR folds a single IP literal into its host-route CIDR
+// (/32 for IPv4, /128 for IPv6) so a host indicator and a range
+// indicator compile through one dst_cidr matcher. Returns false
+// if s is not a valid IP.
+func ipToHostCIDR(s string) (string, bool) {
+	ip := net.ParseIP(s)
+	if ip == nil {
+		return "", false
+	}
+	if ip.To4() != nil {
+		return ip.String() + "/32", true
+	}
+	return ip.String() + "/128", true
 }
 
 // dnsQueryPredicate builds the inline predicate matching a DNS

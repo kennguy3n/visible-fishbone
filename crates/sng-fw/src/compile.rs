@@ -37,7 +37,7 @@
 
 use ipnet::IpNet;
 use sng_policy_eval::bundle::LoadedBundle;
-use sng_policy_eval::matcher::SubjectMatch;
+use sng_policy_eval::matcher::{PredicateMatch, SubjectMatch};
 use sng_policy_eval::rule::{EnforcementDomain, Rule, SubjectKind, Verb};
 use std::collections::BTreeSet;
 
@@ -103,13 +103,14 @@ impl RuleCompiler {
         // exposes its own private lookup but doesn't expose it
         // publicly, so we walk `bundle.rules` once here.
         let subject_lookup = collect_named_subjects(&bundle.rules);
+        let predicate_lookup = collect_named_predicates(&bundle.rules);
 
         let mut compiled_rules = Vec::with_capacity(bundle.rules.len());
         for r in bundle.rules.iter() {
             if !r.applies_to_domain(EnforcementDomain::Ngfw) {
                 continue;
             }
-            if let Some(rule) = compile_one(r, &subject_lookup, &zones)? {
+            if let Some(rule) = compile_one(r, &subject_lookup, &predicate_lookup, &zones)? {
                 compiled_rules.push(rule);
             }
         }
@@ -144,9 +145,24 @@ fn collect_named_subjects(
     out
 }
 
+fn collect_named_predicates(
+    rules: &[Rule],
+) -> std::collections::HashMap<String, sng_policy_eval::rule::Predicate> {
+    let mut out = std::collections::HashMap::new();
+    for r in rules {
+        for p in &r.predicates {
+            if !p.name.is_empty() {
+                out.entry(p.name.clone()).or_insert_with(|| p.clone());
+            }
+        }
+    }
+    out
+}
+
 fn compile_one(
     raw: &Rule,
     subject_lookup: &std::collections::HashMap<String, sng_policy_eval::rule::Subject>,
+    predicate_lookup: &std::collections::HashMap<String, sng_policy_eval::rule::Predicate>,
     zones: &ZoneTable,
 ) -> Result<Option<FirewallRule>, FirewallError> {
     // Suggest-only with an inner verb compiles as `Log` so it
@@ -190,6 +206,33 @@ fn compile_one(
         } else {
             return Err(FirewallError::BundleInvalid(format!(
                 "ngfw rule {} references unknown subject {name}",
+                raw.id
+            )));
+        }
+    }
+
+    // Inline + referenced predicates. The firewall enforces L3/L4
+    // only, so the one predicate kind it folds into the data plane
+    // is a destination-CIDR membership (`PredicateMatch::DstCidr`,
+    // the threat-intel NGFW IOC sink) → the rule's `dst_cidrs`.
+    // Any other non-trivial predicate is a precondition the
+    // firewall genuinely cannot evaluate; rather than silently
+    // ignore it — which would widen a `deny dst X if <cond>` rule
+    // into a match-everything deny (the latent match-all-deny
+    // hazard) — `fold_predicate` drops the whole rule fail-closed.
+    for p in &raw.predicates {
+        if !fold_predicate(&p.matcher, &mut matches) {
+            return Ok(None);
+        }
+    }
+    for name in &raw.predicate_refs {
+        if let Some(p) = predicate_lookup.get(name) {
+            if !fold_predicate(&p.matcher, &mut matches) {
+                return Ok(None);
+            }
+        } else {
+            return Err(FirewallError::BundleInvalid(format!(
+                "ngfw rule {} references unknown predicate {name}",
                 raw.id
             )));
         }
@@ -318,6 +361,26 @@ fn fold_subject(
             describe_matcher(m)
         ))),
     }
+}
+
+/// Fold one predicate matcher into the rule's `RuleMatch`.
+/// Returns `true` if the rule may still compile, `false` if the
+/// predicate is one the firewall data plane cannot enforce and the
+/// caller must drop the whole rule (fail-closed) rather than emit
+/// a rule that ignores the precondition and matches every flow.
+///
+///   * `DstCidr` → appended to `dst_cidrs` (the only kind the L3/L4
+///     firewall can enforce; this is the threat-intel NGFW sink).
+///   * `Always` → no constraint, keep the rule unchanged.
+///   * `ContextEquals` / `ContextIn` / `Unknown` → an
+///     application-layer or unrecognised precondition the firewall
+///     cannot test, so the rule is dropped.
+fn fold_predicate(matcher: &PredicateMatch, into: &mut RuleMatch) -> bool {
+    if let Some(cidr) = matcher.dst_cidr() {
+        into.dst_cidrs.push(cidr);
+        return true;
+    }
+    matches!(matcher, PredicateMatch::Always)
 }
 
 fn describe_matcher(m: &SubjectMatch) -> &'static str {
@@ -862,8 +925,8 @@ mod tests {
     use crate::rule::Protocol;
     use crate::zone::{Zone, ZonePolicy};
     use pretty_assertions::assert_eq;
-    use sng_policy_eval::matcher::SubjectMatch;
-    use sng_policy_eval::rule::Subject as RawSubject;
+    use sng_policy_eval::matcher::{PredicateMatch, SubjectMatch};
+    use sng_policy_eval::rule::{Predicate as RawPredicate, Subject as RawSubject};
 
     fn cidr(s: &str) -> IpNet {
         s.parse().unwrap()
@@ -1272,6 +1335,90 @@ mod tests {
             .unwrap();
         assert_eq!(out.rules.len(), 1);
         assert_eq!(out.rules[0].matches.src_cidrs, vec![cidr("10.0.0.0/24")]);
+    }
+
+    #[test]
+    fn compile_folds_dst_cidr_predicate_into_dst_cidrs() {
+        // The threat-intel IOC compiler emits a subject-less NGFW
+        // deny carrying a tagged dst_cidr predicate. It must fold
+        // into dst_cidrs and render a `daddr` match — proving the
+        // previously-dark IOC NGFW path now enforces.
+        let mut r = ngfw_rule("ioc-cidr", Verb::Deny, vec![]);
+        r.predicates.push(RawPredicate {
+            name: String::new(),
+            matcher: PredicateMatch::DstCidr {
+                cidr: cidr("203.0.113.0/24"),
+            },
+        });
+        let bundle = make_bundle_with_rules(&[r]);
+        let out = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap();
+        assert_eq!(out.rules.len(), 1);
+        assert_eq!(out.rules[0].matches.dst_cidrs, vec![cidr("203.0.113.0/24")]);
+        assert_eq!(out.rules[0].action, RuleAction::Deny);
+        let s = out.script.as_str().unwrap();
+        assert!(
+            s.contains("ip daddr { 203.0.113.0/24 }"),
+            "expected a daddr match for the IOC CIDR, got:\n{s}"
+        );
+    }
+
+    #[test]
+    fn compile_folds_single_ip_host_cidr_predicate() {
+        // A single-IP IOC rides the same matcher as a /32 host
+        // CIDR (the producer folds IPs into /32 or /128).
+        let mut r = ngfw_rule("ioc-ip", Verb::Deny, vec![]);
+        r.predicates.push(RawPredicate {
+            name: String::new(),
+            matcher: PredicateMatch::DstCidr {
+                cidr: cidr("198.51.100.7/32"),
+            },
+        });
+        let bundle = make_bundle_with_rules(&[r]);
+        let out = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap();
+        assert_eq!(out.rules.len(), 1);
+        assert_eq!(
+            out.rules[0].matches.dst_cidrs,
+            vec![cidr("198.51.100.7/32")]
+        );
+    }
+
+    #[test]
+    fn compile_drops_rule_with_unenforceable_predicate() {
+        // A subject-less NGFW rule guarded by a context predicate
+        // the L3/L4 firewall cannot evaluate must NOT compile to a
+        // match-everything deny (the latent match-all-deny
+        // hazard). fold_predicate drops it fail-closed.
+        let mut r = ngfw_rule("ctx-only", Verb::Deny, vec![]);
+        r.predicates.push(RawPredicate {
+            name: String::new(),
+            matcher: PredicateMatch::ContextEquals {
+                key: "category".into(),
+                value: "malware".into(),
+            },
+        });
+        let bundle = make_bundle_with_rules(&[r]);
+        let out = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap();
+        assert!(
+            out.rules.is_empty(),
+            "rule with an unenforceable predicate must be dropped, not widened to match-all"
+        );
+    }
+
+    #[test]
+    fn compile_unknown_predicate_ref_fails() {
+        let mut r = ngfw_rule("bad-pred", Verb::Allow, vec![]);
+        r.predicate_refs.push("ghost".into());
+        let bundle = make_bundle_with_rules(&[r]);
+        let e = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .unwrap_err();
+        assert!(matches!(e, FirewallError::BundleInvalid(_)));
     }
 
     #[test]

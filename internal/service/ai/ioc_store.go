@@ -2,7 +2,9 @@ package ai
 
 import (
 	"context"
+	"net"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -189,9 +191,10 @@ func (s *IOCStore) Persist(ctx context.Context, p IOCPersister) (int, error) {
 		return 0, nil
 	}
 	snap := s.Snapshot()
-	all := make([]IOC, 0, len(snap.Domains)+len(snap.IPs)+len(snap.URLs)+len(snap.Hashes))
+	all := make([]IOC, 0, len(snap.Domains)+len(snap.IPs)+len(snap.CIDRs)+len(snap.URLs)+len(snap.Hashes))
 	all = append(all, snap.Domains...)
 	all = append(all, snap.IPs...)
+	all = append(all, snap.CIDRs...)
 	all = append(all, snap.URLs...)
 	all = append(all, snap.Hashes...)
 	if err := p.SaveIOCs(ctx, all); err != nil {
@@ -236,6 +239,7 @@ func (s *IOCStore) Len() int {
 type IOCCounts struct {
 	Domains int
 	IPs     int
+	CIDRs   int
 	URLs    int
 	Hashes  int
 	Total   int
@@ -259,6 +263,8 @@ func (s *IOCStore) SizeByType() IOCCounts {
 			c.Domains++
 		case IOCTypeIP:
 			c.IPs++
+		case IOCTypeCIDR:
+			c.CIDRs++
 		case IOCTypeURL:
 			c.URLs++
 		case IOCTypeHash:
@@ -291,6 +297,8 @@ func (s *IOCStore) SizeBySource() map[string]IOCCounts {
 			c.Domains++
 		case IOCTypeIP:
 			c.IPs++
+		case IOCTypeCIDR:
+			c.CIDRs++
 		case IOCTypeURL:
 			c.URLs++
 		case IOCTypeHash:
@@ -324,6 +332,8 @@ func (s *IOCStore) Snapshot() IOCSnapshot {
 			snap.Domains = append(snap.Domains, ioc)
 		case IOCTypeIP:
 			snap.IPs = append(snap.IPs, ioc)
+		case IOCTypeCIDR:
+			snap.CIDRs = append(snap.CIDRs, ioc)
 		case IOCTypeURL:
 			snap.URLs = append(snap.URLs, ioc)
 		case IOCTypeHash:
@@ -332,6 +342,7 @@ func (s *IOCStore) Snapshot() IOCSnapshot {
 	}
 	sortIOCs(snap.Domains)
 	sortIOCs(snap.IPs)
+	sortIOCs(snap.CIDRs)
 	sortIOCs(snap.URLs)
 	sortIOCs(snap.Hashes)
 	return snap
@@ -342,6 +353,7 @@ func (s *IOCStore) Snapshot() IOCSnapshot {
 type IOCSnapshot struct {
 	Domains []IOC
 	IPs     []IOC
+	CIDRs   []IOC
 	URLs    []IOC
 	Hashes  []IOC
 }
@@ -358,10 +370,12 @@ func sortIOCs(s []IOC) {
 // QueryIOCs implements ThreatFeedProvider so the aggregated store
 // can be queried for live-traffic matching by the
 // ThreatIntelEngine exactly like a RegionalFeed. Each queried
-// indicator is normalized against the four type-specific
-// canonicalizers and looked up; a hit yields an IOCMatch carrying
-// the stored attribution and confidence. Expired indicators never
-// match.
+// indicator is normalized against the type-specific canonicalizers
+// and looked up; a hit yields an IOCMatch carrying the stored
+// attribution and confidence. A queried bare IP additionally
+// matches any stored CIDR range it falls inside, so alerting stays
+// in step with the firewall data plane that denies the whole range.
+// Expired indicators never match.
 func (s *IOCStore) QueryIOCs(_ context.Context, indicators []string) ([]IOCMatch, error) {
 	if len(indicators) == 0 {
 		return nil, nil
@@ -372,7 +386,22 @@ func (s *IOCStore) QueryIOCs(_ context.Context, indicators []string) ([]IOCMatch
 
 	seen := make(map[string]struct{}, len(indicators))
 	var out []IOCMatch
+	appendMatch := func(ioc IOC) {
+		out = append(out, IOCMatch{
+			Indicator:   ioc.Value,
+			FeedName:    ioc.Source,
+			ThreatType:  string(ioc.Type),
+			ThreatActor: ioc.ThreatActor,
+			Campaign:    ioc.Campaign,
+			Confidence:  ioc.Confidence,
+			LastSeen:    ioc.LastSeen,
+		})
+	}
+	var queryIPs []net.IP
 	for _, raw := range indicators {
+		if ip := net.ParseIP(strings.TrimSpace(raw)); ip != nil {
+			queryIPs = append(queryIPs, ip)
+		}
 		for _, key := range candidateKeys(raw) {
 			if _, dup := seen[key]; dup {
 				continue
@@ -382,15 +411,38 @@ func (s *IOCStore) QueryIOCs(_ context.Context, indicators []string) ([]IOCMatch
 				continue
 			}
 			seen[key] = struct{}{}
-			out = append(out, IOCMatch{
-				Indicator:   ioc.Value,
-				FeedName:    ioc.Source,
-				ThreatType:  string(ioc.Type),
-				ThreatActor: ioc.ThreatActor,
-				Campaign:    ioc.Campaign,
-				Confidence:  ioc.Confidence,
-				LastSeen:    ioc.LastSeen,
-			})
+			appendMatch(ioc)
+		}
+	}
+	// CIDR containment: a queried bare IP also matches any stored
+	// CIDR range it falls inside — the exact-key lookup above can't
+	// see this since the IP's key never equals a range's key. This
+	// keeps the live-traffic / alerting path in step with the
+	// firewall data plane, which already denies the whole range
+	// (see ioc_enforcement.go dst_cidrs). The scan walks the whole
+	// keyed map once, but the per-entry parse/contains work fires
+	// only for CIDR entries (a small slice of the store); if range
+	// cardinality ever grows, a dedicated CIDR index/trie is the
+	// next step.
+	if len(queryIPs) > 0 {
+		for key, ioc := range s.byKey {
+			if ioc.Type != IOCTypeCIDR || ioc.Expired(now) {
+				continue
+			}
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			_, ipNet, err := net.ParseCIDR(ioc.Value)
+			if err != nil {
+				continue
+			}
+			for _, ip := range queryIPs {
+				if ipNet.Contains(ip) {
+					seen[key] = struct{}{}
+					appendMatch(ioc)
+					break
+				}
+			}
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool {
@@ -415,6 +467,9 @@ func candidateKeys(raw string) []string {
 	}
 	if v, ok := normalizeIP(raw); ok {
 		keys = append(keys, string(IOCTypeIP)+"\x00"+v)
+	}
+	if v, ok := normalizeCIDR(raw); ok {
+		keys = append(keys, string(IOCTypeCIDR)+"\x00"+v)
 	}
 	if v, algo, ok := normalizeHash(raw); ok {
 		_ = algo

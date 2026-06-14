@@ -151,6 +151,20 @@ pub enum PredicateMatch {
         /// Accepted values.
         values: Vec<String>,
     },
+    /// Destination-CIDR membership — the threat-intel NGFW sink.
+    /// A flow matches when its destination address falls inside
+    /// `cidr`. The firewall compiler folds this into the rule's
+    /// `dst_cidrs` set at compile time (see `sng-fw`), and the
+    /// eval-time path below enforces the same against a `dst_ip`
+    /// context entry so the flow evaluator agrees with the
+    /// firewall data plane. This is a TAGGED matcher precisely so
+    /// it does not fall through to [`Self::Unknown`] (which never
+    /// matches) the way the earlier untagged `{"dst_ip":…}` IOC
+    /// predicate did, leaving NGFW IOC denies dark.
+    DstCidr {
+        /// The destination range a flow's dst IP must fall in.
+        cidr: IpNet,
+    },
     /// Forward-compat escape hatch.
     #[serde(other)]
     Unknown,
@@ -181,7 +195,23 @@ impl PredicateMatch {
             Self::ContextIn { key, values } => ctx
                 .iter()
                 .any(|(k, v)| k == &key.as_str() && values.iter().any(|w| w == v)),
+            Self::DstCidr { cidr } => ctx.iter().any(|(k, v)| {
+                *k == "dst_ip" && v.parse::<IpAddr>().is_ok_and(|ip| cidr.contains(&ip))
+            }),
             Self::Unknown => false,
+        }
+    }
+
+    /// Returns the destination CIDR this predicate constrains, if
+    /// it is a [`Self::DstCidr`] matcher. The firewall compiler
+    /// uses this to fold IOC NGFW predicates into a rule's
+    /// destination-CIDR set so they enforce on the data plane
+    /// rather than only through [`Self::matches_context`].
+    #[must_use]
+    pub fn dst_cidr(&self) -> Option<IpNet> {
+        match self {
+            Self::DstCidr { cidr } => Some(*cidr),
+            _ => None,
         }
     }
 }
@@ -400,11 +430,44 @@ mod tests {
                 key: "k".into(),
                 values: vec!["a".into(), "b".into()],
             },
+            PredicateMatch::DstCidr {
+                cidr: "10.0.0.0/8".parse().unwrap(),
+            },
         ] {
             let encoded = serde_json::to_string(&p).unwrap();
             let decoded: PredicateMatch = serde_json::from_str(&encoded).unwrap();
             assert_eq!(decoded, p);
         }
+    }
+
+    #[test]
+    fn dst_cidr_predicate_decodes_from_tagged_go_wire_form() {
+        // The Go IOC compiler emits this exact shape; it must
+        // decode to a typed DstCidr, NOT fall through to Unknown
+        // (which never matches and left NGFW IOC denies dark).
+        let json = r#"{"kind":"dst_cidr","cidr":"203.0.113.0/24"}"#;
+        let p: PredicateMatch = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            p,
+            PredicateMatch::DstCidr {
+                cidr: "203.0.113.0/24".parse().unwrap()
+            }
+        );
+        assert_eq!(p.dst_cidr(), Some("203.0.113.0/24".parse().unwrap()));
+    }
+
+    #[test]
+    fn dst_cidr_predicate_matches_dst_ip_in_range() {
+        let p = PredicateMatch::DstCidr {
+            cidr: "203.0.113.0/24".parse().unwrap(),
+        };
+        // In-range dst_ip matches; out-of-range and missing/garbage
+        // context do not (fail-closed).
+        assert!(p.matches_context(&[("dst_ip", "203.0.113.7")]));
+        assert!(!p.matches_context(&[("dst_ip", "198.51.100.7")]));
+        assert!(!p.matches_context(&[("dst_ip", "not-an-ip")]));
+        assert!(!p.matches_context(&[("src_ip", "203.0.113.7")]));
+        assert!(!p.matches_context(&[]));
     }
 
     #[test]

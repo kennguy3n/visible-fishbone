@@ -303,7 +303,7 @@ func assertSameSnapshot(t *testing.T, a, b IOCSnapshot) {
 	t.Helper()
 	index := func(s IOCSnapshot) map[string]IOC {
 		m := map[string]IOC{}
-		for _, g := range [][]IOC{s.Domains, s.IPs, s.URLs, s.Hashes} {
+		for _, g := range [][]IOC{s.Domains, s.IPs, s.CIDRs, s.URLs, s.Hashes} {
 			for _, ioc := range g {
 				m[ioc.Key()] = ioc
 			}

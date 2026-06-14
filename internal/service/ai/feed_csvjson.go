@@ -180,6 +180,13 @@ func (p CSVParser) rowToIOC(row []string, cols csvCols, source string) (IOC, boo
 		if !t.Valid() {
 			return IOC{}, false
 		}
+		if t == IOCTypeIP {
+			// A feed may ship a CIDR range under an "ip" type
+			// column; route by shape so it isn't dropped by the
+			// single-IP normalizer (matches the STIX/MISP/OTX
+			// parsers).
+			t = ipKindForValue(indicator)
+		}
 		return NewIOC(t, indicator, meta)
 	}
 	t, ok := classifyIndicator(indicator)
@@ -271,6 +278,12 @@ func (p JSONParser) Parse(raw []byte) ([]IOC, error) {
 			t := IOCType(strings.ToLower(tv))
 			if !t.Valid() {
 				continue
+			}
+			if t == IOCTypeIP {
+				// A CIDR range shipped under an "ip" type key is
+				// routed by shape so it isn't dropped (matches the
+				// STIX/MISP/OTX parsers).
+				t = ipKindForValue(indicator)
 			}
 			ioc, ok = NewIOC(t, indicator, meta)
 		} else if t, classified := classifyIndicator(indicator); classified {

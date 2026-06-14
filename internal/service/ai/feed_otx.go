@@ -84,6 +84,11 @@ func (p OTXParser) Parse(raw []byte) ([]IOC, error) {
 				FirstSeen:   parseSTIXTime(ind.Created),
 				ExpiresAt:   parseSTIXTime(ind.Expiration),
 			}
+			if iocType == IOCTypeIP {
+				// An IPv4/IPv6 pulse value may carry a CIDR range;
+				// route by shape so it isn't dropped as a bad IP.
+				iocType = ipKindForValue(ind.Indicator)
+			}
 			if ioc, ok := NewIOC(iocType, ind.Indicator, meta); ok {
 				out = append(out, ioc)
 			}
@@ -134,11 +139,13 @@ func decodeOTXPulses(raw []byte) ([]otxPulse, error) {
 // hash subtypes that are not plain file digests (PEHASH, IMPHASH)
 // are mapped to IOCTypeHash and validated by length in NewIOC —
 // non-standard lengths are skipped there. Unsupported OTX types
-// (CIDR, email, mutex, …) return false.
+// (email, mutex, …) return false.
 func otxType(t string) (IOCType, bool) {
 	switch strings.ToLower(strings.TrimSpace(t)) {
 	case "ipv4", "ipv6":
 		return IOCTypeIP, true
+	case "cidr":
+		return IOCTypeCIDR, true
 	case "domain", "hostname":
 		return IOCTypeDomain, true
 	case "url", "uri":
