@@ -124,6 +124,11 @@ func (s *Store) NewTenantMigrationRepository() *TenantMigrationRepository {
 	return &TenantMigrationRepository{s: s}
 }
 
+// NewTenantHibernationRepository binds the Store to hibernation.Store.
+func (s *Store) NewTenantHibernationRepository() *TenantHibernationRepository {
+	return &TenantHibernationRepository{s: s}
+}
+
 // NewCASBConnectorRepository binds the Store to repository.CASBConnectorRepository.
 func (s *Store) NewCASBConnectorRepository() *CASBConnectorRepository {
 	return &CASBConnectorRepository{s: s}

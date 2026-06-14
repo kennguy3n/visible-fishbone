@@ -844,7 +844,12 @@ fn run_wire_scaling_compare(
         .map(|p| load_wire_scaling_report(p))
         .collect::<Result<Vec<_>, _>>()?;
     let label = samples.first().map_or_else(
-        || format!("{}/{}/{}/{}", baseline.profile, baseline.transport, baseline.ip_version, baseline.l4),
+        || {
+            format!(
+                "{}/{}/{}/{}",
+                baseline.profile, baseline.transport, baseline.ip_version, baseline.l4
+            )
+        },
         |s| format!("{}/{}/{}/{}", s.profile, s.transport, s.ip_version, s.l4),
     );
 
