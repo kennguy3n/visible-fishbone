@@ -633,6 +633,18 @@ func (m *Metrics) SetCapacitySetting(axis, knob string, current, recommended flo
 	m.CapacitySetting.WithLabelValues(axis, knob, "recommended").Set(recommended)
 }
 
+// ClearCapacitySettings drops every current-vs-recommended series. The
+// reconciler calls this when the fleet empties so a dashboard does not
+// keep showing a stale recommendation (e.g. recommended batch_size=13250
+// from a prior 5K-tenant cycle) next to fleet_tenants=0. The next
+// non-empty reconcile re-publishes the live series.
+func (m *Metrics) ClearCapacitySettings() {
+	if m == nil {
+		return
+	}
+	m.CapacitySetting.Reset()
+}
+
 // SetCapacityRecommendationPending sets the per-axis pending-action flag.
 func (m *Metrics) SetCapacityRecommendationPending(axis string, pending bool) {
 	if m == nil {

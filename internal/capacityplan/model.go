@@ -175,6 +175,19 @@ type Config struct {
 	// Postgres pressure model (driven by control-plane RPS, not
 	// telemetry). Zero (the default) keeps the projection identical to
 	// the offline bench model.
+	//
+	// CONTRACT: this is the PRE-sampling publish rate — what producers
+	// hand to NATS before the telemetry consumer applies any WS-4 tier
+	// sampling. natsEventsPerSec uses it directly; effectiveEventsPerSec
+	// (ClickHouse) uses it as-is too, which is exact only when sampling
+	// is OFF. With tier sampling active the stored (post-sampling) rate
+	// is lower, so a single measured number would over-size ClickHouse.
+	// That is why the production RepoFleetObserver leaves this 0 (the
+	// synthetic split below sizes each path correctly) and the live
+	// reconciler never sets TierSampling. A future observer that feeds a
+	// real rate here must either (a) keep sampling OFF in the model, or
+	// (b) split this into separate pre-/post-sampling inputs before
+	// wiring a measured ClickHouse rate.
 	MeasuredEventsPerSec float64
 
 	// ClassRates is the per-class per-tenant event rate. Unset uses

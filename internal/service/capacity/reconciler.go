@@ -126,6 +126,7 @@ type RuntimeKnobs struct {
 // the reconciler nil-checks before every call.
 type MetricSink interface {
 	SetCapacitySetting(axis, knob string, current, recommended float64)
+	ClearCapacitySettings()
 	SetCapacityRecommendationPending(axis string, pending bool)
 	SetCapacityFleetTenants(n int)
 	IncCapacityReconcile(outcome string)
@@ -276,10 +277,14 @@ func (r *Reconciler) Reconcile(ctx context.Context) (Recommendation, error) {
 		// default tier and publish a fabricated recommendation. Clear the
 		// per-axis pending gauges so a recommendation left over from a
 		// prior non-empty cycle does not keep an operator alert firing
-		// against an empty fleet.
+		// against an empty fleet, and drop the current-vs-recommended
+		// setting series so a dashboard does not show stale sizing (e.g.
+		// recommended batch_size=13250 from the last 5K cycle) next to
+		// fleet_tenants=0.
 		for _, axis := range []string{AxisPostgres, AxisClickHouse, AxisNATS} {
 			r.metricsSetPending(axis, false)
 		}
+		r.metricsClearSettings()
 		r.logger.Info("capacity: no live tenants yet; skipping sizing")
 		r.metricsIncReconcile("ok")
 		return Recommendation{Observation: obs, At: r.now()}, nil
@@ -479,6 +484,12 @@ func (r *Reconciler) metricsSetFleet(n int) {
 func (r *Reconciler) metricsSetSetting(axis, knob string, current, recommended float64) {
 	if r.metrics != nil {
 		r.metrics.SetCapacitySetting(axis, knob, current, recommended)
+	}
+}
+
+func (r *Reconciler) metricsClearSettings() {
+	if r.metrics != nil {
+		r.metrics.ClearCapacitySettings()
 	}
 }
 

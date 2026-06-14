@@ -64,6 +64,12 @@ func (s *fakeSink) SetCapacitySetting(axis, knob string, current, recommended fl
 	s.settings[settingKey{axis, knob}] = [2]float64{current, recommended}
 }
 
+func (s *fakeSink) ClearCapacitySettings() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.settings = map[settingKey][2]float64{}
+}
+
 func (s *fakeSink) SetCapacityRecommendationPending(axis string, pending bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -275,6 +281,36 @@ func TestZeroFleetClearsPending(t *testing.T) {
 		if sink.pending[axis] {
 			t.Errorf("%s pending must be cleared once the fleet is empty", axis)
 		}
+	}
+}
+
+// TestZeroFleetClearsSettings: when the fleet drops to zero, the
+// current-vs-recommended setting series from the prior non-empty cycle
+// must be dropped so a dashboard does not keep showing stale sizing (e.g.
+// recommended batch_size=13250) next to fleet_tenants=0.
+func TestZeroFleetClearsSettings(t *testing.T) {
+	sink := newFakeSink()
+	obs := &fakeObserver{obs: FleetObservation{TenantCount: 5000}}
+	r := New(Config{
+		Observer: obs,
+		Knobs:    docKnobs,
+		Metrics:  sink,
+		NowFunc:  func() time.Time { return time.Unix(0, 0) },
+	})
+
+	if _, err := r.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.settings) == 0 {
+		t.Fatal("precondition: a non-empty fleet should publish setting series")
+	}
+
+	obs.obs = FleetObservation{TenantCount: 0}
+	if _, err := r.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.settings) != 0 {
+		t.Errorf("setting series must be cleared once the fleet is empty, got %v", sink.settings)
 	}
 }
 
