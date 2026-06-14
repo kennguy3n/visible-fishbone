@@ -227,6 +227,34 @@ func TestCSVParser_TypeInferenceNoHeader(t *testing.T) {
 	}
 }
 
+func TestCSVParser_TypedIPColumnRoutesCIDRByShape(t *testing.T) {
+	t.Parallel()
+	// A CERT CSV that labels everything "ip" but ships a CIDR
+	// range: the range must land in the cidr bucket (routed by
+	// shape) instead of being dropped by the single-IP normalizer.
+	raw := []byte("indicator,type\n" +
+		"203.0.113.5,ip\n" +
+		"10.0.0.0/8,ip\n")
+	p := CSVParser{
+		IndicatorColumn: "indicator",
+		TypeColumn:      "type",
+		HasHeader:       true,
+		Source:          "cert-csv",
+	}
+	iocs, err := p.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	counts := countByType(iocs)
+	if counts[IOCTypeIP] != 1 || counts[IOCTypeCIDR] != 1 {
+		t.Fatalf("expected 1 ip + 1 cidr, got %#v", counts)
+	}
+	by := indexByKey(iocs)
+	if _, ok := by[string(IOCTypeCIDR)+"\x00"+"10.0.0.0/8"]; !ok {
+		t.Errorf("CIDR under type=ip was not reclassified: %#v", iocs)
+	}
+}
+
 func TestCSVParser_MissingIndicatorColumnIsConfigError(t *testing.T) {
 	t.Parallel()
 	raw := []byte("a,b\n1,2\n")
@@ -292,6 +320,28 @@ func TestJSONParser_WrappedArrayCustomKeys(t *testing.T) {
 	}
 	if got.ThreatActor != "FIN7" || got.Campaign != "CarbonSpider" {
 		t.Errorf("attribution: actor=%q campaign=%q", got.ThreatActor, got.Campaign)
+	}
+}
+
+func TestJSONParser_TypedIPKeyRoutesCIDRByShape(t *testing.T) {
+	t.Parallel()
+	// type="ip" with a CIDR value must be routed to the cidr
+	// bucket by shape, mirroring the CSV and STIX/MISP/OTX paths.
+	raw := []byte(`[
+      {"indicator":"198.51.100.7","type":"ip"},
+      {"indicator":"192.0.2.0/24","type":"ip"}
+    ]`)
+	iocs, err := JSONParser{DefaultConfidence: 0.5}.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	counts := countByType(iocs)
+	if counts[IOCTypeIP] != 1 || counts[IOCTypeCIDR] != 1 {
+		t.Fatalf("expected 1 ip + 1 cidr, got %#v", counts)
+	}
+	by := indexByKey(iocs)
+	if _, ok := by[string(IOCTypeCIDR)+"\x00"+"192.0.2.0/24"]; !ok {
+		t.Errorf("CIDR under type=ip was not reclassified: %#v", iocs)
 	}
 }
 
