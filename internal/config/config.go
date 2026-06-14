@@ -538,6 +538,16 @@ type RolloutAutopilot struct {
 	// means "all governed capabilities". A capability not in the set is
 	// only ever advanced by an operator.
 	Capabilities []string
+	// Exclude is the per-tenant opt-out list: a CSV of entries, each
+	// either "<tenantID>" (exclude the tenant for EVERY capability) or
+	// "<tenantID>:<capability>" (exclude it for one capability only). An
+	// excluded (tenant, capability) is left entirely alone by the
+	// autopilot — never auto-enrolled, promoted or auto-demoted — so an
+	// operator can keep one tenant off WITHOUT disabling the autopilot
+	// fleet-wide. Empty means "exclude nothing". Malformed entries are
+	// ignored (logged at construction), so a typo never silently widens
+	// enforcement.
+	Exclude []string
 }
 
 // AI carries runtime knobs for the AI assistant service
@@ -1782,6 +1792,7 @@ func Load() (Config, error) {
 			// leniently here — an empty/typo'd list safely means "all
 			// governed capabilities", never a security regression.
 			Capabilities: splitCSV(getStr("ROLLOUT_AUTOPILOT_CAPABILITIES", "")),
+			Exclude:      splitCSV(getStr("ROLLOUT_AUTOPILOT_EXCLUDE", "")),
 		},
 		Telemetry: Telemetry{
 			OTLPEndpoint:   getStr("OTEL_EXPORTER_OTLP_ENDPOINT", ""),

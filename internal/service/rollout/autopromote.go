@@ -166,6 +166,89 @@ type AutopilotPolicy struct {
 	// that any reading which would auto-demote also blocks promotion —
 	// "no path can auto-promote past a breached guardrail."
 	PromotionGuardrail Threshold
+	// Exclusions is the per-tenant opt-out set: a (tenant, capability) the
+	// autopilot leaves entirely alone — it never auto-enrols, promotes or
+	// auto-demotes it, so an operator keeps that tenant off (or under
+	// manual control) WITHOUT disabling the autopilot fleet-wide. The
+	// zero value excludes nothing. The capability's own monitor-phase
+	// auto-rollback safety net (driven by the capability's sweep, not the
+	// autopilot) is independent and still runs, so excluding a tenant
+	// never removes a safety guardrail — it only stops the autopilot from
+	// advancing it.
+	Exclusions AutopilotExclusions
+}
+
+// AutopilotExclusions is the per-tenant / per-(tenant,capability) opt-out
+// set the autopilot consults before it touches a tenant. An operator
+// configures it (fleet-level, e.g. ROLLOUT_AUTOPILOT_EXCLUDE) to keep a
+// specific tenant off while the rest of the fleet auto-promotes. The zero
+// value is valid and excludes nothing; it is safe for concurrent reads.
+type AutopilotExclusions struct {
+	// tenants holds tenants excluded for ALL capabilities.
+	tenants map[uuid.UUID]struct{}
+	// pairs holds tenants excluded for a SPECIFIC capability only.
+	pairs map[exclusionKey]struct{}
+}
+
+type exclusionKey struct {
+	tenant     uuid.UUID
+	capability Capability
+}
+
+// NewAutopilotExclusions builds an exclusion set. wholeTenants are
+// excluded for every capability; pairs exclude a tenant for one
+// capability only. A nil/empty input yields an empty set (excludes
+// nothing). Nil tenant ids and invalid capabilities are ignored.
+func NewAutopilotExclusions(wholeTenants []uuid.UUID, pairs []TenantCapability) AutopilotExclusions {
+	ex := AutopilotExclusions{}
+	for _, id := range wholeTenants {
+		if id == uuid.Nil {
+			continue
+		}
+		if ex.tenants == nil {
+			ex.tenants = make(map[uuid.UUID]struct{})
+		}
+		ex.tenants[id] = struct{}{}
+	}
+	for _, p := range pairs {
+		if p.TenantID == uuid.Nil || !p.Capability.Valid() {
+			continue
+		}
+		if ex.pairs == nil {
+			ex.pairs = make(map[exclusionKey]struct{})
+		}
+		ex.pairs[exclusionKey{tenant: p.TenantID, capability: p.Capability}] = struct{}{}
+	}
+	return ex
+}
+
+// TenantCapability names a single (tenant, capability) pair, used to
+// build a per-capability [AutopilotExclusions] entry.
+type TenantCapability struct {
+	TenantID   uuid.UUID
+	Capability Capability
+}
+
+// Excludes reports whether the autopilot must leave (tenant, capability)
+// alone: true when the tenant is excluded for all capabilities or for
+// this specific one. The zero value never excludes.
+func (e AutopilotExclusions) Excludes(tenantID uuid.UUID, c Capability) bool {
+	if len(e.tenants) > 0 {
+		if _, ok := e.tenants[tenantID]; ok {
+			return true
+		}
+	}
+	if len(e.pairs) > 0 {
+		if _, ok := e.pairs[exclusionKey{tenant: tenantID, capability: c}]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// Empty reports whether the set excludes nothing.
+func (e AutopilotExclusions) Empty() bool {
+	return len(e.tenants) == 0 && len(e.pairs) == 0
 }
 
 // Autopilot is the scheduled, leader-only NoOps promoter. It is safe for
@@ -337,6 +420,16 @@ func (a *Autopilot) Sweep(ctx context.Context) error {
 // auto-demote BEFORE considering promotion, so a breach during monitor
 // demotes and blocks promotion in the same pass.
 func (a *Autopilot) reconcile(ctx context.Context, tenantID uuid.UUID, c Capability) error {
+	// Per-tenant opt-out: an excluded (tenant, capability) is left
+	// entirely alone — no enrol, no promote, no autopilot-driven
+	// auto-demote — so an operator can keep one tenant off without
+	// disabling the autopilot fleet-wide. The capability's own
+	// monitor-phase auto-rollback safety net is independent of the
+	// autopilot and still runs, so this never removes a guardrail.
+	if a.policy.Exclusions.Excludes(tenantID, c) {
+		return nil
+	}
+
 	cur, err := a.svc.Get(ctx, tenantID, c)
 	if err != nil {
 		a.logger.WarnContext(ctx, "autopilot: read state failed",
@@ -513,23 +606,55 @@ func (a *Autopilot) Run(ctx context.Context, interval time.Duration) {
 	}
 }
 
-// MonitorMetricsRecorder is an in-memory [MonitorMetricsSource] that
-// capabilities feed with the dry-run observations they already compute
-// each monitor pass (see internal/service/identity idp_sync, which builds
-// a [MonitorMetrics] every sweep). It stores the LATEST snapshot per
-// (tenant, capability) with the time it was recorded; the autopilot reads
-// the snapshot and discards it if it predates the capability's current
-// monitor entry. It is safe for concurrent use.
+// MonitorMetricsStore is an OPTIONAL durable backing for a
+// [MonitorMetricsRecorder]. When wired, the recorder write-throughs each
+// snapshot to it and, on an in-memory cache miss, hydrates from it — so
+// the monitor-phase promotion EVIDENCE (and therefore the dwell clock it
+// represents) survives a leader failover instead of resetting to "no
+// evidence" on the new leader. Implementations are tenant-scoped (one
+// latest snapshot per tenant+capability) and safe for concurrent use.
 //
-// It is deliberately a single-process cache, not a persisted store: the
-// promoter additionally requires the dwell window to elapse and the
-// auto-demote guardrail to have held across the whole monitor period, so
-// a snapshot lost to a restart only DELAYS a promotion (the capability
-// stays safely in monitor), it never causes an unsafe one.
+// It never weakens a safety property: the autopilot still discards any
+// snapshot older than the capability's current monitor entry (the
+// freshness gate), so a persisted snapshot can only ever SPEED a safe
+// promotion that the dwell + guardrail already justify, never cause an
+// unsafe one.
+type MonitorMetricsStore interface {
+	// PutSnapshot durably records the latest snapshot for (tenant,
+	// capability), stamped observedAt (the recorder's record time).
+	PutSnapshot(ctx context.Context, tenantID uuid.UUID, c Capability, m MonitorMetrics, observedAt time.Time) error
+	// GetSnapshot returns the stored snapshot for (tenant, capability).
+	// found is false (and err nil) when none is stored — the caller
+	// treats that as "no evidence".
+	GetSnapshot(ctx context.Context, tenantID uuid.UUID, c Capability) (m MonitorMetrics, observedAt time.Time, found bool, err error)
+}
+
+// MonitorMetricsRecorder is a [MonitorMetricsSource] that capabilities
+// feed with the dry-run observations they already compute each monitor
+// pass (see internal/service/identity idp_sync, which builds a
+// [MonitorMetrics] every sweep). It keeps an in-memory cache of the
+// LATEST snapshot per (tenant, capability) with the time it was recorded;
+// the autopilot reads the snapshot and discards it if it predates the
+// capability's current monitor entry. It is safe for concurrent use.
+//
+// Without a store it is a single-process cache: a snapshot lost to a
+// restart or leader failover only DELAYS a promotion (the capability
+// stays safely in monitor), it never causes an unsafe one. Wiring a
+// [MonitorMetricsStore] via [WithMonitorMetricsStore] makes it
+// write-through and lazily hydrate on a cache miss, so a new leader
+// rebuilds the evidence instead of waiting for it to re-accumulate.
 type MonitorMetricsRecorder struct {
 	mu   sync.RWMutex
 	rows map[monitorKey]monitorSnapshot
 	now  func() time.Time
+
+	// store, when non-nil, durably backs the cache so evidence survives a
+	// leader failover. Reads/writes against it are best-effort: a store
+	// error never blocks recording (the in-memory cache is always the
+	// authoritative fast path) and never promotes on its own.
+	store        MonitorMetricsStore
+	storeTimeout time.Duration
+	logger       *slog.Logger
 }
 
 type monitorKey struct {
@@ -542,16 +667,59 @@ type monitorSnapshot struct {
 	observedAt time.Time
 }
 
+// RecorderOption configures a [MonitorMetricsRecorder].
+type RecorderOption func(*MonitorMetricsRecorder)
+
+// WithMonitorMetricsStore wires a durable backing store so monitor
+// evidence survives a leader failover (see [MonitorMetricsStore]). A nil
+// store is ignored (the recorder stays an in-memory cache).
+func WithMonitorMetricsStore(store MonitorMetricsStore) RecorderOption {
+	return func(r *MonitorMetricsRecorder) {
+		if store != nil {
+			r.store = store
+		}
+	}
+}
+
+// WithRecorderStoreTimeout bounds each best-effort store call made from
+// the recorder's no-context Record path. Values <= 0 keep the default.
+func WithRecorderStoreTimeout(d time.Duration) RecorderOption {
+	return func(r *MonitorMetricsRecorder) {
+		if d > 0 {
+			r.storeTimeout = d
+		}
+	}
+}
+
+// WithRecorderLogger injects a structured logger for best-effort store
+// failures. Defaults to slog.Default().
+func WithRecorderLogger(l *slog.Logger) RecorderOption {
+	return func(r *MonitorMetricsRecorder) {
+		if l != nil {
+			r.logger = l
+		}
+	}
+}
+
+const defaultRecorderStoreTimeout = 5 * time.Second
+
 // NewMonitorMetricsRecorder returns an empty recorder. now may be nil
-// (defaults to time.Now UTC).
-func NewMonitorMetricsRecorder(now func() time.Time) *MonitorMetricsRecorder {
+// (defaults to time.Now UTC). Pass [WithMonitorMetricsStore] to back it
+// with a durable store that survives leader failover.
+func NewMonitorMetricsRecorder(now func() time.Time, opts ...RecorderOption) *MonitorMetricsRecorder {
 	if now == nil {
 		now = func() time.Time { return time.Now().UTC() }
 	}
-	return &MonitorMetricsRecorder{
-		rows: make(map[monitorKey]monitorSnapshot),
-		now:  now,
+	r := &MonitorMetricsRecorder{
+		rows:         make(map[monitorKey]monitorSnapshot),
+		now:          now,
+		storeTimeout: defaultRecorderStoreTimeout,
+		logger:       slog.Default(),
 	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r
 }
 
 var _ MonitorMetricsSource = (*MonitorMetricsRecorder)(nil)
@@ -559,34 +727,133 @@ var _ MonitorMetricsSource = (*MonitorMetricsRecorder)(nil)
 // Record stores the latest monitor-phase metric snapshot for (tenant,
 // capability), stamped with the current time. A capability calls it once
 // per dry-run pass with that pass's observed metrics. A nil-tenant or
-// invalid capability is ignored.
+// invalid capability is ignored. When a store is wired, the snapshot is
+// also write-through persisted (best-effort) so it survives a failover.
 func (r *MonitorMetricsRecorder) Record(tenantID uuid.UUID, c Capability, m MonitorMetrics) {
 	if tenantID == uuid.Nil || !c.Valid() {
 		return
 	}
+	observedAt := r.now()
 	r.mu.Lock()
-	r.rows[monitorKey{tenant: tenantID, capability: c}] = monitorSnapshot{metrics: m, observedAt: r.now()}
+	r.rows[monitorKey{tenant: tenantID, capability: c}] = monitorSnapshot{metrics: m, observedAt: observedAt}
 	r.mu.Unlock()
+
+	if r.store == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), r.storeTimeout)
+	defer cancel()
+	if err := r.store.PutSnapshot(ctx, tenantID, c, m, observedAt); err != nil {
+		r.logger.WarnContext(ctx, "rollout: persist monitor evidence failed (cache still authoritative)",
+			slog.String("tenant_id", tenantID.String()),
+			slog.String("capability", string(c)),
+			slog.Any("error", err))
+	}
 }
 
-// MonitorMetrics implements [MonitorMetricsSource].
-func (r *MonitorMetricsRecorder) MonitorMetrics(_ context.Context, tenantID uuid.UUID, c Capability) (MonitorMetrics, time.Time, error) {
+// MonitorMetrics implements [MonitorMetricsSource]. It serves the
+// in-memory cache first; on a miss (e.g. just after a leader failover,
+// before the capability's next dry-run pass re-records) it hydrates from
+// the wired store so the new leader sees the evidence the previous leader
+// accumulated instead of starting empty.
+func (r *MonitorMetricsRecorder) MonitorMetrics(ctx context.Context, tenantID uuid.UUID, c Capability) (MonitorMetrics, time.Time, error) {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
 	snap, ok := r.rows[monitorKey{tenant: tenantID, capability: c}]
-	if !ok {
+	r.mu.RUnlock()
+	if ok {
+		return snap.metrics, snap.observedAt, nil
+	}
+	if r.store == nil {
 		return MonitorMetrics{}, time.Time{}, nil
 	}
-	return snap.metrics, snap.observedAt, nil
+	return r.hydrate(ctx, tenantID, c)
+}
+
+// hydrate loads (tenant, capability) from the store on a cache miss and
+// populates the cache so subsequent reads stay in-process. A store error
+// is returned to the caller (the autopilot treats it as fail-safe: an
+// unreadable source never promotes); a "not found" is the zero snapshot.
+func (r *MonitorMetricsRecorder) hydrate(ctx context.Context, tenantID uuid.UUID, c Capability) (MonitorMetrics, time.Time, error) {
+	m, observedAt, found, err := r.store.GetSnapshot(ctx, tenantID, c)
+	if err != nil {
+		return MonitorMetrics{}, time.Time{}, fmt.Errorf("rollout: hydrate monitor evidence: %w", err)
+	}
+	if !found {
+		return MonitorMetrics{}, time.Time{}, nil
+	}
+	r.mu.Lock()
+	// Don't clobber a fresher snapshot a concurrent Record may have set
+	// between our cache miss and here.
+	key := monitorKey{tenant: tenantID, capability: c}
+	if cur, ok := r.rows[key]; !ok || observedAt.After(cur.observedAt) {
+		r.rows[key] = monitorSnapshot{metrics: m, observedAt: observedAt}
+	} else {
+		m, observedAt = cur.metrics, cur.observedAt
+	}
+	r.mu.Unlock()
+	return m, observedAt, nil
 }
 
 // Forget drops any recorded snapshot for (tenant, capability). It is
 // optional housekeeping — a transition sink can call it so a rolled-back
 // or promoted capability does not retain stale evidence — but correctness
 // does not depend on it (the promoter already discards snapshots older
-// than the current monitor entry).
+// than the current monitor entry). It only clears the in-memory cache;
+// the durable store (if any) keeps its last snapshot, which the freshness
+// gate discards once the capability re-enters monitor.
 func (r *MonitorMetricsRecorder) Forget(tenantID uuid.UUID, c Capability) {
 	r.mu.Lock()
 	delete(r.rows, monitorKey{tenant: tenantID, capability: c})
 	r.mu.Unlock()
+}
+
+// CapabilitySourceMux is a [MonitorMetricsSource] that routes each
+// capability to its OWN evidence source, falling back to a default for
+// any capability without a specific one. It lets the single autopilot
+// govern capabilities whose monitor evidence comes from different places
+// — e.g. idp_directory_sync and noops_autoenforce feed an in-process
+// [MonitorMetricsRecorder], while a future edge-sourced capability
+// (clamav_swg, whose dry-run runs at the SWG edge) plugs its own
+// telemetry-backed source in here — without the autopilot needing to know
+// which is which. A capability with neither a registered source nor a
+// default yields the zero snapshot ("no evidence"), so it simply never
+// auto-promotes (fail-safe). It is safe for concurrent use once built.
+type CapabilitySourceMux struct {
+	byCapability map[Capability]MonitorMetricsSource
+	fallback     MonitorMetricsSource
+}
+
+// NewCapabilitySourceMux builds a mux whose unregistered capabilities use
+// fallback (which may be nil — those capabilities then never promote).
+func NewCapabilitySourceMux(fallback MonitorMetricsSource) *CapabilitySourceMux {
+	return &CapabilitySourceMux{
+		byCapability: make(map[Capability]MonitorMetricsSource),
+		fallback:     fallback,
+	}
+}
+
+var _ MonitorMetricsSource = (*CapabilitySourceMux)(nil)
+
+// Register routes capability c to source. A later Register for the same
+// capability replaces the earlier one. A nil source or invalid capability
+// is ignored. Returns the receiver for chaining at construction.
+func (m *CapabilitySourceMux) Register(c Capability, source MonitorMetricsSource) *CapabilitySourceMux {
+	if source != nil && c.Valid() {
+		m.byCapability[c] = source
+	}
+	return m
+}
+
+// MonitorMetrics implements [MonitorMetricsSource], dispatching to the
+// registered source for c (or the fallback). With no source for c and no
+// fallback it returns the zero snapshot, which the autopilot reads as
+// "insufficient evidence" and never promotes.
+func (m *CapabilitySourceMux) MonitorMetrics(ctx context.Context, tenantID uuid.UUID, c Capability) (MonitorMetrics, time.Time, error) {
+	if src, ok := m.byCapability[c]; ok {
+		return src.MonitorMetrics(ctx, tenantID, c)
+	}
+	if m.fallback != nil {
+		return m.fallback.MonitorMetrics(ctx, tenantID, c)
+	}
+	return MonitorMetrics{}, time.Time{}, nil
 }

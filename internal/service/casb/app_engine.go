@@ -40,6 +40,23 @@ type AutoEnforceGate interface {
 	GateState(ctx context.Context, tenantID uuid.UUID, c rollout.Capability) (rollout.State, bool)
 }
 
+// MonitorMetricsSink receives the monitor-phase metrics a dry-run
+// reconcile pass observed for the NoOps auto-enforce capability, so the
+// WS-5 NoOps auto-promoter can read them as promotion evidence. It is
+// declared here (dependency inverted, like AutoEnforceGate) and is
+// satisfied by rollout.MonitorMetricsRecorder. A nil sink is a no-op, so
+// wiring is fail-safe: with no sink the capability simply never
+// accumulates promotion evidence and is never auto-promoted.
+//
+// This is the noops_autoenforce analogue of the identity package's IdP
+// directory-sync sink: the engine already resolves a tenant's
+// staged-enablement decision once per reconcile, and in MONITOR (dry-run)
+// it records the would-have auto-enforce verdict per app, so aggregating
+// those into a single per-tenant snapshot is the natural evidence feed.
+type MonitorMetricsSink interface {
+	Record(tenantID uuid.UUID, c rollout.Capability, m rollout.MonitorMetrics)
+}
+
 // AppNoOpsEngine is the per-tenant NoOps pipeline. For each discovered
 // app it: (1) classifies it deterministically (optionally AI-refined),
 // (2) persists the classification, (3) decides an action from the
@@ -68,6 +85,11 @@ type AppNoOpsEngine struct {
 	// behavior in which the global config flag alone governs auto-enforce
 	// (see AutoEnforceGate).
 	rolloutGate AutoEnforceGate
+	// monitorSink receives the per-tenant monitor-phase metrics each
+	// dry-run reconcile observes, so the WS-5 NoOps auto-promoter can read
+	// them as promotion evidence (see MonitorMetricsSink). Optional: nil
+	// is a no-op.
+	monitorSink MonitorMetricsSink
 	logger      *slog.Logger
 	nowFunc     func() time.Time
 
@@ -137,6 +159,19 @@ func (e *AppNoOpsEngine) SetAuditLog(a repository.AuditLogRepository) { e.audit 
 // (legacy behavior retained), so wiring is fail-safe.
 func (e *AppNoOpsEngine) SetRolloutGate(g AutoEnforceGate) { e.rolloutGate = g }
 
+// SetMonitorMetricsSink wires the WS-5 auto-promoter's evidence sink for
+// the NoOps auto-enforce capability. Once set, every dry-run (monitor)
+// reconcile pass records a per-tenant snapshot of the would-have
+// auto-enforce verdicts it observed, so the promoter can later read
+// whether the dry-run stayed under the promotion ceiling. A nil sink is a
+// no-op (no evidence recorded, so the capability simply never
+// auto-promotes), so wiring is fail-safe.
+func (e *AppNoOpsEngine) SetMonitorMetricsSink(sink MonitorMetricsSink) {
+	if sink != nil {
+		e.monitorSink = sink
+	}
+}
+
 // WithDormancyPlanner makes the periodic Reconcile sweep activity-tiered
 // using the shared tenancy.TieredSweep helper: active tenants are
 // re-evaluated every cycle, idle ones at IdleEvery cadence, dormant ones
@@ -167,12 +202,24 @@ func (e *AppNoOpsEngine) OnAppDiscovered(ctx context.Context, tenantID uuid.UUID
 		HasConnector:  meta.HasConnector,
 		Domains:       meta.Domains,
 	}
-	if err := e.process(ctx, tenantID, view, e.autoEnforceDecision(ctx, tenantID)); err != nil {
+	if _, err := e.process(ctx, tenantID, view, e.autoEnforceDecision(ctx, tenantID)); err != nil {
 		e.logger.WarnContext(ctx, "casb: noops process failed",
 			slog.String("tenant_id", tenantID.String()),
 			slog.String("app", app.Name),
 			slog.Any("error", err))
 	}
+}
+
+// monitorObservation is one app's contribution to the
+// noops_autoenforce monitor-phase evidence aggregated over a dry-run
+// reconcile. decided is true when the app warranted an action at all
+// (the classifier returned a verb other than ActionNone); wouldEnforce is
+// true when that action would have been AUTO-APPLIED in enforce
+// (mode==ActionModeAuto) — the "would-have-block" volume the promotion
+// deny-rate guardrail watches.
+type monitorObservation struct {
+	decided      bool
+	wouldEnforce bool
 }
 
 // ReconcileTenant runs the pipeline across a tenant's entire discovered
@@ -192,6 +239,7 @@ func (e *AppNoOpsEngine) ReconcileTenant(ctx context.Context, tenantID uuid.UUID
 	// (potentially thousands of apps) needs a single gate read.
 	autoMode := e.autoEnforceDecision(ctx, tenantID)
 	var firstErr error
+	var evidence monitorMetricsAccumulator
 	for _, app := range apps {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -206,7 +254,8 @@ func (e *AppNoOpsEngine) ReconcileTenant(ctx context.Context, tenantID uuid.UUID
 			HasConnector:  hasConnector,
 			Domains:       domains,
 		}
-		if err := e.process(ctx, tenantID, view, autoMode); err != nil {
+		obs, err := e.process(ctx, tenantID, view, autoMode)
+		if err != nil {
 			e.logger.WarnContext(ctx, "casb: noops reconcile app failed",
 				slog.String("tenant_id", tenantID.String()),
 				slog.String("app", app.Name),
@@ -215,8 +264,52 @@ func (e *AppNoOpsEngine) ReconcileTenant(ctx context.Context, tenantID uuid.UUID
 				firstErr = err
 			}
 		}
+		evidence.add(obs, err)
+	}
+	// In MONITOR (dry-run) the would-have auto-enforce verdicts this pass
+	// observed are the auto-promoter's evidence: feed them as one
+	// per-tenant snapshot. Only monitor produces evidence — in enforce the
+	// engine is already applying, and in off it is recommend-only.
+	if autoMode == autoEnforceDryRun && e.monitorSink != nil {
+		e.monitorSink.Record(tenantID, rollout.CapabilityNoOpsAutoEnforce, evidence.metrics())
 	}
 	return firstErr
+}
+
+// monitorMetricsAccumulator sums one reconcile pass's per-app
+// observations into a rollout.MonitorMetrics. Samples counts every app
+// that ENGAGED the decision/enforcement path (warranted an action or
+// errored before deciding); apps the classifier left as ActionNone are
+// not enforcement candidates and are excluded so they don't dilute the
+// deny rate. Errors counts apps that failed to evaluate; Denies counts
+// would-have auto-enforce verdicts (the would-have-block volume).
+type monitorMetricsAccumulator struct {
+	samples int
+	errors  int
+	denies  int
+}
+
+func (a *monitorMetricsAccumulator) add(obs monitorObservation, err error) {
+	if err != nil {
+		a.samples++
+		a.errors++
+		return
+	}
+	if !obs.decided {
+		return
+	}
+	a.samples++
+	if obs.wouldEnforce {
+		a.denies++
+	}
+}
+
+func (a monitorMetricsAccumulator) metrics() rollout.MonitorMetrics {
+	return rollout.MonitorMetrics{
+		Samples: a.samples,
+		Errors:  a.errors,
+		Denies:  a.denies,
+	}
 }
 
 // Reconcile sweeps active tenants' inventories once. Intended to be
@@ -306,19 +399,19 @@ func (e *AppNoOpsEngine) Reconcile(ctx context.Context) error {
 // the caller (per discovered app for the discovery hook, once per tenant
 // for the inventory sweep) so a full-inventory reconcile does not re-read
 // the rollout gate for every app.
-func (e *AppNoOpsEngine) process(ctx context.Context, tenantID uuid.UUID, view DiscoveredAppView, autoMode autoEnforceMode) error {
+func (e *AppNoOpsEngine) process(ctx context.Context, tenantID uuid.UUID, view DiscoveredAppView, autoMode autoEnforceMode) (monitorObservation, error) {
 	if tenantID == uuid.Nil {
-		return repository.ErrInvalidArgument
+		return monitorObservation{}, repository.ErrInvalidArgument
 	}
 	cls := e.classify(ctx, tenantID, view)
 	if _, err := e.store.UpsertClassification(ctx, tenantID, cls); err != nil {
-		return fmt.Errorf("upsert classification: %w", err)
+		return monitorObservation{}, fmt.Errorf("upsert classification: %w", err)
 	}
 
 	policy := e.policyFor(ctx, tenantID)
 	verb, mode, reason := decideAction(cls, policy)
 	if verb == ActionNone {
-		return nil // monitor-only; nothing to record
+		return monitorObservation{}, nil // not an enforcement candidate
 	}
 
 	action := CASBAppAction{
@@ -364,10 +457,13 @@ func (e *AppNoOpsEngine) process(ctx context.Context, tenantID uuid.UUID, view D
 
 	saved, err := e.store.AppendAction(ctx, tenantID, action)
 	if err != nil {
-		return fmt.Errorf("append action: %w", err)
+		return monitorObservation{}, fmt.Errorf("append action: %w", err)
 	}
 	e.auditGlobal(ctx, tenantID, saved)
-	return nil
+	// decided: this app warranted an action; wouldEnforce: that action
+	// would have been auto-applied in enforce (mode==ActionModeAuto), the
+	// would-have-block volume the promotion deny-rate guardrail watches.
+	return monitorObservation{decided: true, wouldEnforce: mode == ActionModeAuto}, nil
 }
 
 // autoEnforceMode is the resolved staged-enablement decision for a
