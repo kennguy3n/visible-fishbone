@@ -1979,6 +1979,15 @@ func buildRouter(
 	)
 	popHandler := handler.NewPoPHandler(popSvc, rbacSvc)
 
+	// Read-only threat-intel feed coverage surface. Feeds are
+	// platform-global, so the route is platform-gated (threatfeeds:read)
+	// and reads the shared FeedManager's live health + indicator
+	// cardinality. feedMgr is always constructed above, so the handler's
+	// nil-source guard is purely defensive here; if feedMgr ever becomes
+	// conditional, gate this construction on feedMgr != nil so a typed-nil
+	// never reaches the interface parameter.
+	threatFeedHandler := handler.NewThreatFeedHandler(feedMgr, rbacSvc)
+
 	// --- WORKSTREAM 11: cross-region tenant migration -----------------
 	// The RegionMigrator drives the resumable migration state machine
 	// (migration 059). Two planes are wired from real services here:
@@ -2208,6 +2217,7 @@ func buildRouter(
 		Mobile:            handler.NewMobileHandler(identitySvc),
 		Metering:          meteringHandler,
 		PoP:               popHandler,
+		ThreatFeed:        threatFeedHandler,
 		Sandbox:           handler.NewSandboxHandler(sandboxSvc),
 		RBI:               handler.NewRBIHandler(rbiSvc),
 		DLP:               handler.NewDLPHandler(dlpSvc),
