@@ -3392,6 +3392,7 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "h2",
+ "hex",
  "http",
  "memmap2",
  "nix",

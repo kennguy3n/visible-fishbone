@@ -466,7 +466,15 @@ func run() error {
 	// own goroutine; Run does an immediate warm-up refresh on entry so a
 	// freshly-elected leader publishes without waiting a full interval.
 	if cfg.ManagedDNSFeeds.Enabled {
-		threatIntelSvc, err := buildThreatIntelPipeline(&cfg, js, logger)
+		// Provider bridging aggregated IOC domains into the DNS bundle.
+		// Nil when the feed manager is absent so buildThreatIntelPipeline
+		// skips the source rather than publishing an empty bucket.
+		var iocDomains func() []string
+		if feedMgr != nil {
+			minConf := cfg.ManagedDNSFeeds.IOCMinConfidence
+			iocDomains = func() []string { return feedMgr.DomainIndicators(minConf) }
+		}
+		threatIntelSvc, err := buildThreatIntelPipeline(&cfg, js, logger, iocDomains)
 		if err != nil {
 			return fmt.Errorf("build managed threat-intel pipeline: %w", err)
 		}
@@ -3321,7 +3329,7 @@ func (p natsBundlePublisher) PublishBundle(ctx context.Context, subject string, 
 // spirit as the evidence automation: an unset signing key falls back to
 // a loudly-logged ephemeral key (bundles then only verify within this
 // process lifetime) so dev/test still boots.
-func buildThreatIntelPipeline(cfg *config.Config, js jetstream.JetStream, logger *slog.Logger) (*threatintel.Service, error) {
+func buildThreatIntelPipeline(cfg *config.Config, js jetstream.JetStream, logger *slog.Logger, iocDomains func() []string) (*threatintel.Service, error) {
 	mf := cfg.ManagedDNSFeeds
 
 	signer, err := threatIntelSigner(mf.SigningKeyHex, logger)
@@ -3361,6 +3369,23 @@ func buildThreatIntelPipeline(cfg *config.Config, js jetstream.JetStream, logger
 			Category: cat,
 			Fetcher:  newFetcher(mf.CategoryFeeds[cat]),
 		})
+	}
+
+	// Bridge the WS8 IOC aggregator's domain indicators into the same
+	// signed bundle as an extra category source. The category bucket
+	// defaults to staged Allow on the edge, so this widens COVERAGE
+	// (aggregated domains now ride the suffix-match DNS path) without
+	// changing enforcement until an operator sets the bucket to Block.
+	if mf.BridgeIOCStore && iocDomains != nil {
+		sources = append(sources, threatintel.Source{
+			Name:     "ioc-aggregator",
+			Kind:     threatintel.KindCategory,
+			Category: mf.IOCCategory,
+			Fetcher:  threatintel.SnapshotFetcher{Provider: iocDomains},
+		})
+		logger.Info("threatintel: bridging WS8 IOC aggregator domains into the DNS bundle",
+			slog.String("category", mf.IOCCategory),
+			slog.Float64("min_confidence", mf.IOCMinConfidence))
 	}
 
 	publisher := natsBundlePublisher{pub: sngnats.NewPublisher(js, &cfg.NATS, cfg.AppName+"/threatintel")}

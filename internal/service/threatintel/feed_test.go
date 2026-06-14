@@ -1,6 +1,7 @@
 package threatintel
 
 import (
+	"context"
 	"reflect"
 	"strings"
 	"testing"
@@ -95,5 +96,40 @@ func TestParseDomainListMultiField(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("multi-field parse mismatch:\n got=%v\nwant=%v", got, want)
+	}
+}
+
+func TestSnapshotFetcher(t *testing.T) {
+	f := SnapshotFetcher{Provider: func() []string {
+		return []string{"evil.example", "bad.example"}
+	}}
+	raw, err := f.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	// The bytes must flow through parseDomainList exactly like an
+	// upstream feed body would, so the same canonicalization applies.
+	got := parseDomainList(raw)
+	want := []string{"evil.example", "bad.example"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("snapshot parse mismatch:\n got=%v\nwant=%v", got, want)
+	}
+}
+
+func TestSnapshotFetcherEmptyProvider(t *testing.T) {
+	f := SnapshotFetcher{Provider: func() []string { return nil }}
+	raw, err := f.Fetch(context.Background())
+	if err != nil {
+		t.Fatalf("Fetch: %v", err)
+	}
+	if len(parseDomainList(raw)) != 0 {
+		t.Fatalf("expected no domains from empty provider, got %q", raw)
+	}
+}
+
+func TestSnapshotFetcherNilProvider(t *testing.T) {
+	var f SnapshotFetcher // nil Provider
+	if _, err := f.Fetch(context.Background()); err == nil {
+		t.Fatal("expected error from nil provider")
 	}
 }

@@ -25,6 +25,7 @@ package threatintel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -148,6 +149,34 @@ func (s StaticFetcher) Fetch(context.Context) ([]byte, error) {
 		return nil, s.Err
 	}
 	return s.Data, nil
+}
+
+// SnapshotFetcher adapts an in-process domain provider into a feed
+// Fetcher so a set of domains already held in memory (e.g. the WS8 IOC
+// aggregator's IOCStore) flows into the SAME signed DNS bundle as the
+// upstream URL feeds, rather than needing a second distribution path.
+//
+// The provider is invoked on every refresh and must be safe for
+// concurrent use; it returns the current domain set, already filtered
+// to the indicators the caller wants enforced (e.g. confidence-gated).
+// The returned slice is joined into the newline-delimited shape
+// parseDomainList already accepts, so the same canonicalization /
+// validity gate applies uniformly to in-process and upstream feeds.
+//
+// A nil Provider is a configuration error surfaced on the first fetch
+// (treated by the refresh loop as a failed source falling back to
+// last-known-good) rather than a panic.
+type SnapshotFetcher struct {
+	// Provider returns the current domain set to fold into the bundle.
+	Provider func() []string
+}
+
+// Fetch implements Fetcher.
+func (s SnapshotFetcher) Fetch(context.Context) ([]byte, error) {
+	if s.Provider == nil {
+		return nil, errors.New("threatintel: nil snapshot provider")
+	}
+	return []byte(strings.Join(s.Provider(), "\n")), nil
 }
 
 // Source binds a fetcher to the bundle slot it populates. One Source
