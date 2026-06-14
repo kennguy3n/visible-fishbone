@@ -1,102 +1,62 @@
-# Compliance baselines in minutes, not weeks
+# Compliance baselines in minutes
 
-> **Business series, Post 4 of 5.** Persona: **Mara**, onboarding a new SME.
-> Job-to-be-done: *"Get a brand-new customer to a sensible, compliant,
-> deny-by-default posture before the kickoff call ends — without hand-authoring
-> a policy graph for every vertical and every jurisdiction."*
+> **Business series, Post 4 of 5.** Buyer: **Mara**, the MSP owner onboarding a
+> new tenant. Job-to-be-done: *"stand up a new client on a compliant, sensible
+> default — without a security consultant and without two weeks of config."*
+> Capability: smart-default policy templates. Evidence:
+> [`policy-templates-catalog.json`](../../artifacts/payloads/policy-templates-catalog.json);
+> screenshots [`new-guided-onboarding-wizard.png`](../../artifacts/screenshots/new-guided-onboarding-wizard.png),
+> [`s2-policy-graph.png`](../../artifacts/screenshots/s2-policy-graph.png).
 
-## The onboarding tax
+When Mara wins a new client, the clock starts. The client expects to be protected
+*today*, and "today" can't mean a two-week engagement with a security consultant
+drawing up firewall rules. SNG's answer: a tenant's `(industry, country)`
+coordinates render a **jurisdiction-correct baseline policy graph** automatically.
 
-Every new SME means a policy from scratch. A healthcare client needs HIPAA-shaped
-DLP and the right acceptable-use posture; a retailer needs PCI; a law firm needs
-attorney-client confidentiality controls; an EU customer needs GDPR detectors a
-US one doesn't. Hand-building that per tenant is slow, error-prone, and the main
-reason "secure by default" so often means "secure once someone gets around to
-configuring it." For an MSP onboarding dozens of SMEs, that tax doesn't scale.
+## Pick the coordinates, get a baseline
 
-## What we shipped: a smart-default template catalog
+The guided onboarding wizard asks the questions that matter — what industry, what
+country — and renders the rest:
 
-SNG ships a built-in, fleet-wide catalog of policy templates
-([PR #157](https://github.com/kennguy3n/visible-fishbone/pull/157)). Mara picks an
-**industry** and a **compliance regime**; the template resolves into a working,
-deny-by-default `policy.Graph` baseline — safe-browsing categories at the DNS and
-SWG planes, per-regime DLP detectors, and an NGFW posture — that the edge enforces
-immediately.
+![Guided onboarding](../../artifacts/screenshots/new-guided-onboarding-wizard.png)
 
-The catalog is real and live. Captured verbatim from the control plane
-(`GET /api/v1/policy-templates`,
-[`policy-templates-catalog.json`](../../artifacts/payloads/policy-templates-catalog.json)):
-**14 templates** — 1 universal baseline + 8 industries + 5 compliance regimes:
+Behind it is the template catalog
+([`policy-templates-catalog.json`](../../artifacts/payloads/policy-templates-catalog.json)),
+captured verbatim from the API: a baseline plus industry overlays plus
+compliance-regime overlays. A US healthcare tenant gets HIPAA-shaped defaults; a
+German finance tenant gets GDPR-shaped ones; a UK tenant gets uk-dpa. Across the
+seeded fleet that's **five live regimes** — us-baseline, uk-dpa, eu-gdpr,
+ca-pipeda, au-privacy — each producing a different starting graph.
 
-| Kind | Templates |
-| --- | --- |
-| **Baseline** (1) | Universal security baseline — blocks malware, phishing, hacking-tool, and anonymiser categories at DNS + SWG for *every* tenant |
-| **Industry** (8) | Retail & E-commerce · Healthcare · Finance & Banking · Legal · Education · Technology · Professional Services · General Business |
-| **Compliance** (5) | EU GDPR · UK GDPR / DPA 2018 · US Baseline (PII/PCI) · Canada PIPEDA · Australia Privacy Act |
+## It's a real policy graph, not a checklist
 
-Each compliance template maps to concrete, jurisdiction-correct DLP detectors —
-not a vague "enable GDPR mode." Straight from the captured catalog:
+The template doesn't produce a PDF of recommendations — it produces the actual
+typed policy graph the edge enforces (the engineering series' Post 1):
 
-- **EU GDPR** → `iban` (high), `eu_vat` (medium), `phone` (medium), `email` (low)
-- **Canada PIPEDA** → `canada_sin` (high), `phone` (medium), `email` (low)
-- **Australia Privacy Act** → `tfn_au` (high), `australia_medicare` (high),
-  `phone` (medium), `email` (low)
+![The rendered policy graph](../../artifacts/screenshots/s2-policy-graph.png)
 
-The universal baseline applies to everyone regardless of choice, so even a tenant
-that picks nothing else is *not* wide open — it's already blocking threats,
-phishing, hacking tools, and anonymisers at the DNS and web layers.
+So "compliant baseline" means *enforced* baseline from minute one, with every
+node and edge auditable. Mara can hand the client a working, compliant posture on
+the kickoff call, then refine specifics later — instead of shipping nothing until
+everything is perfect.
 
-## The posture it produces, on real pages
+## One MSP, many jurisdictions, one motion
 
-Pick a baseline and the result is a typed, deny-by-default policy — here's the
-policy editor for Acme, showing intent rules across NGFW / SWG / DNS / ZTNA / DLP
-/ inline-CASB:
+The same wizard works for every tenant regardless of where they are, so Mara's
+onboarding motion doesn't fork per country. And for the MSP rolling the same
+refinement across many clients, the cross-tenant roll-out surface (engineering
+Post 2/8) previews a per-tenant diff before applying — the multi-tenant version
+of the same "safe default, fast" promise.
 
-![Policy editor — intent rules](../../artifacts/business/biz-02-policy-editor-rules.png)
+## Where it falls short
 
-…compiled into one unified policy graph the edge enforces:
-
-![Policy graph](../../artifacts/business/biz-03-policy-graph.png)
-
-And the safe-browsing/category controls that the baseline turns on out of the
-box:
-
-![Browser protection — category actions](../../artifacts/business/biz-07-browser-protection.png)
-
-## Why "deny-by-default" matters for an SME
-
-The template doesn't hand Mara a permissive starting point she has to lock down.
-It hands her a *closed* one she selectively opens — the correct security posture,
-and the one that actually satisfies an auditor. An SME with no security staff
-gets enterprise-shaped defaults on day one, and Mara gets them there in the time
-it takes to choose two dropdowns.
-
-## Where we fall short (honest)
-
-- **The catalog is the same fleet-wide; it's a starting point, not bespoke
-  policy.** A template gets a tenant to a strong, compliant default fast — it
-  does not replace a real policy review for a complex customer. The compliance
-  templates cover the regimes listed above; a customer under a regime not yet in
-  the catalog still needs hand-authoring.
-- **The cross-tenant template *roll-out* UI shipped — closed.** The previous
-  draft said the MSP "curate and push a template to a cohort" console page was
-  still being built. It landed in
-  [#207](https://github.com/kennguy3n/visible-fishbone/pull/207): a cross-tenant
-  roll-out surface (`ui/src/routes/PolicyRollout.tsx`) that previews a per-tenant
-  **diff**, executes the apply across the selected cohort, and supports
-  **rollback** — captured at `new-msp-cross-tenant-templates.png`.
-- **Detectors are only as current as the jurisdiction list.** The DLP detector
-  set is broad (and Post 3 covers the AI-edge reuse), but new national-ID formats
-  and regulatory regimes are an ongoing maintenance commitment, not a solved
-  problem.
-
-## The takeaway for Mara
-
-Two dropdowns — industry + regime — and a new SME is at a deny-by-default,
-jurisdiction-correct posture the edge is already enforcing, with a universal
-threat baseline underneath it that applies no matter what. The onboarding tax
-that used to eat the first week of every engagement is now a step in the kickoff
-call.
-
-Next: [Post 5 — prove the spend, prove the posture, and the honest competitive
-critique](12-cost-and-competition.md).
+- **A template is a starting point, not a compliance certification.** It encodes
+  sensible, jurisdiction-aware defaults; it does not *certify* the tenant as
+  HIPAA- or GDPR-compliant. That still requires the client's own controls and
+  audit. SNG gives the enforced baseline, not the auditor's signature.
+- **The catalog covers the common regimes, not all of them.** Five regimes and
+  eight industries cover most SME cases; an unusual jurisdiction still needs
+  manual graph work.
+- **Defaults drift from best practice over time.** A template encodes today's
+  good defaults; keeping the catalog current as regulations change is ongoing
+  work, not a one-time build.
