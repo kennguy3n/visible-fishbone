@@ -3382,6 +3382,10 @@ func buildThreatIntelPipeline(cfg *config.Config, js jetstream.JetStream, logger
 			Kind:     threatintel.KindCategory,
 			Category: mf.IOCCategory,
 			Fetcher:  threatintel.SnapshotFetcher{Provider: iocDomains},
+			// Empty is legitimate here (the store may hold no unexpired
+			// domains), so do not fall back to last-known-good or
+			// expired IOCs would linger in the bundle past their TTL.
+			AllowEmpty: true,
 		})
 		logger.Info("threatintel: bridging WS8 IOC aggregator domains into the DNS bundle",
 			slog.String("category", mf.IOCCategory),

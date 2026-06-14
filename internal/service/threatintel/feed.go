@@ -194,6 +194,15 @@ type Source struct {
 	Category string
 	// Fetcher retrieves the raw feed bytes.
 	Fetcher Fetcher
+	// AllowEmpty marks a source whose empty result is a legitimate
+	// state rather than a sign of a broken upstream. For URL feeds an
+	// empty parse is suspicious (truncated body, wrong endpoint, format
+	// change), so fetchSource keeps the last-known-good set; for an
+	// in-process SnapshotFetcher bridging the IOC store, empty means the
+	// store genuinely holds no (unexpired) domains, so the last set must
+	// drain rather than persist past the indicators' TTL. Set on the
+	// IOC-aggregator bridge source; leave false for upstream URL feeds.
+	AllowEmpty bool
 }
 
 // parseDomainList normalizes a plain-text feed body into a slice of

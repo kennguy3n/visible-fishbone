@@ -207,35 +207,40 @@ func TestRunStopsOnContextCancel(t *testing.T) {
 
 // TestRefreshOnceBridgesSnapshotSource proves an in-process
 // SnapshotFetcher source (the IOCStore bridge) lands its domains in the
-// signed bundle under its category bucket, and that a live update to
-// the provider is reflected on the next refresh — i.e. aggregated IOC
-// domains ride the same signed distribution path as URL feeds.
+// signed bundle under its category bucket, that a live update to the
+// provider is reflected on the next refresh, and — because the source
+// is AllowEmpty — that draining the provider to empty drains the bucket
+// rather than re-publishing the stale last-known-good set (so expired
+// IOCs do not linger in the bundle past their TTL).
 func TestRefreshOnceBridgesSnapshotSource(t *testing.T) {
 	pub := &fakePublisher{}
 	domains := []string{"evil.example", "sub.bad.example"}
 	sources := []Source{
 		{Name: "rep", Kind: KindReputation, Fetcher: StaticFetcher{Data: []byte("known-bad.example\n")}},
-		{Name: "ioc-aggregator", Kind: KindCategory, Category: "threat-intel-ioc",
+		{Name: "ioc-aggregator", Kind: KindCategory, Category: "threat-intel-ioc", AllowEmpty: true,
 			Fetcher: SnapshotFetcher{Provider: func() []string { return domains }}},
 	}
 	svc := newTestService(t, sources, pub)
 
+	decodeCategory := func() []string {
+		t.Helper()
+		_, data, _ := pub.snapshot()
+		var env SignedBundle
+		if err := json.Unmarshal(data, &env); err != nil {
+			t.Fatal(err)
+		}
+		bundle, err := env.DecodeVerified(svc.signer.Public())
+		if err != nil {
+			t.Fatalf("verify: %v", err)
+		}
+		return bundle.Categories["threat-intel-ioc"]
+	}
+
 	if _, err := svc.RefreshOnce(context.Background()); err != nil {
 		t.Fatalf("RefreshOnce: %v", err)
 	}
-	_, data, _ := pub.snapshot()
-	var env SignedBundle
-	if err := json.Unmarshal(data, &env); err != nil {
-		t.Fatal(err)
-	}
-	bundle, err := env.DecodeVerified(svc.signer.Public())
-	if err != nil {
-		t.Fatalf("verify: %v", err)
-	}
-	got := bundle.Categories["threat-intel-ioc"]
-	want := []string{"evil.example", "sub.bad.example"}
-	if !equalStringSet(got, want) {
-		t.Fatalf("ioc category = %v, want %v", got, want)
+	if got := decodeCategory(); !equalStringSet(got, []string{"evil.example", "sub.bad.example"}) {
+		t.Fatalf("ioc category = %v, want [evil.example sub.bad.example]", got)
 	}
 
 	// Live provider update is picked up on the next refresh.
@@ -243,16 +248,19 @@ func TestRefreshOnceBridgesSnapshotSource(t *testing.T) {
 	if _, err := svc.RefreshOnce(context.Background()); err != nil {
 		t.Fatalf("second RefreshOnce: %v", err)
 	}
-	_, data, _ = pub.snapshot()
-	if err := json.Unmarshal(data, &env); err != nil {
-		t.Fatal(err)
-	}
-	bundle, err = env.DecodeVerified(svc.signer.Public())
-	if err != nil {
-		t.Fatalf("verify: %v", err)
-	}
-	if got := bundle.Categories["threat-intel-ioc"]; !equalStringSet(got, []string{"evil.example"}) {
+	if got := decodeCategory(); !equalStringSet(got, []string{"evil.example"}) {
 		t.Fatalf("after update ioc category = %v, want [evil.example]", got)
+	}
+
+	// All indicators expire / store swept → provider returns empty. The
+	// AllowEmpty source must drain the bucket, NOT fall back to the
+	// cached set, otherwise expired IOCs would persist past their TTL.
+	domains = nil
+	if _, err := svc.RefreshOnce(context.Background()); err != nil {
+		t.Fatalf("third RefreshOnce: %v", err)
+	}
+	if got := decodeCategory(); len(got) != 0 {
+		t.Fatalf("after drain ioc category = %v, want empty (stale IOCs must not linger)", got)
 	}
 }
 

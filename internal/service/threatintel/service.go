@@ -283,10 +283,15 @@ func (s *Service) fetchSource(ctx context.Context, src Source) (domains []string
 		return s.cachedDomains(src.Name), false, ferr
 	}
 	parsed := parseDomainList(raw)
-	if len(parsed) == 0 {
+	if len(parsed) == 0 && !src.AllowEmpty {
 		// A successful fetch that parses to nothing is suspicious (empty
 		// body, wrong endpoint, format change). Keep last-known-good
 		// rather than letting an empty parse erase the source.
+		//
+		// AllowEmpty sources opt out: for the in-process IOC bridge an
+		// empty result is legitimate (the store holds no unexpired
+		// domains), so the cache must NOT be substituted or expired
+		// indicators would linger in the bundle past their TTL.
 		cached := s.cachedDomains(src.Name)
 		if len(cached) > 0 {
 			return cached, false, fmt.Errorf("threatintel: source %q parsed to zero domains", src.Name)
