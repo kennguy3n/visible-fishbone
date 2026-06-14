@@ -188,6 +188,28 @@ func (s *Service) TestPolicy(ctx context.Context, tenantID, policyID uuid.UUID, 
 	}, nil
 }
 
+// maxAdviseSamples caps the labeled corpus an advise call may carry,
+// bounding the synchronous work an operator can trigger per request.
+const maxAdviseSamples = 2000
+
+// AdviseRule scores a candidate DLP rule against tenant-supplied
+// labeled samples and returns measured false-positive / false-negative
+// rates plus deterministic tuning suggestions. It is a pure, on-demand
+// evaluation: nothing is persisted and no policy is enabled as a side
+// effect, so it is the coach-first safety net for tenant custom-rule
+// add-ons. Only regex/keyword rules decide inline through the regex
+// engine; MIP/fingerprint/ml_ner rules decide elsewhere and return
+// ErrInvalidArgument here.
+func (s *Service) AdviseRule(_ context.Context, _ uuid.UUID, rule repository.DLPRule, samples []engine.LabeledSample) (engine.Advice, error) {
+	if rule.Type != repository.DLPRuleTypeRegex && rule.Type != repository.DLPRuleTypeKeyword {
+		return engine.Advice{}, repository.ErrInvalidArgument
+	}
+	if len(samples) == 0 || len(samples) > maxAdviseSamples {
+		return engine.Advice{}, repository.ErrInvalidArgument
+	}
+	return s.regex.AdviseRule(rule, samples), nil
+}
+
 // evaluatePolicy runs a single policy's rules against content.
 // Fingerprint matching is hoisted: if any rule has type fingerprint
 // a single query loads all matches and appends them once.

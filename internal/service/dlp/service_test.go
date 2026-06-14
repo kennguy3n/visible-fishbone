@@ -10,6 +10,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 	"github.com/kennguy3n/visible-fishbone/internal/service/dlp"
+	"github.com/kennguy3n/visible-fishbone/internal/service/dlp/engine"
 )
 
 func setup(t *testing.T) (*dlp.Service, uuid.UUID) {
@@ -309,5 +310,39 @@ func TestService_Fingerprints(t *testing.T) {
 	}
 	if len(result.Items) != 1 {
 		t.Fatalf("expected 1 fingerprint, got %d", len(result.Items))
+	}
+}
+
+func TestService_AdviseRule(t *testing.T) {
+	svc, tid := setup(t)
+	ctx := context.Background()
+
+	// A non-inline rule type cannot be scored by the regex engine.
+	_, err := svc.AdviseRule(ctx, tid,
+		repository.DLPRule{Type: repository.DLPRuleTypeFingerprint, Pattern: "x"},
+		[]engine.LabeledSample{{Text: "a", ShouldMatch: false}})
+	if err != repository.ErrInvalidArgument {
+		t.Fatalf("fingerprint rule: want ErrInvalidArgument, got %v", err)
+	}
+
+	// No samples is a bad request.
+	if _, err := svc.AdviseRule(ctx, tid,
+		repository.DLPRule{Type: repository.DLPRuleTypeRegex, Pattern: "email"},
+		nil); err != repository.ErrInvalidArgument {
+		t.Fatalf("empty samples: want ErrInvalidArgument, got %v", err)
+	}
+
+	// A valid regex rule scores and returns advice.
+	advice, err := svc.AdviseRule(ctx, tid,
+		repository.DLPRule{Type: repository.DLPRuleTypeRegex, Pattern: "email"},
+		[]engine.LabeledSample{
+			{Text: "ping me at a@b.com", ShouldMatch: true},
+			{Text: "nothing here", ShouldMatch: false},
+		})
+	if err != nil {
+		t.Fatalf("advise: %v", err)
+	}
+	if advice.Quality.TruePositives != 1 || advice.Quality.TrueNegatives != 1 {
+		t.Fatalf("unexpected quality: %+v", advice.Quality)
 	}
 }
