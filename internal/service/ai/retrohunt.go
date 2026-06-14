@@ -283,8 +283,8 @@ func (h *RetroHunter) matchEnvelope(env schema.Envelope, set *RetroIndicatorSet)
 		if host == "" {
 			host = ev.Host
 		}
-		if h, _, found := strings.Cut(host, ":"); found {
-			host = h
+		if hostPart, _, found := strings.Cut(host, ":"); found {
+			host = hostPart
 		}
 		if ioc, ok := set.matchDomain(host); ok {
 			return base(strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), ".")), ioc, ev.Verdict), true, false
