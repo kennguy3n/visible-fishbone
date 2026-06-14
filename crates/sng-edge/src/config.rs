@@ -302,6 +302,15 @@ pub struct DnsConfig {
     /// negligible.
     #[serde(default = "default_dns_reputation_interval", with = "humantime_serde")]
     pub reputation_refresh_interval: std::time::Duration,
+    /// Managed signed-bundle consumer config. DEFAULT-OFF: with no
+    /// pinned keys the subsystem never accepts a bundle and behaves
+    /// exactly as before (reputation-file + local filters only). When
+    /// an operator pins the producer's verifying key, the subsystem can
+    /// verify and hot-swap the control plane's signed DNS bundle
+    /// (`internal/service/threatintel`) into the live category /
+    /// reputation filters via [`sng_dns::ManagedFeedApplier`].
+    #[serde(default)]
+    pub managed_feed: ManagedFeedConfig,
 }
 
 impl Default for DnsConfig {
@@ -311,8 +320,45 @@ impl Default for DnsConfig {
             sinkhole_ipv6: default_sinkhole_ipv6(),
             reputation_file: None,
             reputation_refresh_interval: default_dns_reputation_interval(),
+            managed_feed: ManagedFeedConfig::default(),
         }
     }
+}
+
+/// Edge consumer config for the control plane's signed DNS feed bundle.
+///
+/// Empty by default (no pinned keys), which keeps the managed-feed
+/// consumer inert: the subsystem holds no applier and rejects any
+/// bundle. Populating `keys` with the producer's pinned Ed25519
+/// verifying key turns the consumer on; `category_actions` is the
+/// operator's per-category disposition (membership comes from the
+/// bundle, policy stays on the edge), so even an enabled consumer only
+/// starts blocking a bucket once it is mapped to `block`.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedFeedConfig {
+    /// Pinned Ed25519 verifying keys, selected by the `key_id` the
+    /// producer stamps into each envelope.
+    #[serde(default)]
+    pub keys: Vec<ManagedFeedKey>,
+    /// Per-category disposition map (`category -> allow|log|block`,
+    /// case-insensitive). A category present in a bundle but absent
+    /// here defaults to `allow` (staged), matching the producer's
+    /// staged-Allow posture for the bridged IOC bucket.
+    #[serde(default)]
+    pub category_actions: std::collections::HashMap<String, String>,
+}
+
+/// One pinned verifying key for the managed DNS feed bundle.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ManagedFeedKey {
+    /// Identifier matching the producer's `THREAT_INTEL_KEY_ID`. May be
+    /// empty when exactly one key is pinned.
+    #[serde(default)]
+    pub key_id: String,
+    /// Hex-encoded 32-byte Ed25519 public key.
+    pub public_key_hex: String,
 }
 
 /// Firewall settings. Real nftables backend is wired through

@@ -59,6 +59,46 @@ only for configured feeds.
 | `THREATINTEL_MISP_URL` / `THREATINTEL_MISP_AUTH_KEY` | — | MISP feed (events/attributes export; key → `Authorization`) |
 | `THREATINTEL_MISP_INCLUDE_NON_IDS` | `false` | Ingest MISP attributes not flagged `to_ids` (default: `to_ids:true` only) |
 
+### Managed DNS feed bundle bridge (`internal/service/threatintel`)
+
+The aggregated domain IOCs can additionally ride the signed **managed
+DNS feed bundle** — the same Ed25519-signed, serial-monotonic
+distribution path the upstream DNS reputation/category feeds use — so
+they reach the edge DNS `FilterChain` with **suffix-match** semantics
+(`*.evil.com`) and allowlist override, not just the exact-match policy
+bundle rules. The bridge is an in-process `SnapshotFetcher` that folds
+`FeedManager.DomainIndicators(min)` into the bundle as one more category
+source; it is **default-OFF** and, when on, files domains under a
+staged-Allow bucket so enabling it widens *coverage* without changing
+*enforcement* until an operator maps the bucket to Block.
+
+| Env var | Default | Meaning |
+|---------|---------|---------|
+| `THREAT_INTEL_BRIDGE_IOC_STORE` | `false` | Fold aggregated domain IOCs into the signed DNS bundle as an extra category source |
+| `THREAT_INTEL_IOC_CATEGORY` | `threat-intel-ioc` | Category bucket the bridged domains are filed under (stays Allow until an operator sets it to Block) |
+| `THREAT_INTEL_IOC_MIN_CONFIDENCE` | `0` | Enforcement-confidence gate applied to bridged domains on top of the store's ingest floor |
+
+### Edge consumer (`crates/sng-edge` DNS subsystem)
+
+The edge `DnsSubsystem` is the consumer half: with at least one pinned
+verifying key it constructs a `sng_dns::ManagedFeedApplier` and exposes
+`apply_feed_bundle(&SignedFeedBundle)`, which verifies the signature
+against the pinned trust store, enforces serial monotonicity, and
+hot-swaps the bundle into the **live** `Category` + `Reputation`
+filters. A tampered, untrusted, or stale bundle leaves the live feed
+untouched (fail-closed). It is **default-OFF**: with no pinned key the
+applier is absent and `apply_feed_bundle` rejects every bundle, so the
+subsystem behaves exactly as before (local reputation file + local
+filters). The cross-process transport that delivers the envelope (NATS
+subscription / control-plane pull) and the UDP listener that answers
+clients over the wire are separate follow-ups; this PR wires the
+verify-and-apply seam and proves enforcement at the `DnsService` /
+`FilterChain` level.
+
+Edge config lives under `[dns.managed_feed]`: `keys` (pinned
+`{key_id, public_key_hex}` Ed25519 verifying keys) and
+`category_actions` (`category -> allow|log|block`, default `allow`).
+
 ## Data flow
 
 ```

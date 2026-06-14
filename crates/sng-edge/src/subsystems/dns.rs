@@ -22,8 +22,12 @@ use sng_core::{
     HealthCheck, HealthStatus, ShutdownSignal, Subsystem, SubsystemError, SubsystemHandle,
     SubsystemHealth,
 };
-use sng_dns::{Category, DnsService, FilterChain, Reputation, Resolver, Sinkhole, StaticResolver};
+use sng_dns::{
+    AppliedFeed, Category, CategoryAction, DnsService, FeedBundleError, FeedVerifier, FilterChain,
+    ManagedFeedApplier, Reputation, Resolver, SignedFeedBundle, Sinkhole, StaticResolver,
+};
 use sng_telemetry::TelemetryEvent;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -35,11 +39,20 @@ use tokio::task;
 pub struct DnsSubsystem<R: Resolver = StaticResolver> {
     service: Arc<DnsService<R>>,
     reputation: Arc<Reputation>,
+    category: Arc<Category>,
     reputation_file: Option<PathBuf>,
     refresh_interval: std::time::Duration,
     reloads_total: Arc<AtomicU64>,
     reload_failures: Arc<AtomicU64>,
     entries_loaded: Arc<AtomicU64>,
+    // Managed signed-bundle consumer seam. `applier` is None unless the
+    // operator pinned at least one verifying key (DEFAULT-OFF), in which
+    // case apply_feed_bundle is a no-op error. `category_actions` is the
+    // operator's per-category disposition applied at swap time.
+    applier: Option<Arc<ManagedFeedApplier>>,
+    category_actions: HashMap<String, CategoryAction>,
+    feeds_applied: Arc<AtomicU64>,
+    feed_apply_failures: Arc<AtomicU64>,
 }
 
 impl<R: Resolver> std::fmt::Debug for DnsSubsystem<R> {
@@ -60,6 +73,12 @@ impl<R: Resolver> std::fmt::Debug for DnsSubsystem<R> {
             .field(
                 "entries_loaded",
                 &self.entries_loaded.load(Ordering::Relaxed),
+            )
+            .field("managed_feed", &self.applier.is_some())
+            .field("feeds_applied", &self.feeds_applied.load(Ordering::Relaxed))
+            .field(
+                "feed_apply_failures",
+                &self.feed_apply_failures.load(Ordering::Relaxed),
             )
             .finish_non_exhaustive()
     }
@@ -103,15 +122,92 @@ impl DnsSubsystem<StaticResolver> {
         ]);
         let resolver = Arc::new(StaticResolver::new("edge-stub"));
         let service = Arc::new(DnsService::new(Arc::new(chain), resolver, telemetry));
+
+        // Managed-feed consumer is DEFAULT-OFF: it only comes alive when
+        // the operator pins at least one verifying key. A key that fails
+        // to decode is skipped with a warning rather than failing boot,
+        // matching the fail-soft posture of the rest of the edge config.
+        let applier = build_feed_applier(cfg);
+        let category_actions = parse_category_actions(cfg);
+
         Self {
             service,
             reputation,
+            category,
             reputation_file: cfg.reputation_file.clone(),
             refresh_interval: cfg.reputation_refresh_interval,
             reloads_total: Arc::new(AtomicU64::new(0)),
             reload_failures: Arc::new(AtomicU64::new(0)),
             entries_loaded: Arc::new(AtomicU64::new(0)),
+            applier,
+            category_actions,
+            feeds_applied: Arc::new(AtomicU64::new(0)),
+            feed_apply_failures: Arc::new(AtomicU64::new(0)),
         }
+    }
+}
+
+/// Build the [`ManagedFeedApplier`] from the operator's pinned keys, or
+/// `None` (DEFAULT-OFF) when no keys are configured. Keys that fail to
+/// decode are skipped with a warning; if every configured key is
+/// invalid the applier is still constructed (empty trust store) so the
+/// operator's intent to enable the consumer is honoured and every
+/// bundle fails closed with `UnknownKey` rather than silently passing.
+fn build_feed_applier(cfg: &DnsConfig) -> Option<Arc<ManagedFeedApplier>> {
+    if cfg.managed_feed.keys.is_empty() {
+        return None;
+    }
+    let mut verifier = FeedVerifier::new();
+    for key in &cfg.managed_feed.keys {
+        match hex::decode(key.public_key_hex.trim()) {
+            Ok(bytes) => {
+                if let Err(e) = verifier.add_key(key.key_id.clone(), &bytes) {
+                    tracing::warn!(
+                        target: "sng_edge::dns",
+                        key_id = %key.key_id,
+                        error = %e,
+                        "managed feed: skipping invalid verifying key"
+                    );
+                }
+            }
+            Err(e) => tracing::warn!(
+                target: "sng_edge::dns",
+                key_id = %key.key_id,
+                error = %e,
+                "managed feed: skipping non-hex verifying key"
+            ),
+        }
+    }
+    Some(Arc::new(ManagedFeedApplier::new(verifier)))
+}
+
+/// Parse the operator's per-category disposition strings into
+/// [`CategoryAction`]s. Unknown / malformed values are skipped with a
+/// warning so a category falls back to the staged-Allow default rather
+/// than failing boot.
+fn parse_category_actions(cfg: &DnsConfig) -> HashMap<String, CategoryAction> {
+    let mut out = HashMap::new();
+    for (cat, action) in &cfg.managed_feed.category_actions {
+        if let Some(parsed) = parse_category_action(action) {
+            out.insert(cat.clone(), parsed);
+        } else {
+            tracing::warn!(
+                target: "sng_edge::dns",
+                category = %cat,
+                action = %action,
+                "managed feed: unknown category action, defaulting to allow"
+            );
+        }
+    }
+    out
+}
+
+fn parse_category_action(s: &str) -> Option<CategoryAction> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "allow" => Some(CategoryAction::Allow),
+        "log" => Some(CategoryAction::Log),
+        "block" => Some(CategoryAction::Block),
+        _ => None,
     }
 }
 
@@ -126,6 +222,75 @@ impl<R: Resolver> DnsSubsystem<R> {
     #[must_use]
     pub fn reputation(&self) -> &Arc<Reputation> {
         &self.reputation
+    }
+
+    /// Borrow the category filter handle.
+    #[must_use]
+    pub fn category(&self) -> &Arc<Category> {
+        &self.category
+    }
+
+    /// Whether the managed signed-bundle consumer is enabled (i.e. the
+    /// operator pinned at least one verifying key).
+    #[must_use]
+    pub fn managed_feed_enabled(&self) -> bool {
+        self.applier.is_some()
+    }
+
+    /// Verify a signed control-plane DNS feed bundle and hot-swap it
+    /// into the live category + reputation filters. This is the edge
+    /// consumer seam for `internal/service/threatintel`'s signed bundle:
+    /// the cross-process transport that delivers the bytes here (a NATS
+    /// subscription / control-plane pull) is a separate follow-up; this
+    /// method is what that transport calls once it has the envelope.
+    ///
+    /// The applier verifies the signature against the pinned trust store
+    /// and enforces serial monotonicity BEFORE touching the filters, so
+    /// a tampered, untrusted, or stale bundle leaves the live feed
+    /// unchanged (fail-closed).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FeedBundleError::UnknownKey`] when the managed-feed
+    /// consumer is disabled (no pinned keys), and otherwise propagates
+    /// any verification / staleness error from the applier.
+    pub fn apply_feed_bundle(
+        &self,
+        signed: &SignedFeedBundle,
+    ) -> Result<AppliedFeed, FeedBundleError> {
+        let Some(applier) = self.applier.as_ref() else {
+            // DEFAULT-OFF: no pinned key means the operator never opted
+            // in. Report it as an untrusted bundle rather than silently
+            // succeeding.
+            return Err(FeedBundleError::UnknownKey(signed.key_id.clone()));
+        };
+        let res = applier.apply(
+            signed,
+            &self.category,
+            &self.reputation,
+            &self.category_actions,
+        );
+        match &res {
+            Ok(summary) => {
+                self.feeds_applied.fetch_add(1, Ordering::Relaxed);
+                tracing::info!(
+                    target: "sng_edge::dns",
+                    serial = summary.serial,
+                    categories = summary.categories,
+                    reputation = summary.reputation,
+                    "managed feed bundle applied"
+                );
+            }
+            Err(e) => {
+                self.feed_apply_failures.fetch_add(1, Ordering::Relaxed);
+                tracing::warn!(
+                    target: "sng_edge::dns",
+                    error = %e,
+                    "managed feed bundle rejected"
+                );
+            }
+        }
+        res
     }
 
     /// Read the reputation file (newline-separated names, `#`
@@ -280,7 +445,12 @@ impl<R: Resolver> HealthCheck for DnsSubsystem<R> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{ManagedFeedConfig, ManagedFeedKey};
+    use base64::Engine as _;
+    use ed25519_dalek::{Signer as _, SigningKey};
     use sng_core::ShutdownTrigger;
+    use sng_dns::managed::SCHEMA_VERSION;
+    use sng_dns::{DnsQuery, FeedBundle, QType};
     use std::io::Write;
     use std::time::Duration;
     use tempfile::NamedTempFile;
@@ -291,7 +461,160 @@ mod tests {
             sinkhole_ipv6: std::net::Ipv6Addr::UNSPECIFIED,
             reputation_file: path,
             reputation_refresh_interval: interval,
+            managed_feed: ManagedFeedConfig::default(),
         }
+    }
+
+    fn signing_key() -> SigningKey {
+        SigningKey::from_bytes(&[7u8; 32])
+    }
+
+    /// Sign a bundle exactly as the Go producer does: Ed25519 over the
+    /// canonical payload bytes that get base64-encoded into `payload`.
+    fn sign_bundle(key: &SigningKey, key_id: &str, bundle: &FeedBundle) -> SignedFeedBundle {
+        let payload = serde_json::to_vec(bundle).expect("serialize");
+        let sig = key.sign(&payload);
+        let engine = base64::engine::general_purpose::STANDARD;
+        SignedFeedBundle {
+            algorithm: "ed25519".to_string(),
+            key_id: key_id.to_string(),
+            public_key: engine.encode(key.verifying_key().to_bytes()),
+            payload: engine.encode(&payload),
+            signature: engine.encode(sig.to_bytes()),
+        }
+    }
+
+    /// Bundle with a reputation entry (evil.example) and a category
+    /// bucket "threat-intel-ioc" holding a suffix-matchable domain.
+    fn ioc_bundle(serial: i64) -> FeedBundle {
+        let mut categories = HashMap::new();
+        categories.insert(
+            "threat-intel-ioc".to_string(),
+            vec!["bad.example".to_string()],
+        );
+        FeedBundle {
+            schema_version: SCHEMA_VERSION,
+            serial,
+            generated_at: "2026-01-01T00:00:00Z".to_string(),
+            categories,
+            reputation: vec!["evil.example".to_string()],
+        }
+    }
+
+    /// Config that pins the test signing key and maps the IOC bucket to
+    /// Block, i.e. the operator has fully opted in to enforcement.
+    fn config_with_managed_feed(key: &SigningKey, key_id: &str) -> DnsConfig {
+        let mut category_actions = std::collections::HashMap::new();
+        category_actions.insert("threat-intel-ioc".to_string(), "block".to_string());
+        DnsConfig {
+            sinkhole_ipv4: std::net::Ipv4Addr::UNSPECIFIED,
+            sinkhole_ipv6: std::net::Ipv6Addr::UNSPECIFIED,
+            reputation_file: None,
+            reputation_refresh_interval: Duration::from_millis(10),
+            managed_feed: ManagedFeedConfig {
+                keys: vec![ManagedFeedKey {
+                    key_id: key_id.to_string(),
+                    public_key_hex: hex::encode(key.verifying_key().to_bytes()),
+                }],
+                category_actions,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn apply_feed_bundle_enforces_on_live_filters() {
+        let key = signing_key();
+        let (tx, _rx) = mpsc::channel::<TelemetryEvent>(4);
+        let sub = DnsSubsystem::new(&config_with_managed_feed(&key, "k1"), tx);
+        assert!(sub.managed_feed_enabled());
+
+        let applied = sub
+            .apply_feed_bundle(&sign_bundle(&key, "k1", &ioc_bundle(1)))
+            .expect("apply");
+        assert_eq!(applied.serial, 1);
+        assert_eq!(applied.reputation, 1);
+
+        // Reputation hit (exact) — apex of the reputation entry.
+        let evil = sub
+            .service()
+            .handle_query(&DnsQuery::new("evil.example", QType::A))
+            .await;
+        assert!(evil.short_circuited, "evil.example must be sinkholed");
+
+        // Category hit via suffix-match: a subdomain of the IOC entry.
+        let sub_bad = sub
+            .service()
+            .handle_query(&DnsQuery::new("host.bad.example", QType::A))
+            .await;
+        assert!(
+            sub_bad.short_circuited,
+            "host.bad.example must match the IOC category suffix"
+        );
+
+        // A domain in neither list resolves (no short-circuit).
+        let ok = sub
+            .service()
+            .handle_query(&DnsQuery::new("allowed.example", QType::A))
+            .await;
+        assert!(!ok.short_circuited, "allowed.example must pass the chain");
+    }
+
+    #[tokio::test]
+    async fn apply_feed_bundle_rejects_stale_serial() {
+        let key = signing_key();
+        let (tx, _rx) = mpsc::channel::<TelemetryEvent>(4);
+        let sub = DnsSubsystem::new(&config_with_managed_feed(&key, "k1"), tx);
+
+        sub.apply_feed_bundle(&sign_bundle(&key, "k1", &ioc_bundle(5)))
+            .expect("first apply");
+        let err = sub
+            .apply_feed_bundle(&sign_bundle(&key, "k1", &ioc_bundle(4)))
+            .expect_err("stale serial must be rejected");
+        assert!(matches!(err, FeedBundleError::StaleSerial { .. }));
+    }
+
+    #[tokio::test]
+    async fn apply_feed_bundle_rejects_untrusted_key() {
+        let pinned = signing_key();
+        let attacker = SigningKey::from_bytes(&[9u8; 32]);
+        let (tx, _rx) = mpsc::channel::<TelemetryEvent>(4);
+        let sub = DnsSubsystem::new(&config_with_managed_feed(&pinned, "k1"), tx);
+
+        // Signed by a key NOT in the trust store (same key_id).
+        let err = sub
+            .apply_feed_bundle(&sign_bundle(&attacker, "k1", &ioc_bundle(1)))
+            .expect_err("untrusted signature must be rejected");
+        assert!(matches!(err, FeedBundleError::SignatureInvalid));
+
+        // The live filters must be untouched (fail-closed).
+        let evil = sub
+            .service()
+            .handle_query(&DnsQuery::new("evil.example", QType::A))
+            .await;
+        assert!(!evil.short_circuited, "rejected bundle must not enforce");
+    }
+
+    #[tokio::test]
+    async fn managed_feed_disabled_by_default() {
+        let key = signing_key();
+        let (tx, _rx) = mpsc::channel::<TelemetryEvent>(4);
+        // No pinned keys -> consumer OFF.
+        let sub = DnsSubsystem::new(&config_with(None, Duration::from_millis(10)), tx);
+        assert!(!sub.managed_feed_enabled());
+
+        let err = sub
+            .apply_feed_bundle(&sign_bundle(&key, "k1", &ioc_bundle(1)))
+            .expect_err("disabled consumer must reject");
+        assert!(matches!(err, FeedBundleError::UnknownKey(_)));
+
+        let evil = sub
+            .service()
+            .handle_query(&DnsQuery::new("evil.example", QType::A))
+            .await;
+        assert!(
+            !evil.short_circuited,
+            "disabled consumer must not enforce anything"
+        );
     }
 
     #[tokio::test]

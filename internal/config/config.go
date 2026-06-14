@@ -722,6 +722,24 @@ type ManagedDNSFeeds struct {
 	// MaxFeedBytes caps a single feed response. Zero applies the
 	// pipeline default (64 MiB). THREAT_INTEL_MAX_FEED_BYTES.
 	MaxFeedBytes int64
+	// BridgeIOCStore folds the WS8 IOC aggregator's domain indicators
+	// (internal/service/ai IOCStore) into this signed DNS bundle as an
+	// extra category source, so aggregated MISP/OTX/TAXII domains ride
+	// the same signed distribution path with suffix-match semantics
+	// instead of only the exact-match policy-bundle rules. Default
+	// false (the aggregated domains are then carried only in the policy
+	// bundle, unchanged). THREAT_INTEL_BRIDGE_IOC_STORE.
+	BridgeIOCStore bool
+	// IOCCategory is the category bucket the bridged IOC domains are
+	// filed under in the bundle. The edge's per-category disposition
+	// for this bucket stays default Allow (staged) until an operator
+	// sets it to Block, so enabling the bridge does not by itself start
+	// blocking. THREAT_INTEL_IOC_CATEGORY (default "threat-intel-ioc").
+	IOCCategory string
+	// IOCMinConfidence is the enforcement-confidence gate applied to the
+	// bridged domains on top of the store's ingest floor, mirroring the
+	// IOC enforcement compiler's per-rule gate. THREAT_INTEL_IOC_MIN_CONFIDENCE.
+	IOCMinConfidence float64
 }
 
 // Log carries structured-logging configuration.
@@ -1840,14 +1858,16 @@ func Load() (Config, error) {
 		},
 		ManagedDNSFeeds: ManagedDNSFeeds{
 			// Enabled is parsed strictly below (default-OFF feature flag).
-			RefreshInterval: getDuration("THREAT_INTEL_REFRESH_INTERVAL", time.Hour),
-			SigningKeyHex:   getStr("THREAT_INTEL_SIGNING_KEY_HEX", ""),
-			KeyID:           getStr("THREAT_INTEL_KEY_ID", ""),
-			Subject:         getStr("THREAT_INTEL_SUBJECT", ""),
-			ReputationURLs:  splitCSV(getStr("THREAT_INTEL_REPUTATION_URLS", "")),
-			CategoryFeeds:   parseKeyedURLs(getStr("THREAT_INTEL_CATEGORY_FEEDS", "")),
-			HTTPTimeout:     getDuration("THREAT_INTEL_HTTP_TIMEOUT", 30*time.Second),
-			MaxFeedBytes:    int64(getIntLenient("THREAT_INTEL_MAX_FEED_BYTES", 0)),
+			RefreshInterval:  getDuration("THREAT_INTEL_REFRESH_INTERVAL", time.Hour),
+			SigningKeyHex:    getStr("THREAT_INTEL_SIGNING_KEY_HEX", ""),
+			KeyID:            getStr("THREAT_INTEL_KEY_ID", ""),
+			Subject:          getStr("THREAT_INTEL_SUBJECT", ""),
+			ReputationURLs:   splitCSV(getStr("THREAT_INTEL_REPUTATION_URLS", "")),
+			CategoryFeeds:    parseKeyedURLs(getStr("THREAT_INTEL_CATEGORY_FEEDS", "")),
+			HTTPTimeout:      getDuration("THREAT_INTEL_HTTP_TIMEOUT", 30*time.Second),
+			MaxFeedBytes:     int64(getIntLenient("THREAT_INTEL_MAX_FEED_BYTES", 0)),
+			IOCCategory:      getStr("THREAT_INTEL_IOC_CATEGORY", "threat-intel-ioc"),
+			IOCMinConfidence: getFloatLenient("THREAT_INTEL_IOC_MIN_CONFIDENCE", 0),
 		},
 	}
 
@@ -2126,6 +2146,11 @@ func Load() (Config, error) {
 		// silently leaving the pipeline off when an operator meant to
 		// turn it on.
 		{"THREAT_INTEL_ENABLED", false, &cfg.ManagedDNSFeeds.Enabled},
+		// Bridge the WS8 IOC aggregator's domains into the signed DNS
+		// bundle. DEFAULT-OFF and parsed strictly for the same reason as
+		// the pipeline flag above: a typo should fail boot, not silently
+		// leave aggregated domains out of the DNS enforcement path.
+		{"THREAT_INTEL_BRIDGE_IOC_STORE", false, &cfg.ManagedDNSFeeds.BridgeIOCStore},
 		{"METRICS_ENABLED", true, &cfg.Metrics.Enabled},
 		{"POP_REBALANCE_ENABLED", true, &cfg.PoP.RebalanceEnabled},
 		// Per-tenant activity tracking. Default ON: it is the writer

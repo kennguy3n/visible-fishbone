@@ -25,6 +25,7 @@ package threatintel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -150,6 +151,34 @@ func (s StaticFetcher) Fetch(context.Context) ([]byte, error) {
 	return s.Data, nil
 }
 
+// SnapshotFetcher adapts an in-process domain provider into a feed
+// Fetcher so a set of domains already held in memory (e.g. the WS8 IOC
+// aggregator's IOCStore) flows into the SAME signed DNS bundle as the
+// upstream URL feeds, rather than needing a second distribution path.
+//
+// The provider is invoked on every refresh and must be safe for
+// concurrent use; it returns the current domain set, already filtered
+// to the indicators the caller wants enforced (e.g. confidence-gated).
+// The returned slice is joined into the newline-delimited shape
+// parseDomainList already accepts, so the same canonicalization /
+// validity gate applies uniformly to in-process and upstream feeds.
+//
+// A nil Provider is a configuration error surfaced on the first fetch
+// (treated by the refresh loop as a failed source falling back to
+// last-known-good) rather than a panic.
+type SnapshotFetcher struct {
+	// Provider returns the current domain set to fold into the bundle.
+	Provider func() []string
+}
+
+// Fetch implements Fetcher.
+func (s SnapshotFetcher) Fetch(context.Context) ([]byte, error) {
+	if s.Provider == nil {
+		return nil, errors.New("threatintel: nil snapshot provider")
+	}
+	return []byte(strings.Join(s.Provider(), "\n")), nil
+}
+
 // Source binds a fetcher to the bundle slot it populates. One Source
 // corresponds to a single upstream (a reputation list, or a single
 // category's domain export).
@@ -165,6 +194,24 @@ type Source struct {
 	Category string
 	// Fetcher retrieves the raw feed bytes.
 	Fetcher Fetcher
+	// AllowEmpty marks a source whose empty result is a legitimate
+	// state rather than a sign of a broken upstream. For URL feeds an
+	// empty parse is suspicious (truncated body, wrong endpoint, format
+	// change), so fetchSource keeps the last-known-good set; for an
+	// in-process SnapshotFetcher bridging the IOC store, empty means the
+	// store genuinely holds no (unexpired) domains, so the last set must
+	// drain rather than persist past the indicators' TTL. Set on the
+	// IOC-aggregator bridge source; leave false for upstream URL feeds.
+	//
+	// An AllowEmpty source that returns empty contributes nothing to the
+	// refresh, so it can never be the SOLE contributor to a published
+	// bundle: if it were the only configured source and went empty,
+	// RefreshOnce would suppress the publish (errAllSourcesEmpty) and the
+	// last good bundle would stand. That is fine in the current wiring
+	// (the bridge always accompanies URL-based reputation/category
+	// sources), but reuse alongside no other source should account for
+	// it.
+	AllowEmpty bool
 }
 
 // parseDomainList normalizes a plain-text feed body into a slice of

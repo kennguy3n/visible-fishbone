@@ -140,3 +140,51 @@ func TestFeedManagerCoverageComposesHealthAndStore(t *testing.T) {
 		t.Errorf("Store.Total = %d, want 2 (staleness must not change cardinality)", cov.Store.Total)
 	}
 }
+
+// TestFeedManagerDomainIndicators verifies the DNS-bundle bridge:
+// DomainIndicators returns only domain IOC values, applies the
+// enforcement-confidence gate on top of the store, and excludes IPs /
+// other types and expired indicators.
+func TestFeedManagerDomainIndicators(t *testing.T) {
+	t.Parallel()
+	start := time.Date(2024, 3, 1, 0, 0, 0, 0, time.UTC)
+	var mu sync.Mutex
+	cur := start
+	clock := func() time.Time {
+		mu.Lock()
+		defer mu.Unlock()
+		return cur
+	}
+	store := NewIOCStore(withStoreClock(clock))
+	store.Upsert(
+		IOC{Type: IOCTypeDomain, Value: "evil.example.com", Source: "misp", Confidence: 0.9},
+		IOC{Type: IOCTypeDomain, Value: "low.example.com", Source: "misp", Confidence: 0.2},
+		IOC{Type: IOCTypeIP, Value: "203.0.113.5", Source: "misp", Confidence: 0.9},
+		IOC{Type: IOCTypeDomain, Value: "gone.example.com", Source: "misp", Confidence: 0.9, ExpiresAt: start.Add(time.Hour)},
+	)
+	mgr := NewFeedManager(store, nil, withManagerClock(clock))
+
+	// Gate at 0.5 keeps the high-confidence domain, drops the
+	// low-confidence one, and never includes the IP.
+	got := mgr.DomainIndicators(0.5)
+	if len(got) != 2 {
+		t.Fatalf("DomainIndicators(0.5) = %v, want 2 (evil + gone)", got)
+	}
+	for _, d := range got {
+		if d == "203.0.113.5" {
+			t.Fatalf("DomainIndicators must not return IPs: %v", got)
+		}
+		if d == "low.example.com" {
+			t.Fatalf("DomainIndicators(0.5) must drop sub-threshold domain: %v", got)
+		}
+	}
+
+	// Past expiry, the expired domain drops out.
+	mu.Lock()
+	cur = start.Add(2 * time.Hour)
+	mu.Unlock()
+	got = mgr.DomainIndicators(0.5)
+	if len(got) != 1 || got[0] != "evil.example.com" {
+		t.Fatalf("post-expiry DomainIndicators(0.5) = %v, want [evil.example.com]", got)
+	}
+}
