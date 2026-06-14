@@ -288,6 +288,85 @@ func TestAutopilotStaleMetricsBlock(t *testing.T) {
 	}
 }
 
+// TestAutopilotStaleBreachDoesNotReDemote proves the fix for the
+// enrol->demote oscillation: after a monitor period ends in auto-rollback,
+// the in-memory recorder still holds the OLD breaching snapshot. Once the
+// tenant is re-enrolled, that snapshot predates the new monitor entry and
+// must NOT trigger another auto-demote — otherwise the tenant would
+// oscillate off->monitor->off on alternate sweeps until live metrics
+// overwrite it. (TestAutopilotStaleMetricsBlock only exercises HEALTHY
+// stale metrics, so the auto-demote path never fires and this regression
+// is invisible to it.)
+func TestAutopilotStaleBreachDoesNotReDemote(t *testing.T) {
+	t.Parallel()
+	obs := &countingObserver{}
+	ap, svc, _, lister, recorder, clk := newAutopilotFixture(t, defaultPolicy(),
+		rollout.WithAutopilotObserver(obs))
+	tenant := uuid.New()
+	lister.ids = []uuid.UUID{tenant}
+	capID := rollout.CapabilityIDPDirectorySync
+	ctx := context.Background()
+
+	// Sweep 1: off -> monitor (enrol).
+	if err := ap.Sweep(ctx); err != nil {
+		t.Fatalf("enrol sweep: %v", err)
+	}
+	// Live breaching metrics (error rate 0.10 > demote threshold 0.05).
+	recorder.Record(tenant, capID, rollout.MonitorMetrics{Samples: 1000, Errors: 100})
+	clk.Advance(48 * time.Hour)
+	// Sweep 2: live breach -> auto-demote to off. The recorder KEEPS the
+	// breaching snapshot (nothing forgets it).
+	if err := ap.Sweep(ctx); err != nil {
+		t.Fatalf("breach sweep: %v", err)
+	}
+	if rec, _ := svc.Get(ctx, tenant, capID); rec.State != rollout.StateOff {
+		t.Fatalf("after breach: state = %s, want off", rec.State)
+	}
+	if obs.demoted[capID] != 1 {
+		t.Fatalf("after breach: demoted = %d, want 1", obs.demoted[capID])
+	}
+
+	// Sweep 3: off -> monitor (re-enrol). The new monitor entry is stamped
+	// AFTER the stale breaching snapshot recorded before sweep 2.
+	clk.Advance(time.Hour)
+	if err := ap.Sweep(ctx); err != nil {
+		t.Fatalf("re-enrol sweep: %v", err)
+	}
+	if rec, _ := svc.Get(ctx, tenant, capID); rec.State != rollout.StateMonitor {
+		t.Fatalf("after re-enrol: state = %s, want monitor", rec.State)
+	}
+
+	// Sweep 4: the only snapshot is the stale breach. It must NOT demote
+	// again; the tenant stays in monitor (dry-run) awaiting live metrics.
+	clk.Advance(48 * time.Hour)
+	if err := ap.Sweep(ctx); err != nil {
+		t.Fatalf("stale-breach sweep: %v", err)
+	}
+	if rec, _ := svc.Get(ctx, tenant, capID); rec.State != rollout.StateMonitor {
+		t.Fatalf("stale breach re-demoted: state = %s, want monitor (no oscillation)", rec.State)
+	}
+	if obs.demoted[capID] != 1 {
+		t.Fatalf("stale breach caused a second demote: demoted = %d, want 1", obs.demoted[capID])
+	}
+	if obs.blocked[capID]["stale_metrics"] == 0 {
+		t.Fatalf("expected a stale_metrics block on the stale-breach sweep, got %+v", obs.blocked[capID])
+	}
+
+	// Now LIVE breaching metrics for the current period must still demote
+	// immediately — the freshness gate must not have disarmed auto-demote.
+	recorder.Record(tenant, capID, rollout.MonitorMetrics{Samples: 1000, Errors: 100})
+	clk.Advance(time.Hour)
+	if err := ap.Sweep(ctx); err != nil {
+		t.Fatalf("live re-breach sweep: %v", err)
+	}
+	if rec, _ := svc.Get(ctx, tenant, capID); rec.State != rollout.StateOff {
+		t.Fatalf("live breach did not demote: state = %s, want off", rec.State)
+	}
+	if obs.demoted[capID] != 2 {
+		t.Fatalf("live breach demote count = %d, want 2", obs.demoted[capID])
+	}
+}
+
 // TestAutopilotNoEnrolWhenDisabled proves that with AutoEnrol off the
 // autopilot never creates a monitor row for an unmanaged tenant: it only
 // promotes tenants an operator already moved into monitor.

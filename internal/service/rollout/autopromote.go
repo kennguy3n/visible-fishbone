@@ -399,28 +399,39 @@ func (a *Autopilot) maybePromote(ctx context.Context, tenantID uuid.UUID, c Capa
 		return err
 	}
 
-	// Auto-demote first: if the (looser-or-equal) demote threshold is
-	// breached, roll back to off and stop. This guarantees a breach during
-	// monitor demotes and blocks promotion in the same pass.
-	if _, rolled, derr := a.svc.EvaluateAutoRollback(ctx, tenantID, c, m); derr != nil {
-		a.logger.WarnContext(ctx, "autopilot: auto-demote evaluation failed",
-			slog.String("tenant_id", tenantID.String()),
-			slog.String("capability", string(c)),
-			slog.Any("error", derr))
-		return derr
-	} else if rolled {
-		a.observer.Demoted(c)
-		return nil
+	// A snapshot recorded before this monitor period began (e.g. left over
+	// from a prior monitor that ended in auto-rollback, or none recorded
+	// yet) is not evidence for the current period. It must gate the
+	// auto-demote path as well as promotion: acting on a stale breaching
+	// snapshot would re-demote a freshly re-enrolled tenant on every sweep
+	// (enrol->demote->enrol oscillation) until live metrics overwrite it.
+	fresh := !observedAt.IsZero() && !observedAt.Before(cur.UpdatedAt)
+
+	// Auto-demote first, on fresh evidence only: if the (looser-or-equal)
+	// demote threshold is breached, roll back to off and stop. This
+	// guarantees a live breach during monitor demotes and blocks promotion
+	// in the same pass, while a stale snapshot cannot trigger a rollback.
+	if fresh {
+		if _, rolled, derr := a.svc.EvaluateAutoRollback(ctx, tenantID, c, m); derr != nil {
+			a.logger.WarnContext(ctx, "autopilot: auto-demote evaluation failed",
+				slog.String("tenant_id", tenantID.String()),
+				slog.String("capability", string(c)),
+				slog.Any("error", derr))
+			return derr
+		} else if rolled {
+			a.observer.Demoted(c)
+			return nil
+		}
 	}
 
 	if a.policy.DwellWindow <= 0 {
 		return nil // promotion disabled: enrol-only autopilot
 	}
 
-	// Stale evidence: a snapshot recorded before this monitor period began
-	// (e.g. left over from a prior monitor that was rolled back) is not
-	// evidence for the current one.
-	if observedAt.IsZero() || observedAt.Before(cur.UpdatedAt) {
+	// Stale evidence blocks promotion (same freshness gate as the
+	// auto-demote above): the capability stays in monitor (dry-run, no
+	// enforcement) until a live snapshot for this period is recorded.
+	if !fresh {
 		a.observer.PromotionBlocked(c, blockStaleMetrics)
 		return nil
 	}
