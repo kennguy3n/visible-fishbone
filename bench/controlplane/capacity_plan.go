@@ -139,6 +139,26 @@ type CapacityPlanConfig struct {
 	// defaultClassRates.
 	classRates []classEventRate
 
+	// DormantFraction is the share of the fleet (0..1) in TierDormant —
+	// the hibernation candidates. WS-3's dormant-tenant hibernation parks
+	// these tenants' telemetry at HibernatedSampleRate. 0 (the default)
+	// models the pre-hibernation world where every tenant emits at full
+	// fidelity, so an empty config reproduces the original projection
+	// exactly. A NoOps trial-heavy fleet runs ~0.8.
+	//
+	// DormantFraction is the WS-3 hibernation lens and is only consulted
+	// when TierSampling is off; the WS-4 cohort model below supersedes it
+	// when both are set (it carries its own dormant cohort).
+	DormantFraction float64
+	// HibernatedSampleRate is the near-zero telemetry keep-probability a
+	// hibernated tenant's non-security classes are sampled to (mirrors
+	// hibernation.DefaultHibernatedSampleRate). Only consulted when
+	// DormantFraction > 0. Security-relevant events (inspect_full) are
+	// pinned at 1:1 by the live sampler and are not part of this model's
+	// class set, so the near-zero rate applies cleanly to the modelled
+	// classes. Unset uses DefaultHibernatedSampleRate.
+	HibernatedSampleRate float64
+
 	// TierSampling models the WS-4 activity-tier-aware telemetry
 	// sampling policy: the fleet is split into active / idle / dormant
 	// cohorts, active tenants write full fidelity, idle tenants sample
@@ -199,6 +219,13 @@ func defaultSweepJobs() []string {
 		"alert_feedback_tuning",
 	}
 }
+
+// DefaultHibernatedSampleRate mirrors
+// hibernation.DefaultHibernatedSampleRate (1-in-10000): the near-zero
+// keep probability a hibernated tenant's non-security telemetry is
+// sampled to. Duplicated here so the dependency-free bench model carries
+// no import of the control-plane service packages.
+const DefaultHibernatedSampleRate = 0.0001
 
 // securityClass reports whether a telemetry class is security-relevant
 // and therefore never shed by the dormant tier. Mirrors the runtime
@@ -308,6 +335,25 @@ func (c CapacityPlanConfig) withDefaults() CapacityPlanConfig {
 	if len(c.classRates) == 0 {
 		c.classRates = d.classRates
 	}
+	// DormantFraction defaults to 0 (no hibernation) on purpose: an empty
+	// config reproduces the pre-WS-3 projection. Clamp an out-of-range
+	// value into [0,1] rather than rejecting it (the model never errors).
+	if c.DormantFraction < 0 {
+		c.DormantFraction = 0
+	}
+	if c.DormantFraction > 1 {
+		c.DormantFraction = 1
+	}
+	if c.HibernatedSampleRate <= 0 {
+		c.HibernatedSampleRate = DefaultHibernatedSampleRate
+	}
+	// HibernatedSampleRate is a keep-probability; clamp the upper bound so
+	// a fat-fingered flag can never project MORE telemetry than the
+	// un-hibernated fleet (effectiveTelemetryTenants would otherwise
+	// exceed TenantCount).
+	if c.HibernatedSampleRate > 1 {
+		c.HibernatedSampleRate = 1
+	}
 	// Tier-sampling cohort knobs only matter when the policy is modelled;
 	// fill them with NoOps-fleet defaults so an operator can flip
 	// TierSampling on without having to specify the whole split.
@@ -342,6 +388,31 @@ func (c CapacityPlanConfig) withDefaults() CapacityPlanConfig {
 		c.sweepJobs = d.sweepJobs
 	}
 	return c
+}
+
+// effectiveTelemetryTenants is the hibernation-adjusted count of tenants
+// worth of telemetry the data plane actually carries: the active tenants
+// emit at full fidelity, while the dormant (hibernated) tenants emit
+// only HibernatedSampleRate of their events. With DormantFraction == 0
+// this is exactly TenantCount, so the pre-hibernation projection is
+// unchanged. The dormant count is rounded so the split is a whole number
+// of tenants.
+func (c CapacityPlanConfig) effectiveTelemetryTenants() float64 {
+	dormant := math.Round(float64(c.TenantCount) * c.DormantFraction)
+	active := float64(c.TenantCount) - dormant
+	return active + dormant*c.HibernatedSampleRate
+}
+
+// activeTenants is the count of full-fidelity (non-hibernated) tenants.
+// It is the denominator for per-active-tenant sizing. Floored at 1 so a
+// 100%-dormant fleet never divides by zero.
+func (c CapacityPlanConfig) activeTenants() float64 {
+	dormant := math.Round(float64(c.TenantCount) * c.DormantFraction)
+	active := float64(c.TenantCount) - dormant
+	if active < 1 {
+		active = 1
+	}
+	return active
 }
 
 // perTenantEventsPerSec sums every class's per-tenant rate (the full
@@ -401,14 +472,24 @@ func (c CapacityPlanConfig) tierRowsPerSec() (active, idle, dormant float64) {
 }
 
 // effectiveRowsPerSec is the fleet write rate the downstream ClickHouse
-// model sizes against: the full publish rate when tier sampling is off,
-// or the post-sampling cohort sum when it is on.
+// model sizes against. It composes the two dormant-tenant reduction
+// lenses behind their respective gates:
+//
+//   - WS-4 tier sampling (TierSampling) takes precedence: it carries its
+//     own active / idle / dormant cohort split, so its post-sampling sum
+//     supersedes the hibernation lens when enabled.
+//   - WS-3 hibernation (DormantFraction > 0) applies otherwise, parking
+//     the dormant share to HibernatedSampleRate via
+//     effectiveTelemetryTenants.
+//
+// With both gates off this is exactly the full publish rate, so the
+// baseline projection is unchanged.
 func (c CapacityPlanConfig) effectiveRowsPerSec() float64 {
-	if !c.TierSampling {
-		return c.totalEventsPerSec()
+	if c.TierSampling {
+		a, i, d := c.tierRowsPerSec()
+		return a + i + d
 	}
-	a, i, d := c.tierRowsPerSec()
-	return a + i + d
+	return c.perTenantEventsPerSec() * c.effectiveTelemetryTenants()
 }
 
 // RunCapacityPlan evaluates the three sub-models and returns the
@@ -422,13 +503,15 @@ func RunCapacityPlan(cfg CapacityPlanConfig) *CapacityPlanSection {
 	}
 	sort.Strings(classes)
 	return &CapacityPlanSection{
-		TenantCount:      cfg.TenantCount,
-		TelemetryClasses: classes,
-		Postgres:         planPostgresPool(cfg),
-		ClickHouse:       planClickHouseWrite(cfg),
-		NATS:             planNATSSubjects(cfg),
-		TierSampling:     planTierSampling(cfg),
-		PeriodicSweep:    planPeriodicSweep(cfg),
+		TenantCount:              cfg.TenantCount,
+		DormantFraction:          cfg.DormantFraction,
+		EmittingTenantsEffective: round1(cfg.effectiveTelemetryTenants()),
+		TelemetryClasses:         classes,
+		Postgres:                 planPostgresPool(cfg),
+		ClickHouse:               planClickHouseWrite(cfg),
+		NATS:                     planNATSSubjects(cfg),
+		TierSampling:             planTierSampling(cfg),
+		PeriodicSweep:            planPeriodicSweep(cfg),
 	}
 }
 
@@ -552,16 +635,18 @@ func planClickHouseWrite(cfg CapacityPlanConfig) ClickHouseWritePlan {
 		InsertsPerSecPerShard: round2c(insertsPerSecPerShard),
 		MonthlyRows:           int64(monthlyRows),
 		// PerTenantMonthlyRows is the fleet-wide mean (total ÷
-		// TenantCount). Under tier sampling it is NOT any single
-		// tenant's volume — an active tenant writes far more and a
-		// dormant one far less; the TierSampling section carries the
-		// per-cohort breakdown. Without tier sampling every tenant
-		// writes the same rate, so it is the exact per-tenant figure.
-		PerTenantMonthlyRows:   int64(monthlyRows / float64(cfg.TenantCount)),
-		HotStorageGBCompressed: round1(compressedGBPerMonth),
-		IngestBytesPerSec:      int64(rowsPerSec * float64(cfg.BytesPerEvent)),
-		RecommendedShards:      cfg.ClickHouseShards,
-		RecommendedBatchSize:   cfg.ClickHouseBatchSize,
+		// TenantCount). Under tier sampling or hibernation it is NOT any
+		// single tenant's volume — an active tenant writes far more and a
+		// dormant one far less; the TierSampling section (and
+		// PerActiveTenantMonthlyRows) carry the per-cohort breakdown.
+		// Without either reduction every tenant writes the same rate, so
+		// it is the exact per-tenant figure.
+		PerTenantMonthlyRows:       int64(monthlyRows / float64(cfg.TenantCount)),
+		PerActiveTenantMonthlyRows: int64(monthlyRows / cfg.activeTenants()),
+		HotStorageGBCompressed:     round1(compressedGBPerMonth),
+		IngestBytesPerSec:          int64(rowsPerSec * float64(cfg.BytesPerEvent)),
+		RecommendedShards:          cfg.ClickHouseShards,
+		RecommendedBatchSize:       cfg.ClickHouseBatchSize,
 	}
 
 	const insertCeilingPerShard = 1.0
@@ -758,6 +843,10 @@ func (r *BusinessBenchmarkReport) writeCapacityPlanMarkdown(b *strings.Builder) 
 	fmt.Fprintf(b, "### Capacity plan @ %d tenants × %d telemetry classes\n\n",
 		cp.TenantCount, len(cp.TelemetryClasses))
 	fmt.Fprintf(b, "Telemetry classes: `%s`\n\n", strings.Join(cp.TelemetryClasses, "`, `"))
+	if cp.DormantFraction > 0 {
+		fmt.Fprintf(b, "Hibernation: %.0f%% dormant → **%.1f** effective emitting tenants (parked telemetry at the near-zero hibernated sample rate).\n\n",
+			cp.DormantFraction*100, cp.EmittingTenantsEffective)
+	}
 
 	pg := cp.Postgres
 	b.WriteString("**Postgres connection-pool pressure**\n\n")
@@ -770,7 +859,11 @@ func (r *BusinessBenchmarkReport) writeCapacityPlanMarkdown(b *strings.Builder) 
 	b.WriteString("**ClickHouse write throughput**\n\n")
 	fmt.Fprintf(b, "- %.1f rows/s total across %d shard(s) = %.1f rows/s/shard\n", ch.TotalRowsPerSec, ch.Shards, ch.RowsPerSecPerShard)
 	fmt.Fprintf(b, "- %.2f inserts/s/shard @ batch %d (recommended: batch %d across %d shard(s))\n", ch.InsertsPerSecPerShard, ch.BatchSize, ch.RecommendedBatchSize, ch.RecommendedShards)
-	fmt.Fprintf(b, "- %d rows/month (%d/tenant), ~%.1f GB/month compressed hot storage\n", ch.MonthlyRows, ch.PerTenantMonthlyRows, ch.HotStorageGBCompressed)
+	if cp.DormantFraction > 0 {
+		fmt.Fprintf(b, "- %d rows/month (%d/tenant fleet-avg, %d/active-tenant), ~%.1f GB/month compressed hot storage\n", ch.MonthlyRows, ch.PerTenantMonthlyRows, ch.PerActiveTenantMonthlyRows, ch.HotStorageGBCompressed)
+	} else {
+		fmt.Fprintf(b, "- %d rows/month (%d/tenant), ~%.1f GB/month compressed hot storage\n", ch.MonthlyRows, ch.PerTenantMonthlyRows, ch.HotStorageGBCompressed)
+	}
 	fmt.Fprintf(b, "- %s\n\n", ch.Note)
 
 	n := cp.NATS

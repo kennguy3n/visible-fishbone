@@ -280,6 +280,14 @@ type PostgresScaleSection struct {
 type CapacityPlanSection struct {
 	// TenantCount is the modelled fleet size.
 	TenantCount int `json:"tenant_count"`
+	// DormantFraction is the share of the fleet modelled as dormant
+	// (hibernation candidates). 0 reproduces the pre-WS-3 projection.
+	DormantFraction float64 `json:"dormant_fraction"`
+	// EmittingTenantsEffective is the hibernation-adjusted count of
+	// full-fidelity tenants worth of telemetry the data plane carries:
+	// active tenants plus dormant tenants scaled by the near-zero
+	// hibernated sample rate. Equals TenantCount when DormantFraction=0.
+	EmittingTenantsEffective float64 `json:"emitting_tenants_effective"`
 	// TelemetryClasses is the set of telemetry classes the throughput
 	// and subject-cardinality models fan out across.
 	TelemetryClasses []string `json:"telemetry_classes"`
@@ -385,16 +393,24 @@ type ClickHouseWritePlan struct {
 	RowsPerSecPerShard    float64 `json:"rows_per_sec_per_shard"`
 	InsertsPerSecPerShard float64 `json:"inserts_per_sec_per_shard"`
 	MonthlyRows           int64   `json:"monthly_rows"`
-	// PerTenantMonthlyRows is the fleet-wide mean (monthly_rows ÷
-	// tenant_count). With tier sampling on it is an average across
-	// cohorts, not any individual tenant's volume — read the
-	// tier_sampling section for the per-cohort split.
-	PerTenantMonthlyRows   int64   `json:"per_tenant_monthly_rows"`
-	HotStorageGBCompressed float64 `json:"hot_storage_gb_compressed"`
-	IngestBytesPerSec      int64   `json:"ingest_bytes_per_sec"`
-	RecommendedShards      int     `json:"recommended_shards"`
-	RecommendedBatchSize   int     `json:"recommended_batch_size"`
-	Note                   string  `json:"note"`
+	// PerTenantMonthlyRows is the FLEET-WIDE AVERAGE rows/month (total ÷
+	// full tenant count). With DormantFraction > 0 (or tier sampling on)
+	// this is a blended average — active tenants write more than this and
+	// dormant tenants near-zero — not what any individual tenant writes.
+	// Use PerActiveTenantMonthlyRows (or the tier_sampling section) for
+	// per-tenant sizing when a reduction is modelled. Equals
+	// PerActiveTenantMonthlyRows when DormantFraction=0.
+	PerTenantMonthlyRows int64 `json:"per_tenant_monthly_rows"`
+	// PerActiveTenantMonthlyRows is rows/month per ACTIVE (emitting)
+	// tenant: total ÷ active-tenant count. This is the number to size an
+	// individual active tenant against. Equals PerTenantMonthlyRows when
+	// DormantFraction=0.
+	PerActiveTenantMonthlyRows int64   `json:"per_active_tenant_monthly_rows"`
+	HotStorageGBCompressed     float64 `json:"hot_storage_gb_compressed"`
+	IngestBytesPerSec          int64   `json:"ingest_bytes_per_sec"`
+	RecommendedShards          int     `json:"recommended_shards"`
+	RecommendedBatchSize       int     `json:"recommended_batch_size"`
+	Note                       string  `json:"note"`
 }
 
 // NATSSubjectPlan projects subject cardinality + JetStream storage.
