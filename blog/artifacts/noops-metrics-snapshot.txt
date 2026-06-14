@@ -1,0 +1,37 @@
+# SNG NoOps self-operation — live metrics snapshot
+# host=devin-box  git=65824c75cf0d463d64f7ea83ca90f41859b8b76b  generated=2026-06-14T11:51:21Z
+# Source: GET http://127.0.0.1:9090/metrics on the seeded 9-tenant(+platform) stack with
+# WS-3/4/5/6/7/9 controllers enabled. Verbatim scrape, filtered to the workstream metric families.
+
+sng_activity_queue_depth 0
+sng_ai_inference_pool_admitted_total 0
+sng_ai_inference_pool_avg_wait_ms 0
+sng_ai_inference_pool_cancelled_total 0
+sng_ai_inference_pool_completed_total 0
+sng_ai_inference_pool_errors_total 0
+sng_ai_inference_pool_inflight 0
+sng_ai_inference_pool_peak_inflight 0
+sng_ai_inference_pool_peak_queued 0
+sng_ai_inference_pool_queued 0
+sng_ai_inference_pool_rejected_queue_full_total 0
+sng_ai_inference_pool_wait_timeouts_total 0
+sng_capacity_fleet_tenants 10
+sng_capacity_recommendation_pending{axis="clickhouse"} 0
+sng_capacity_recommendation_pending{axis="nats"} 0
+sng_capacity_recommendation_pending{axis="postgres"} 0
+sng_capacity_reconcile_total{outcome="ok"} 3
+sng_capacity_setting{axis="clickhouse",kind="current",knob="batch_size"} 1024
+sng_capacity_setting{axis="clickhouse",kind="current",knob="shards"} 1
+sng_capacity_setting{axis="clickhouse",kind="recommended",knob="batch_size"} 1024
+sng_capacity_setting{axis="clickhouse",kind="recommended",knob="shards"} 1
+sng_capacity_setting{axis="nats",kind="current",knob="partitions"} 1
+sng_capacity_setting{axis="nats",kind="recommended",knob="partitions"} 1
+sng_capacity_setting{axis="postgres",kind="current",knob="backend_conns"} 60
+sng_capacity_setting{axis="postgres",kind="current",knob="pool_size_per_replica"} 20
+sng_capacity_setting{axis="postgres",kind="recommended",knob="backend_conns"} 200
+sng_capacity_setting{axis="postgres",kind="recommended",knob="pool_size_per_replica"} 1
+sng_hibernation_hibernate_failures_total 0
+sng_hibernation_hibernate_total 0
+sng_hibernation_hibernated_tenants 0
+sng_hibernation_wake_latency_seconds_count 0
+sng_hibernation_wake_total 0

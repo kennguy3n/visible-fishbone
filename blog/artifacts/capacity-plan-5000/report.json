@@ -1,0 +1,108 @@
+{
+  "schema_version": 1,
+  "mode": "capacity-plan",
+  "unix_time_secs": 1781437282,
+  "dry_run": false,
+  "capacity_plan": {
+    "tenant_count": 5000,
+    "dormant_fraction": 0,
+    "emitting_tenants_effective": 5000,
+    "telemetry_classes": [
+      "agent",
+      "dns",
+      "flow",
+      "http",
+      "ips",
+      "sdwan",
+      "ztna"
+    ],
+    "postgres": {
+      "replicas": 3,
+      "pool_size_per_replica": 20,
+      "total_app_conns": 60,
+      "peak_concurrent_queries": 10,
+      "recommended_pool_size": 5,
+      "pgbouncer_mode": true,
+      "backend_conns_required": 15,
+      "max_connections": 200,
+      "within_max_connections": true,
+      "note": "pool sized comfortably for the modelled load."
+    },
+    "clickhouse": {
+      "shards": 2,
+      "batch_size": 1024,
+      "total_rows_per_sec": 26500,
+      "rows_per_sec_per_shard": 13250,
+      "inserts_per_sec_per_shard": 12.94,
+      "monthly_rows": 68688000000,
+      "per_tenant_monthly_rows": 13737600,
+      "per_active_tenant_monthly_rows": 13737600,
+      "hot_storage_gb_compressed": 2198,
+      "ingest_bytes_per_sec": 6784000,
+      "recommended_shards": 2,
+      "recommended_batch_size": 13250,
+      "note": "12.94 inserts/s/shard exceeds the ~1/s target; raise CLICKHOUSE_BATCH_SIZE to 13250 (more rows per part, same shard count)."
+    },
+    "nats": {
+      "partitions": 16,
+      "distinct_subjects": 35000,
+      "subjects_per_partition_avg": 2187.5,
+      "subjects_per_partition_max": 2516,
+      "msgs_per_sec": 26500,
+      "retention_hours": 24,
+      "stream_bytes_hot": 732672000000,
+      "recommended_partitions": 16,
+      "note": "subject cardinality per partition within the healthy envelope."
+    },
+    "ai_inference": {
+      "active_tenants": 250,
+      "avg_calls_per_sec": 0.42,
+      "peak_calls_per_sec": 1.25,
+      "offered_concurrency": 4.38,
+      "pool_concurrency": 4,
+      "pool_utilization": 1.09,
+      "recommended_pool_concurrency": 7,
+      "shared_pool_gb": 4.6,
+      "per_tenant_residency_gb": 17000,
+      "memory_savings_factor": 3695.7,
+      "note": "peak demand needs ~4.38 parallel slots; raise AI_INFERENCE_POOL_MAX_CONCURRENT to 7 (bursts above the cap queue fairly up to MaxWait, then degrade to the template path)."
+    },
+    "periodic_sweep": {
+      "jobs": [
+        "idp_directory_sync",
+        "casb_noops_reconcile",
+        "alert_feedback_tuning"
+      ],
+      "job_count": 3,
+      "idle_every": 10,
+      "dormant_every": 100,
+      "active_tenants": 400,
+      "idle_tenants": 600,
+      "dormant_tenants": 4000,
+      "untiered_visits_per_cycle_per_job": 5000,
+      "tiered_visits_per_cycle_per_job": 500,
+      "active_visits_per_cycle": 400,
+      "idle_visits_per_cycle": 60,
+      "dormant_visits_per_cycle": 40,
+      "untiered_visits_per_cycle_total": 15000,
+      "tiered_visits_per_cycle_total": 1500,
+      "reduction_factor": 10,
+      "idle_reduction_factor": 10,
+      "dormant_reduction_factor": 100,
+      "note": "3 job(s) tiered: 5000 tenants/cycle/job → 500.0 (10.0x); idle tail 10.0x, dormant tail 100.0x."
+    }
+  },
+  "theoretical": {
+    "api_p99_ms": 200,
+    "policy_compile_100_rule_ms": 100,
+    "policy_compile_1000_rule_ms": 1000,
+    "rls_overhead_pct": 15
+  },
+  "competitor": {
+    "fortinet_policy_push_p99_ms": 500,
+    "zscaler_tenant_crud_p99_ms": 300,
+    "palo_alto_policy_compile_p99_ms": 800,
+    "caveat": "Fortinet (FortiManager) and Palo Alto (Panorama) numbers are management-plane / ASIC-appliance figures, NOT apples-to-apples with a multi-tenant SaaS control plane. Zscaler (cloud-native) is the most directly comparable. Treat the cross-vendor column as directional only."
+  },
+  "verdicts": []
+}

@@ -1,6 +1,6 @@
 {
   "country": "GB",
-  "created_at": "2026-06-12T00:54:56.80432Z",
+  "created_at": "2026-06-14T11:40:52.231781Z",
   "graph": {
     "default_action": "deny",
     "rules": [
@@ -442,6 +442,6 @@
     "compliance/uk-dpa"
   ],
   "tenant_id": "2d0935d3-8c57-4f66-a5a9-0de368f16a7c",
-  "updated_at": "2026-06-12T00:54:56.80432Z",
+  "updated_at": "2026-06-14T11:40:52.231781Z",
   "version": 1
 }

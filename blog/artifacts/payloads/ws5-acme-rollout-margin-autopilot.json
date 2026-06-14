@@ -1,0 +1,7 @@
+{
+  "capability": "margin_autopilot",
+  "enforces": false,
+  "evaluates": false,
+  "state": "off",
+  "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+}

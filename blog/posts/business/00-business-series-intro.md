@@ -2,74 +2,45 @@
 
 > **Business series, Post 0 of 5 — the intro and the evidence contract.**
 >
-> The nine-post [engineering series](../README.md) walks SNG end-to-end for a
+> The eleven-post [engineering series](../README.md) walks SNG end-to-end for a
 > technical reader. This *business* series is for the buyer: the MSP owner, the
 > SME IT lead, the compliance officer, the CFO. It answers one question per
 > post — *"what job does this do for me, and can you prove it?"* — using the
-> **same live, seeded control plane**, the same console, and the same audit
-> trail an operator sees. Every screenshot below is a real page; every number
-> traces to a captured API payload or a database row this session produced.
+> **same live, seeded control plane**, console, and audit trail an operator
+> sees. Every screenshot is a real page; every number traces to a captured API
+> payload, a database row, or a harness run.
 
-## Who this is for (personas + jobs-to-be-done)
+## The one-line thesis
 
-| Persona | Role | The job they're hiring SNG to do |
-| --- | --- | --- |
-| **Mara** | MSP owner, runs security for 80+ SMEs | "Make a free trial cost me almost nothing until the customer is actually using it." |
-| **Sam** | IT lead at a 200-person retailer | "Show me what SaaS and AI apps my staff use, and tell me what to do — without a SOC team." |
-| **Lena** | Security analyst (the rare SME that has one) | "Stop sensitive data leaking into AI tools without my helpdesk drowning in angry tickets." |
-| **Mara (again)** | Onboarding a new SME | "Get a new customer to a compliant, deny-by-default posture before the kickoff call ends." |
-| **Tom** | Fractional CFO across the MSP's book | "Prove the spend, prove the posture, and tell me honestly where you lose to the incumbents." |
+Most SASE platforms are priced and built for busy enterprises. SNG is built for
+the messy reality of an MSP or SME: **a fleet of mostly-dormant trials, run by a
+tiny team, that still has to be compliant and secure.** This cycle's merged work
+(twelve workstreams on `main` `65824c75`) makes that concrete — dormant trials
+cost almost nothing, the platform operates itself, and the bill is predictable.
 
-## The five posts
+## The five buyer jobs
 
-| # | Post | Job-to-be-done | Capability |
+| Post | Buyer | The job | The proof |
 | --- | --- | --- | --- |
-| 1 | [The NoOps trial that costs almost nothing](08-noops-dormant-trials.md) | Trials that don't bleed money | Activity-tiered dormancy |
-| 2 | [Shadow-IT discovery without the noise](09-shadow-it-noops.md) | See + act on unknown apps | CASB NoOps pipeline |
-| 3 | [PII at the AI edge: coach, don't block](10-ai-dlp-coaching.md) | Stop AI leaks, keep staff happy | Long-tail AI-app DLP + HITL |
-| 4 | [Compliance baselines in minutes](11-compliance-templates.md) | Onboard to a safe default fast | Smart-default policy templates |
-| 5 | [Prove the spend, prove the posture](12-cost-and-competition.md) | CFO sign-off + honest comparison | Self-hosted AI + metering + competitive critique |
+| 1 | Mara, MSP owner | "Trials shouldn't bleed money" | 10× fewer background visits + hibernation to near-zero |
+| 2 | Sam, SME IT lead | "Show me the apps I don't know about" | real CASB engine output with risk + recommended action |
+| 3 | Lena, analyst | "Stop AI leaks without a staff revolt" | coach-first DLP + a human review queue |
+| 4 | Mara, MSP owner | "Onboard a tenant to a safe default, fast" | jurisdiction-correct templates across 5 regimes |
+| 5 | Tom, CFO | "Prove the spend and the posture" | per-tenant margin, a real loss-maker, honest competitive read |
 
-## The evidence contract (unchanged from the engineering series)
+## The evidence contract
 
-1. **Screenshots are of real, seeded pages** — captured this session from the
-   console on `:5173` against the nine-tenant fleet under one MSP. They live in
-   [`../../artifacts/business/`](../../artifacts/business).
-2. **Numbers trace to a source** — every figure is either a captured API
-   payload in [`../../artifacts/payloads/`](../../artifacts/payloads) or a
-   database row produced by a harness in [`../../harness/`](../../harness).
-3. **The CASB classifications and recommendations are produced by the real
-   engine** — not hand-written. The harness in
-   [`../../harness/casb`](../../harness/casb) seeds a shadow-IT inventory and
-   then runs the production `AppNoOpsEngine` over it; the verdicts you see are
-   what the classifier actually emitted.
-4. **The critique is honest** — Post 5 names exactly where SNG loses to
-   Zscaler, Cloudflare, Netskope, Cato, and Fortinet, with their published
-   datasheet figures (and the caveat that ASIC appliances aren't apples-to-apples
-   with software-on-a-VM).
+1. **Screenshots are of real, seeded console pages** — captured via CDP against
+   the nine-tenant fleet, never mock-ups.
+2. **Every number traces to evidence** — a captured payload, a DB row, or a
+   named harness run, all in-repo.
+3. **The AI/CASB output is the production engine's**, not a hand-written example.
+4. **The critique is honest** — every post ends with where SNG falls short, and
+   Post 5 carries the consolidated competitive critique.
 
-## The cast (seeded data)
+## The cast
 
-One MSP, **Northwind Managed Security**, manages a **nine-tenant fleet across
-seven countries, eight industries, and three tiers** — so every screenshot in
-this buyer series shows real, tier-shaped, residency-correct cost/margin data.
-The full per-tenant residency + compliance walk-through is in engineering
-[Post 8](../08-six-scenarios-on-this-vm.md); the cost figures here are the
-fleet-wide metering report.
-
-| | Fleet (9 tenants) |
-| --- | ---: |
-| Revenue / mo | **$8,191** |
-| Projected cost / mo | **≈$4,056** |
-| Blended margin | **≈50%** |
-| Best-margin tenant | Globex Health ≈66.6% |
-| Worst-margin tenant | Maple Health **≈−14.8%** (deliberately underwater — the upsell signal) |
-
-The per-tenant breakdown (worst-margin-first) is in
-[Post 5](12-cost-and-competition.md). Source: the **Fleet cost & margin** table
-on the Metering page, captured live in
-[`biz-10-fleet-margin.png`](../../artifacts/business/biz-10-fleet-margin.png), and
-[`s7-admin-cost-report.json`](../../artifacts/payloads/s7-admin-cost-report.json).
-
-Read on — Post 1 starts with the job that decides whether an MSP can afford to
-offer free trials at all.
+One MSP, nine tenants, seven countries, eight industries, five compliance
+regimes, three service tiers — and one deliberate loss-maker (Maple Health) so
+the money story isn't an all-green fiction. That fleet is the stage for all five
+jobs.

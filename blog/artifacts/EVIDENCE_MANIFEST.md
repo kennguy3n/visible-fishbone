@@ -1,12 +1,37 @@
-# SNG Wave 2 — Evidence Manifest & Provenance Index
+# SNG Wave 3 — Evidence Manifest & Provenance Index
 
-This manifest is the hand-off to the Wave 3 blog rewrite. Every number in the
-rewritten posts must trace back to an artifact listed here. Nothing in this set
-is hand-edited: each payload is a real control-plane API response, each report
-is real harness output, each screenshot is a real CDP capture of the live
-console.
+This manifest is the provenance index for the **merged-state** blog rewrite (the
+12-workstream 5,000-tenant NoOps push). Every number in the posts traces back to
+an artifact listed here. Nothing in this set is hand-edited: each payload is a
+real control-plane API response, each report is real harness output, each
+screenshot is a real CDP capture of the live console. The §0 Wave-3 addendum
+covers the artifacts re-measured/added on merged `main`; §2–§8 retain the
+Wave-2 provenance for artifacts carried forward unchanged.
 
-## 1. Capture context
+## 0. Wave-3 capture context (merged `main`)
+
+| Field | Value |
+| --- | --- |
+| Repo HEAD | `65824c75cf0d463d64f7ea83ca90f41859b8b76b` (`65824c75`) — all 12 workstreams merged |
+| Latest migrations | `068_tenant_hibernation` (WS-3), `069_capability_rollout_monitor_evidence` (WS-5) |
+| Stack | Postgres 16 + NATS 2.10 · `sng-control` on :8080 · vite console on :5173 |
+| Host | 8 vCPU AMD EPYC 7763, 31 GiB RAM, CPU-only |
+| Feature flags this run | **all WS gates ON**: `HIBERNATION_ENABLED`, `CLICKHOUSE_TIER_SAMPLING_ENABLED`, `ROLLOUT_AUTOPILOT_ENABLED`, `CAPACITY_AUTOPILOT_ENABLED`, `METERING_AUTOPILOT_ENABLED`, `AI_INFERENCE_POOL_ENABLED`, `THREAT_INTEL_RETROHUNT`, `CASB_NOOPS_ENABLED`, `IDP_DIRECTORY_SYNC_ENABLED` |
+
+**Re-measured / added on merged `main`:**
+- `efficacy-report.json` — full matrix re-run (overall PASS; `dlp` 3,800/3,800 100%/0%; `dlp_ml_ner` 97.4%; gating + adversarial legs 100%; `malware_wild` 90.1%/9.6% WARN).
+- `multiqueue-micro.json` (5.569 → 28.567 Gbps, 5.13×) and `multi-queue-branch-large.json` (5.063 → 21.564 Gbps, 4.26×) — WS-8 floor→ceiling.
+- `capacity-plan-5000/report.{md,json}` — WS-1 dormancy dividend **10×** (idle 10×, dormant 100× tail; 5,000→500 visits/cycle/job), WS-9 shared AI pool **~3,696×** less memory (4.6 GB vs 17,000 GB), sized ClickHouse/AI/NATS/Postgres recommendations.
+- `noops-metrics-snapshot.txt` — live `sng_capacity_*` (reconcile_total{ok}=3, current-vs-recommended sizing), `sng_hibernation_*`, `sng_ai_inference_pool_*` gauges from the seeded stack.
+- `payloads/ws5-acme-rollout-capabilities.json`, `ws5-acme-rollout-margin-autopilot.json` — WS-5 off→monitor→enforce capability ladder (RLS-scoped).
+- `payloads/ws7-acme-cost.json`, `ws7-maple-cost-report-underwater.json` — WS-7 margin-autopilot input signal (Maple ≈−14.3% underwater).
+- `payloads/s7-admin-cost-report.json` — fleet $8,191 rev / ≈$4,039 cost / ≈$4,152 margin (~50.7%), +66.8% (Globex) → −14.3% (Maple).
+- `screenshots/` — re-shot fleet/metering/CASB-NoOps/cross-tenant-rollout/DLP-review-queue/IdP/app-registry surfaces via CDP.
+- Harness change: `blog/harness/capture/main.go` extended with the WS-5 rollout and WS-7 cost endpoints (reproducible).
+
+---
+
+## 1. Capture context (Wave 2 — retained artifacts)
 
 | Field | Value |
 | --- | --- |
@@ -124,6 +149,23 @@ endpoints a human operator would, so every row is enforcement-path-authentic.
 | §6 stand-in model not 8B | **measured** | `s6-llm-validation-bonsai-8b-q2_0.json` (p50 8.9s / p95 10.8s, 100%) |
 | §7 cost report 4-tenant | **fleet-wide** | `s7-admin-cost-report.json` 9 tenants, ≈50% fleet margin (Maple ≈−14.8% underwater) |
 | §7 global PoP network | **honest gap** | `deploy/pop/` reference topology + `docs/pop-topology.md` ("software you operate, not a rented network") — the one genuinely unclosed competitive gap |
+
+### Wave-3 workstream crosswalk (merged `main`)
+
+| Workstream | Status | Evidence |
+| --- | --- | --- |
+| WS-1 universal dormancy tiering | **measured** | `capacity-plan-5000/report.md` 10× (idle 10×, dormant 100×), 5,000→500 visits/cycle/job |
+| WS-2 `last_active_at` coverage | **merged** | activity signal feeding tiering + hibernation |
+| WS-3 hibernation / scale-to-zero | **wired (default-OFF)** | migration 068; `sng_hibernation_*` gauges in `noops-metrics-snapshot.txt` |
+| WS-4 tier-aware telemetry sampling | **wired (default-OFF)** | `CLICKHOUSE_TIER_SAMPLING_ENABLED` |
+| WS-5 NoOps auto-promotion | **wired (default-OFF)** | migration 069; `ws5-acme-rollout-*.json` off→monitor→enforce ladder |
+| WS-6 capacity autopilot | **running** | `sng_capacity_reconcile_total{ok}=3`, current-vs-recommended gauges |
+| WS-7 margin autopilot | **wired (default-OFF)** | `ws7-maple-cost-report-underwater.json` (Maple −14.3%) |
+| WS-8 multi-queue edge | **measured** | `multiqueue-micro.json` 5.13×, `multi-queue-branch-large.json` 4.26× |
+| WS-9 shared AI inference | **measured** | `capacity-plan-5000/report.md` ~3,696× less memory; `sng_ai_inference_pool_*` gauges |
+| WS-10a IdP / IGA breadth | **wired (default-OFF)** | `IDP_DIRECTORY_SYNC_ENABLED`; `ws10a-idp-directory.png`, `ws10a-app-registry.png` |
+| WS-10b threat-intel breadth | **measured / wired** | JA3 + Suricata rule bundle (`ips`/`ips_adversarial` 100%); retro-hunt `THREAT_INTEL_RETROHUNT` |
+| WS-10c CASB + DLP catalog | **measured / wired** | `dlp` 3,800/3,800; `new-casb-noops-shadow-it.png`; SaaS-API connectors |
 
 ## 8. Known honest gaps (carry into the rewrite unchanged)
 - **Global PoP footprint** vs Zscaler/Cloudflare/Cato: SNG ships software you run, not a rented anycast network. `deploy/pop/` is a reference topology, not a live global edge.

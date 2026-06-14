@@ -1,0 +1,11 @@
+{
+  "clickhouse_monthly_usd": 59.97,
+  "clickhouse_projected_rows": 299846374,
+  "hibernated": false,
+  "nats_monthly_usd": 0,
+  "nats_stream_bytes": 0,
+  "s3_archive_bytes": 674340897146,
+  "s3_monthly_usd": 0.67,
+  "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+  "total_monthly_usd": 60.64
+}

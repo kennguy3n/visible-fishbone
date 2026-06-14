@@ -1,6 +1,6 @@
 {
   "country": "FR",
-  "created_at": "2026-06-12T00:54:57.525211Z",
+  "created_at": "2026-06-14T11:40:52.989648Z",
   "graph": {
     "default_action": "deny",
     "rules": [
@@ -470,6 +470,6 @@
     "compliance/eu-gdpr"
   ],
   "tenant_id": "890486df-98bd-482b-85a8-af361706676f",
-  "updated_at": "2026-06-12T00:54:57.525211Z",
+  "updated_at": "2026-06-14T11:40:52.989648Z",
   "version": 1
 }

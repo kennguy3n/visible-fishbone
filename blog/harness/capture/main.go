@@ -132,6 +132,18 @@ func main() {
 		{"s7-admin-cost-report", "/api/v1/admin/cost-report"},
 		{"s7-acme-compliance-reports", "/api/v1/tenants/" + acme + "/compliance/reports"},
 		{"s7-acme-integrations", "/api/v1/tenants/" + acme + "/integrations"},
+		// Wave 3 — NoOps self-operation surfaces (merged WS-5/WS-7).
+		// The per-tenant capability rollout list is the off->monitor->enforce
+		// state machine the auto-promotion autopilot drives; the
+		// margin_autopilot capability is the WS-7 cost-action gate. Both are
+		// real RLS-scoped reads against the staged-enablement framework.
+		{"ws5-acme-rollout-capabilities", "/api/v1/tenants/" + acme + "/rollout"},
+		{"ws5-acme-rollout-margin-autopilot", "/api/v1/tenants/" + acme + "/rollout/margin_autopilot"},
+		// Per-tenant cost detail + the underwater tenant's cost report — the
+		// WS-7 margin autopilot's input signal (Maple is the deliberately
+		// loss-making tenant in the seeded fleet).
+		{"ws7-acme-cost", "/api/v1/tenants/" + acme + "/cost"},
+		{"ws7-maple-cost-report-underwater", "/api/v1/tenants/" + maple + "/cost-report"},
 	}
 
 	client := &http.Client{Timeout: 15 * time.Second}
