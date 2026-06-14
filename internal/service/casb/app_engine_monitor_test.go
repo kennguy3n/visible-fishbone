@@ -123,6 +123,27 @@ func TestReconcileTenant_EnforceModeRecordsNoEvidence(t *testing.T) {
 	}
 }
 
+// TestReconcileTenant_ZeroSamplesRecordsNothing proves an empty-inventory
+// monitor tenant carries no evidence: with no enforcement candidates the
+// pass observes zero samples, so the engine skips the sink entirely
+// rather than write a useless zero-sample snapshot through to the store.
+func TestReconcileTenant_ZeroSamplesRecordsNothing(t *testing.T) {
+	fx := newEngineFixture(t)
+	fx.engine.SetRolloutGate(stubAutoEnforceGate{state: rollout.StateMonitor, managed: true})
+	sink := &fakeMonitorSink{}
+	fx.engine.SetMonitorMetricsSink(sink)
+
+	tid := fx.newTenant(t)
+	ctx := context.Background()
+	// No apps seeded: the tenant's inventory is empty.
+	if err := fx.engine.ReconcileTenant(ctx, tid); err != nil {
+		t.Fatalf("ReconcileTenant: %v", err)
+	}
+	if calls := sink.snapshot(); len(calls) != 0 {
+		t.Fatalf("sink Record calls = %d, want 0 (zero-sample pass records nothing)", len(calls))
+	}
+}
+
 // TestReconcileTenant_NilSinkSafe proves the sink is optional: a
 // monitor-mode reconcile with no sink wired runs without panicking (nil
 // is a no-op, so wiring is fail-safe).

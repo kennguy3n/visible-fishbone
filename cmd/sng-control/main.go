@@ -852,6 +852,15 @@ func run() error {
 			logger.Warn("sng-control: dlp review recompiler drain incomplete", slog.Any("error", err))
 		}
 	}
+	// Flush any in-flight best-effort monitor-evidence persistence the
+	// rollout recorder dispatched out of band, so a snapshot recorded by
+	// the final reconcile sweep still reaches the store (and a new leader)
+	// before pool.Close. Each write self-bounds via the recorder's store
+	// timeout, so this can never hang the shutdown path; rootCtx is
+	// already cancelled, so no new sweep is launching more.
+	if rc.RolloutMonitorMetrics != nil {
+		rc.RolloutMonitorMetrics.Wait()
+	}
 
 	if err := telShutdown(shutdownCtx); err != nil {
 		logger.Warn("sng-control: telemetry shutdown error", slog.Any("error", err))
@@ -951,6 +960,12 @@ type routerComponents struct {
 	// in which case main() runs its leader-only sweep via
 	// elector.RunIfLeader on cfg.RolloutAutopilot.Interval.
 	RolloutAutopilot *rollout.Autopilot
+	// RolloutMonitorMetrics is the shared monitor-evidence recorder the
+	// capabilities feed and the autopilot reads. Always non-nil. main()
+	// flushes its out-of-band persistence on shutdown via Wait so a
+	// snapshot recorded by the final reconcile sweep still reaches the
+	// store (and a new leader) before the pool closes.
+	RolloutMonitorMetrics *rollout.MonitorMetricsRecorder
 	// MarginAutopilot is the margin/cost NoOps engine (WS-7). main()
 	// runs its leader-only Reconcile sweep when cfg.Metering.AutopilotEnabled.
 	// Always non-nil; the engine is recommend-only unless a tenant opts
@@ -2386,6 +2401,7 @@ func buildRouter(
 		DLPReviewService:       dlpReviewSvc,
 		ActivityRecorder:       activityRecorder,
 		RolloutAutopilot:       rolloutAutopilot,
+		RolloutMonitorMetrics:  rolloutMonitorMetrics,
 		MarginAutopilot:        marginAutopilot,
 		AIInferencePool:        aiInferencePool,
 		HibernationRegistry:    hibRegistry,

@@ -269,9 +269,15 @@ func (e *AppNoOpsEngine) ReconcileTenant(ctx context.Context, tenantID uuid.UUID
 	// In MONITOR (dry-run) the would-have auto-enforce verdicts this pass
 	// observed are the auto-promoter's evidence: feed them as one
 	// per-tenant snapshot. Only monitor produces evidence — in enforce the
-	// engine is already applying, and in off it is recommend-only.
+	// engine is already applying, and in off it is recommend-only. A pass
+	// that engaged no enforcement candidates (e.g. an empty inventory)
+	// carries no evidence: a zero-sample snapshot can neither promote
+	// (MinSamples blocks it) nor demote (no breach on zero samples), so we
+	// skip it rather than write a useless snapshot through to the store.
 	if autoMode == autoEnforceDryRun && e.monitorSink != nil {
-		e.monitorSink.Record(tenantID, rollout.CapabilityNoOpsAutoEnforce, evidence.metrics())
+		if m := evidence.metrics(); m.Samples > 0 {
+			e.monitorSink.Record(tenantID, rollout.CapabilityNoOpsAutoEnforce, m)
+		}
 	}
 	return firstErr
 }

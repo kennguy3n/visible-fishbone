@@ -655,6 +655,10 @@ type MonitorMetricsRecorder struct {
 	store        MonitorMetricsStore
 	storeTimeout time.Duration
 	logger       *slog.Logger
+	// wg tracks in-flight best-effort persistence writes so a graceful
+	// shutdown (or a test) can flush them via Wait; the sweep itself never
+	// waits on them.
+	wg sync.WaitGroup
 }
 
 type monitorKey struct {
@@ -728,7 +732,9 @@ var _ MonitorMetricsSource = (*MonitorMetricsRecorder)(nil)
 // capability), stamped with the current time. A capability calls it once
 // per dry-run pass with that pass's observed metrics. A nil-tenant or
 // invalid capability is ignored. When a store is wired, the snapshot is
-// also write-through persisted (best-effort) so it survives a failover.
+// also persisted (best-effort, out of band) so it survives a failover —
+// the durable write runs in the background so a slow store never adds
+// latency to the leader-only reconcile sweep that calls Record.
 func (r *MonitorMetricsRecorder) Record(tenantID uuid.UUID, c Capability, m MonitorMetrics) {
 	if tenantID == uuid.Nil || !c.Valid() {
 		return
@@ -741,14 +747,31 @@ func (r *MonitorMetricsRecorder) Record(tenantID uuid.UUID, c Capability, m Moni
 	if r.store == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), r.storeTimeout)
-	defer cancel()
-	if err := r.store.PutSnapshot(ctx, tenantID, c, m, observedAt); err != nil {
-		r.logger.WarnContext(ctx, "rollout: persist monitor evidence failed (cache still authoritative)",
-			slog.String("tenant_id", tenantID.String()),
-			slog.String("capability", string(c)),
-			slog.Any("error", err))
-	}
+	// Persist out of band: the in-memory cache is already authoritative,
+	// so the sweep must never block on the store. A failed (or dropped)
+	// write only means a new leader re-accumulates this evidence — a safe
+	// delay, never an unsafe promotion. The conflict guard in the store
+	// keeps newest-observedAt-wins, so out-of-order completion is fine.
+	r.wg.Add(1)
+	go func() {
+		defer r.wg.Done()
+		ctx, cancel := context.WithTimeout(context.Background(), r.storeTimeout)
+		defer cancel()
+		if err := r.store.PutSnapshot(ctx, tenantID, c, m, observedAt); err != nil {
+			r.logger.WarnContext(ctx, "rollout: persist monitor evidence failed (cache still authoritative)",
+				slog.String("tenant_id", tenantID.String()),
+				slog.String("capability", string(c)),
+				slog.Any("error", err))
+		}
+	}()
+}
+
+// Wait blocks until every in-flight best-effort persistence write has
+// completed. It is for graceful shutdown (flush pending evidence before
+// the process exits) and for tests; it is never required for
+// correctness, since the in-memory cache is always authoritative.
+func (r *MonitorMetricsRecorder) Wait() {
+	r.wg.Wait()
 }
 
 // MonitorMetrics implements [MonitorMetricsSource]. It serves the

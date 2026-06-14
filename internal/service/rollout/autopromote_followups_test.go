@@ -2,6 +2,7 @@ package rollout_test
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -10,6 +11,50 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 	"github.com/kennguy3n/visible-fishbone/internal/service/rollout"
 )
+
+// blockingStore is a MonitorMetricsStore whose PutSnapshot blocks until
+// released, so a test can prove Record dispatches persistence out of band
+// (returns before the write finishes) and Wait flushes it.
+type blockingStore struct {
+	release chan struct{}
+	puts    atomic.Int32
+}
+
+func (s *blockingStore) PutSnapshot(ctx context.Context, _ uuid.UUID, _ rollout.Capability, _ rollout.MonitorMetrics, _ time.Time) error {
+	<-s.release
+	s.puts.Add(1)
+	return nil
+}
+
+func (s *blockingStore) GetSnapshot(context.Context, uuid.UUID, rollout.Capability) (rollout.MonitorMetrics, time.Time, bool, error) {
+	return rollout.MonitorMetrics{}, time.Time{}, false, nil
+}
+
+// TestRecorderPersistIsOutOfBand proves the store write never blocks the
+// reconcile sweep: Record returns while a slow PutSnapshot is still in
+// flight (the cache is already authoritative), and Wait drains it.
+func TestRecorderPersistIsOutOfBand(t *testing.T) {
+	t.Parallel()
+	store := &blockingStore{release: make(chan struct{})}
+	rec := rollout.NewMonitorMetricsRecorder(nil, rollout.WithMonitorMetricsStore(store))
+	tenant := uuid.New()
+
+	// Record returns even though PutSnapshot is blocked: the cache holds
+	// the snapshot immediately, the durable write is dispatched out of band.
+	rec.Record(tenant, rollout.CapabilityNoOpsAutoEnforce, rollout.MonitorMetrics{Samples: 42})
+	if m, _, _ := rec.MonitorMetrics(context.Background(), tenant, rollout.CapabilityNoOpsAutoEnforce); m.Samples != 42 {
+		t.Fatalf("cache samples = %d, want 42 (served without waiting on the store)", m.Samples)
+	}
+	if got := store.puts.Load(); got != 0 {
+		t.Fatalf("PutSnapshot completed %d times while blocked, want 0", got)
+	}
+
+	close(store.release) // let the in-flight write proceed.
+	rec.Wait()
+	if got := store.puts.Load(); got != 1 {
+		t.Fatalf("after Wait, PutSnapshot count = %d, want 1", got)
+	}
+}
 
 // --- Item 2: per-tenant sticky_off / exclusion ---
 
@@ -160,6 +205,7 @@ func TestRecorderPersistsAndHydratesAcrossFailover(t *testing.T) {
 	leader1 := rollout.NewMonitorMetricsRecorder(clk.Now, rollout.WithMonitorMetricsStore(store))
 	recordedAt := clk.Now()
 	leader1.Record(tenant, capID, rollout.MonitorMetrics{Samples: 300, Errors: 1, Denies: 5})
+	leader1.Wait() // flush the out-of-band persist before the new leader reads.
 
 	// New leader: empty cache, same store.
 	clk.Advance(2 * time.Hour)
@@ -227,6 +273,7 @@ func TestAutopilotPromotionClockSurvivesFailover(t *testing.T) {
 			t.Fatalf("after enrol state = %s, want monitor", rec.State)
 		}
 		leader1.Record(tenant, capID, rollout.MonitorMetrics{Samples: 500, Errors: 2, Denies: 10})
+		leader1.Wait() // flush the out-of-band persist before the failover read.
 
 		// Dwell window elapses, then the leader fails over: a NEW recorder
 		// (empty in-memory cache) sharing the same store, driving a new
