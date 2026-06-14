@@ -793,6 +793,28 @@ type ManagedDNSFeeds struct {
 	// bridged domains on top of the store's ingest floor, mirroring the
 	// IOC enforcement compiler's per-rule gate. THREAT_INTEL_IOC_MIN_CONFIDENCE.
 	IOCMinConfidence float64
+	// IPSRulesEnabled gates the leader-only IPS rule producer: when on,
+	// aggregated IOCs (JA3 fingerprints, malware/C2 domains, IPs) are
+	// compiled into a signed Suricata rule bundle and published on
+	// IPSRulesSubject for the edge's sng-ips consumer to verify, stage
+	// and hot-swap. Independent of (and default-OFF like) Enabled: the
+	// DNS feed loop and the IPS rule loop are separate producers.
+	// THREAT_INTEL_IPS_RULES.
+	IPSRulesEnabled bool
+	// IPSRulesSubject overrides the NATS subject the signed IPS rule
+	// bundle is published on. Empty applies the pipeline default
+	// (sng.platform.policy.ips.rules.v1). THREAT_INTEL_IPS_SUBJECT.
+	IPSRulesSubject string
+	// IPSRulesMinConfidence is the confidence floor an indicator must
+	// clear to be compiled into a Suricata rule, on top of the store's
+	// ingest floor. Mirrors IOCMinConfidence for the IPS tier.
+	// THREAT_INTEL_IPS_MIN_CONFIDENCE.
+	IPSRulesMinConfidence float64
+	// IPSRulesRefreshInterval is the publish cadence of the IPS rule
+	// producer. Zero (the default) falls back to RefreshInterval, so the
+	// IPS bundle and the DNS feed bundle move together unless an operator
+	// deliberately decouples them. THREAT_INTEL_IPS_REFRESH_INTERVAL.
+	IPSRulesRefreshInterval time.Duration
 }
 
 // Log carries structured-logging configuration.
@@ -1922,6 +1944,10 @@ func Load() (Config, error) {
 			MaxFeedBytes:     int64(getIntLenient("THREAT_INTEL_MAX_FEED_BYTES", 0)),
 			IOCCategory:      getStr("THREAT_INTEL_IOC_CATEGORY", "threat-intel-ioc"),
 			IOCMinConfidence: getFloatLenient("THREAT_INTEL_IOC_MIN_CONFIDENCE", 0),
+			// IPSRulesEnabled is parsed strictly below (default-OFF flag).
+			IPSRulesSubject:         getStr("THREAT_INTEL_IPS_SUBJECT", ""),
+			IPSRulesMinConfidence:   getFloatLenient("THREAT_INTEL_IPS_MIN_CONFIDENCE", 0.5),
+			IPSRulesRefreshInterval: getDuration("THREAT_INTEL_IPS_REFRESH_INTERVAL", 0),
 		},
 	}
 
@@ -2214,6 +2240,10 @@ func Load() (Config, error) {
 		// the pipeline flag above: a typo should fail boot, not silently
 		// leave aggregated domains out of the DNS enforcement path.
 		{"THREAT_INTEL_BRIDGE_IOC_STORE", false, &cfg.ManagedDNSFeeds.BridgeIOCStore},
+		// IPS rule producer. DEFAULT-OFF and parsed strictly for the same
+		// reason as the pipeline flag above: a typo should fail boot, not
+		// silently leave the IOC->Suricata rule bundle unpublished.
+		{"THREAT_INTEL_IPS_RULES", false, &cfg.ManagedDNSFeeds.IPSRulesEnabled},
 		{"METRICS_ENABLED", true, &cfg.Metrics.Enabled},
 		{"POP_REBALANCE_ENABLED", true, &cfg.PoP.RebalanceEnabled},
 		// Per-tenant activity tracking. Default ON: it is the writer

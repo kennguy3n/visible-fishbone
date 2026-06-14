@@ -191,12 +191,13 @@ func (s *IOCStore) Persist(ctx context.Context, p IOCPersister) (int, error) {
 		return 0, nil
 	}
 	snap := s.Snapshot()
-	all := make([]IOC, 0, len(snap.Domains)+len(snap.IPs)+len(snap.CIDRs)+len(snap.URLs)+len(snap.Hashes))
+	all := make([]IOC, 0, len(snap.Domains)+len(snap.IPs)+len(snap.CIDRs)+len(snap.URLs)+len(snap.Hashes)+len(snap.JA3s))
 	all = append(all, snap.Domains...)
 	all = append(all, snap.IPs...)
 	all = append(all, snap.CIDRs...)
 	all = append(all, snap.URLs...)
 	all = append(all, snap.Hashes...)
+	all = append(all, snap.JA3s...)
 	if err := p.SaveIOCs(ctx, all); err != nil {
 		return 0, err
 	}
@@ -242,6 +243,7 @@ type IOCCounts struct {
 	CIDRs   int
 	URLs    int
 	Hashes  int
+	JA3s    int
 	Total   int
 }
 
@@ -269,6 +271,8 @@ func (s *IOCStore) SizeByType() IOCCounts {
 			c.URLs++
 		case IOCTypeHash:
 			c.Hashes++
+		case IOCTypeJA3:
+			c.JA3s++
 		}
 		c.Total++
 	}
@@ -303,6 +307,8 @@ func (s *IOCStore) SizeBySource() map[string]IOCCounts {
 			c.URLs++
 		case IOCTypeHash:
 			c.Hashes++
+		case IOCTypeJA3:
+			c.JA3s++
 		}
 		c.Total++
 		out[ioc.Source] = c
@@ -338,6 +344,8 @@ func (s *IOCStore) Snapshot() IOCSnapshot {
 			snap.URLs = append(snap.URLs, ioc)
 		case IOCTypeHash:
 			snap.Hashes = append(snap.Hashes, ioc)
+		case IOCTypeJA3:
+			snap.JA3s = append(snap.JA3s, ioc)
 		}
 	}
 	sortIOCs(snap.Domains)
@@ -345,6 +353,7 @@ func (s *IOCStore) Snapshot() IOCSnapshot {
 	sortIOCs(snap.CIDRs)
 	sortIOCs(snap.URLs)
 	sortIOCs(snap.Hashes)
+	sortIOCs(snap.JA3s)
 	return snap
 }
 
@@ -356,6 +365,7 @@ type IOCSnapshot struct {
 	CIDRs   []IOC
 	URLs    []IOC
 	Hashes  []IOC
+	JA3s    []IOC
 }
 
 func sortIOCs(s []IOC) {
@@ -474,6 +484,13 @@ func candidateKeys(raw string) []string {
 	if v, algo, ok := normalizeHash(raw); ok {
 		_ = algo
 		keys = append(keys, string(IOCTypeHash)+"\x00"+v)
+	}
+	// A 32-hex value is shape-ambiguous between an MD5 file hash
+	// and a JA3 fingerprint; the two are stored under distinct
+	// keys, so probe both so a live-traffic query of a JA3 string
+	// matches a stored JA3 IOC (the hash key is added just above).
+	if v, ok := normalizeJA3(raw); ok {
+		keys = append(keys, string(IOCTypeJA3)+"\x00"+v)
 	}
 	if v, ok := normalizeDomain(raw); ok {
 		keys = append(keys, string(IOCTypeDomain)+"\x00"+v)

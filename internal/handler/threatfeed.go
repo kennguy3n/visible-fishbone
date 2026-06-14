@@ -9,6 +9,7 @@ import (
 
 	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/service/ai"
+	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
 )
 
 // Threat-feed observability permission. Feeds are platform-global
@@ -82,8 +83,10 @@ func (h *ThreatFeedHandler) requirePlatform(w http.ResponseWriter, r *http.Reque
 type IOCCountsResponse struct {
 	Domains int `json:"domains"`
 	IPs     int `json:"ips"`
+	CIDRs   int `json:"cidrs"`
 	URLs    int `json:"urls"`
 	Hashes  int `json:"hashes"`
+	JA3s    int `json:"ja3s"`
 	Total   int `json:"total"`
 }
 
@@ -91,10 +94,28 @@ func toIOCCountsResponse(c ai.IOCCounts) IOCCountsResponse {
 	return IOCCountsResponse{
 		Domains: c.Domains,
 		IPs:     c.IPs,
+		CIDRs:   c.CIDRs,
 		URLs:    c.URLs,
 		Hashes:  c.Hashes,
+		JA3s:    c.JA3s,
 		Total:   c.Total,
 	}
+}
+
+// IPSRuleEfficacyResponse is the JSON projection of
+// ai.IPSRuleEfficacy: the per-category Suricata-rule cardinality the
+// live store compiles into the signed IPS rule bundle.
+type IPSRuleEfficacyResponse struct {
+	Total      int            `json:"total"`
+	ByCategory map[string]int `json:"by_category"`
+}
+
+func toIPSRuleEfficacyResponse(e ai.IPSRuleEfficacy) IPSRuleEfficacyResponse {
+	byCat := make(map[string]int, len(e.ByCategory))
+	for _, cat := range policy.AllIPSRuleCategories() {
+		byCat[string(cat)] = e.ByCategory[cat]
+	}
+	return IPSRuleEfficacyResponse{Total: e.Total, ByCategory: byCat}
 }
 
 // FeedHealthResponse is the JSON projection of ai.FeedHealth.
@@ -121,6 +142,7 @@ type FeedCoverageResponse struct {
 	Feeds       []FeedHealthResponse     `json:"feeds"`
 	Store       IOCCountsResponse        `json:"store"`
 	BySource    []SourceCoverageResponse `json:"by_source"`
+	IPSRules    IPSRuleEfficacyResponse  `json:"ips_rules"`
 }
 
 // coverage returns the live feed health + indicator-coverage view.
@@ -168,5 +190,6 @@ func (h *ThreatFeedHandler) coverage(w http.ResponseWriter, r *http.Request) {
 		Feeds:       feeds,
 		Store:       toIOCCountsResponse(cov.Store),
 		BySource:    bySource,
+		IPSRules:    toIPSRuleEfficacyResponse(cov.IPSRules),
 	})
 }

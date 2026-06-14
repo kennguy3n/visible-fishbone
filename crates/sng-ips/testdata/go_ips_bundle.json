@@ -1,0 +1,23 @@
+{
+  "envelope": {
+    "alg": "ed25519",
+    "signing_key_id": "79b5562e8fe654f9",
+    "public_key": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
+    "body": "haF2zAGjcmV2zwAAAAAAAAAqpGNvbXC4c25nLWNvbnRyb2wvdGhyZWF0LWludGVspXJ1bGVz2gOeYWxlcnQgaXAgJEhPTUVfTkVUIGFueSAtPiAxOTguNTEuMTAwLjAvMjQgYW55IChtc2c6IlNORyBUSFJFQVRJTlRFTCBET1MgZGVzdGluYXRpb24gYWRkcmVzcyI7IGNsYXNzdHlwZTpkZW5pYWwtb2Ytc2VydmljZTsgc2lkOjMyMDAwMDAwMDA7IHJldjoxOyBtZXRhZGF0YTpzbmdfdGhyZWF0aW50ZWwgY2lkciwgc25nX3NvdXJjZSBjZXJ0LCBzbmdfY29uZmlkZW5jZSBoaWdoOykKYWxlcnQgZG5zICRIT01FX05FVCBhbnkgLT4gYW55IGFueSAobXNnOiJTTkcgVEhSRUFUSU5URUwgTUFMV0FSRSBkbnMgcXVlcnkiOyBkbnMucXVlcnk7IGNvbnRlbnQ6Im1hbHdhcmUtZHJvcC5leGFtcGxlIjsgbm9jYXNlOyBjbGFzc3R5cGU6dHJvamFuLWFjdGl2aXR5OyBzaWQ6MzIwMDAwMDAwMTsgcmV2OjE7IG1ldGFkYXRhOnNuZ190aHJlYXRpbnRlbCBkb21haW4sIHNuZ19zb3VyY2UgYWJ1c2UuY2gsIHNuZ19jb25maWRlbmNlIGhpZ2g7KQphbGVydCBpcCAkSE9NRV9ORVQgYW55IC0+IDIwMy4wLjExMy4xMCBhbnkgKG1zZzoiU05HIFRIUkVBVElOVEVMIEVYRklMIGRlc3RpbmF0aW9uIGFkZHJlc3MiOyBzaWQ6MzIwMDAwMDAwMjsgcmV2OjE7IG1ldGFkYXRhOnNuZ190aHJlYXRpbnRlbCBpcCwgc25nX3NvdXJjZSBmZW9kbywgc25nX2NvbmZpZGVuY2UgaGlnaDspCmFsZXJ0IHRscyAkSE9NRV9ORVQgYW55IC0+ICRFWFRFUk5BTF9ORVQgYW55IChtc2c6IlNORyBUSFJFQVRJTlRFTCBDMiBqYTMgY2xpZW50IGZpbmdlcnByaW50IjsgamEzLmhhc2g7IGNvbnRlbnQ6ImU3ZDcwNWEzMjg2ZTE5ZWE0MmY1ODdiMzQ0ZWU2ODY1IjsgY2xhc3N0eXBlOmNvbW1hbmQtYW5kLWNvbnRyb2w7IHNpZDozMjAwMDAwMDAzOyByZXY6MTsgbWV0YWRhdGE6c25nX3RocmVhdGludGVsIGphMywgc25nX3NvdXJjZSBvdHgsIHNuZ19jb25maWRlbmNlIGhpZ2g7KQqjc3JjqmN1c3RvbV9vcmc=",
+    "signature": "ktHvcVdMG946V72kKoTkVjeDjKiDptKefqUudAydBl+4iajSE9FJwraCpIRyNaFwwLnqOOZ0tbmfJjxHLmucAQ=="
+  },
+  "public_key_hex": "79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664",
+  "signing_key_id": "79b5562e8fe654f9",
+  "version": 42,
+  "rules_text": "alert ip $HOME_NET any -\u003e 198.51.100.0/24 any (msg:\"SNG THREATINTEL DOS destination address\"; classtype:denial-of-service; sid:3200000000; rev:1; metadata:sng_threatintel cidr, sng_source cert, sng_confidence high;)\nalert dns $HOME_NET any -\u003e any any (msg:\"SNG THREATINTEL MALWARE dns query\"; dns.query; content:\"malware-drop.example\"; nocase; classtype:trojan-activity; sid:3200000001; rev:1; metadata:sng_threatintel domain, sng_source abuse.ch, sng_confidence high;)\nalert ip $HOME_NET any -\u003e 203.0.113.10 any (msg:\"SNG THREATINTEL EXFIL destination address\"; sid:3200000002; rev:1; metadata:sng_threatintel ip, sng_source feodo, sng_confidence high;)\nalert tls $HOME_NET any -\u003e $EXTERNAL_NET any (msg:\"SNG THREATINTEL C2 ja3 client fingerprint\"; ja3.hash; content:\"e7d705a3286e19ea42f587b344ee6865\"; classtype:command-and-control; sid:3200000003; rev:1; metadata:sng_threatintel ja3, sng_source otx, sng_confidence high;)\n",
+  "by_category": {
+    "c2": 1,
+    "dos": 1,
+    "exfiltration": 1,
+    "exploit": 0,
+    "lateral_movement": 0,
+    "malware": 1,
+    "other": 0
+  },
+  "total": 4
+}
