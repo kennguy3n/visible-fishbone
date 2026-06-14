@@ -629,6 +629,144 @@ fn indonesia_nik(counter: usize) -> (String, String) {
     (format!("{province:02}{tail}"), format!("99{tail}"))
 }
 
+/// Ireland PPSN: seven digits + a weighted mod-23 check letter
+/// (alphabet `WABCDEFGHIJKLMNOPQRSTUV`, weights 8..=2). Invalid form:
+/// the next letter in the alphabet.
+fn ireland_ppsn(counter: usize) -> (String, String) {
+    const ALPHA: &[u8; 23] = b"WABCDEFGHIJKLMNOPQRSTUV";
+    let mut body = [0u8; 7];
+    for (i, b) in body.iter_mut().enumerate() {
+        *b = ((counter + i * 7) % 10) as u8;
+    }
+    let sum: u32 = (0..7).map(|i| u32::from(body[i]) * (8 - i as u32)).sum();
+    let idx = (sum % 23) as usize;
+    let valid = format!("{}{}", digits_to_string(&body), char::from(ALPHA[idx]));
+    let invalid = format!(
+        "{}{}",
+        digits_to_string(&body),
+        char::from(ALPHA[(idx + 1) % 23])
+    );
+    (valid, invalid)
+}
+
+/// Switzerland AHV: `756` + nine digits + an EAN-13 check digit
+/// (weights alternate 1,3 from the left). Invalid form: a wrong check.
+fn switzerland_ahv(counter: usize) -> (String, String) {
+    let mut d = vec![7u8, 5, 6];
+    for i in 0..9 {
+        d.push(((counter + i * 3) % 10) as u8);
+    }
+    let sum: u32 = (0..12)
+        .map(|i| u32::from(d[i]) * if i % 2 == 0 { 1 } else { 3 })
+        .sum();
+    let check = ((10 - sum % 10) % 10) as u8;
+    let valid = format!("{}{}", digits_to_string(&d), char::from(b'0' + check));
+    let invalid = format!(
+        "{}{}",
+        digits_to_string(&d),
+        char::from(b'0' + (check + 1) % 10)
+    );
+    (valid, invalid)
+}
+
+/// Israel Teudat Zehut: eight body digits + a Luhn-style check (odd
+/// positions weight 1, even weight 2). Invalid form: a wrong check.
+fn israel_id(counter: usize) -> (String, String) {
+    let mut body = [0u8; 8];
+    for (i, b) in body.iter_mut().enumerate() {
+        *b = ((counter + i * 5) % 10) as u8;
+    }
+    let mut sum = 0u32;
+    for (i, &digit) in body.iter().enumerate() {
+        let mut v = u32::from(digit) * if i % 2 == 0 { 1 } else { 2 };
+        if v > 9 {
+            v -= 9;
+        }
+        sum += v;
+    }
+    let check = ((10 - sum % 10) % 10) as u8;
+    let valid = format!("{}{}", digits_to_string(&body), char::from(b'0' + check));
+    let invalid = format!(
+        "{}{}",
+        digits_to_string(&body),
+        char::from(b'0' + (check + 1) % 10)
+    );
+    (valid, invalid)
+}
+
+/// Romania CNP: sex/century digit + DOB + county + serial + a weighted
+/// mod-11 check digit (weights `279146358279`). Invalid form: a wrong
+/// check.
+fn romania_cnp(counter: usize) -> (String, String) {
+    const W: [u32; 12] = [2, 7, 9, 1, 4, 6, 3, 5, 8, 2, 7, 9];
+    let sex = (counter % 8 + 1) as u8;
+    let yy = (counter % 100) as u32;
+    let mm = (counter % 12 + 1) as u32;
+    let dd = (counter % 28 + 1) as u32;
+    let county = (counter % 52 + 1) as u32;
+    let serial = (counter % 999 + 1) as u32;
+    let body = vec![
+        sex,
+        (yy / 10) as u8,
+        (yy % 10) as u8,
+        (mm / 10) as u8,
+        (mm % 10) as u8,
+        (dd / 10) as u8,
+        (dd % 10) as u8,
+        (county / 10) as u8,
+        (county % 10) as u8,
+        (serial / 100 % 10) as u8,
+        (serial / 10 % 10) as u8,
+        (serial % 10) as u8,
+    ];
+    let sum: u32 = (0..12).map(|i| W[i] * u32::from(body[i])).sum();
+    let r = sum % 11;
+    let check = if r == 10 { 1 } else { r as u8 };
+    let valid = format!("{}{}", digits_to_string(&body), char::from(b'0' + check));
+    let invalid = format!(
+        "{}{}",
+        digits_to_string(&body),
+        char::from(b'0' + (check + 1) % 10)
+    );
+    (valid, invalid)
+}
+
+/// Mexico CURP: name letters + DOB + sex + state + consonants +
+/// homoclave + a RENAPO mod-10 check digit (dictionary `0-9 A-N Ñ O-Z`,
+/// weights 18..=2). Invalid form: a wrong check.
+fn mexico_curp(counter: usize) -> (String, String) {
+    const NAMES: [&str; 5] = ["PEPP", "MARL", "GOHM", "LOAN", "RAQU"];
+    const CONS: [&str; 5] = ["RRL", "NXX", "BCD", "FGH", "JKL"];
+    const STATES: [&str; 6] = ["AS", "BC", "DF", "JC", "NL", "VZ"];
+    fn value(ch: char) -> u32 {
+        match ch {
+            '0'..='9' => ch as u32 - '0' as u32,
+            'A'..='N' => ch as u32 - 'A' as u32 + 10,
+            'Ñ' => 24,
+            'O'..='Z' => ch as u32 - 'O' as u32 + 25,
+            _ => 0,
+        }
+    }
+    let name = NAMES[counter % NAMES.len()];
+    let cons = CONS[counter % CONS.len()];
+    let state = STATES[counter % STATES.len()];
+    let yy = counter % 100;
+    let mm = counter % 12 + 1;
+    let dd = counter % 28 + 1;
+    let sex = if counter.is_multiple_of(2) { 'H' } else { 'M' };
+    let homoclave = counter % 10;
+    let head = format!("{name}{yy:02}{mm:02}{dd:02}{sex}{state}{cons}{homoclave}");
+    let sum: u32 = head
+        .chars()
+        .enumerate()
+        .map(|(i, ch)| value(ch) * (18 - i as u32))
+        .sum();
+    let check = (10 - sum % 10) % 10;
+    let valid = format!("{head}{check}");
+    let invalid = format!("{head}{}", (check + 1) % 10);
+    (valid, invalid)
+}
+
 type Gen = fn(usize) -> (String, String);
 
 /// All validated detectors and their input generators.
@@ -659,6 +797,12 @@ fn detectors() -> Vec<(&'static str, Gen)> {
         ("eu_vat", eu_vat),
         ("philippines_umid", philippines_umid),
         ("indonesia_nik", indonesia_nik),
+        // --- WS-10c jurisdiction breadth ---
+        ("ireland_ppsn", ireland_ppsn),
+        ("switzerland_ahv", switzerland_ahv),
+        ("israel_id", israel_id),
+        ("romania_cnp", romania_cnp),
+        ("mexico_curp", mexico_curp),
     ]
 }
 
@@ -775,10 +919,12 @@ fn features() -> Vec<Feature> {
              algorithm (ISO 7064 Mod 11-2, weighted mod-11, Luhn, Verhoeff, per-series \
              tables) plus date/prefix invariants; a pass boosts confidence to 1.0, a \
              fail suppresses the match — this is what keeps the false-positive rate at 0%.",
-            "24 validated detectors: China, Japan, Korea, Singapore, Malaysia, \
-             Thailand, India (Aadhaar+PAN), UAE, Saudi, Kuwait, plus the WS5 breadth — \
+            "29 validated detectors: China, Japan, Korea, Singapore, Malaysia, \
+             Thailand, India (Aadhaar+PAN), UAE, Saudi, Kuwait, the WS5 breadth — \
              UK (NINO+NHS), Canada SIN, Australia (TFN+Medicare), Germany Personalausweis, \
-             France INSEE, Brazil (CPF+CNPJ), EU (IBAN+VAT), Philippines UMID, Indonesia NIK",
+             France INSEE, Brazil (CPF+CNPJ), EU (IBAN+VAT), Philippines UMID, Indonesia NIK — \
+             plus the WS-10c breadth — Ireland PPSN, Switzerland AHV, Israel Teudat Zehut, \
+             Romania CNP, Mexico CURP",
         ),
         f(
             "Proximity context analysis",

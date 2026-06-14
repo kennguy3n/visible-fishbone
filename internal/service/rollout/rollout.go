@@ -123,6 +123,13 @@ const (
 	// provisioning and off-boarding local users from a tenant's upstream
 	// directory.
 	CapabilityIDPDirectorySync Capability = "idp_directory_sync"
+	// CapabilityMarginAutopilot is the margin/cost autopilot (WS-7): the
+	// metering engine's NoOps actions that act on underwater, over-budget
+	// and anomalous tenants. Unlike the other gates it governs only the
+	// engine's narrow DESTRUCTIVE auto-action (pinning a trial's hard
+	// budget cap); recommendation + audit always run regardless of state,
+	// so off (the default) is recommend-only rather than do-nothing.
+	CapabilityMarginAutopilot Capability = "margin_autopilot"
 )
 
 // AllCapabilities returns every capability the framework governs, in a
@@ -134,13 +141,14 @@ func AllCapabilities() []Capability {
 		CapabilityClamAVSWG,
 		CapabilityNoOpsAutoEnforce,
 		CapabilityIDPDirectorySync,
+		CapabilityMarginAutopilot,
 	}
 }
 
 // Valid reports whether c is a known capability.
 func (c Capability) Valid() bool {
 	switch c {
-	case CapabilityClamAVSWG, CapabilityNoOpsAutoEnforce, CapabilityIDPDirectorySync:
+	case CapabilityClamAVSWG, CapabilityNoOpsAutoEnforce, CapabilityIDPDirectorySync, CapabilityMarginAutopilot:
 		return true
 	default:
 		return false

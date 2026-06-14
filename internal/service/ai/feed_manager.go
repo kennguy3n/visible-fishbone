@@ -335,6 +335,40 @@ func (m *FeedManager) Health(now time.Time) []FeedHealth {
 	return out
 }
 
+// FeedCoverage is the operator-facing "what threat intel is live"
+// view: each feed's health alongside the active indicator
+// cardinality currently in the shared store, both in aggregate and
+// attributed to the source feed that contributed it. It composes
+// Health (staleness) with the store's SizeByType / SizeBySource so
+// an operator can answer "is every feed fresh, and what is each one
+// actually contributing right now?" in a single read.
+type FeedCoverage struct {
+	// GeneratedAt is the instant the view was computed (UTC).
+	GeneratedAt time.Time
+	// Feeds is the per-feed staleness/health view.
+	Feeds []FeedHealth
+	// Store is the active indicator cardinality across all feeds.
+	Store IOCCounts
+	// BySource attributes the active cardinality to the source feed
+	// that contributed it. Keyed on IOC.Source; an indicator with no
+	// source is keyed under "".
+	BySource map[string]IOCCounts
+}
+
+// Coverage computes the operator-facing feed-coverage view as of
+// now: per-feed health plus the live indicator cardinality of the
+// shared store (aggregate and per-source). It is a read-only
+// composition of Health and the store size accessors, safe to call
+// concurrently with feed refreshes.
+func (m *FeedManager) Coverage(now time.Time) FeedCoverage {
+	return FeedCoverage{
+		GeneratedAt: now.UTC(),
+		Feeds:       m.Health(now),
+		Store:       m.store.SizeByType(),
+		BySource:    m.store.SizeBySource(),
+	}
+}
+
 // stalenessThreshold is staleFactor x the feed's effective refresh
 // interval.
 func (m *FeedManager) stalenessThreshold(feed Feed) time.Duration {

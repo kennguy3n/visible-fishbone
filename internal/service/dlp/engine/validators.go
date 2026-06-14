@@ -79,6 +79,17 @@ func validatorFor(name string) func(string) bool {
 		return philippinesUMID
 	case "indonesia_nik":
 		return indonesiaNIK
+	// WS-10c jurisdiction breadth — twins in validators_ws10c.go.
+	case "ireland_ppsn":
+		return irelandPPSN
+	case "switzerland_ahv":
+		return switzerlandAHV
+	case "israel_id":
+		return israelID
+	case "romania_cnp":
+		return romaniaCNP
+	case "mexico_curp":
+		return mexicoCURP
 	// Secret / credential detectors — twins in validators.rs.
 	case "private_key_block":
 		return privateKeyBlock
