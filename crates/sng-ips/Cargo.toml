@@ -60,6 +60,9 @@ pretty_assertions = { workspace = true }
 tempfile = { workspace = true }
 rmp-serde = { workspace = true }
 rand_core = { workspace = true }
+# Decode the Go-produced golden bundle fixture (base64 body/signature)
+# in the cross-language verify test.
+base64 = { workspace = true }
 
 [lints]
 workspace = true

@@ -491,6 +491,36 @@ func run() error {
 		logger.Info("sng-control: managed threat-intel feed pipeline disabled (THREAT_INTEL_ENABLED=false)")
 	}
 
+	// Threat-intel -> Suricata IPS rule producer. Independent of and
+	// gated separately from the DNS feed loop above: when enabled, the
+	// leader compiles aggregated IOCs (JA3 fingerprints, malware/C2
+	// domains, IPs) into a signed Suricata rule bundle and publishes it
+	// for the edge's sng-ips consumer to verify/stage/hot-swap. Leader-
+	// gated for the same reason as the DNS loop (one producer per
+	// interval, not one per replica). Requires a feed manager to source
+	// the rules from; without one it is a no-op with a loud log.
+	if cfg.ManagedDNSFeeds.IPSRulesEnabled {
+		if feedMgr == nil {
+			logger.Warn("sng-control: THREAT_INTEL_IPS_RULES=true but no feed manager is configured; IPS rule producer not started")
+		} else {
+			rules := func() (string, int) {
+				rs := feedMgr.CompileIPSRules()
+				return rs.RulesText, rs.Total
+			}
+			ipsRuleSvc, err := buildIPSRulePipeline(&cfg, js, logger, rules)
+			if err != nil {
+				return fmt.Errorf("build threat-intel ips rule pipeline: %w", err)
+			}
+			interval := cfg.ManagedDNSFeeds.RefreshInterval
+			go elector.RunIfLeader(rootCtx, "threatintel-ips-rules", func(ctx context.Context) {
+				ipsRuleSvc.Run(ctx, interval)
+			})
+			logger.Info("sng-control: threat-intel IPS rule producer enabled (runs on leader only)",
+				slog.Duration("refresh_interval", interval),
+				slog.Float64("min_confidence", cfg.ManagedDNSFeeds.IPSRulesMinConfidence))
+		}
+	}
+
 	// Shadow-IT auto-discovery: the telemetry consumer feeds every
 	// processed DNS/HTTP event's hostname to this discoverer, which
 	// turns the SWG exhaust into a per-tenant inventory of SaaS apps
@@ -1614,6 +1644,7 @@ func buildRouter(
 		}),
 		aisvc.WithPersister(iocPersister, cfg.ThreatIntel.PersistInterval),
 		aisvc.WithLeaderCheck(isLeader),
+		aisvc.WithIPSEfficacyMinConfidence(cfg.ManagedDNSFeeds.IPSRulesMinConfidence),
 	)
 
 	// WS12: per-tenant / per-class telemetry sampling overrides sourced
@@ -3655,6 +3686,27 @@ func buildThreatIntelPipeline(cfg *config.Config, js jetstream.JetStream, logger
 		threatintel.WithLogger(logger),
 		threatintel.WithSubject(mf.Subject),
 		threatintel.WithKeyID(mf.KeyID),
+	)
+}
+
+// buildIPSRulePipeline wires the threat-intel Suricata rule producer:
+// it signs the compiled rule set (sourced from the in-process IOC
+// store via the injected rules provider) with the same Ed25519 key
+// material as the DNS feed pipeline and publishes the signed bundle on
+// the IPS rule subject for the edge's sng-ips consumer.
+func buildIPSRulePipeline(cfg *config.Config, js jetstream.JetStream, logger *slog.Logger, rules threatintel.IPSRuleProvider) (*threatintel.IPSRuleService, error) {
+	mf := cfg.ManagedDNSFeeds
+
+	signer, err := threatIntelSigner(mf.SigningKeyHex, logger)
+	if err != nil {
+		return nil, err
+	}
+
+	publisher := natsBundlePublisher{pub: sngnats.NewPublisher(js, &cfg.NATS, cfg.AppName+"/threatintel-ips")}
+
+	return threatintel.NewIPSRuleService(rules, signer, publisher,
+		threatintel.WithIPSLogger(logger),
+		threatintel.WithIPSSubject(mf.IPSRulesSubject),
 	)
 }
 

@@ -8,6 +8,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
 )
 
 // FeedManager runs the configured threat feeds on their schedules,
@@ -35,6 +37,11 @@ type FeedManager struct {
 	// sweepInterval controls how often expired IOCs are reaped.
 	// Zero applies defaultSweepInterval.
 	sweepInterval time.Duration
+	// ipsMinConfidence is the confidence floor the IPS efficacy view
+	// (Coverage.IPSRules) compiles rules at, so the observed
+	// per-category breadth matches the gate the shipped IPS rule
+	// bundle uses. Defaults to defaultEnforcementMinConfidence.
+	ipsMinConfidence float64
 	// healthInterval controls how often per-feed staleness/health
 	// is evaluated and published. Zero applies defaultHealthInterval.
 	healthInterval time.Duration
@@ -136,6 +143,14 @@ func WithSweepInterval(d time.Duration) FeedManagerOption {
 	}
 }
 
+// WithIPSEfficacyMinConfidence sets the confidence floor the IPS
+// efficacy view (Coverage.IPSRules) compiles at, so the reported
+// per-category breadth matches the gate of the shipped IPS rule
+// bundle. Out-of-range values are clamped to [0,1].
+func WithIPSEfficacyMinConfidence(floor float64) FeedManagerOption {
+	return func(m *FeedManager) { m.ipsMinConfidence = clampConfidence(floor) }
+}
+
 // WithPersister enables IOC-store durability: the active set is
 // flushed to the persister every interval (defaulting to
 // defaultPersistInterval when interval <= 0) and once more on
@@ -214,15 +229,16 @@ func withManagerClock(now func() time.Time) FeedManagerOption {
 // feeds.
 func NewFeedManager(store *IOCStore, feeds []Feed, opts ...FeedManagerOption) *FeedManager {
 	m := &FeedManager{
-		feeds:          feeds,
-		store:          store,
-		logger:         slog.Default(),
-		now:            time.Now,
-		sweepInterval:  defaultSweepInterval,
-		healthInterval: defaultHealthInterval,
-		staleFactor:    defaultStaleFactor,
-		stopCh:         make(chan struct{}),
-		doneCh:         make(chan struct{}),
+		feeds:            feeds,
+		store:            store,
+		logger:           slog.Default(),
+		now:              time.Now,
+		sweepInterval:    defaultSweepInterval,
+		ipsMinConfidence: defaultEnforcementMinConfidence,
+		healthInterval:   defaultHealthInterval,
+		staleFactor:      defaultStaleFactor,
+		stopCh:           make(chan struct{}),
+		doneCh:           make(chan struct{}),
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -353,6 +369,25 @@ type FeedCoverage struct {
 	// that contributed it. Keyed on IOC.Source; an indicator with no
 	// source is keyed under "".
 	BySource map[string]IOCCounts
+	// IPSRules is the IPS-tier efficacy view: the per-category
+	// cardinality of Suricata rules the live store would compile into
+	// the signed IPS rule bundle. It answers "how much IPS detection
+	// is the aggregated intel producing, and across which threat
+	// classes?" — the before/after breadth metric for the IPS tier.
+	// Counts use the same edge classifier the bundle ships under, so
+	// they match what per-category enablement / hit stats will see.
+	IPSRules IPSRuleEfficacy
+}
+
+// IPSRuleEfficacy is the per-category Suricata-rule cardinality the
+// IOC store currently compiles into the IPS rule bundle.
+type IPSRuleEfficacy struct {
+	// Total is the number of IPS rules emitted from the live store.
+	Total int
+	// ByCategory is the per-RuleCategory rule count, keyed on the
+	// wire-stable category id. Every category is present (zero when
+	// none emitted) so a dashboard renders a stable row set.
+	ByCategory map[policy.IPSRuleCategory]int
 }
 
 // Coverage computes the operator-facing feed-coverage view as of
@@ -361,12 +396,24 @@ type FeedCoverage struct {
 // composition of Health and the store size accessors, safe to call
 // concurrently with feed refreshes.
 func (m *FeedManager) Coverage(now time.Time) FeedCoverage {
+	rules := m.CompileIPSRules()
 	return FeedCoverage{
 		GeneratedAt: now.UTC(),
 		Feeds:       m.Health(now),
 		Store:       m.store.SizeByType(),
 		BySource:    m.store.SizeBySource(),
+		IPSRules:    IPSRuleEfficacy{Total: rules.Total, ByCategory: rules.ByCategory},
 	}
+}
+
+// CompileIPSRules compiles the live store snapshot into the Suricata
+// rule set the signed IPS rule bundle ships, gated at the manager's
+// configured IPS confidence floor. It is the seam the IPS rule
+// producer (internal/service/threatintel.IPSRuleService) pulls from,
+// and the source of the Coverage IPS efficacy metric. Safe to call
+// concurrently with feed refreshes.
+func (m *FeedManager) CompileIPSRules() IPSRuleSet {
+	return NewIPSRuleCompiler(m.store, WithIPSMinConfidence(m.ipsMinConfidence)).Compile()
 }
 
 // DomainIndicators returns the active (non-expired) domain IOC values

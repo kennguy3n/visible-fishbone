@@ -17,6 +17,7 @@ import (
 //   - IOCTypeCIDR   -> NGFW firewall-deny rule (address range)
 //   - IOCTypeURL    -> SWG deny-list rule
 //   - IOCTypeHash   -> malware-verdict provider (StaticMalwareList)
+//   - IOCTypeJA3    -> Suricata IPS rule (TLS client fingerprint)
 //
 // IOCTypeIP and IOCTypeCIDR drive the SAME enforcement sink (an
 // NGFW destination-CIDR deny); they are kept distinct so the store
@@ -41,12 +42,21 @@ const (
 	IOCTypeURL IOCType = "url"
 	// IOCTypeHash is a file hash (MD5, SHA-1 or SHA-256), hex.
 	IOCTypeHash IOCType = "hash"
+	// IOCTypeJA3 is a JA3 TLS client fingerprint, the 32-char
+	// lowercase-hex MD5 of the TLS ClientHello feature string
+	// (the form Suricata's ja3.hash keyword matches). It drives
+	// the IPS Suricata-rule sink, not the NGFW/DNS/SWG sinks: a
+	// JA3 identifies a malicious CLIENT (malware/C2 tooling) by
+	// how it speaks TLS, independent of the destination address
+	// or SNI, so it is enforced in the inline IPS engine rather
+	// than the L3/L4 firewall.
+	IOCTypeJA3 IOCType = "ja3"
 )
 
 // Valid reports whether t is one of the known IOC types.
 func (t IOCType) Valid() bool {
 	switch t {
-	case IOCTypeDomain, IOCTypeIP, IOCTypeCIDR, IOCTypeURL, IOCTypeHash:
+	case IOCTypeDomain, IOCTypeIP, IOCTypeCIDR, IOCTypeURL, IOCTypeHash, IOCTypeJA3:
 		return true
 	}
 	return false
@@ -256,6 +266,22 @@ func normalizeHash(s string) (string, HashAlgo, bool) {
 	return "", "", false
 }
 
+// normalizeJA3 validates and lowercases a JA3 TLS client
+// fingerprint. A JA3 hash is the MD5 of the ClientHello feature
+// string, so on the wire it is exactly 32 hex characters — the
+// same shape Suricata's ja3.hash keyword matches. Returns ("",
+// false) for anything that is not 32 hex chars. JA3 shares the
+// MD5 shape with a 32-char file hash, so the two types are only
+// distinguished by the feed's explicit label (an unlabelled
+// 32-hex value classifies as IOCTypeHash, see classifyIndicator).
+func normalizeJA3(s string) (string, bool) {
+	h := strings.ToLower(strings.TrimSpace(s))
+	if len(h) != 32 || !isHex(h) {
+		return "", false
+	}
+	return h, true
+}
+
 func isHex(s string) bool {
 	if s == "" {
 		return false
@@ -319,6 +345,12 @@ func NewIOC(t IOCType, rawValue string, opts IOCMeta) (IOC, bool) {
 		}
 		ioc.Value = v
 		ioc.HashAlgo = algo
+	case IOCTypeJA3:
+		v, ok := normalizeJA3(rawValue)
+		if !ok {
+			return IOC{}, false
+		}
+		ioc.Value = v
 	default:
 		return IOC{}, false
 	}

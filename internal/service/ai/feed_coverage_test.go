@@ -42,6 +42,7 @@ func TestSizeBySourceReconcilesWithSizeByType(t *testing.T) {
 		sum.CIDRs += c.CIDRs
 		sum.URLs += c.URLs
 		sum.Hashes += c.Hashes
+		sum.JA3s += c.JA3s
 		sum.Total += c.Total
 	}
 	if want := store.SizeByType(); sum != want {
