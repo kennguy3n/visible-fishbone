@@ -541,6 +541,20 @@ func run() error {
 			slog.Duration("reconcile_interval", cfg.CASB.NoOpsReconcileInterval))
 	}
 
+	// Leader-only margin/cost autopilot sweep (WS-7). DEFAULT-OFF: only
+	// registered when METERING_AUTOPILOT_ENABLED. Leader-gated so a
+	// multi-replica deployment evaluates each tenant exactly once per
+	// interval; runs in its own goroutine because RunIfLeader blocks
+	// until rootCtx is cancelled. Recommend-only unless a tenant has
+	// opted into the margin_autopilot rollout gate.
+	if cfg.Metering.AutopilotEnabled {
+		go elector.RunIfLeader(rootCtx, "metering-margin-autopilot", func(ctx context.Context) {
+			runMarginAutopilot(ctx, rc.MarginAutopilot, cfg.Metering.AutopilotInterval, logger)
+		})
+		logger.Info("sng-control: margin/cost autopilot enabled",
+			slog.Duration("sweep_interval", cfg.Metering.AutopilotInterval))
+	}
+
 	// Leader-only IdP directory-sync loop. Nil unless
 	// IDP_DIRECTORY_SYNC_ENABLED=true (rc.IDPSyncService is only built
 	// in that case), so this is a no-op by default. Leader-gated like
@@ -914,6 +928,12 @@ type routerComponents struct {
 	// activity observer; the control-plane signal is wired into the
 	// router here in buildRouter.
 	ActivityRecorder *activity.Recorder
+	// MarginAutopilot is the margin/cost NoOps engine (WS-7). main()
+	// runs its leader-only Reconcile sweep when cfg.Metering.AutopilotEnabled.
+	// Always non-nil; the engine is recommend-only unless a tenant opts
+	// into the margin_autopilot rollout gate (the auto action is further
+	// gated on that per-tenant state).
+	MarginAutopilot *metering.MarginAutopilot
 	// AIInferencePool is the WS-9 fleet-scale shared inference pool. Nil
 	// unless AI_INFERENCE_POOL_ENABLED and an AI_LLM_ENDPOINT are set.
 	// main() closes it on shutdown so the scheduler goroutine exits and
@@ -1769,6 +1789,27 @@ func buildRouter(
 	}
 	meteringHandler := handler.NewMeteringHandler(meteringSvc, budgetEnforcer, meteringReports, meteringAnomalies, meteringReports, rbacSvc)
 
+	// Margin/cost autopilot (WS-7). It composes the read-only metering
+	// signals (cost report margin, per-meter projection + effective caps,
+	// the anomaly detector) into audited NoOps recommendations and, for a
+	// tenant that has opted into the margin_autopilot rollout gate, the
+	// single narrow auto action (pinning a trial's hard cap at its tier
+	// policy ceiling). The audit log is always wired. The rollout gate is
+	// always wired too, but it is recommend-only by construction unless a
+	// tenant's state is enforce, so this never silently mutates a budget.
+	// The activity-tiered planner keeps the leader-only sweep from
+	// re-pricing thousands of dormant trials every interval. main() runs
+	// the sweep via elector.RunIfLeader only when cfg.Metering.AutopilotEnabled.
+	marginAutopilot, err := metering.NewMarginAutopilot(meteringReports, meteringAnomalies, budgetEnforcer, logger)
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("control: margin autopilot: %w", err)
+	}
+	marginAutopilot.SetTenantLister(tenantRepo)
+	marginAutopilot.SetAuditLog(auditRepo)
+	marginAutopilot.SetGate(marginAutopilotGate{rollout: rolloutSvc})
+	marginAutopilotPlanner := tenancy.DefaultPlanner()
+	marginAutopilot.WithDormancyPlanner(&marginAutopilotPlanner)
+
 	aiHandler, aiSvc, aiInferencePool := buildAIHandler(cfg, policySvc, store.NewAICorrelationRepository(), alertRepo, auditSvc, aiSuggestionRepo,
 		metering.NewGuardrailBudgetGate(budgetEnforcer), metering.NewGuardrailUsageRecorder(meteringSvc), iocStore, userRepo, roleRepo, logger)
 
@@ -2268,6 +2309,7 @@ func buildRouter(
 		IDPSyncService:         idpSyncSvc,
 		DLPReviewService:       dlpReviewSvc,
 		ActivityRecorder:       activityRecorder,
+		MarginAutopilot:        marginAutopilot,
 		AIInferencePool:        aiInferencePool,
 		HibernationRegistry:    hibRegistry,
 		HibernationSyncer:      hibSyncer,
@@ -2278,6 +2320,29 @@ func buildRouter(
 		AlertFeedback:          alertFeedback,
 		AlertFeedbackTenants:   idpTenantSource{activity: tenantRepo}.ListTenants,
 	}, nil
+}
+
+// marginAutopilotGate adapts the staged-rollout service onto the
+// metering engine's AutopilotGate. It maps the per-tenant
+// margin_autopilot capability state onto the engine's auto-action mode:
+// enforce applies the narrow auto action, monitor dry-runs it (records
+// the would-have action as a recommendation), and off — the default for
+// any tenant that has never opted in — keeps the engine recommend-only.
+// EffectiveState fails closed to off, so an unreadable rollout row can
+// only ever make the engine MORE conservative, never auto-enforce.
+type marginAutopilotGate struct {
+	rollout *rollout.Service
+}
+
+func (g marginAutopilotGate) AutoAct(ctx context.Context, tenantID uuid.UUID) metering.AutoActMode {
+	switch g.rollout.EffectiveState(ctx, tenantID, rollout.CapabilityMarginAutopilot) {
+	case rollout.StateEnforce:
+		return metering.AutoActEnforce
+	case rollout.StateMonitor:
+		return metering.AutoActDryRun
+	default:
+		return metering.AutoActRecommend
+	}
 }
 
 // meteringTierResolver adapts the TenantRepository onto the metering
@@ -3794,6 +3859,59 @@ func runCASBNoOps(ctx context.Context, engine *casb.AppNoOpsEngine, interval tim
 		if err := engine.RunDigests(ctx); err != nil && ctx.Err() == nil {
 			logger.Warn("casb: NoOps digest pass failed", slog.Any("error", err))
 		}
+	}
+	sweep()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			sweep()
+		}
+	}
+}
+
+// runMarginAutopilot drives the leader-only margin/cost autopilot sweep
+// (WS-7): each tick it evaluates every active tenant, turning the
+// engine's underwater / over-budget / anomaly signals into audited
+// recommendations and applying the narrow auto action only for tenants
+// opted into the margin_autopilot rollout gate. The activity-tiered
+// planner keeps the sweep from re-pricing thousands of dormant trials
+// every interval while still bounding how stale any tenant's evaluation
+// can get. Like runCASBNoOps it sweeps once immediately on entry — so a
+// leader that has just taken over reacts without waiting a full interval
+// — then re-sweeps every interval. A failed pass is logged and the loop
+// continues so one tenant's error never stalls the fleet.
+func runMarginAutopilot(ctx context.Context, engine *metering.MarginAutopilot, interval time.Duration, logger *slog.Logger) {
+	if engine == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	sweep := func() {
+		s, err := engine.Reconcile(ctx)
+		if err != nil {
+			// A cancelled context is a normal shutdown, not a failure, and
+			// leaves the sweep partial — don't warn and don't log a
+			// misleading "complete" line in either case.
+			if ctx.Err() == nil {
+				logger.Warn("metering: margin autopilot sweep failed", slog.Any("error", err))
+			}
+			return
+		}
+		// s is per-sweep (this pass only), not cumulative, so the
+		// figures describe the workload of the sweep that just finished.
+		logger.Info("metering: margin autopilot sweep complete",
+			slog.Int64("cycle", s.Cycle),
+			slog.Int64("visited", s.TenantsVisited),
+			slog.Int64("skipped_idle", s.SkippedIdle),
+			slog.Int64("skipped_dormant", s.SkippedDormant),
+			slog.Int64("recommendations", s.Recommendations),
+			slog.Int64("caps_enforced", s.CapsEnforced),
+			slog.Int64("eval_errors", s.EvalErrors))
 	}
 	sweep()
 	t := time.NewTicker(interval)

@@ -232,6 +232,17 @@ func TestTenantAnomaliesPropagatesErrors(t *testing.T) {
 	}
 }
 
+func TestAnomaliesForReportRejectsTenantMismatch(t *testing.T) {
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	d := newDetector(t, TenantCostReport{}, nil, now, AnomalyConfig{})
+	// A report priced for a different tenant must never be evaluated
+	// against this tenant's usage history.
+	report := TenantCostReport{TenantID: uuid.New()}
+	if _, err := d.AnomaliesForReport(context.Background(), uuid.New(), report); err == nil {
+		t.Fatal("want error for report tenant mismatch, got nil")
+	}
+}
+
 func TestNewCostAnomalyDetectorNilDeps(t *testing.T) {
 	calc := NewCostCalculator(DefaultUnitCosts)
 	if _, err := NewCostAnomalyDetector(nil, fakeHistory{}, calc, AnomalyConfig{}); err == nil {
