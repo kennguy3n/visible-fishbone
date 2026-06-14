@@ -24,6 +24,10 @@ func TestIOCEnforcementCompiler_RulesByDomainAndConfidenceFloor(t *testing.T) {
 			mkIOC(IOCTypeIP, "203.0.113.10", 0.9),
 			mkIOC(IOCTypeIP, "203.0.113.11", 0.3), // below floor -> dropped
 		},
+		CIDRs: []IOC{
+			mkIOC(IOCTypeCIDR, "198.51.100.0/24", 0.9),
+			mkIOC(IOCTypeCIDR, "198.51.100.0/25", 0.3), // below floor -> dropped
+		},
 		Domains: []IOC{mkIOC(IOCTypeDomain, "evil.example.com", 0.8)},
 		URLs: []IOC{
 			mkIOC(IOCTypeURL, "http://bad.example/a", 0.7),
@@ -46,6 +50,12 @@ func TestIOCEnforcementCompiler_RulesByDomainAndConfidenceFloor(t *testing.T) {
 	if _, ok := byID["ti-ngfw-203.0.113.11"]; ok {
 		t.Errorf("below-floor IP must not compile to a rule")
 	}
+	if r, ok := byID["ti-ngfw-198.51.100.0/24"]; !ok || r.Domain != policy.DomainNGFW || r.Verb != policy.VerbDeny {
+		t.Errorf("missing NGFW CIDR deny rule: %#v", r)
+	}
+	if _, ok := byID["ti-ngfw-198.51.100.0/25"]; ok {
+		t.Errorf("below-floor CIDR must not compile to a rule")
+	}
 	if r, ok := byID["ti-dns-evil.example.com"]; !ok || r.Domain != policy.DomainDNS || r.Verb != policy.VerbDeny {
 		t.Errorf("DNS sinkhole rule wrong: %#v", r)
 	}
@@ -60,8 +70,9 @@ func TestIOCEnforcementCompiler_RulesByDomainAndConfidenceFloor(t *testing.T) {
 		t.Errorf("expected 1 collapsed SWG rule for shared host, got %d", swgCount)
 	}
 
-	// Predicate of the NGFW rule must carry the dst_ip match the
-	// evaluator understands.
+	// Predicate of the single-IP NGFW rule must carry the TAGGED
+	// dst_cidr matcher the edge enforces, with the host folded to a
+	// /32 (so a host IOC and a range IOC ride one matcher).
 	ngfw := byID["ti-ngfw-203.0.113.10"]
 	if len(ngfw.Predicates) != 1 {
 		t.Fatalf("ngfw predicates: %#v", ngfw.Predicates)
@@ -70,8 +81,17 @@ func TestIOCEnforcementCompiler_RulesByDomainAndConfidenceFloor(t *testing.T) {
 	if err := json.Unmarshal(ngfw.Predicates[0].Match, &m); err != nil {
 		t.Fatalf("predicate match decode: %v", err)
 	}
-	if m["dst_ip"] != "203.0.113.10" {
-		t.Errorf("ngfw predicate dst_ip: %#v", m)
+	if m["kind"] != "dst_cidr" || m["cidr"] != "203.0.113.10/32" {
+		t.Errorf("ngfw IP predicate should be a /32 dst_cidr: %#v", m)
+	}
+	// The CIDR rule carries the range verbatim.
+	cidrRule := byID["ti-ngfw-198.51.100.0/24"]
+	var cm map[string]string
+	if err := json.Unmarshal(cidrRule.Predicates[0].Match, &cm); err != nil {
+		t.Fatalf("cidr predicate match decode: %v", err)
+	}
+	if cm["kind"] != "dst_cidr" || cm["cidr"] != "198.51.100.0/24" {
+		t.Errorf("ngfw CIDR predicate wrong: %#v", cm)
 	}
 }
 

@@ -189,9 +189,10 @@ func (s *IOCStore) Persist(ctx context.Context, p IOCPersister) (int, error) {
 		return 0, nil
 	}
 	snap := s.Snapshot()
-	all := make([]IOC, 0, len(snap.Domains)+len(snap.IPs)+len(snap.URLs)+len(snap.Hashes))
+	all := make([]IOC, 0, len(snap.Domains)+len(snap.IPs)+len(snap.CIDRs)+len(snap.URLs)+len(snap.Hashes))
 	all = append(all, snap.Domains...)
 	all = append(all, snap.IPs...)
+	all = append(all, snap.CIDRs...)
 	all = append(all, snap.URLs...)
 	all = append(all, snap.Hashes...)
 	if err := p.SaveIOCs(ctx, all); err != nil {
@@ -236,6 +237,7 @@ func (s *IOCStore) Len() int {
 type IOCCounts struct {
 	Domains int
 	IPs     int
+	CIDRs   int
 	URLs    int
 	Hashes  int
 	Total   int
@@ -259,6 +261,8 @@ func (s *IOCStore) SizeByType() IOCCounts {
 			c.Domains++
 		case IOCTypeIP:
 			c.IPs++
+		case IOCTypeCIDR:
+			c.CIDRs++
 		case IOCTypeURL:
 			c.URLs++
 		case IOCTypeHash:
@@ -291,6 +295,8 @@ func (s *IOCStore) SizeBySource() map[string]IOCCounts {
 			c.Domains++
 		case IOCTypeIP:
 			c.IPs++
+		case IOCTypeCIDR:
+			c.CIDRs++
 		case IOCTypeURL:
 			c.URLs++
 		case IOCTypeHash:
@@ -324,6 +330,8 @@ func (s *IOCStore) Snapshot() IOCSnapshot {
 			snap.Domains = append(snap.Domains, ioc)
 		case IOCTypeIP:
 			snap.IPs = append(snap.IPs, ioc)
+		case IOCTypeCIDR:
+			snap.CIDRs = append(snap.CIDRs, ioc)
 		case IOCTypeURL:
 			snap.URLs = append(snap.URLs, ioc)
 		case IOCTypeHash:
@@ -332,6 +340,7 @@ func (s *IOCStore) Snapshot() IOCSnapshot {
 	}
 	sortIOCs(snap.Domains)
 	sortIOCs(snap.IPs)
+	sortIOCs(snap.CIDRs)
 	sortIOCs(snap.URLs)
 	sortIOCs(snap.Hashes)
 	return snap
@@ -342,6 +351,7 @@ func (s *IOCStore) Snapshot() IOCSnapshot {
 type IOCSnapshot struct {
 	Domains []IOC
 	IPs     []IOC
+	CIDRs   []IOC
 	URLs    []IOC
 	Hashes  []IOC
 }
@@ -415,6 +425,9 @@ func candidateKeys(raw string) []string {
 	}
 	if v, ok := normalizeIP(raw); ok {
 		keys = append(keys, string(IOCTypeIP)+"\x00"+v)
+	}
+	if v, ok := normalizeCIDR(raw); ok {
+		keys = append(keys, string(IOCTypeCIDR)+"\x00"+v)
 	}
 	if v, algo, ok := normalizeHash(raw); ok {
 		_ = algo

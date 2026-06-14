@@ -296,6 +296,13 @@ func mispAttrIOCs(attrType, value string, meta IOCMeta) []IOC {
 		if v == "" {
 			continue
 		}
+		if iocType == IOCTypeIP {
+			// MISP carries ranges under the same ip-dst/ip-src/ip
+			// attribute types as hosts; route by shape so a CIDR
+			// value lands in the range sink instead of being
+			// dropped by the single-IP normalizer.
+			iocType = ipKindForValue(v)
+		}
 		if ioc, ok := NewIOC(iocType, v, meta); ok {
 			out = append(out, ioc)
 		}

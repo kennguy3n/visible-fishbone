@@ -127,7 +127,10 @@ func (p STIXTAXIIParser) iocsFromPattern(pattern string, meta IOCMeta) []IOC {
 		case "domain-name":
 			iocType = IOCTypeDomain
 		case "ipv4-addr", "ipv6-addr":
-			iocType = IOCTypeIP
+			// A STIX address object value may be a single address
+			// or a CIDR range; route by shape so ranges aren't
+			// dropped by the single-IP normalizer.
+			iocType = ipKindForValue(value)
 		case "url":
 			iocType = IOCTypeURL
 		case "file":

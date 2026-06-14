@@ -53,6 +53,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 
 	"github.com/google/uuid"
 
@@ -452,9 +453,15 @@ type subjectMatchDoc struct {
 type predicateMatchDoc struct {
 	// Common fields
 	Verdict string `json:"verdict,omitempty"`
+	// Kind is the tagged-matcher discriminator (mirrors the Rust
+	// sng_policy_eval PredicateMatch `kind` tag). Only the
+	// threat-intel dst_cidr matcher uses it today; an empty Kind
+	// keeps the legacy untagged field-equality dialect below.
+	Kind string `json:"kind,omitempty"`
 
 	// Flow fields
 	DstIP   string `json:"dst_ip,omitempty"`
+	CIDR    string `json:"cidr,omitempty"`
 	DstPort uint16 `json:"dst_port,omitempty"`
 	Proto   string `json:"protocol,omitempty"`
 
@@ -468,6 +475,20 @@ type predicateMatchDoc struct {
 }
 
 func matchFlow(m predicateMatchDoc, f schema.FlowEvent) bool {
+	// Tagged dst_cidr matcher: the flow's destination must fall
+	// inside the CIDR range. Mirrors sng_policy_eval's
+	// PredicateMatch::DstCidr (folded into the firewall rule's
+	// dst_cidrs on the edge) so dry-run and edge agree. An
+	// unparseable CIDR or destination is a non-match (fail-closed),
+	// matching the edge compiler's refusal to widen a bad rule.
+	if m.Kind == "dst_cidr" {
+		_, ipNet, err := net.ParseCIDR(m.CIDR)
+		if err != nil {
+			return false
+		}
+		ip := net.ParseIP(f.DstIP)
+		return ip != nil && ipNet.Contains(ip)
+	}
 	if m.Verdict != "" && string(f.Verdict) != m.Verdict {
 		return false
 	}

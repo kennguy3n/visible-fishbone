@@ -193,3 +193,55 @@ func TestNormalizeDomainRejectsIPLiterals(t *testing.T) {
 		}
 	}
 }
+
+// TestNormalizeCIDR guards the CIDR canonicalizer: it must mask off
+// host bits, lowercase IPv6, and reject anything that is not a
+// prefix-bearing range — in particular a bare address (which is a
+// single IP and belongs under IOCTypeIP), so the two types stay
+// disjoint.
+func TestNormalizeCIDR(t *testing.T) {
+	t.Parallel()
+	accepts := map[string]string{
+		"203.0.113.10/24": "203.0.113.0/24",  // host bits masked off
+		"198.51.100.0/24": "198.51.100.0/24", // already canonical
+		"10.0.0.0/8":      "10.0.0.0/8",
+		"2001:DB8::1/32":  "2001:db8::/32", // IPv6 lowercased + masked
+		"203.0.113.10/32": "203.0.113.10/32",
+	}
+	for in, want := range accepts {
+		got, ok := normalizeCIDR(in)
+		if !ok || got != want {
+			t.Errorf("normalizeCIDR(%q) = (%q, %v), want (%q, true)", in, got, ok, want)
+		}
+	}
+	rejects := []string{
+		"203.0.113.10", // bare IPv4 -> belongs to IOCTypeIP
+		"2001:db8::1",  // bare IPv6 -> belongs to IOCTypeIP
+		"not-a-cidr",   // garbage
+		"203.0.113.0/", // malformed prefix
+		"",             // empty
+	}
+	for _, in := range rejects {
+		if got, ok := normalizeCIDR(in); ok {
+			t.Errorf("normalizeCIDR(%q) = (%q, true), want rejected", in, got)
+		}
+	}
+
+	// A range must classify as IOCTypeCIDR (not domain or IP), and a
+	// bare IP must NOT classify as a CIDR.
+	if typ, ok := classifyIndicator("10.0.0.0/8"); !ok || typ != IOCTypeCIDR {
+		t.Errorf("classifyIndicator(CIDR) = (%v, %v), want (cidr, true)", typ, ok)
+	}
+	if typ, _ := classifyIndicator("203.0.113.10"); typ == IOCTypeCIDR {
+		t.Errorf("bare IP must not classify as CIDR")
+	}
+
+	// NewIOC stores a range under the CIDR type with the canonical
+	// masked value; a bare IP is rejected for the CIDR type.
+	if ioc, ok := NewIOC(IOCTypeCIDR, "203.0.113.10/24", IOCMeta{Confidence: 0.9}); !ok || ioc.Value != "203.0.113.0/24" {
+		t.Errorf("NewIOC(CIDR) = (%#v, %v), want masked 203.0.113.0/24", ioc, ok)
+	}
+	if _, ok := NewIOC(IOCTypeCIDR, "203.0.113.10", IOCMeta{Confidence: 0.9}); ok {
+		t.Errorf("NewIOC(CIDR, bare IP) must be rejected")
+	}
+}

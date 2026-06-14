@@ -7,7 +7,12 @@ score, and wires matches into the existing enforcement planes:
 - **Domain IOCs** → DNS sinkhole + app-registry demotion (via the
   `appdb` demotion engine, `threat_feed` signal).
 - **IP IOCs** → firewall deny rules compiled into the next signed
-  policy bundle (NGFW target slice).
+  policy bundle (NGFW target slice). A single address folds to a
+  host CIDR (`/32` or `/128`) so it shares one matcher with ranges.
+- **CIDR/range IOCs** → the same NGFW firewall-deny sink, matching a
+  flow whose destination address falls inside the range. Producer
+  and edge agree on a tagged `{"kind":"dst_cidr","cidr":"…"}`
+  predicate that `sng-fw` folds into the rule's `dst_cidrs`.
 - **URL IOCs** → SWG deny rules in the bundle (SWG target slice).
 - **Hash IOCs** → malware verdict set in the bundle's `mw` section,
   hot-swapped into the `sng-swg` `StaticMalwareList`.
@@ -20,7 +25,7 @@ in `cmd/sng-control`.
 
 | File | Role |
 |------|------|
-| `ioc.go` | `IOC` type, type normalization (`domain`/`ip`/`url`/`hash`), validation |
+| `ioc.go` | `IOC` type, type normalization (`domain`/`ip`/`cidr`/`url`/`hash`), validation |
 | `ioc_store.go` | In-memory dedup store (TTL, confidence floor, `Sweep`), implements `ThreatFeedProvider` for live matching |
 | `feed.go` | `FeedParser`/`FeedFetcher` seams, `HTTPFetcher` (the only network IO), `StaticFetcher` (tests) |
 | `feed_stix_taxii.go` | STIX 2.1 / TAXII 2.1 pattern extraction |
