@@ -95,6 +95,42 @@ func TestIOCEnforcementCompiler_RulesByDomainAndConfidenceFloor(t *testing.T) {
 	}
 }
 
+func TestIOCEnforcementCompiler_HostIPAndExplicitSlash32Collapse(t *testing.T) {
+	t.Parallel()
+	// The same address arriving both as a bare IP and as an explicit
+	// /32 CIDR (e.g. via different feed attribute labels) folds to one
+	// dst_cidr matcher; only a single deny rule should be emitted. The
+	// host-IP rule is emitted first and wins.
+	snap := IOCSnapshot{
+		IPs:   []IOC{mkIOC(IOCTypeIP, "203.0.113.10", 0.9)},
+		CIDRs: []IOC{mkIOC(IOCTypeCIDR, "203.0.113.10/32", 0.9)},
+	}
+	c := newIOCEnforcementCompilerFromSnapshot(fixedSnapshot(snap))
+	rules, err := c.CompileIOCRules(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("compile rules: %v", err)
+	}
+	var ngfw []policy.Rule
+	for _, r := range rules {
+		if r.Domain == policy.DomainNGFW {
+			ngfw = append(ngfw, r)
+		}
+	}
+	if len(ngfw) != 1 {
+		t.Fatalf("expected 1 deduped NGFW rule, got %d: %#v", len(ngfw), ngfw)
+	}
+	if ngfw[0].ID != "ti-ngfw-203.0.113.10" {
+		t.Errorf("host-IP rule should win the dedup, got ID %q", ngfw[0].ID)
+	}
+	var m map[string]string
+	if err := json.Unmarshal(ngfw[0].Predicates[0].Match, &m); err != nil {
+		t.Fatalf("predicate decode: %v", err)
+	}
+	if m["cidr"] != "203.0.113.10/32" {
+		t.Errorf("folded predicate cidr wrong: %#v", m)
+	}
+}
+
 func TestIOCEnforcementCompiler_MalwareVerdictThresholds(t *testing.T) {
 	t.Parallel()
 	snap := IOCSnapshot{

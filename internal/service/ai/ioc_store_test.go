@@ -150,6 +150,62 @@ func TestIOCStore_QueryIOCsMatchesNormalizedLiveTraffic(t *testing.T) {
 	}
 }
 
+func TestIOCStore_QueryIOCsMatchesIPInsideCIDR(t *testing.T) {
+	t.Parallel()
+	store := NewIOCStore()
+	store.Upsert(
+		mkIOC(IOCTypeCIDR, "10.0.0.0/8", 0.7),
+		mkIOC(IOCTypeCIDR, "2001:db8::/32", 0.6),
+		mkIOC(IOCTypeIP, "203.0.113.10", 0.9),
+	)
+	// A bare IP inside a stored range matches the range even though
+	// its own key never equals the range's key; an exact IP still
+	// matches by key; an IP outside every range does not match.
+	matches, err := store.QueryIOCs(context.Background(), []string{
+		"10.1.2.3",       // inside 10.0.0.0/8
+		"2001:db8::dead", // inside the IPv6 range
+		"203.0.113.10",   // exact IP IOC
+		"198.51.100.7",   // outside every range/IP
+	})
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(matches) != 3 {
+		t.Fatalf("expected 3 matches, got %d (%#v)", len(matches), matches)
+	}
+	got := make(map[string]string, len(matches))
+	for _, m := range matches {
+		got[m.Indicator] = m.ThreatType
+	}
+	if got["10.0.0.0/8"] != string(IOCTypeCIDR) {
+		t.Errorf("IPv4 IP did not match its containing CIDR: %#v", matches)
+	}
+	if got["2001:db8::/32"] != string(IOCTypeCIDR) {
+		t.Errorf("IPv6 IP did not match its containing CIDR: %#v", matches)
+	}
+	if got["203.0.113.10"] != string(IOCTypeIP) {
+		t.Errorf("exact IP IOC did not match: %#v", matches)
+	}
+}
+
+func TestIOCStore_QueryIOCsExpiredCIDRDoesNotMatch(t *testing.T) {
+	t.Parallel()
+	cur := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	store := NewIOCStore(withStoreClock(func() time.Time { return cur }))
+	store.Upsert(mkIOC(IOCTypeCIDR, "10.0.0.0/8", 0.7, func(i *IOC) {
+		i.ExpiresAt = cur.Add(time.Hour)
+	}))
+	// Before expiry the contained IP matches.
+	if m, _ := store.QueryIOCs(context.Background(), []string{"10.1.2.3"}); len(m) != 1 {
+		t.Fatalf("pre-expiry: expected 1 match, got %d", len(m))
+	}
+	// After expiry the range must not match by containment.
+	cur = cur.Add(2 * time.Hour)
+	if m, _ := store.QueryIOCs(context.Background(), []string{"10.1.2.3"}); len(m) != 0 {
+		t.Fatalf("post-expiry: expected 0 matches, got %d (%#v)", len(m), m)
+	}
+}
+
 func TestIOCStore_ImplementsThreatFeedProvider(t *testing.T) {
 	t.Parallel()
 	var _ ThreatFeedProvider = NewIOCStore()
