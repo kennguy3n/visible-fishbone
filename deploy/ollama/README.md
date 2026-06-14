@@ -64,7 +64,7 @@ ships* (`-DGGML_NATIVE=OFF`, static, CPU-only → AVX2/FMA/F16C on, AVX-512 off)
 `n_params = 8.19B`, `n_ctx_train = 65536`) and answers `/v1/chat/completions`
 with valid JSON. The measured 8B run is published at
 [`blog/artifacts/payloads/s6-llm-validation-bonsai-8b-q2_0.json`](../../blog/artifacts/payloads/s6-llm-validation-bonsai-8b-q2_0.json)
-and walked in [Post 6](../../blog/posts/06-s6-ai-assisted-ops.md).
+and walked in [Post 7](../../blog/posts/07-s6-ai-assisted-ops-shared-inference.md).
 
 > **Performance — the repack kernel, measured honestly.** This pin carries the
 > prism **4×4 AVX2 repack GEMM**. On an AVX2 host the runtime gate
