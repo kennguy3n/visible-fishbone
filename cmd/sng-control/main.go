@@ -511,7 +511,13 @@ func run() error {
 			if err != nil {
 				return fmt.Errorf("build threat-intel ips rule pipeline: %w", err)
 			}
-			interval := cfg.ManagedDNSFeeds.RefreshInterval
+			// Dedicated IPS publish cadence, falling back to the shared
+			// feed RefreshInterval when unset so the two move together by
+			// default but can be decoupled without touching the DNS loop.
+			interval := cfg.ManagedDNSFeeds.IPSRulesRefreshInterval
+			if interval <= 0 {
+				interval = cfg.ManagedDNSFeeds.RefreshInterval
+			}
 			go elector.RunIfLeader(rootCtx, "threatintel-ips-rules", func(ctx context.Context) {
 				ipsRuleSvc.Run(ctx, interval)
 			})

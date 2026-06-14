@@ -396,24 +396,31 @@ type IPSRuleEfficacy struct {
 // composition of Health and the store size accessors, safe to call
 // concurrently with feed refreshes.
 func (m *FeedManager) Coverage(now time.Time) FeedCoverage {
-	rules := m.CompileIPSRules()
 	return FeedCoverage{
 		GeneratedAt: now.UTC(),
 		Feeds:       m.Health(now),
 		Store:       m.store.SizeByType(),
 		BySource:    m.store.SizeBySource(),
-		IPSRules:    IPSRuleEfficacy{Total: rules.Total, ByCategory: rules.ByCategory},
+		IPSRules:    m.CompileIPSRuleCounts(),
 	}
 }
 
 // CompileIPSRules compiles the live store snapshot into the Suricata
 // rule set the signed IPS rule bundle ships, gated at the manager's
 // configured IPS confidence floor. It is the seam the IPS rule
-// producer (internal/service/threatintel.IPSRuleService) pulls from,
-// and the source of the Coverage IPS efficacy metric. Safe to call
-// concurrently with feed refreshes.
+// producer (internal/service/threatintel.IPSRuleService) pulls from.
+// Safe to call concurrently with feed refreshes.
 func (m *FeedManager) CompileIPSRules() IPSRuleSet {
 	return NewIPSRuleCompiler(m.store, WithIPSMinConfidence(m.ipsMinConfidence)).Compile()
+}
+
+// CompileIPSRuleCounts is the count-only sibling of CompileIPSRules:
+// it returns just the per-category rule cardinality the live store
+// compiles into, without allocating the full Suricata rule text. It
+// is the source of the Coverage IPS efficacy metric, which reads only
+// the counts. Safe to call concurrently with feed refreshes.
+func (m *FeedManager) CompileIPSRuleCounts() IPSRuleEfficacy {
+	return NewIPSRuleCompiler(m.store, WithIPSMinConfidence(m.ipsMinConfidence)).CompileCounts()
 }
 
 // DomainIndicators returns the active (non-expired) domain IOC values

@@ -128,9 +128,21 @@ type ipsRuleDraft struct {
 	build   func(sid uint32) string
 }
 
-// compile is the snapshot-bound core of Compile, split out so tests
-// can drive a fixed snapshot.
-func (c *IPSRuleCompiler) compile(snap IOCSnapshot) IPSRuleSet {
+// CompileCounts reads a fresh snapshot and returns only the
+// per-category rule cardinality, without building the full rule text.
+// It is the count-only sibling of Compile for callers (the coverage
+// efficacy metric) that read only Total/ByCategory: it skips both the
+// potentially megabyte-scale RulesText concatenation and the
+// sid-stabilising sort, neither of which affects which category a
+// rule classifies into.
+func (c *IPSRuleCompiler) CompileCounts() IPSRuleEfficacy {
+	return c.compileCounts(c.snapshot())
+}
+
+// buildDrafts applies the confidence and grammar-safety gates and
+// returns the unsorted rule drafts for a snapshot. Shared by the full
+// compile path and the count-only path.
+func (c *IPSRuleCompiler) buildDrafts(snap IOCSnapshot) []ipsRuleDraft {
 	drafts := make([]ipsRuleDraft, 0,
 		len(snap.JA3s)+len(snap.Domains)+len(snap.IPs)+len(snap.CIDRs))
 
@@ -174,13 +186,26 @@ func (c *IPSRuleCompiler) compile(snap IOCSnapshot) IPSRuleSet {
 			build:   func(sid uint32) string { return buildAddrRule(ioc, sid) },
 		})
 	}
+	return drafts
+}
 
-	sort.SliceStable(drafts, func(i, j int) bool { return drafts[i].sortKey < drafts[j].sortKey })
-
+// emptyCategoryCounts returns a per-category counter initialised to
+// zero for every category, so a dashboard renders a stable row set.
+func emptyCategoryCounts() map[policy.IPSRuleCategory]int {
 	byCat := make(map[policy.IPSRuleCategory]int, len(policy.AllIPSRuleCategories()))
 	for _, cat := range policy.AllIPSRuleCategories() {
 		byCat[cat] = 0
 	}
+	return byCat
+}
+
+// compile is the snapshot-bound core of Compile, split out so tests
+// can drive a fixed snapshot.
+func (c *IPSRuleCompiler) compile(snap IOCSnapshot) IPSRuleSet {
+	drafts := c.buildDrafts(snap)
+	sort.SliceStable(drafts, func(i, j int) bool { return drafts[i].sortKey < drafts[j].sortKey })
+
+	byCat := emptyCategoryCounts()
 	var b strings.Builder
 	for i, d := range drafts {
 		line := d.build(sidBase + uint32(i))
@@ -189,6 +214,20 @@ func (c *IPSRuleCompiler) compile(snap IOCSnapshot) IPSRuleSet {
 		byCat[classifyRuleCategory(line)]++
 	}
 	return IPSRuleSet{RulesText: b.String(), ByCategory: byCat, Total: len(drafts)}
+}
+
+// compileCounts is the snapshot-bound core of CompileCounts. It builds
+// and classifies each rule line but discards the text, so only one
+// line is alive at a time rather than the whole rule set. The sid does
+// not influence classification, so a constant base sid is used and the
+// deterministic sort is skipped.
+func (c *IPSRuleCompiler) compileCounts(snap IOCSnapshot) IPSRuleEfficacy {
+	drafts := c.buildDrafts(snap)
+	byCat := emptyCategoryCounts()
+	for _, d := range drafts {
+		byCat[classifyRuleCategory(d.build(sidBase))]++
+	}
+	return IPSRuleEfficacy{Total: len(drafts), ByCategory: byCat}
 }
 
 // buildJA3Rule emits a tls rule matching a JA3 client fingerprint.

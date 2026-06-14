@@ -810,6 +810,11 @@ type ManagedDNSFeeds struct {
 	// ingest floor. Mirrors IOCMinConfidence for the IPS tier.
 	// THREAT_INTEL_IPS_MIN_CONFIDENCE.
 	IPSRulesMinConfidence float64
+	// IPSRulesRefreshInterval is the publish cadence of the IPS rule
+	// producer. Zero (the default) falls back to RefreshInterval, so the
+	// IPS bundle and the DNS feed bundle move together unless an operator
+	// deliberately decouples them. THREAT_INTEL_IPS_REFRESH_INTERVAL.
+	IPSRulesRefreshInterval time.Duration
 }
 
 // Log carries structured-logging configuration.
@@ -1940,8 +1945,9 @@ func Load() (Config, error) {
 			IOCCategory:      getStr("THREAT_INTEL_IOC_CATEGORY", "threat-intel-ioc"),
 			IOCMinConfidence: getFloatLenient("THREAT_INTEL_IOC_MIN_CONFIDENCE", 0),
 			// IPSRulesEnabled is parsed strictly below (default-OFF flag).
-			IPSRulesSubject:       getStr("THREAT_INTEL_IPS_SUBJECT", ""),
-			IPSRulesMinConfidence: getFloatLenient("THREAT_INTEL_IPS_MIN_CONFIDENCE", 0.5),
+			IPSRulesSubject:         getStr("THREAT_INTEL_IPS_SUBJECT", ""),
+			IPSRulesMinConfidence:   getFloatLenient("THREAT_INTEL_IPS_MIN_CONFIDENCE", 0.5),
+			IPSRulesRefreshInterval: getDuration("THREAT_INTEL_IPS_REFRESH_INTERVAL", 0),
 		},
 	}
 

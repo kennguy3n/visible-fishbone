@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -188,6 +189,46 @@ func TestIPSRuleCompiler_Empty(t *testing.T) {
 	}
 	if len(set.ByCategory) != len(policy.AllIPSRuleCategories()) {
 		t.Fatalf("ByCategory should carry every category, got %d", len(set.ByCategory))
+	}
+}
+
+// TestIPSRuleCompiler_CompileCountsMatchesCompile verifies the
+// count-only path returns the same Total and per-category cardinality
+// as the full Compile path (the efficacy metric relies on this, since
+// Coverage now reads counts via CompileCounts to skip the RulesText
+// allocation).
+func TestIPSRuleCompiler_CompileCountsMatchesCompile(t *testing.T) {
+	t.Parallel()
+	store := NewIOCStore()
+	store.Upsert(
+		mkIOC(IOCTypeJA3, sampleJA3, 0.9),
+		mkIOC(IOCTypeDomain, "malware-drop.example", 0.9),
+		mkIOC(IOCTypeIP, "203.0.113.10", 0.9, func(i *IOC) { i.Campaign = "Emotet botnet" }),
+		mkIOC(IOCTypeCIDR, "198.51.100.0/24", 0.9, func(i *IOC) { i.Source = "exfil-tracker" }),
+		mkIOC(IOCTypeDomain, "low.example", 0.3),
+	)
+	c := NewIPSRuleCompiler(store, WithIPSMinConfidence(0.5))
+	full := c.Compile()
+	counts := c.CompileCounts()
+
+	if counts.Total != full.Total {
+		t.Errorf("CompileCounts Total = %d, Compile Total = %d", counts.Total, full.Total)
+	}
+	if !reflect.DeepEqual(counts.ByCategory, full.ByCategory) {
+		t.Errorf("CompileCounts ByCategory = %v, Compile ByCategory = %v", counts.ByCategory, full.ByCategory)
+	}
+}
+
+// TestIPSRuleCompiler_CompileCountsEmpty verifies the count-only path
+// returns the full zeroed category row set for an empty store.
+func TestIPSRuleCompiler_CompileCountsEmpty(t *testing.T) {
+	t.Parallel()
+	counts := NewIPSRuleCompiler(NewIOCStore()).CompileCounts()
+	if counts.Total != 0 {
+		t.Fatalf("empty store CompileCounts Total = %d, want 0", counts.Total)
+	}
+	if len(counts.ByCategory) != len(policy.AllIPSRuleCategories()) {
+		t.Fatalf("ByCategory should carry every category, got %d", len(counts.ByCategory))
 	}
 }
 
