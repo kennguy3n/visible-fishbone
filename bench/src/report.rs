@@ -1066,7 +1066,13 @@ impl WireScalingReport {
         let _ = writeln!(
             out,
             "Transport `{}` · interface `{}` · {} {} · frame {} B · {} ms/stream · host parallelism {}.",
-            self.transport, self.interface, self.ip_version, self.l4, self.frame_bytes, self.duration_ms, self.available_parallelism
+            self.transport,
+            self.interface,
+            self.ip_version,
+            self.l4,
+            self.frame_bytes,
+            self.duration_ms,
+            self.available_parallelism
         );
         let _ = writeln!(out);
 
@@ -2448,13 +2454,26 @@ mod tests {
 
     #[test]
     fn wire_scaling_markdown_headlines_lift_and_keeps_wire_caveat() {
-        let md = wire_report("af-packet", &[(1, 1e5, 0.40, 1.0), (8, 4.5e5, 1.60, 0.56)]).to_markdown();
+        let md =
+            wire_report("af-packet", &[(1, 1e5, 0.40, 1.0), (8, 4.5e5, 1.60, 0.56)]).to_markdown();
         // Floor→ceiling lift is 1.60 / 0.40 = 4.00×.
-        assert!(md.contains("4.00×"), "markdown must headline the lift: {md}");
-        assert!(md.contains("AF_PACKET"), "wire run must keep the wire caveat");
-        assert!(!md.contains("craft-only"), "wire run must not show the dry-run caveat");
+        assert!(
+            md.contains("4.00×"),
+            "markdown must headline the lift: {md}"
+        );
+        assert!(
+            md.contains("AF_PACKET"),
+            "wire run must keep the wire caveat"
+        );
+        assert!(
+            !md.contains("craft-only"),
+            "wire run must not show the dry-run caveat"
+        );
         // The run's flow shape is self-describing in the metadata line.
-        assert!(md.contains("v4 udp"), "markdown must record ip version + l4: {md}");
+        assert!(
+            md.contains("v4 udp"),
+            "markdown must record ip version + l4: {md}"
+        );
     }
 
     #[test]
@@ -2468,27 +2487,68 @@ mod tests {
     #[test]
     fn wire_scaling_markdown_marks_dry_run_as_craft_only() {
         let md = wire_report("dry-run", &[(1, 1e5, 0.40, 1.0), (4, 3e5, 1.19, 0.75)]).to_markdown();
-        assert!(md.contains("craft-only"), "dry-run must flag the craft-only ceiling: {md}");
-        assert!(!md.contains("really crafted and pushed"), "dry-run must not claim a wire number");
+        assert!(
+            md.contains("craft-only"),
+            "dry-run must flag the craft-only ceiling: {md}"
+        );
+        assert!(
+            !md.contains("really crafted and pushed"),
+            "dry-run must not claim a wire number"
+        );
     }
 
     #[test]
     fn wire_scaling_gate_flags_real_efficiency_collapse() {
         // Baseline: efficiency holds at 0.90/0.80 across 2/4 streams.
-        let base = wire_report("af-packet", &[(1, 1e5, 0.37, 1.0), (2, 2e5, 0.66, 0.90), (4, 3.5e5, 1.18, 0.80)]);
+        let base = wire_report(
+            "af-packet",
+            &[
+                (1, 1e5, 0.37, 1.0),
+                (2, 2e5, 0.66, 0.90),
+                (4, 3.5e5, 1.18, 0.80),
+            ],
+        );
         // Current: q=4 collapses 0.80 -> 0.50 (~38% drop); q=2 holds.
-        let sample = wire_report("af-packet", &[(1, 1e5, 0.37, 1.0), (2, 2e5, 0.66, 0.90), (4, 2.4e5, 0.74, 0.50)]);
+        let sample = wire_report(
+            "af-packet",
+            &[
+                (1, 1e5, 0.37, 1.0),
+                (2, 2e5, 0.66, 0.90),
+                (4, 2.4e5, 0.74, 0.50),
+            ],
+        );
         let rr = detect_wire_scaling_regression_stats(&base, &[sample], 0.15, 2.0).unwrap();
-        assert!(rr.has_regression(), "a real scaling collapse must flag: {rr:?}");
-        let q4 = rr.metrics.iter().find(|m| m.metric.contains("q=4")).unwrap();
+        assert!(
+            rr.has_regression(),
+            "a real scaling collapse must flag: {rr:?}"
+        );
+        let q4 = rr
+            .metrics
+            .iter()
+            .find(|m| m.metric.contains("q=4"))
+            .unwrap();
         assert!(q4.flagged, "q=4 must be the flagged width: {q4:?}");
     }
 
     #[test]
     fn wire_scaling_gate_ignores_minor_scatter() {
-        let base = wire_report("af-packet", &[(1, 1e5, 0.37, 1.0), (2, 2e5, 0.66, 0.90), (4, 3.5e5, 1.18, 0.80)]);
+        let base = wire_report(
+            "af-packet",
+            &[
+                (1, 1e5, 0.37, 1.0),
+                (2, 2e5, 0.66, 0.90),
+                (4, 3.5e5, 1.18, 0.80),
+            ],
+        );
         // A few percent of scatter, well inside the 15% threshold.
-        let sample = wire_report("af-packet", &[(1, 1e5, 0.37, 1.0), (2, 2e5, 0.65, 0.88), (4, 3.5e5, 1.15, 0.78)]);
+        let sample = wire_report(
+            "af-packet",
+            &[
+                (1, 1e5, 0.37, 1.0),
+                (2, 2e5, 0.65, 0.88),
+                (4, 3.5e5, 1.15, 0.78),
+            ],
+        );
         let rr = detect_wire_scaling_regression_stats(&base, &[sample], 0.15, 2.0).unwrap();
         assert!(!rr.has_regression(), "minor scatter must not flag: {rr:?}");
     }
@@ -2532,6 +2592,9 @@ mod tests {
             wire_report("af-packet", &[(4, 3.5e5, 1.18, 0.80)]),
         ];
         let rr = detect_wire_scaling_regression_stats(&base, &samples, 0.15, 2.0).unwrap();
-        assert!(!rr.has_regression(), "scatter across samples must not flag: {rr:?}");
+        assert!(
+            !rr.has_regression(),
+            "scatter across samples must not flag: {rr:?}"
+        );
     }
 }
