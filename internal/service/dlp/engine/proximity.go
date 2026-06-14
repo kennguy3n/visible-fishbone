@@ -70,6 +70,13 @@ var contextKeywords = map[string][]string{
 	"philippines_umid":        {"umid", "crn", "common reference", "sss", "gsis"},
 	"thailand_id":             {"บัตรประชาชน", "national id", "thai id"},
 	"indonesia_nik":           {"nik", "ktp", "nomor induk kependudukan"},
+
+	// --- WS-10c jurisdiction breadth (mirrors the detectors registry) ---
+	"ireland_ppsn":    {"pps", "ppsn", "pps number", "personal public service", "uimhir psp"},
+	"switzerland_ahv": {"ahv", "avs", "ahv-nummer", "sozialversicherungsnummer", "social security"},
+	"israel_id":       {"תעודת זהות", "teudat zehut", "national id", "id number"},
+	"romania_cnp":     {"cnp", "cod numeric personal", "personal numeric code"},
+	"mexico_curp":     {"curp", "clave única de registro", "registro de población"},
 }
 
 // proximityKeywords returns the locale context keywords for a pattern

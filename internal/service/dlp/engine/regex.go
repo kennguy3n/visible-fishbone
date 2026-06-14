@@ -102,6 +102,18 @@ var builtinPatterns = map[string]*regexp.Regexp{
 	// Indonesia NIK (KTP): 16 digits.
 	"indonesia_nik": regexp.MustCompile(`\b\d{16}\b`),
 
+	// --- WS-10c jurisdiction breadth (confirmed by validators_ws10c.go) ---
+	// Ireland PPSN: 7 digits, a check letter, optional second letter.
+	"ireland_ppsn": regexp.MustCompile(`\b\d{7}[A-Wa-w][A-IWa-iw]?\b`),
+	// Switzerland AHV/AVS: 756 + 9 digits + check (756.XXXX.XXXX.XX).
+	"switzerland_ahv": regexp.MustCompile(`\b756[.\s]?\d{4}[.\s]?\d{4}[.\s]?\d{2}\b`),
+	// Israel Teudat Zehut: 9 digits.
+	"israel_id": regexp.MustCompile(`\b\d{9}\b`),
+	// Romania CNP: leading 1-8 + 12 digits.
+	"romania_cnp": regexp.MustCompile(`\b[1-8]\d{12}\b`),
+	// Mexico CURP: 4 letters, DOB, sex, state, consonants, homoclave, check.
+	"mexico_curp": regexp.MustCompile(`\b[A-Z]{4}\d{6}[HM][A-Z]{2}[A-Z]{3}[A-Z0-9]\d\b`),
+
 	// --- Secret / credential detectors (confirmed by validators.go) ---
 	// Distinctive vendor prefixes make these near-zero-FP; each
 	// resolves to a structural validator in validatorFor that
