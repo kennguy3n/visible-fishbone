@@ -361,3 +361,45 @@ func TestReportsTenantInfraProjectionPropagatesSizerError(t *testing.T) {
 		t.Fatal("expected TenantInfraProjection to propagate the sizer error")
 	}
 }
+
+// fakeHibReader is a HibernationStateReader for the fleet-view flag test.
+type fakeHibReader struct{ hibernated map[uuid.UUID]bool }
+
+func (f fakeHibReader) IsHibernated(id uuid.UUID) bool { return f.hibernated[id] }
+
+func TestReportsTenantInfraProjectionHibernatedFlag(t *testing.T) {
+	store := newFakeStore()
+	now := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	svc := mustService(t, store, withClock(fixedClock(now)))
+	enf := mustEnforcer(t, svc, store, fakeTiers{tier: repository.TenantTierStarter})
+	calc := NewCostCalculator(DefaultUnitCosts, withCostClock(fixedClock(now)))
+
+	parked := uuid.New()
+	live := uuid.New()
+	reports, err := NewReports(svc, enf, store, fakeTiers{tier: repository.TenantTierStarter}, calc,
+		WithHibernationStateReader(fakeHibReader{hibernated: map[uuid.UUID]bool{parked: true}}))
+	if err != nil {
+		t.Fatalf("NewReports: %v", err)
+	}
+	ctx := context.Background()
+
+	parkedProj, err := reports.TenantInfraProjection(ctx, parked)
+	if err != nil {
+		t.Fatalf("TenantInfraProjection(parked): %v", err)
+	}
+	if !parkedProj.Hibernated {
+		t.Fatal("parked tenant projection should be marked Hibernated")
+	}
+	// A hibernated trial with no recorded usage projects to near-zero.
+	if parkedProj.TotalMonthlyUSD != 0 {
+		t.Fatalf("hibernated trial total = %v, want 0", parkedProj.TotalMonthlyUSD)
+	}
+
+	liveProj, err := reports.TenantInfraProjection(ctx, live)
+	if err != nil {
+		t.Fatalf("TenantInfraProjection(live): %v", err)
+	}
+	if liveProj.Hibernated {
+		t.Fatal("live tenant projection must not be marked Hibernated")
+	}
+}
