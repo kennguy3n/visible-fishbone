@@ -656,6 +656,10 @@ pub enum SecretKind {
     StripeSecretKey,
     /// `OpenAI`-style API key (`sk-…`, `sk-proj-…`).
     OpenAiKey,
+    /// Anthropic API key (`sk-ant-…`).
+    AnthropicKey,
+    /// Twilio Account SID / API-key SID (`AC…`, `SK…` + 32 hex).
+    TwilioKey,
     /// `SendGrid` API key (`SG.…`).
     SendGridKey,
     /// npm access token (`npm_…`).
@@ -678,6 +682,8 @@ impl SecretKind {
             Self::SlackToken => "slack_token",
             Self::StripeSecretKey => "stripe_secret_key",
             Self::OpenAiKey => "openai_api_key",
+            Self::AnthropicKey => "anthropic_api_key",
+            Self::TwilioKey => "twilio_api_key",
             Self::SendGridKey => "sendgrid_api_key",
             Self::NpmToken => "npm_token",
             Self::PrivateKey => "private_key",
@@ -813,11 +819,20 @@ impl SecretScanner {
                 r"\b(?:sk|rk)_live_[0-9A-Za-z]{16,}\b",
                 3.0,
             ),
+            // Anthropic precedes OpenAI: an `sk-ant-…` key matches both
+            // shapes, and `scan` keeps the specific Anthropic kind for
+            // any span both report.
+            (
+                SecretKind::AnthropicKey,
+                r"\bsk-ant-[0-9A-Za-z_\-]{20,}\b",
+                3.5,
+            ),
             (
                 SecretKind::OpenAiKey,
                 r"\bsk-(?:proj-)?[0-9A-Za-z_\-]{20,}\b",
                 3.5,
             ),
+            (SecretKind::TwilioKey, r"\b(?:AC|SK)[0-9a-f]{32}\b", 3.0),
             (
                 SecretKind::SendGridKey,
                 r"\bSG\.[0-9A-Za-z_\-]{22}\.[0-9A-Za-z_\-]{43}\b",
@@ -879,6 +894,18 @@ impl SecretScanner {
                 });
             }
         }
+        // An `sk-ant-…` key matches both the specific Anthropic shape and
+        // the broader OpenAI `sk-…` shape. Keep only the Anthropic kind
+        // for any span both reported, so the credential is labeled once,
+        // with the correct vendor.
+        let ant_spans: Vec<(usize, usize)> = out
+            .iter()
+            .filter(|m| m.kind == SecretKind::AnthropicKey)
+            .map(|m| (m.offset, m.length))
+            .collect();
+        out.retain(|m| {
+            m.kind != SecretKind::OpenAiKey || !ant_spans.contains(&(m.offset, m.length))
+        });
         out
     }
 }
