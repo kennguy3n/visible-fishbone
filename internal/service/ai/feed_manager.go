@@ -370,23 +370,23 @@ func (m *FeedManager) Coverage(now time.Time) FeedCoverage {
 }
 
 // DomainIndicators returns the active (non-expired) domain IOC values
-// whose confidence is at or above min, as the canonical lowercased
-// strings the IOC store already holds. It is the bridge that feeds
-// aggregated domain indicators into the managed DNS feed bundle
+// whose confidence is at or above minConfidence, as the canonical
+// lowercased strings the IOC store already holds. It is the bridge that
+// feeds aggregated domain indicators into the managed DNS feed bundle
 // (internal/service/threatintel) so they ride the SAME signed
 // distribution path as the upstream reputation / category feeds rather
 // than needing a second producer.
 //
-// min is an additional enforcement-confidence gate applied on top of
-// the store's own ingest floor, mirroring the IOC enforcement
+// minConfidence is an additional enforcement-confidence gate applied on
+// top of the store's own ingest floor, mirroring the IOC enforcement
 // compiler's per-rule confidence gate so the DNS bundle and the policy
 // bundle enforce the same indicator set. It is read-only and safe to
 // call concurrently with feed refreshes.
-func (m *FeedManager) DomainIndicators(min float64) []string {
+func (m *FeedManager) DomainIndicators(minConfidence float64) []string {
 	snap := m.store.Snapshot()
 	out := make([]string, 0, len(snap.Domains))
 	for _, ioc := range snap.Domains {
-		if ioc.Confidence < min {
+		if ioc.Confidence < minConfidence {
 			continue
 		}
 		out = append(out, ioc.Value)
