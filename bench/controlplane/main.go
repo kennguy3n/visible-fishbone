@@ -62,6 +62,10 @@ capacity-plan / full-suite flags:
   --tenants N              Fleet size to model (default: 5000)
   --ch-shards N            ClickHouse shard count to model (default: 2)
   --nats-partitions N      NATS_PARTITIONS fan-out to model (default: 16)
+  --tier-sampling          Model WS-4 activity-tier telemetry sampling (default: off)
+  --active-fraction F      Active-tenant share of the fleet (default: 0.10)
+  --idle-fraction F        Idle-tenant share of the fleet (default: 0.15)
+  --idle-multiplier F      Idle-tenant keep fraction (default: 0.25)
 `
 
 // options holds the parsed CLI flags shared across subcommands.
@@ -85,6 +89,14 @@ type options struct {
 	poolSize    int
 	chShards    int
 	natsParts   int
+
+	dormantFrac   float64
+	hibSampleRate float64
+
+	tierSampling   bool
+	activeFraction float64
+	idleFraction   float64
+	idleMultiplier float64
 }
 
 func main() {
@@ -145,6 +157,15 @@ func parseFlags(mode string, args []string) *options {
 	// override path could tell them apart.
 	fs.IntVar(&opts.chShards, "ch-shards", 0, "ClickHouse shard count to model (capacity-plan; 0 = default)")
 	fs.IntVar(&opts.natsParts, "nats-partitions", 0, "NATS_PARTITIONS to model (capacity-plan; 0 = default)")
+	fs.Float64Var(&opts.dormantFrac, "dormant-fraction", 0, "fraction of the fleet (0..1) modelled as dormant/hibernated (capacity-plan; 0 = pre-hibernation baseline)")
+	fs.Float64Var(&opts.hibSampleRate, "hibernated-sample-rate", 0, "near-zero telemetry keep-probability for hibernated tenants (capacity-plan; 0 = default 1-in-10000)")
+	// WS-4 activity-tier sampling knobs (capacity-plan). Default-OFF so
+	// the baseline projection is unchanged; the fractions/multiplier
+	// default to the NoOps-fleet model when --tier-sampling is set.
+	fs.BoolVar(&opts.tierSampling, "tier-sampling", false, "model WS-4 activity-tier telemetry sampling (capacity-plan; default off)")
+	fs.Float64Var(&opts.activeFraction, "active-fraction", 0, "active-tenant share of the fleet (tier-sampling; 0 = default 0.10)")
+	fs.Float64Var(&opts.idleFraction, "idle-fraction", 0, "idle-tenant share of the fleet (tier-sampling; 0 = default 0.15)")
+	fs.Float64Var(&opts.idleMultiplier, "idle-multiplier", 0, "idle-tenant keep fraction (tier-sampling; 0 = default 0.25)")
 	fs.Usage = func() { fmt.Fprint(os.Stderr, usage) }
 	// ExitOnError handles the error path; the assignment keeps the
 	// linter from flagging the unchecked return.
@@ -258,6 +279,26 @@ func buildCapacityPlan(opts *options) *CapacityPlanSection {
 	}
 	if opts.natsParts > 0 {
 		cfg.NATSPartitions = opts.natsParts
+	}
+	if opts.dormantFrac > 0 {
+		cfg.DormantFraction = opts.dormantFrac
+	}
+	if opts.hibSampleRate > 0 {
+		cfg.HibernatedSampleRate = opts.hibSampleRate
+	}
+	if opts.tierSampling {
+		cfg.TierSampling = true
+		// Only override the cohort defaults when explicitly supplied;
+		// withDefaults fills the rest with the NoOps-fleet model.
+		if opts.activeFraction > 0 {
+			cfg.ActiveFraction = opts.activeFraction
+		}
+		if opts.idleFraction > 0 {
+			cfg.IdleFraction = opts.idleFraction
+		}
+		if opts.idleMultiplier > 0 {
+			cfg.IdleSampleMultiplier = opts.idleMultiplier
+		}
 	}
 	return RunCapacityPlan(cfg)
 }

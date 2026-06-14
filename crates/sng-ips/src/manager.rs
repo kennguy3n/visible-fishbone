@@ -1405,6 +1405,7 @@ mod tests {
             app_layer_enabled: BTreeMap::new(),
             force_drop_on_alert: None,
             max_pending_packets: None,
+            capture_threads: crate::config::CaptureThreads::default(),
         }
     }
 

@@ -94,6 +94,31 @@ type Config struct {
 	RBI                RBI
 	TenantMigration    TenantMigration
 	Activity           Activity
+	Hibernation        Hibernation
+	AlertFeedback      AlertFeedback
+}
+
+// AlertFeedback carries the runtime knobs for the leader-only alert
+// false-positive feedback tuning loop (internal/service/alert
+// feedback.go). The loop walks every (tenant, dimension, window)
+// baseline and nudges its anomaly-detection Z-threshold from the
+// accumulated operator-feedback false-positive rate.
+//
+// DEFAULT-OFF: TuningEnabled gates whether the loop is registered at
+// all, so a fresh deployment never starts mutating baseline thresholds
+// on upgrade — the loop only runs once an operator opts in. When
+// enabled, the sweep is activity-tiered (tenancy.TieredSweep) so dormant
+// trials are re-tuned at a reduced cadence instead of every cycle, while
+// active tenants stay on the per-cycle cadence and cycle 0 still tunes
+// everyone.
+type AlertFeedback struct {
+	// TuningEnabled registers the leader-only tuning loop. Default
+	// false (the loop is constructed regardless for on-demand
+	// TuneDimension calls, but the periodic sweep is off).
+	TuningEnabled bool
+	// TuningInterval is the cadence of the tuning sweep. Defaults to
+	// 30m. Only consulted when TuningEnabled is true.
+	TuningInterval time.Duration
 }
 
 // Activity carries the runtime knobs for per-tenant activity tracking
@@ -122,6 +147,38 @@ type Activity struct {
 	// drain worker; beyond it, touches are dropped (forward-only, so
 	// the next activity re-establishes the signal). Defaults to 4096.
 	QueueSize int
+}
+
+// Hibernation carries the runtime knobs for dormant-tenant scale-to-zero
+// hibernation (internal/service/tenancy/hibernation): the leader-only
+// controller that parks a tenant's ongoing telemetry / NATS / warm-state
+// draw once it reaches the dormant tier, and the wake-on-activity path
+// that rehydrates it on the first sign of life.
+//
+// Enabled defaults to OFF so a fresh deployment (and every upgrade)
+// hibernates nothing until an operator opts in — no surprise enforcement
+// on upgrade. When off, none of the hibernation loops are constructed
+// and the telemetry/retention/metering hooks are not wired, so the
+// feature is fully inert.
+type Hibernation struct {
+	// Enabled gates the whole feature: the leader-only controller, the
+	// per-replica registry sync + wake coordinator, and the telemetry /
+	// retention / metering hooks. Default false. When false, a tenant is
+	// never parked and behaves exactly as before this feature shipped.
+	Enabled bool
+	// SweepInterval is the cadence of the leader-only controller's
+	// reconcile loop (classify every tenant, hibernate newly-dormant
+	// ones, wake any that climbed back out as a backstop). Defaults to
+	// 1h. Anything <= 0 is treated as the default by the loop; the
+	// strict parser still rejects un-parseable values.
+	SweepInterval time.Duration
+	// RegistrySyncInterval is the cadence at which each replica refreshes
+	// its in-memory hibernation registry from the store, so the
+	// telemetry sampler and retention resolver on every replica honor the
+	// leader's decisions. Defaults to 30s. The activity-triggered wake
+	// path clears a tenant inline, so this only bounds how fast a newly
+	// hibernated tenant's telemetry pause propagates to followers.
+	RegistrySyncInterval time.Duration
 }
 
 // TenantMigration carries the runtime knobs for the WS11 cross-region
@@ -481,6 +538,17 @@ type ThreatIntel struct {
 	// in CSV (indicator-per-row) or JSON (array-of-objects) form.
 	CSVURL  string
 	JSONURL string
+	// MISPURL / MISPAuthKey configure a MISP feed (events or
+	// attributes REST-search export, or a static event JSON). The
+	// key, when set, is sent as the MISP "Authorization" header.
+	MISPURL     string
+	MISPAuthKey string
+	// MISPIncludeNonIDs, when true, ingests MISP attributes that are
+	// NOT flagged `to_ids`. Defaults to false: only `to_ids:true`
+	// attributes (MISP's "intended for automated detection"
+	// convention) become enforceable IOCs, so contextual attributes
+	// never cause a false-positive block.
+	MISPIncludeNonIDs bool
 	// Persistence snapshots the in-memory IOC store to Postgres and
 	// restores it on boot, so a control-plane restart does not open
 	// an enforcement gap until every feed re-fetches during warm-up
@@ -1377,6 +1445,30 @@ type TelemetryAnalytics struct {
 	// place. The healthy per-shard ceiling is ~1–2 inserts/sec.
 	ClickHouseAutoTuneTargetInsertsPerSec float64
 
+	// ClickHouseTierSamplingEnabled toggles the WS-4 activity-tier-aware
+	// telemetry sampling policy on the ClickHouse hot path (env
+	// CLICKHOUSE_TIER_SAMPLING_ENABLED). DEFAULT-OFF: enabling it makes
+	// idle tenants sample more aggressively and dormant tenants write
+	// security-events-only, so it is opt-in to avoid silently changing
+	// retention on upgrade. Security-relevant events (IPS / ZTNA / DLP)
+	// and the inspect_full compliance record are always preserved at
+	// 1:1 regardless. Only consulted when an adaptive sampler is wired.
+	ClickHouseTierSamplingEnabled bool
+	// ClickHouseTierSamplingIdleMultiplier scales the keep probability
+	// for idle-tier tenants when tier sampling is enabled (env
+	// CLICKHOUSE_TIER_SAMPLING_IDLE_MULTIPLIER). <= 0 ⇒ use the
+	// telemetry package default (0.25), so the default lives in one
+	// place. Clamped to (0,1]; dormant tenants are always
+	// security-events-only and are not tunable here.
+	ClickHouseTierSamplingIdleMultiplier float64
+	// ClickHouseTierSamplingRefreshInterval bounds how stale a tenant's
+	// activity tier may be on the hot path (env
+	// CLICKHOUSE_TIER_SAMPLING_REFRESH_INTERVAL). <= 0 ⇒ use the
+	// telemetry package default (60s). A waking dormant tenant is
+	// re-classified active within one interval, so the security floor
+	// plus this bound cap how long a now-active tenant is under-sampled.
+	ClickHouseTierSamplingRefreshInterval time.Duration
+
 	// S3: bucket name. Empty disables the cold-path sink.
 	S3Bucket string
 	// S3Prefix is the top-level key prefix under which archive
@@ -1639,6 +1731,9 @@ func Load() (Config, error) {
 			FeodoTrackerURL:      getStr("THREATINTEL_FEODOTRACKER_URL", ""),
 			CSVURL:               getStr("THREATINTEL_CSV_URL", ""),
 			JSONURL:              getStr("THREATINTEL_JSON_URL", ""),
+			MISPURL:              getStr("THREATINTEL_MISP_URL", ""),
+			MISPAuthKey:          getStr("THREATINTEL_MISP_AUTH_KEY", ""),
+			MISPIncludeNonIDs:    getBoolLenient("THREATINTEL_MISP_INCLUDE_NON_IDS", false),
 			Persistence:          getBoolLenient("THREATINTEL_PERSISTENCE", true),
 			PersistInterval:      getDuration("THREATINTEL_PERSIST_INTERVAL", 5*time.Minute),
 			AutoRecompile:        getBoolLenient("THREATINTEL_AUTO_RECOMPILE", true),
@@ -1776,9 +1871,19 @@ func Load() (Config, error) {
 		{"BRUTEFORCE_AUTH_COOLDOWN", 30 * time.Second, &cfg.BruteForce.AuthCooldown},
 		{"BRUTEFORCE_ENROLL_COOLDOWN", 5 * time.Minute, &cfg.BruteForce.EnrollCooldown},
 		{"CLICKHOUSE_FLUSH_INTERVAL", 2 * time.Second, &cfg.TelemetryAnalytics.ClickHouseFlushInterval},
+		// WS-4 tier-sampling activity-tier refresh cadence. 0 ⇒ use the
+		// telemetry package default (60s). Bounds how stale a tenant's
+		// tier may be on the hot path.
+		{"CLICKHOUSE_TIER_SAMPLING_REFRESH_INTERVAL", 0, &cfg.TelemetryAnalytics.ClickHouseTierSamplingRefreshInterval},
 		{"S3_TELEMETRY_FLUSH_INTERVAL", 30 * time.Second, &cfg.TelemetryAnalytics.S3FlushInterval},
 		{"APP_REGISTRY_SYNC_INTERVAL", 24 * time.Hour, &cfg.AppRegistry.SyncInterval},
 		{"CASB_NOOPS_RECONCILE_INTERVAL", time.Hour, &cfg.CASB.NoOpsReconcileInterval},
+		// Dormant-tenant hibernation cadences (only consulted when
+		// HIBERNATION_ENABLED). SweepInterval drives the leader-only
+		// reconcile; RegistrySyncInterval bounds how fast a decision
+		// propagates to follower replicas' telemetry hooks.
+		{"HIBERNATION_SWEEP_INTERVAL", time.Hour, &cfg.Hibernation.SweepInterval},
+		{"HIBERNATION_REGISTRY_SYNC_INTERVAL", 30 * time.Second, &cfg.Hibernation.RegistrySyncInterval},
 		// Per-tenant activity debounce window. Must stay well under the
 		// dormancy planner's 24h IdleAfter so steady traffic keeps a
 		// tenant in the active tier between writes.
@@ -1806,6 +1911,9 @@ func Load() (Config, error) {
 		{"POP_GEODNS_PUBLISH_INTERVAL", 30 * time.Second, &cfg.PoP.GeoDNSPublishInterval},
 		{"POP_REBALANCE_INTERVAL", 60 * time.Second, &cfg.PoP.RebalanceInterval},
 		{"WS11_MIGRATION_RESUME_INTERVAL", 5 * time.Minute, &cfg.TenantMigration.ResumeInterval},
+		// Alert false-positive feedback tuning sweep cadence (only
+		// consulted when ALERT_FEEDBACK_TUNING_ENABLED). Defaults to 30m.
+		{"ALERT_FEEDBACK_TUNING_INTERVAL", 30 * time.Minute, &cfg.AlertFeedback.TuningInterval},
 	}
 	strictFloats := []struct {
 		key string
@@ -1825,6 +1933,10 @@ func Load() (Config, error) {
 		// telemetry package default (~2/sec). Parsed strictly so a typo
 		// can't silently revert the "too many parts" health target.
 		{"CLICKHOUSE_AUTOTUNE_TARGET_INSERTS_PER_SEC", 0, &cfg.TelemetryAnalytics.ClickHouseAutoTuneTargetInsertsPerSec},
+		// WS-4 tier-sampling idle-tier keep multiplier. 0 ⇒ use the
+		// telemetry package default (0.25). Parsed strictly so a typo
+		// can't silently change idle-tenant retention.
+		{"CLICKHOUSE_TIER_SAMPLING_IDLE_MULTIPLIER", 0, &cfg.TelemetryAnalytics.ClickHouseTierSamplingIdleMultiplier},
 	}
 	// Boolean fields parsed strictly. Both entries below toggle
 	// security- or correctness-adjacent behaviour:
@@ -1855,10 +1967,16 @@ func Load() (Config, error) {
 		{"CLICKHOUSE_ROW_LIMIT_ENABLED", true, &cfg.TelemetryAnalytics.ClickHouseRowLimitEnabled},
 		{"CLICKHOUSE_ROW_LIMIT_ADAPTIVE", false, &cfg.TelemetryAnalytics.ClickHouseRowLimitAdaptive},
 		{"CLICKHOUSE_AUTOTUNE_ENABLED", true, &cfg.TelemetryAnalytics.ClickHouseAutoTuneEnabled},
+		{"CLICKHOUSE_TIER_SAMPLING_ENABLED", false, &cfg.TelemetryAnalytics.ClickHouseTierSamplingEnabled},
 		{"S3_TELEMETRY_MANAGE_LIFECYCLE", true, &cfg.TelemetryAnalytics.S3ManageLifecycle},
 		{"APP_REGISTRY_SYNC_ENABLED", true, &cfg.AppRegistry.SyncEnabled},
 		{"CASB_NOOPS_ENABLED", false, &cfg.CASB.NoOpsEnabled},
 		{"CASB_NOOPS_AUTO_ENFORCE", false, &cfg.CASB.NoOpsAutoEnforce},
+		// Dormant-tenant hibernation. DEFAULT-OFF: the leader-only
+		// controller, registry sync, wake coordinator, and the telemetry
+		// /retention/metering hooks are only wired when this is explicitly
+		// enabled, so an upgrade never starts parking tenants on its own.
+		{"HIBERNATION_ENABLED", false, &cfg.Hibernation.Enabled},
 		{"MOBILE_AUTH_AUTO_PROVISION_USERS", true, &cfg.MobileAuth.AutoProvisionUsers},
 		{"IDP_DIRECTORY_SYNC_ENABLED", false, &cfg.MobileAuth.DirectorySyncEnabled},
 		// Managed DNS threat-intel feed pipeline. DEFAULT-OFF: the
@@ -1874,6 +1992,11 @@ func Load() (Config, error) {
 		// planner sees every tenant as dormant. Cheap (debounced, async)
 		// so there is no reason to ship it off by default.
 		{"ACTIVITY_TRACKING_ENABLED", true, &cfg.Activity.Enabled},
+		// Alert false-positive feedback tuning loop. DEFAULT-OFF: the
+		// leader-only sweep mutates baseline Z-thresholds, so it is only
+		// registered when an operator explicitly opts in. Parsed strictly
+		// so a typo fails boot rather than silently leaving it off.
+		{"ALERT_FEEDBACK_TUNING_ENABLED", false, &cfg.AlertFeedback.TuningEnabled},
 	}
 
 	var strictErrs []error
@@ -2267,6 +2390,14 @@ func (c Config) validate() error {
 	// pipeline is enabled — the default-off path ignores the interval.
 	if c.ManagedDNSFeeds.Enabled && c.ManagedDNSFeeds.RefreshInterval <= 0 {
 		return fmt.Errorf("THREAT_INTEL_REFRESH_INTERVAL must be > 0 when THREAT_INTEL_ENABLED=true, got %s", c.ManagedDNSFeeds.RefreshInterval)
+	}
+	// Alert feedback tuning loop: when enabled its cadence must be
+	// positive (a <= 0 interval would be silently overridden by the
+	// service's default rather than the cadence the operator chose).
+	// Only enforced when the loop is enabled — the default-off path
+	// ignores the interval.
+	if c.AlertFeedback.TuningEnabled && c.AlertFeedback.TuningInterval <= 0 {
+		return fmt.Errorf("ALERT_FEEDBACK_TUNING_INTERVAL must be > 0 when ALERT_FEEDBACK_TUNING_ENABLED=true, got %s", c.AlertFeedback.TuningInterval)
 	}
 	// Likewise, a <= 0 discovery-cache TTL would silently fall back to
 	// the service's 24h default rather than the configured value.

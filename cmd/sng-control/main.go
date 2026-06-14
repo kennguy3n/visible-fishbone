@@ -76,6 +76,7 @@ import (
 	telreplay "github.com/kennguy3n/visible-fishbone/internal/service/telemetry/replay"
 	s3writer "github.com/kennguy3n/visible-fishbone/internal/service/telemetry/s3"
 	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy"
+	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy/hibernation"
 	"github.com/kennguy3n/visible-fishbone/internal/service/tenant"
 	"github.com/kennguy3n/visible-fishbone/internal/service/terraform"
 	"github.com/kennguy3n/visible-fishbone/internal/service/threatintel"
@@ -559,6 +560,24 @@ func run() error {
 			slog.Duration("interval", cfg.MobileAuth.DirectorySyncInterval))
 	}
 
+	// Leader-only alert false-positive feedback tuning loop. DEFAULT-OFF
+	// (cfg.AlertFeedback.TuningEnabled): the sweep mutates baseline
+	// Z-thresholds, so it is registered only when an operator opts in.
+	// Leader-gated so only the lock holder tunes, and activity-tiered
+	// (the configured TieredSweep) so dormant trials are re-tuned at a
+	// reduced cadence while active tenants stay on the per-tick cadence.
+	// Own goroutine because RunIfLeader blocks until rootCtx is cancelled.
+	if cfg.AlertFeedback.TuningEnabled && rc.AlertFeedback != nil {
+		feedbackSvc := rc.AlertFeedback
+		tenantsFn := rc.AlertFeedbackTenants
+		interval := cfg.AlertFeedback.TuningInterval
+		go elector.RunIfLeader(rootCtx, "alert-feedback-tuning", func(ctx context.Context) {
+			feedbackSvc.Run(ctx, interval, tenantsFn)
+		})
+		logger.Info("sng-control: alert feedback tuning loop enabled (runs on leader only)",
+			slog.Duration("interval", interval))
+	}
+
 	// Producer half of the human-in-the-loop DLP review queue: an async,
 	// bounded adapter that turns coach-action DLP events off the
 	// telemetry hot path into review-queue enqueues. Drained on shutdown
@@ -587,7 +606,23 @@ func run() error {
 			slog.Duration("min_interval", cfg.Activity.MinInterval))
 	}
 
-	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer, dlpReviewIngest, rc.SampleRateResolver, rc.ActivityRecorder)
+	// Dormant-tenant hibernation (DEFAULT-OFF; nil unless enabled). The
+	// registry syncer and wake coordinator run on EVERY replica so each
+	// replica's telemetry sampler / retention resolver honor the parked
+	// set and any replica can wake a tenant on activity; the reconcile
+	// controller is leader-only (elector.RunIfLeader) so exactly one
+	// replica writes hibernate/wake transitions per interval. All three
+	// stop with rootCtx.
+	if rc.HibernationRegistry != nil {
+		go rc.HibernationSyncer.Run(rootCtx, cfg.Hibernation.RegistrySyncInterval)
+		go rc.HibernationCoordinator.Run(rootCtx)
+		go elector.RunIfLeader(rootCtx, "tenant-hibernation", func(ctx context.Context) {
+			rc.HibernationController.Run(ctx, cfg.Hibernation.SweepInterval)
+		})
+		logger.Info("sng-control: dormant-tenant hibernation enabled (leader-gated reconcile)")
+	}
+
+	rawTelShutdown, chStats, chReaderFactory, err := startTelemetry(rootCtx, &cfg, logger, js, telPublisher, shadowDiscoverer, dlpReviewIngest, rc.SampleRateResolver, rc.ActivityRecorder, rc.HibernationRegistry, rc.HibernationMetrics, rc.TierActivityLister)
 	if err != nil {
 		return fmt.Errorf("start telemetry: %w", err)
 	}
@@ -865,6 +900,59 @@ type routerComponents struct {
 	// activity observer; the control-plane signal is wired into the
 	// router here in buildRouter.
 	ActivityRecorder *activity.Recorder
+	// Hibernation* wire the dormant-tenant scale-to-zero subsystem. All
+	// are nil unless cfg.Hibernation.Enabled (DEFAULT-OFF): the registry
+	// is the per-replica parked-set snapshot the telemetry sampler /
+	// retention resolver / metering fleet view consult; the syncer
+	// refreshes it from the store on every replica; the coordinator
+	// performs the fast wake-on-activity (wired into the recorder's
+	// SetWakeNotifier here); and the controller is the leader-only
+	// reconcile loop main() runs via elector.RunIfLeader.
+	HibernationRegistry    *hibernation.Registry
+	HibernationSyncer      *hibernation.Syncer
+	HibernationCoordinator *hibernation.Coordinator
+	HibernationController  *hibernation.Controller
+	HibernationMetrics     *hibernation.Metrics
+	// TierActivityLister is the (id, last_active_at) projection the
+	// WS-4 tier-sampling refresher classifies once per cycle to drive
+	// the per-activity-tier telemetry sampling policy. Satisfied by the
+	// TenantRepository; handed to startTelemetry, which only consults it
+	// when CLICKHOUSE_TIER_SAMPLING_ENABLED. Never nil.
+	TierActivityLister telemetry.TenantActivityLister
+	// AlertFeedback is the alert false-positive feedback tuning service.
+	// Always non-nil (it also backs on-demand TuneDimension via the alert
+	// handler). main() registers its leader-only, activity-tiered tuning
+	// loop (AlertFeedback.Run) only when cfg.AlertFeedback.TuningEnabled
+	// — DEFAULT-OFF so an upgrade never starts mutating baseline
+	// thresholds unprompted.
+	AlertFeedback *alert.Feedback
+	// AlertFeedbackTenants is the legacy full-fanout tenant lister handed
+	// to AlertFeedback.Run as its fallback enumeration. The configured
+	// dormancy sweep gates the actual cadence; this is only consulted if
+	// the sweep is ever unset, so it stays correct (never starves) by
+	// listing every tenant.
+	AlertFeedbackTenants func(context.Context) ([]uuid.UUID, error)
+}
+
+// hibernationActivityLister adapts the tenant repository's
+// ListTenantActivity (which returns repository.TenantActivity) to the
+// hibernation.ActivityLister the controller consumes, converting at the
+// boundary so the hibernation package keeps its inward-pointing
+// dependency rule.
+type hibernationActivityLister struct {
+	tenants repository.TenantRepository
+}
+
+func (l hibernationActivityLister) ListTenantActivity(ctx context.Context) ([]hibernation.TenantActivity, error) {
+	acts, err := l.tenants.ListTenantActivity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]hibernation.TenantActivity, len(acts))
+	for i, a := range acts {
+		out[i] = hibernation.TenantActivity{ID: a.ID, LastActiveAt: a.LastActiveAt}
+	}
+	return out, nil
 }
 
 // buildRouter wires every repository / service / handler against
@@ -914,6 +1002,74 @@ func buildRouter(
 		// them from the data-plane (telemetry) and public-ingress
 		// (enroll / mobile) writers wired below.
 		activityObs = activityRecorder.From(activity.SourceAPI)
+	}
+
+	// Dormant-tenant hibernation (DEFAULT-OFF). When enabled, build the
+	// per-replica registry + store-backed syncer, the leader-only
+	// reconcile controller, and the wake coordinator; wire the wake into
+	// the activity recorder's hot path so the first sign of life on a
+	// parked tenant triggers an immediate rehydration. When disabled,
+	// every hibernation field stays nil and the telemetry / retention /
+	// metering hooks below are not wired, so the feature is fully inert.
+	var (
+		hibRegistry    *hibernation.Registry
+		hibSyncer      *hibernation.Syncer
+		hibCoordinator *hibernation.Coordinator
+		hibController  *hibernation.Controller
+		hibMetrics     *hibernation.Metrics
+	)
+	if cfg.Hibernation.Enabled {
+		// Derive the registry's post-wake re-park suppression window from
+		// the configured sync interval so the wake/sync race stays closed
+		// even when an operator sets an unusually long sync interval: the
+		// grace must outlast the time for a wake's store write to reach
+		// the next refresh. Keep the package default as a floor.
+		wakeGrace := 4 * cfg.Hibernation.RegistrySyncInterval
+		if wakeGrace < hibernation.DefaultWakeGrace {
+			wakeGrace = hibernation.DefaultWakeGrace
+		}
+		hibRegistry = hibernation.NewRegistry(hibernation.WithWakeGrace(wakeGrace))
+		// mx is nil when metrics are disabled; guard the registry /
+		// namespace access exactly as the other call sites do.
+		// NewMetrics treats a nil registerer as "metrics off" and
+		// returns a nil *Metrics whose record methods no-op.
+		if mx != nil {
+			hibMetrics = hibernation.NewMetrics(mx.Registry(), mx.Namespace())
+		}
+		hibStore := store.NewTenantHibernationRepository()
+		hibSyncer = hibernation.NewSyncer(hibStore, hibRegistry, logger)
+		hibCoordinator = hibernation.NewCoordinator(hibRegistry, hibStore,
+			hibernation.WithCoordinatorLogger(logger),
+			hibernation.WithCoordinatorMetrics(hibMetrics),
+		)
+		ctrl, err := hibernation.New(
+			tenancy.DefaultPlanner().Classifier,
+			hibStore,
+			hibernationActivityLister{tenants: tenantRepo},
+			hibernation.WithLogger(logger),
+			hibernation.WithMetrics(hibMetrics),
+		)
+		if err != nil {
+			return routerComponents{}, fmt.Errorf("control: hibernation controller: %w", err)
+		}
+		hibController = ctrl
+		if activityRecorder != nil {
+			activityRecorder.SetWakeNotifier(hibCoordinator.Notify)
+		} else {
+			// No activity recorder means the fast wake-on-activity path is
+			// not wired: a parked tenant can then only be rehydrated by the
+			// leader controller's backstop sweep (SweepInterval, 1h by
+			// default), not on its first request. Still correct, but the
+			// wake-latency SLA does not hold — warn the operator since this
+			// usually means HIBERNATION_ENABLED was set without the activity
+			// recorder (which is on by default and is what the dormancy
+			// signal depends on).
+			logger.Warn("hibernation: activity recorder disabled; fast wake-on-activity is OFF, tenants wake only via the controller backstop",
+				slog.Duration("backstop_interval", cfg.Hibernation.SweepInterval))
+		}
+		logger.Info("hibernation: enabled (leader-gated controller + per-replica wake)",
+			slog.Duration("sweep_interval", cfg.Hibernation.SweepInterval),
+			slog.Duration("registry_sync_interval", cfg.Hibernation.RegistrySyncInterval))
 	}
 
 	tenantMigrationRepo := store.NewTenantMigrationRepository()
@@ -1130,9 +1286,12 @@ func buildRouter(
 	// re-classify thousands of dormant trial tenants' inventories every
 	// interval. Active tenants are still visited every cycle; the planner
 	// only skips quiet tenants whose tier is not yet due. The status
-	// filter is unchanged. Same DefaultPlanner the IdP sync uses.
-	casbReconcilePlanner := tenancy.DefaultPlanner()
-	appNoOpsEngine.WithDormancyPlanner(&casbReconcilePlanner)
+	// filter is unchanged. Same DefaultPlanner the IdP sync uses, wired
+	// through the shared tenancy.TieredSweep so the saving lands on the
+	// sweep_tenants_visited{job,tier} metric.
+	sweepObs := newSweepObserver(mx)
+	casbReconcileSweep := tenancy.NewTieredSweep("casb_noops_reconcile", tenancy.DefaultPlanner(), sweepObs)
+	appNoOpsEngine.WithDormancyPlanner(casbReconcileSweep)
 	// Both gates, not just NoOpsAutoEnforce: the engine only acts at all
 	// when NoOpsEnabled (the discovery hook and reconcile loop in main()
 	// are both gated on it), so wiring the enforcer also requires
@@ -1434,6 +1593,14 @@ func buildRouter(
 	// `component=alert-feedback` to triage missing threshold
 	// adjustments without scrolling through every router log.
 	alertFeedback.SetLogger(logger.With(slog.String("component", "alert-feedback")))
+	// Activity-tiered tuning cadence: the leader-only tuning loop
+	// re-tunes active tenants every cycle and idle/dormant trials at a
+	// reduced cadence instead of walking every tenant's baselines every
+	// tick. Wired through the shared TieredSweep so the saving lands on
+	// sweep_tenants_visited{job="alert_feedback_tuning"}. tenantRepo
+	// supplies the cheap (id, last_active_at) projection.
+	alertFeedbackSweep := tenancy.NewTieredSweep("alert_feedback_tuning", tenancy.DefaultPlanner(), sweepObs)
+	alertFeedback.WithDormancySweep(alertFeedbackSweep, tenantRepo)
 	// NOTE: baseline.NewService(baselineRepo) is intentionally
 	// NOT constructed here. The Service / Detector pair is
 	// wired by the telemetry consumer (future block) once the
@@ -1567,7 +1734,13 @@ func buildRouter(
 		return routerComponents{}, fmt.Errorf("control: budget enforcer: %w", err)
 	}
 	costCalc := metering.NewCostCalculator(metering.DefaultUnitCosts)
-	meteringReports, err := metering.NewReports(meteringSvc, budgetEnforcer, meteringStore, meteringTiers, costCalc)
+	meteringReportOpts := []metering.ReportsOption{}
+	if hibRegistry != nil {
+		// Fleet view attributes a parked trial's near-zero projection to
+		// hibernation rather than to an absence of data.
+		meteringReportOpts = append(meteringReportOpts, metering.WithHibernationStateReader(hibRegistry))
+	}
+	meteringReports, err := metering.NewReports(meteringSvc, budgetEnforcer, meteringStore, meteringTiers, costCalc, meteringReportOpts...)
 	if err != nil {
 		return routerComponents{}, fmt.Errorf("control: metering reports: %w", err)
 	}
@@ -1703,8 +1876,9 @@ func buildRouter(
 
 		// Activity-tiered cadence so dormant trials are not reconciled
 		// every cycle. tenantRepo satisfies both the activity projection
-		// and (via idpTenantSource) the full-fanout fallback.
-		planner := tenancy.DefaultPlanner()
+		// and (via idpTenantSource) the full-fanout fallback. The shared
+		// TieredSweep reports the saving on sweep_tenants_visited.
+		idpSyncSweep := tenancy.NewTieredSweep("idp_directory_sync", tenancy.DefaultPlanner(), sweepObs)
 		idpSyncSvc = identity.NewSyncService(
 			idpConfigRepo,
 			userRepo,
@@ -1715,7 +1889,7 @@ func buildRouter(
 			identity.DefaultDirectoryClientFactory{},
 			identity.NewNATSRevocationPublisher(natsAlertAdapter{p: telPub}),
 			logger,
-		).WithDormancyPlanner(&planner, tenantRepo).
+		).WithDormancyPlanner(idpSyncSweep, tenantRepo).
 			// Gate directory sync (#177) through the staged-enablement
 			// framework: off skips a tenant entirely, monitor dry-runs the
 			// reconcile (reporting would-have provisions/off-boards but
@@ -2052,25 +2226,33 @@ func buildRouter(
 	// way to refresh vendor endpoints — which contradicts
 	// docs/TRAFFIC_CLASSIFICATION.md's "24h cadence" contract.
 	return routerComponents{
-		Router:              router,
-		WebhookWorker:       webhookWorker,
-		IntegrationWorker:   integrationWorker,
-		AppRegistry:         appRegHandler,
-		AppSyncer:           appSyncer,
-		PolicySim:           policySimHandler,
-		AI:                  aiSvc,
-		Metering:            meteringSvc,
-		PoP:                 popSvc,
-		RegionMigrator:      tenantMigrator,
-		EvidenceScheduler:   evidenceScheduler,
-		FeedManager:         feedMgr,
-		AppNoOpsEngine:      appNoOpsEngine,
-		Recompiler:          recompiler,
-		DLPReviewRecompiler: dlpReviewRecompiler,
-		SampleRateResolver:  sampleRateResolver,
-		IDPSyncService:      idpSyncSvc,
-		DLPReviewService:    dlpReviewSvc,
-		ActivityRecorder:    activityRecorder,
+		Router:                 router,
+		WebhookWorker:          webhookWorker,
+		IntegrationWorker:      integrationWorker,
+		AppRegistry:            appRegHandler,
+		AppSyncer:              appSyncer,
+		PolicySim:              policySimHandler,
+		AI:                     aiSvc,
+		Metering:               meteringSvc,
+		PoP:                    popSvc,
+		RegionMigrator:         tenantMigrator,
+		EvidenceScheduler:      evidenceScheduler,
+		FeedManager:            feedMgr,
+		AppNoOpsEngine:         appNoOpsEngine,
+		Recompiler:             recompiler,
+		DLPReviewRecompiler:    dlpReviewRecompiler,
+		SampleRateResolver:     sampleRateResolver,
+		IDPSyncService:         idpSyncSvc,
+		DLPReviewService:       dlpReviewSvc,
+		ActivityRecorder:       activityRecorder,
+		HibernationRegistry:    hibRegistry,
+		HibernationSyncer:      hibSyncer,
+		HibernationCoordinator: hibCoordinator,
+		HibernationController:  hibController,
+		HibernationMetrics:     hibMetrics,
+		TierActivityLister:     tenantRepo,
+		AlertFeedback:          alertFeedback,
+		AlertFeedbackTenants:   idpTenantSource{activity: tenantRepo}.ListTenants,
 	}, nil
 }
 
@@ -2506,6 +2688,13 @@ func buildThreatFeeds(cfg config.ThreatIntel) []aisvc.Feed {
 	if cfg.JSONURL != "" {
 		add("cert-json", aisvc.JSONParser{Source: "cert-json", DefaultConfidence: 0.5}, mkFetcher(cfg.JSONURL, nil))
 	}
+	if cfg.MISPURL != "" {
+		h := http.Header{"Accept": []string{"application/json"}}
+		if cfg.MISPAuthKey != "" {
+			h.Set("Authorization", cfg.MISPAuthKey)
+		}
+		add("misp", aisvc.MISPParser{Source: "misp", DefaultConfidence: 0.5, IncludeNonIDs: cfg.MISPIncludeNonIDs}, mkFetcher(cfg.MISPURL, h))
+	}
 	return feeds
 }
 
@@ -2673,6 +2862,16 @@ func startTelemetry(
 	dlpObserver telemetry.DLPReviewObserver,
 	sampleResolver *telemetry.MapSampleRateResolver,
 	activityObserver *activity.Recorder,
+	// hibRegistry is the dormant-tenant hibernation registry, or nil when
+	// the feature is disabled. When non-nil it drives the near-zero
+	// telemetry sample rate and the aggressive ClickHouse retention floor
+	// for parked tenants (security-relevant events stay full-fidelity via
+	// the sampler's 1:1 inspect_full floor).
+	hibRegistry *hibernation.Registry,
+	// hibMetrics is the hibernation Prometheus surface, or nil. The wrapped
+	// sample resolver feeds its per-class shed counter; nil-safe.
+	hibMetrics *hibernation.Metrics,
+	tierActivityLister telemetry.TenantActivityLister,
 ) (func(context.Context) error, handler.TelemetryClassQuerier, func() (policy.TelemetrySource, error), error) {
 	var hot telemetry.HotWriter
 	var cold telemetry.ColdWriter
@@ -2703,6 +2902,22 @@ func startTelemetry(
 			FlushInterval:        cfg.TelemetryAnalytics.ClickHouseFlushInterval,
 			BatchSize:            cfg.TelemetryAnalytics.ClickHouseBatchSize,
 			MaxBacklogMultiplier: cfg.TelemetryAnalytics.ClickHouseMaxBacklogMultiplier,
+		}
+		if hibRegistry != nil {
+			// WS3 hibernation: a parked tenant resolves to the aggressive
+			// retention floor so its hot partitions age into the S3 cold
+			// tier as fast as the compliance floor allows. The inner
+			// resolver is nil here, so a non-parked tenant resolves to 0
+			// (defer to DefaultRetentionDays); the writer clamps every
+			// result to [MinRetentionDays, MaxRetentionDays], so hibernation
+			// can only push a tenant down to the 30-day floor, never below.
+			//
+			// If a future change introduces a base retention resolver (e.g.
+			// per-tier 90d/30d), wrap it here — pass it as the inner so the
+			// hibernation floor only applies on top of it for parked tenants:
+			// NewRetentionResolver(hibRegistry, baseResolver, ...). Passing
+			// nil then would silently discard that base policy.
+			chCfg.Retention = hibernation.NewRetentionResolver(hibRegistry, nil, hibernation.DefaultHibernatedRetentionDays)
 		}
 		if cfg.TelemetryAnalytics.ClickHouseSharding {
 			sw, err := chwriter.NewShardedWriter(ctx, chCfg, logger)
@@ -2841,11 +3056,52 @@ func startTelemetry(
 	//     entirely via CLICKHOUSE_ROW_LIMIT_ENABLED=false — a nil
 	//     limiter is a no-op, so a deployment that bounds write cost
 	//     another way carries no per-tenant ceiling.
+	// WS12: consult the policy-graph-published per-tenant / per-class
+	// sampling overrides ahead of the built-in class defaults and the
+	// adaptive sampler. Empty until a tenant publishes sampling config.
+	var rateResolver telemetry.SampleRateResolver = sampleResolver
+	if hibRegistry != nil {
+		// WS3 hibernation: a parked tenant's non-security telemetry is
+		// driven to a near-zero keep probability ahead of the policy-graph
+		// overrides, so "no traffic → near-zero rows" holds even if a
+		// dormant tenant still emits. The sampler's mandatory 1:1 floor
+		// for inspect_full overrides this, so security/audit events are
+		// never sampled away. A non-parked tenant falls through to the
+		// policy-graph resolver unchanged.
+		rateResolver = hibernation.NewSampleResolver(hibRegistry, sampleResolver, hibernation.DefaultHibernatedSampleRate, hibMetrics)
+	}
+	// WS-4: activity-tier-aware telemetry sampling. DEFAULT-OFF — only
+	// engaged when CLICKHOUSE_TIER_SAMPLING_ENABLED and an activity
+	// projection is available, so an upgrade never silently changes
+	// retention. When on, a background refresher classifies every tenant
+	// (active / idle / dormant) once per interval into a lock-free
+	// snapshot the sampler reads on the hot path; idle tenants sample at
+	// the configured reduced multiplier and dormant tenants write
+	// security-events-only. Security-relevant events (IPS / ZTNA / DLP)
+	// and the inspect_full compliance record are always preserved
+	// regardless. A single indexed scan per interval for the whole
+	// fleet; one background goroutine, stopped with the consumer.
+	var tierPolicy *telemetry.TierSamplingPolicy
+	var tierRefresher *telemetry.TierRefresher
+	if cfg.TelemetryAnalytics.ClickHouseTierSamplingEnabled && tierActivityLister != nil {
+		tierResolver := telemetry.NewMapTierResolver(nil)
+		tierPolicy = telemetry.NewTierSamplingPolicy(telemetry.TierSamplingConfig{
+			Resolver:       tierResolver,
+			IdleMultiplier: cfg.TelemetryAnalytics.ClickHouseTierSamplingIdleMultiplier,
+		})
+		tierRefresher = telemetry.NewTierRefresher(telemetry.TierRefresherConfig{
+			Lister:   tierActivityLister,
+			Resolver: tierResolver,
+			Interval: cfg.TelemetryAnalytics.ClickHouseTierSamplingRefreshInterval,
+			Logger:   logger,
+		})
+	}
 	svc.WithSampler(telemetry.NewAdaptiveSampler(telemetry.SamplerConfig{
-		// WS12: consult the policy-graph-published per-tenant / per-class
-		// sampling overrides ahead of the built-in class defaults and the
-		// adaptive sampler. Empty until a tenant publishes sampling config.
-		RateResolver: sampleResolver,
+		// RateResolver is the hibernation-aware wrapper when WS-3 is on,
+		// else the bare policy-graph resolver.
+		RateResolver: rateResolver,
+		// WS-4: nil unless tier sampling is enabled (default-OFF).
+		TierPolicy: tierPolicy,
 	}))
 	if cfg.TelemetryAnalytics.ClickHouseRowLimitEnabled {
 		// WS12: prefer the self-calibrating per-tenant limiter (cap tracks
@@ -2890,6 +3146,24 @@ func startTelemetry(
 		return nil, nil, nil, fmt.Errorf("telemetry start: %w", err)
 	}
 	logger.Info("telemetry: consumer started")
+
+	// WS-4: launch the activity-tier refresher once the consumer is
+	// live. nil (and no goroutine) unless tier sampling is enabled. It
+	// exits when ctx is cancelled (graceful shutdown), and a failed
+	// refresh keeps the previous snapshot rather than blanking the tier
+	// signal (which fails safe to active anyway).
+	//
+	// Unlike the autotuner below, the refresher has no explicit Stop():
+	// ctx cancellation is its only shutdown path, and that is sufficient
+	// because it owns nothing to drain or flush. It only reads the
+	// activity projection and swaps an atomic snapshot, so a clean
+	// goroutine exit on ctx.Done leaves no in-flight state — and the
+	// last snapshot survives the goroutine, so the consumer keeps a
+	// valid (bounded-staleness) tier signal through the shutdown window.
+	if tierRefresher != nil {
+		go tierRefresher.Run(ctx)
+		logger.Info("telemetry: activity-tier sampling enabled (idle reduced, dormant security-events-only)")
+	}
 
 	// WS12: launch the ClickHouse batch-size auto-tuner once the writers
 	// and consumer are live. It holds each shard's insert frequency near
@@ -3844,6 +4118,17 @@ func (s idpTenantSource) ListTenants(ctx context.Context) ([]uuid.UUID, error) {
 		ids[i] = a.ID
 	}
 	return ids, nil
+}
+
+// newSweepObserver returns a tenancy.SweepObserver backed by mx, or nil
+// when metrics are disabled (mx == nil). A nil observer is the documented
+// "disable emission" contract of TieredSweep, so the tiered sweeps still
+// gate correctly with metrics off — they simply publish nothing.
+func newSweepObserver(mx *metrics.Metrics) tenancy.SweepObserver {
+	if mx == nil {
+		return nil
+	}
+	return mx.SweepObserver()
 }
 
 // hostnameForSyslog returns the local hostname used as the

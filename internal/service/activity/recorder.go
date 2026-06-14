@@ -185,6 +185,15 @@ type Recorder struct {
 
 	queue chan touch
 
+	// wakeNotifier, when set, is called on the Observe hot path before
+	// the debounce gate so the first activity for a hibernated tenant
+	// triggers an immediate wake (the notifier is the hibernation
+	// Coordinator's Notify, which is itself a cheap registry check plus a
+	// non-blocking enqueue). Stored atomically because Observe runs
+	// concurrently with the one-time SetWakeNotifier wiring call. Nil
+	// when hibernation is disabled, in which case Observe skips it.
+	wakeNotifier atomic.Pointer[wakeNotifier]
+
 	mu   sync.Mutex
 	last map[uuid.UUID]time.Time // wall-clock of the last enqueued touch per tenant
 
@@ -225,6 +234,12 @@ type touch struct {
 	tenantID uuid.UUID
 	seen     time.Time
 	src      Source
+}
+
+// wakeNotifier wraps the optional wake callback so it can be held in an
+// atomic.Pointer (a bare func is not comparable / atomically storable).
+type wakeNotifier struct {
+	fn func(tenantID uuid.UUID)
 }
 
 // Option customises a Recorder at construction.
@@ -310,6 +325,22 @@ func NewRecorder(repo TenantToucher, opts ...Option) *Recorder {
 	return r
 }
 
+// SetWakeNotifier installs (or clears, with nil) the hibernation wake
+// callback consulted on the Observe hot path. It is wired once at
+// startup after the hibernation coordinator is constructed; storing it
+// atomically keeps the concurrent Observe path race-free. A nil Recorder
+// is a no-op.
+func (r *Recorder) SetWakeNotifier(fn func(tenantID uuid.UUID)) {
+	if r == nil {
+		return
+	}
+	if fn == nil {
+		r.wakeNotifier.Store(nil)
+		return
+	}
+	r.wakeNotifier.Store(&wakeNotifier{fn: fn})
+}
+
 // Observe records that the data plane (or an authenticated request)
 // saw activity for tenantID at `seen`, attributing it to SourceUnknown.
 // It satisfies the narrow ActivityObserver interface the telemetry
@@ -360,6 +391,16 @@ func (r *Recorder) observe(tenantID uuid.UUID, seen time.Time, src Source) {
 	now := r.now()
 	if seen.IsZero() {
 		seen = now
+	}
+
+	// Wake-on-activity runs before the debounce gate: a hibernated
+	// tenant's last_active_at is stale by definition, so the debounce
+	// never suppresses its first touch, but checking here guarantees the
+	// wake is never delayed by an unrelated recent enqueue. The notifier
+	// is cheap (a registry read; a parked tenant additionally does one
+	// non-blocking channel send) and must never block the hot path.
+	if wn := r.wakeNotifier.Load(); wn != nil {
+		wn.fn(tenantID)
 	}
 
 	r.mu.Lock()

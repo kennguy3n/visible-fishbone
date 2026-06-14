@@ -280,6 +280,14 @@ type PostgresScaleSection struct {
 type CapacityPlanSection struct {
 	// TenantCount is the modelled fleet size.
 	TenantCount int `json:"tenant_count"`
+	// DormantFraction is the share of the fleet modelled as dormant
+	// (hibernation candidates). 0 reproduces the pre-WS-3 projection.
+	DormantFraction float64 `json:"dormant_fraction"`
+	// EmittingTenantsEffective is the hibernation-adjusted count of
+	// full-fidelity tenants worth of telemetry the data plane carries:
+	// active tenants plus dormant tenants scaled by the near-zero
+	// hibernated sample rate. Equals TenantCount when DormantFraction=0.
+	EmittingTenantsEffective float64 `json:"emitting_tenants_effective"`
 	// TelemetryClasses is the set of telemetry classes the throughput
 	// and subject-cardinality models fan out across.
 	TelemetryClasses []string `json:"telemetry_classes"`
@@ -289,6 +297,78 @@ type CapacityPlanSection struct {
 	ClickHouse ClickHouseWritePlan `json:"clickhouse"`
 	// NATS is the subject-cardinality + JetStream storage projection.
 	NATS NATSSubjectPlan `json:"nats"`
+	// TierSampling is the WS-4 activity-tier sampling breakdown. Present
+	// only when the policy is modelled (default-OFF), so the baseline
+	// projection's JSON is byte-for-byte unchanged.
+	TierSampling *TierSamplingPlan `json:"tier_sampling,omitempty"`
+	// PeriodicSweep is the control-plane dormancy-dividend projection:
+	// tenants-visited/cycle for the periodic per-tenant sweeps, before
+	// vs after activity-tiered gating (WS-1).
+	PeriodicSweep PeriodicSweepPlan `json:"periodic_sweep"`
+}
+
+// TierSamplingPlan decomposes the fleet write rate by activity tier
+// under the WS-4 sampling policy: active tenants write full fidelity,
+// idle tenants sample at IdleSampleMultiplier, dormant tenants write
+// security-events-only. It is the metric proving dormant-tenant rows/s
+// collapse and that total write cost tracks the active cohort.
+type TierSamplingPlan struct {
+	IdleSampleMultiplier float64 `json:"idle_sample_multiplier"`
+	ActiveTenants        int     `json:"active_tenants"`
+	IdleTenants          int     `json:"idle_tenants"`
+	DormantTenants       int     `json:"dormant_tenants"`
+	ActiveRowsPerSec     float64 `json:"active_rows_per_sec"`
+	IdleRowsPerSec       float64 `json:"idle_rows_per_sec"`
+	DormantRowsPerSec    float64 `json:"dormant_rows_per_sec"`
+	SampledRowsPerSec    float64 `json:"sampled_rows_per_sec"`
+	BaselineRowsPerSec   float64 `json:"baseline_rows_per_sec"`
+	ReductionPct         float64 `json:"reduction_pct"`
+	ActiveCohortSharePct float64 `json:"active_cohort_share_pct"`
+}
+
+// PeriodicSweepPlan projects the WS-1 dormancy dividend: how many
+// tenants the periodic per-tenant sweeps (idp_directory_sync,
+// casb_noops_reconcile, alert_feedback_tuning) visit per cycle once the
+// shared tenancy.TieredSweep gates them by activity tier, versus the
+// legacy every-tenant-every-cycle fan-out. The dominant avoidable
+// control-plane cost at a dormant-heavy 5000-SME fleet.
+type PeriodicSweepPlan struct {
+	// Jobs is the set of sweep loops modelled (the {job} label values
+	// of sweep_tenants_visited).
+	Jobs []string `json:"jobs"`
+	// JobCount is len(Jobs), surfaced for the aggregate roll-up.
+	JobCount int `json:"job_count"`
+	// IdleEvery / DormantEvery are the planner cadences the model used
+	// (idle tenants visited every Nth cycle, dormant every Mth).
+	IdleEvery    int64 `json:"idle_every"`
+	DormantEvery int64 `json:"dormant_every"`
+	// ActiveTenants / IdleTenants / DormantTenants is the modelled
+	// activity-tier breakdown of the fleet.
+	ActiveTenants  int `json:"active_tenants"`
+	IdleTenants    int `json:"idle_tenants"`
+	DormantTenants int `json:"dormant_tenants"`
+	// UntieredVisitsPerCyclePerJob is the legacy cost: every tenant,
+	// every cycle (== TenantCount).
+	UntieredVisitsPerCyclePerJob int `json:"untiered_visits_per_cycle_per_job"`
+	// TieredVisitsPerCyclePerJob is the steady-state cost after tiering,
+	// averaged over one full cadence period.
+	TieredVisitsPerCyclePerJob float64 `json:"tiered_visits_per_cycle_per_job"`
+	// ActiveVisitsPerCycle / IdleVisitsPerCycle / DormantVisitsPerCycle
+	// decompose the tiered per-job cost by tier.
+	ActiveVisitsPerCycle  float64 `json:"active_visits_per_cycle"`
+	IdleVisitsPerCycle    float64 `json:"idle_visits_per_cycle"`
+	DormantVisitsPerCycle float64 `json:"dormant_visits_per_cycle"`
+	// UntieredVisitsPerCycleTotal / TieredVisitsPerCycleTotal aggregate
+	// across all modelled jobs.
+	UntieredVisitsPerCycleTotal int     `json:"untiered_visits_per_cycle_total"`
+	TieredVisitsPerCycleTotal   float64 `json:"tiered_visits_per_cycle_total"`
+	// ReductionFactor is untiered/tiered per job (aggregate dividend).
+	ReductionFactor float64 `json:"reduction_factor"`
+	// IdleReductionFactor / DormantReductionFactor are the per-tier
+	// dividends on the idle/dormant tail (the headline 10-100x).
+	IdleReductionFactor    float64 `json:"idle_reduction_factor"`
+	DormantReductionFactor float64 `json:"dormant_reduction_factor"`
+	Note                   string  `json:"note"`
 }
 
 // PostgresPoolPlan projects connection-pool pressure at scale.
@@ -307,18 +387,30 @@ type PostgresPoolPlan struct {
 
 // ClickHouseWritePlan projects hot-path write load at scale.
 type ClickHouseWritePlan struct {
-	Shards                 int     `json:"shards"`
-	BatchSize              int     `json:"batch_size"`
-	TotalRowsPerSec        float64 `json:"total_rows_per_sec"`
-	RowsPerSecPerShard     float64 `json:"rows_per_sec_per_shard"`
-	InsertsPerSecPerShard  float64 `json:"inserts_per_sec_per_shard"`
-	MonthlyRows            int64   `json:"monthly_rows"`
-	PerTenantMonthlyRows   int64   `json:"per_tenant_monthly_rows"`
-	HotStorageGBCompressed float64 `json:"hot_storage_gb_compressed"`
-	IngestBytesPerSec      int64   `json:"ingest_bytes_per_sec"`
-	RecommendedShards      int     `json:"recommended_shards"`
-	RecommendedBatchSize   int     `json:"recommended_batch_size"`
-	Note                   string  `json:"note"`
+	Shards                int     `json:"shards"`
+	BatchSize             int     `json:"batch_size"`
+	TotalRowsPerSec       float64 `json:"total_rows_per_sec"`
+	RowsPerSecPerShard    float64 `json:"rows_per_sec_per_shard"`
+	InsertsPerSecPerShard float64 `json:"inserts_per_sec_per_shard"`
+	MonthlyRows           int64   `json:"monthly_rows"`
+	// PerTenantMonthlyRows is the FLEET-WIDE AVERAGE rows/month (total ÷
+	// full tenant count). With DormantFraction > 0 (or tier sampling on)
+	// this is a blended average — active tenants write more than this and
+	// dormant tenants near-zero — not what any individual tenant writes.
+	// Use PerActiveTenantMonthlyRows (or the tier_sampling section) for
+	// per-tenant sizing when a reduction is modelled. Equals
+	// PerActiveTenantMonthlyRows when DormantFraction=0.
+	PerTenantMonthlyRows int64 `json:"per_tenant_monthly_rows"`
+	// PerActiveTenantMonthlyRows is rows/month per ACTIVE (emitting)
+	// tenant: total ÷ active-tenant count. This is the number to size an
+	// individual active tenant against. Equals PerTenantMonthlyRows when
+	// DormantFraction=0.
+	PerActiveTenantMonthlyRows int64   `json:"per_active_tenant_monthly_rows"`
+	HotStorageGBCompressed     float64 `json:"hot_storage_gb_compressed"`
+	IngestBytesPerSec          int64   `json:"ingest_bytes_per_sec"`
+	RecommendedShards          int     `json:"recommended_shards"`
+	RecommendedBatchSize       int     `json:"recommended_batch_size"`
+	Note                       string  `json:"note"`
 }
 
 // NATSSubjectPlan projects subject cardinality + JetStream storage.

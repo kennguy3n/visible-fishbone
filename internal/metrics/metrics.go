@@ -32,7 +32,36 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	"github.com/kennguy3n/visible-fishbone/internal/config"
+	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy"
 )
+
+// sweepObserver adapts a *Metrics to tenancy.SweepObserver so the shared
+// tenancy.TieredSweep helper can export the per-job sweep counters
+// without the tenancy package importing this one (which would pull
+// Prometheus into a pure domain helper). The {job} label is the sweep's
+// stable job name and {tier} the bounded active|idle|dormant string, so
+// cardinality stays at the handful of (job × 3) series — no tenant ids.
+type sweepObserver struct {
+	visited *prometheus.CounterVec
+	skipped *prometheus.CounterVec
+}
+
+// SweepObserver returns a tenancy.SweepObserver that records the sweep
+// counters owned by this registry. Always non-nil; callers that want to
+// disable emission should pass a nil observer to TieredSweep directly.
+func (m *Metrics) SweepObserver() tenancy.SweepObserver {
+	return sweepObserver{visited: m.SweepTenantsVisited, skipped: m.SweepTenantsSkipped}
+}
+
+func (o sweepObserver) ObserveSweep(job string, tier tenancy.Tier, visited, skipped int) {
+	t := tier.String()
+	if visited > 0 {
+		o.visited.WithLabelValues(job, t).Add(float64(visited))
+	}
+	if skipped > 0 {
+		o.skipped.WithLabelValues(job, t).Add(float64(skipped))
+	}
+}
 
 // Default histogram bucket sets. Kept as package vars (copied on
 // use) so the bucket boundaries are documented in one place and
@@ -144,6 +173,16 @@ type Metrics struct {
 	TenantActiveDevices *prometheus.GaugeVec
 	TenantActiveEdges   *prometheus.GaugeVec
 	TenantPolicyVersion *prometheus.GaugeVec
+
+	// --- Dormancy sweep (WS-1) ----------------------------------
+	// SweepTenantsVisited / SweepTenantsSkipped prove the dormancy
+	// dividend: how many tenants each periodic per-tenant sweep
+	// actually visited (vs skipped because the tier was not due) per
+	// cycle, broken down by job and activity tier. The {tier} label is
+	// bounded to active|idle|dormant and {job} to the handful of
+	// registered sweep loops, so cardinality stays low (no tenant ids).
+	SweepTenantsVisited *prometheus.CounterVec
+	SweepTenantsSkipped *prometheus.CounterVec
 
 	// --- Activity (dormancy signal) -----------------------------
 	// ActivityTouches counts per-tenant activity touches by the
@@ -466,6 +505,20 @@ func New(cfg config.Metrics) *Metrics {
 		Name:      "policy_version",
 		Help:      "Currently distributed policy version per tenant.",
 	}, []string{"tenant"})
+
+	// --- Dormancy sweep (WS-1) --------------------------------------
+	m.SweepTenantsVisited = f.NewCounterVec(prometheus.CounterOpts{
+		Namespace: ns,
+		Subsystem: "sweep",
+		Name:      "tenants_visited_total",
+		Help:      "Total tenants a periodic per-tenant sweep visited, by job and activity tier (active|idle|dormant).",
+	}, []string{"job", "tier"})
+	m.SweepTenantsSkipped = f.NewCounterVec(prometheus.CounterOpts{
+		Namespace: ns,
+		Subsystem: "sweep",
+		Name:      "tenants_skipped_total",
+		Help:      "Total tenants a periodic per-tenant sweep skipped because their tier was not due this cycle, by job and tier.",
+	}, []string{"job", "tier"})
 
 	// --- Activity (dormancy signal) ---------------------------------
 	m.ActivityTouches = f.NewCounterVec(prometheus.CounterOpts{

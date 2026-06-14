@@ -924,6 +924,222 @@ impl MultiQueueReport {
     }
 }
 
+/// Schema version for the [`WireScalingReport`] artifact. Bumped
+/// independently of the forwarding/throughput schemas because the wire
+/// scaling artifact has its own consumers (the `wire-scaling` leg).
+pub const WIRE_SCALING_SCHEMA_VERSION: u32 = 1;
+
+/// One measured wire stream — a single `AF_PACKET` transmit socket pinned
+/// to a worker thread for the duration of a fanout point. Unlike
+/// [`MultiQueueStreamMeasurement`], these frames are actually crafted and
+/// pushed at the kernel transmit path (or, in `--dry-run`, crafted and
+/// discarded), so the numbers are a *wire* measurement, not an in-process
+/// forwarding-decision model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WireStreamMeasurement {
+    /// Stream / TX-socket index, `0..queues`.
+    pub queue_index: usize,
+    /// Frames this stream transmitted in its measured window.
+    pub packets: u64,
+    /// Wire bytes this stream transmitted (sum of per-frame sizes).
+    pub bytes: u64,
+    /// This stream's transmit rate in packets per second, measured while
+    /// every stream at this fanout width was running concurrently.
+    pub pps: f64,
+    /// This stream's transmit rate in Gbps over the same window.
+    pub gbps: f64,
+    /// The stream's own measured wall-clock window in milliseconds. Each
+    /// stream times itself so a thread that is scheduled late never
+    /// inflates another stream's rate.
+    pub elapsed_ms: f64,
+}
+
+/// Aggregate result at one TX-fanout width (`queues` parallel `AF_PACKET`
+/// transmit streams running concurrently). The `queues == 1` point is the
+/// single-stream *wire floor* — the ~5.5 Gbps number the blog quotes; the
+/// widest point is the multi-queue *wire ceiling*.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WireScalePoint {
+    /// Number of concurrent transmit streams at this point.
+    pub queues: usize,
+    /// Sum of every stream's transmit rate — the aggregate wire rate the
+    /// box sustains at this fanout width.
+    pub aggregate_pps: f64,
+    /// Aggregate transmit rate in Gbps at this fanout width.
+    pub aggregate_gbps: f64,
+    /// Mean per-stream transmit rate in Gbps (`aggregate_gbps / queues`).
+    /// Falls as the fanout exceeds the host's physical cores — the
+    /// contention a single-stream number structurally cannot reveal.
+    pub mean_gbps_per_queue: f64,
+    /// Scaling efficiency: `aggregate_pps / (queues × single_stream_pps)`,
+    /// where the single-stream rate is the `queues == 1` aggregate. `1.0`
+    /// is ideal linear scaling; below `1.0` is the real, contended ceiling.
+    pub scaling_efficiency: f64,
+    /// Per-stream detail for this fanout width.
+    pub streams: Vec<WireStreamMeasurement>,
+}
+
+/// A multi-queue *wire* transmit scaling report: a curve from a single
+/// `AF_PACKET` transmit stream up to the widest fanout, recording the
+/// aggregate wire rate and per-stream scaling at each width.
+///
+/// This is the artifact that retires the "single-stream floor" caveat with
+/// a *real wire* number: every frame is crafted and handed to the kernel
+/// transmit path across N sockets on N cores, exactly the way a
+/// multi-queue NIC fans transmit across TX rings. It remains
+/// software-on-a-VM, not an ASIC — [`Self::to_markdown`] carries that
+/// caveat. When `transport` is `dry-run` the figures are a craft-rate
+/// ceiling (no socket), never to be quoted as a wire number.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WireScalingReport {
+    /// Artifact schema version.
+    pub schema_version: u32,
+    /// SKU profile name the sweep ran against.
+    pub profile: String,
+    /// Wall-clock time the report was produced (Unix seconds).
+    pub unix_time_secs: u64,
+    /// Source revision, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git_sha: Option<String>,
+    /// Transmit transport: `af-packet` for a live wire run, `dry-run` for
+    /// the in-process craft-only ceiling. Recorded so a dry-run number is
+    /// never silently published as a wire measurement.
+    pub transport: String,
+    /// Egress interface the live run transmitted on (`lo`, `eth0`, ...).
+    pub interface: String,
+    /// Representative on-wire frame size in bytes.
+    pub frame_bytes: u32,
+    /// IP version of the crafted traffic (`v4` / `v6`). Recorded so two
+    /// artifacts from the same profile but different IP versions are
+    /// self-describing and never conflated by a future compare gate.
+    pub ip_version: String,
+    /// L4 protocol shape of the crafted traffic (`udp` / `tcp-syn`).
+    pub l4: String,
+    /// Per-stream measured window in milliseconds.
+    pub duration_ms: u64,
+    /// `std::thread::available_parallelism()` on the measuring host — the
+    /// core budget the scaling curve is bounded by.
+    pub available_parallelism: usize,
+    /// The SKU's published acceptance target in Gbps, for context.
+    pub target_gbps: f64,
+    /// The scaling curve, in ascending queue-count order.
+    pub points: Vec<WireScalePoint>,
+}
+
+impl WireScalingReport {
+    /// Serialize to pretty JSON.
+    ///
+    /// # Errors
+    /// Propagates a `serde_json` failure (never expected for this plain
+    /// struct).
+    pub fn to_json(&self) -> Result<String, ReportError> {
+        Ok(serde_json::to_string_pretty(self)?)
+    }
+
+    /// Parse from JSON.
+    ///
+    /// # Errors
+    /// Returns [`ReportError::Json`] on malformed input.
+    pub fn from_json(s: &str) -> Result<Self, ReportError> {
+        Ok(serde_json::from_str(s)?)
+    }
+
+    /// The single-stream wire floor (`queues == 1`), if measured.
+    #[must_use]
+    pub fn single_stream(&self) -> Option<&WireScalePoint> {
+        self.points.iter().find(|p| p.queues == 1)
+    }
+
+    /// The widest-fanout wire ceiling, if any point was measured.
+    #[must_use]
+    pub fn ceiling(&self) -> Option<&WireScalePoint> {
+        self.points.iter().max_by_key(|p| p.queues)
+    }
+
+    /// Render the markdown summary: the scaling table, the floor→ceiling
+    /// headline, and the standing honesty caveat.
+    #[must_use]
+    pub fn to_markdown(&self) -> String {
+        let mut out = String::new();
+        let _ = writeln!(out, "### Multi-queue wire throughput: `{}`", self.profile);
+        let _ = writeln!(out);
+        let _ = writeln!(
+            out,
+            "Transport `{}` · interface `{}` · {} {} · frame {} B · {} ms/stream · host parallelism {}.",
+            self.transport,
+            self.interface,
+            self.ip_version,
+            self.l4,
+            self.frame_bytes,
+            self.duration_ms,
+            self.available_parallelism
+        );
+        let _ = writeln!(out);
+
+        let _ = writeln!(
+            out,
+            "| Streams | Aggregate Mpps | Aggregate Gbps | Per-stream Gbps | Scaling eff. |"
+        );
+        let _ = writeln!(out, "| ---: | ---: | ---: | ---: | ---: |");
+        for p in &self.points {
+            let _ = writeln!(
+                out,
+                "| {} | {:.2} | {:.3} | {:.3} | {:.0}% |",
+                p.queues,
+                p.aggregate_pps / 1e6,
+                p.aggregate_gbps,
+                p.mean_gbps_per_queue,
+                p.scaling_efficiency * 100.0,
+            );
+        }
+        let _ = writeln!(out);
+
+        if let (Some(floor), Some(ceil)) = (self.single_stream(), self.ceiling())
+            && ceil.queues > floor.queues
+        {
+            let lift = if floor.aggregate_gbps > 0.0 {
+                ceil.aggregate_gbps / floor.aggregate_gbps
+            } else {
+                0.0
+            };
+            let _ = writeln!(
+                out,
+                "Single-stream wire floor: **{:.3} Gbps** ({} stream). \
+                 Multi-queue wire ceiling: **{:.3} Gbps** ({} streams) — a **{:.2}×** lift.",
+                floor.aggregate_gbps, floor.queues, ceil.aggregate_gbps, ceil.queues, lift
+            );
+            let _ = writeln!(out);
+        }
+
+        if self.target_gbps > 0.0 {
+            let _ = writeln!(
+                out,
+                "SKU published acceptance target: **{:.3} Gbps**.",
+                self.target_gbps
+            );
+            let _ = writeln!(out);
+        }
+
+        let caveat = if self.transport == "dry-run" {
+            "> **Read this honestly.** This is a `--dry-run` craft-only ceiling: frames are \
+             built and discarded, never handed to a socket, so the figure is the host's \
+             packet-*crafting* rate across N cores, not a wire number. Run without \
+             `--dry-run` (with `CAP_NET_RAW`) for the real `AF_PACKET` transmit measurement."
+        } else {
+            "> **Read this honestly.** These frames are really crafted and pushed at the \
+             kernel `AF_PACKET` transmit path across N sockets on a generic x86 VM — a real \
+             *wire* measurement, but still software-on-x86, not a multi-queue physical NIC \
+             and not an ASIC. The single-stream row is the conservative floor the blog \
+             quotes; the wider rows show how transmit scales when the box uses all its cores. \
+             Treat the ceiling as an apples-*closer* figure to a vendor's multi-queue \
+             line-rate number, still not apples-to-apples."
+        };
+        let _ = writeln!(out, "{caveat}");
+
+        out
+    }
+}
+
 /// Direction in which a forwarding metric regresses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RegressDir {
@@ -1405,6 +1621,114 @@ pub fn detect_multiqueue_regression(
         })
         .collect();
     Ok(RegressionReport { regressions })
+}
+
+/// Gate one-or-more current *wire* scaling sweeps against a committed
+/// baseline on the hardware-invariant per-width transmit scaling
+/// efficiency, exactly as [`detect_multiqueue_regression_stats`] gates the
+/// in-process forwarding curve.
+///
+/// Efficiency (`aggregate / (queues × single_stream)`) is dimensionless, so
+/// a baseline captured on one box still gates another: a real loss of
+/// transmit scale-out (lock contention on the TX path, false sharing in the
+/// per-socket harness, an allocator regression) drops efficiency on every
+/// host, while swapping hardware moves only the absolute Gbps the gate
+/// ignores. The `queues == 1` floor is skipped — its efficiency is `1.0` by
+/// construction. Each wider width is gated as a **drop**, aggregated by
+/// median and tested against a `sigma × σ` noise band so a single noisy run
+/// on a shared runner does not fail the build.
+///
+/// # Errors
+/// Returns an error string when `samples` is empty or when any sample
+/// describes a different schema version, profile, transport, IP version, L4
+/// shape, or frame size than the baseline — guards that stop a `dry-run`
+/// craft ceiling from ever being compared against a live `af-packet` wire
+/// curve, or a v4/UDP run against a v6/TCP one.
+pub fn detect_wire_scaling_regression_stats(
+    baseline: &WireScalingReport,
+    samples: &[WireScalingReport],
+    threshold: f64,
+    sigma: f64,
+) -> Result<StatRegressionReport, String> {
+    if samples.is_empty() {
+        return Err("no current samples to compare against the baseline".to_string());
+    }
+    for s in samples {
+        if baseline.schema_version != s.schema_version {
+            return Err(format!(
+                "wire-scaling schema version mismatch: baseline {} vs current {}",
+                baseline.schema_version, s.schema_version
+            ));
+        }
+        if baseline.profile != s.profile
+            || baseline.transport != s.transport
+            || baseline.ip_version != s.ip_version
+            || baseline.l4 != s.l4
+            || baseline.frame_bytes != s.frame_bytes
+        {
+            return Err(format!(
+                "cannot compare different wire sweeps: baseline {}/{}/{}/{}/{}B vs current {}/{}/{}/{}/{}B",
+                baseline.profile,
+                baseline.transport,
+                baseline.ip_version,
+                baseline.l4,
+                baseline.frame_bytes,
+                s.profile,
+                s.transport,
+                s.ip_version,
+                s.l4,
+                s.frame_bytes,
+            ));
+        }
+    }
+
+    let mut metrics = Vec::new();
+    for point in &baseline.points {
+        // queues == 1 is the efficiency baseline (always 1.0) → no signal.
+        if point.queues < 2 {
+            continue;
+        }
+        let base_val = point.scaling_efficiency;
+        if !base_val.is_finite() || base_val <= 0.0 {
+            continue; // no defined reference to take a fractional change from
+        }
+
+        let sample_vals: Vec<f64> = samples
+            .iter()
+            .filter_map(|s| s.points.iter().find(|p| p.queues == point.queues))
+            .map(|p| p.scaling_efficiency)
+            .filter(|e| e.is_finite())
+            .collect();
+        let Some(median_val) = median(&sample_vals) else {
+            continue; // no current evidence for this width
+        };
+        let stddev = sample_stddev(&sample_vals);
+
+        let change = (median_val - base_val) / base_val;
+        // Efficiency is advantage-like: a drop is the regression.
+        let exceeds_threshold = change <= -threshold;
+        let noise_band = sigma * stddev;
+        let outside_noise_band = (median_val - base_val).abs() > noise_band;
+
+        metrics.push(StatMetric {
+            metric: format!("q={} wire-scaling-efficiency", point.queues),
+            baseline: base_val,
+            median: median_val,
+            stddev,
+            samples: sample_vals.len(),
+            change_fraction: change,
+            exceeds_threshold,
+            outside_noise_band,
+            flagged: exceeds_threshold && outside_noise_band,
+        });
+    }
+
+    Ok(StatRegressionReport {
+        sigma,
+        threshold,
+        sample_count: samples.len(),
+        metrics,
+    })
 }
 
 /// `numerator / denominator`, or `None` when the denominator is zero.
@@ -2081,5 +2405,196 @@ mod tests {
         assert!(rr.has_regression());
         assert_eq!(rr.regressions.len(), 1);
         assert!(rr.regressions[0].metric.contains("q=4"));
+    }
+
+    fn wire_report(transport: &str, points: &[(usize, f64, f64, f64)]) -> WireScalingReport {
+        WireScalingReport {
+            schema_version: WIRE_SCALING_SCHEMA_VERSION,
+            profile: "micro".to_string(),
+            unix_time_secs: 0,
+            git_sha: None,
+            transport: transport.to_string(),
+            interface: "lo".to_string(),
+            frame_bytes: 1500,
+            ip_version: "v4".to_string(),
+            l4: "udp".to_string(),
+            duration_ms: 1000,
+            available_parallelism: 8,
+            target_gbps: 0.8,
+            points: points
+                .iter()
+                .map(|&(queues, agg_pps, agg_gbps, eff)| WireScalePoint {
+                    queues,
+                    aggregate_pps: agg_pps,
+                    aggregate_gbps: agg_gbps,
+                    mean_gbps_per_queue: agg_gbps / queues as f64,
+                    scaling_efficiency: eff,
+                    streams: Vec::new(),
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn wire_scaling_json_roundtrips() {
+        let r = wire_report("af-packet", &[(1, 1e5, 0.37, 1.0), (8, 4.5e5, 1.64, 0.56)]);
+        let json = r.to_json().unwrap();
+        let back = WireScalingReport::from_json(&json).unwrap();
+        assert_eq!(r, back);
+    }
+
+    #[test]
+    fn wire_scaling_floor_and_ceiling_resolve_by_value() {
+        // Out-of-order points: floor/ceiling must key on queue count, not
+        // position.
+        let r = wire_report("af-packet", &[(8, 4.5e5, 1.64, 0.56), (1, 1e5, 0.37, 1.0)]);
+        assert_eq!(r.single_stream().unwrap().queues, 1);
+        assert_eq!(r.ceiling().unwrap().queues, 8);
+    }
+
+    #[test]
+    fn wire_scaling_markdown_headlines_lift_and_keeps_wire_caveat() {
+        let md =
+            wire_report("af-packet", &[(1, 1e5, 0.40, 1.0), (8, 4.5e5, 1.60, 0.56)]).to_markdown();
+        // Floor→ceiling lift is 1.60 / 0.40 = 4.00×.
+        assert!(
+            md.contains("4.00×"),
+            "markdown must headline the lift: {md}"
+        );
+        assert!(
+            md.contains("AF_PACKET"),
+            "wire run must keep the wire caveat"
+        );
+        assert!(
+            !md.contains("craft-only"),
+            "wire run must not show the dry-run caveat"
+        );
+        // The run's flow shape is self-describing in the metadata line.
+        assert!(
+            md.contains("v4 udp"),
+            "markdown must record ip version + l4: {md}"
+        );
+    }
+
+    #[test]
+    fn wire_scaling_metadata_roundtrips_ip_version_and_l4() {
+        let r = wire_report("af-packet", &[(1, 1e5, 0.37, 1.0)]);
+        let back = WireScalingReport::from_json(&r.to_json().unwrap()).unwrap();
+        assert_eq!(back.ip_version, "v4");
+        assert_eq!(back.l4, "udp");
+    }
+
+    #[test]
+    fn wire_scaling_markdown_marks_dry_run_as_craft_only() {
+        let md = wire_report("dry-run", &[(1, 1e5, 0.40, 1.0), (4, 3e5, 1.19, 0.75)]).to_markdown();
+        assert!(
+            md.contains("craft-only"),
+            "dry-run must flag the craft-only ceiling: {md}"
+        );
+        assert!(
+            !md.contains("really crafted and pushed"),
+            "dry-run must not claim a wire number"
+        );
+    }
+
+    #[test]
+    fn wire_scaling_gate_flags_real_efficiency_collapse() {
+        // Baseline: efficiency holds at 0.90/0.80 across 2/4 streams.
+        let base = wire_report(
+            "af-packet",
+            &[
+                (1, 1e5, 0.37, 1.0),
+                (2, 2e5, 0.66, 0.90),
+                (4, 3.5e5, 1.18, 0.80),
+            ],
+        );
+        // Current: q=4 collapses 0.80 -> 0.50 (~38% drop); q=2 holds.
+        let sample = wire_report(
+            "af-packet",
+            &[
+                (1, 1e5, 0.37, 1.0),
+                (2, 2e5, 0.66, 0.90),
+                (4, 2.4e5, 0.74, 0.50),
+            ],
+        );
+        let rr = detect_wire_scaling_regression_stats(&base, &[sample], 0.15, 2.0).unwrap();
+        assert!(
+            rr.has_regression(),
+            "a real scaling collapse must flag: {rr:?}"
+        );
+        let q4 = rr
+            .metrics
+            .iter()
+            .find(|m| m.metric.contains("q=4"))
+            .unwrap();
+        assert!(q4.flagged, "q=4 must be the flagged width: {q4:?}");
+    }
+
+    #[test]
+    fn wire_scaling_gate_ignores_minor_scatter() {
+        let base = wire_report(
+            "af-packet",
+            &[
+                (1, 1e5, 0.37, 1.0),
+                (2, 2e5, 0.66, 0.90),
+                (4, 3.5e5, 1.18, 0.80),
+            ],
+        );
+        // A few percent of scatter, well inside the 15% threshold.
+        let sample = wire_report(
+            "af-packet",
+            &[
+                (1, 1e5, 0.37, 1.0),
+                (2, 2e5, 0.65, 0.88),
+                (4, 3.5e5, 1.15, 0.78),
+            ],
+        );
+        let rr = detect_wire_scaling_regression_stats(&base, &[sample], 0.15, 2.0).unwrap();
+        assert!(!rr.has_regression(), "minor scatter must not flag: {rr:?}");
+    }
+
+    #[test]
+    fn wire_scaling_gate_rejects_empty_and_mismatched_sweeps() {
+        let base = wire_report("af-packet", &[(1, 1e5, 0.37, 1.0), (2, 2e5, 0.66, 0.90)]);
+        assert!(detect_wire_scaling_regression_stats(&base, &[], 0.15, 2.0).is_err());
+
+        // A dry-run craft ceiling must never be gated against a live wire curve.
+        let dry = wire_report("dry-run", &[(1, 1e5, 0.37, 1.0), (2, 2e5, 0.66, 0.90)]);
+        assert!(
+            detect_wire_scaling_regression_stats(&base, &[dry], 0.15, 2.0).is_err(),
+            "comparing dry-run vs af-packet must error"
+        );
+
+        let mut wrong_ipv = wire_report("af-packet", &[(2, 2e5, 0.66, 0.90)]);
+        wrong_ipv.ip_version = "v6".to_string();
+        assert!(detect_wire_scaling_regression_stats(&base, &[wrong_ipv], 0.15, 2.0).is_err());
+
+        let mut wrong_l4 = wire_report("af-packet", &[(2, 2e5, 0.66, 0.90)]);
+        wrong_l4.l4 = "tcp-syn".to_string();
+        assert!(detect_wire_scaling_regression_stats(&base, &[wrong_l4], 0.15, 2.0).is_err());
+
+        let mut wrong_frame = wire_report("af-packet", &[(2, 2e5, 0.66, 0.90)]);
+        wrong_frame.frame_bytes = 64;
+        assert!(detect_wire_scaling_regression_stats(&base, &[wrong_frame], 0.15, 2.0).is_err());
+
+        let mut wrong_schema = wire_report("af-packet", &[(2, 2e5, 0.66, 0.90)]);
+        wrong_schema.schema_version = WIRE_SCALING_SCHEMA_VERSION + 1;
+        assert!(detect_wire_scaling_regression_stats(&base, &[wrong_schema], 0.15, 2.0).is_err());
+    }
+
+    #[test]
+    fn wire_scaling_gate_single_noisy_sample_within_band_does_not_flag() {
+        let base = wire_report("af-packet", &[(1, 1e5, 0.37, 1.0), (4, 3.5e5, 1.18, 0.80)]);
+        // Several samples scattering around 0.79; median move tiny, σ small.
+        let samples = [
+            wire_report("af-packet", &[(4, 3.5e5, 1.18, 0.81)]),
+            wire_report("af-packet", &[(4, 3.5e5, 1.18, 0.78)]),
+            wire_report("af-packet", &[(4, 3.5e5, 1.18, 0.80)]),
+        ];
+        let rr = detect_wire_scaling_regression_stats(&base, &samples, 0.15, 2.0).unwrap();
+        assert!(
+            !rr.has_regression(),
+            "scatter across samples must not flag: {rr:?}"
+        );
     }
 }
