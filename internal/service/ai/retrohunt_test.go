@@ -170,6 +170,45 @@ func TestRetroHunter_MatchesDomainIPAndCIDR(t *testing.T) {
 	}
 }
 
+func TestRetroHunter_HTTPHostWithPortMatchesDomain(t *testing.T) {
+	t.Parallel()
+	base := time.Date(2026, 1, 10, 12, 0, 0, 0, time.UTC)
+	// Plain HTTP to a non-standard port with no SNI: the Host header
+	// carries a :port that stored domains never do.
+	env := schema.Envelope{
+		EventID:    uuid.New(),
+		DeviceID:   uuid.New(),
+		Timestamp:  base,
+		EventClass: schema.EventClassHTTP,
+		Payload: mustPack(t, schema.HTTPEvent{
+			Method: "GET", Host: "evil.example:8080", SNI: "", Verdict: schema.VerdictAllow,
+		}),
+	}
+	src := &stubEventSource{events: []schema.Envelope{env}}
+	set := NewRetroIndicatorSet(storeSnapshot(mkIOC(IOCTypeDomain, "evil.example", 0.9)), 0.5)
+
+	report, err := runHunt(t, src, set, base)
+	if err != nil {
+		t.Fatalf("Hunt: %v", err)
+	}
+	if len(report.Hits) != 1 {
+		t.Fatalf("Hits = %d, want 1 (Host port should be stripped before matching)", len(report.Hits))
+	}
+	if report.Hits[0].Indicator != "evil.example" {
+		t.Errorf("indicator = %q, want evil.example", report.Hits[0].Indicator)
+	}
+	if report.Hits[0].MatchedValue != "evil.example" {
+		t.Errorf("matched value = %q, want evil.example (port stripped)", report.Hits[0].MatchedValue)
+	}
+}
+
+// runHunt runs a single-tenant hunt over a one-hour window centred on ts.
+func runHunt(t *testing.T, src RetroEventSource, set *RetroIndicatorSet, ts time.Time) (RetroReport, error) {
+	t.Helper()
+	return NewRetroHunter(src).Hunt(context.Background(), uuid.New(), set,
+		ts.Add(-time.Hour), ts.Add(time.Hour))
+}
+
 func TestRetroHunter_EmptySetSkipsSource(t *testing.T) {
 	t.Parallel()
 	src := &stubEventSource{events: []schema.Envelope{

@@ -274,10 +274,17 @@ func (h *RetroHunter) matchEnvelope(env schema.Envelope, set *RetroIndicatorSet)
 			return RetroHit{}, false, true
 		}
 		// SNI is the most reliable destination identity (it
-		// survives an IP-only connect); fall back to Host.
+		// survives an IP-only connect); fall back to Host. The Host
+		// header may carry a :port (e.g. "evil.com:8080") whereas
+		// stored domains never do (normalizeDomain rejects ':'), so
+		// strip the port before matching to avoid a false negative on
+		// plain HTTP to a non-standard port with no SNI.
 		host := ev.SNI
 		if host == "" {
 			host = ev.Host
+		}
+		if h, _, found := strings.Cut(host, ":"); found {
+			host = h
 		}
 		if ioc, ok := set.matchDomain(host); ok {
 			return base(strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), ".")), ioc, ev.Verdict), true, false
