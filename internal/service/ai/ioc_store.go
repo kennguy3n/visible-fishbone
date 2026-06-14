@@ -419,8 +419,11 @@ func (s *IOCStore) QueryIOCs(_ context.Context, indicators []string) ([]IOCMatch
 	// see this since the IP's key never equals a range's key. This
 	// keeps the live-traffic / alerting path in step with the
 	// firewall data plane, which already denies the whole range
-	// (see ioc_enforcement.go dst_cidrs). Bounded to the CIDR slice
-	// of the store, which is small relative to single-value IOCs.
+	// (see ioc_enforcement.go dst_cidrs). The scan walks the whole
+	// keyed map once, but the per-entry parse/contains work fires
+	// only for CIDR entries (a small slice of the store); if range
+	// cardinality ever grows, a dedicated CIDR index/trie is the
+	// next step.
 	if len(queryIPs) > 0 {
 		for key, ioc := range s.byKey {
 			if ioc.Type != IOCTypeCIDR || ioc.Expired(now) {
