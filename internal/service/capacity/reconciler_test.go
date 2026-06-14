@@ -314,6 +314,47 @@ func TestZeroFleetClearsSettings(t *testing.T) {
 	}
 }
 
+// TestZeroFleetClearsLatest: when the fleet drops from N>0 to 0, Latest()
+// must reflect the empty fleet rather than keep serving the prior
+// non-empty recommendation. Otherwise an operator endpoint reading
+// Latest() would report Pending=true while the dashboard (gauges cleared)
+// shows all-clear against fleet_tenants=0.
+func TestZeroFleetClearsLatest(t *testing.T) {
+	obs := &fakeObserver{obs: FleetObservation{TenantCount: 5000}}
+	r := New(Config{
+		Observer: obs,
+		Knobs:    docKnobs,
+		Metrics:  newFakeSink(),
+		NowFunc:  func() time.Time { return time.Unix(0, 0) },
+	})
+
+	if _, err := r.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	pre, ok := r.Latest()
+	if !ok || !pre.Pending {
+		t.Fatalf("precondition: 5K fleet with batch 1024 should cache a pending recommendation, got ok=%v pending=%v", ok, pre.Pending)
+	}
+
+	obs.obs = FleetObservation{TenantCount: 0}
+	if _, err := r.Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := r.Latest()
+	if !ok {
+		t.Fatal("empty-fleet pass should still cache a (cleared) recommendation")
+	}
+	if got.Pending {
+		t.Error("Latest() must not stay pending after the fleet empties")
+	}
+	if got.Plan != nil {
+		t.Error("Latest() Plan must be nil after the fleet empties")
+	}
+	if got.Observation.TenantCount != 0 {
+		t.Errorf("Latest() observation TenantCount = %d, want 0", got.Observation.TenantCount)
+	}
+}
+
 // TestNoPendingWhenAdequatelyProvisioned: a fleet whose knobs already
 // meet the recommendation reports no pending action and over-
 // provisioning is never flagged (fail-safe toward more capacity).
@@ -353,8 +394,21 @@ func TestZeroTenantsSkipsModel(t *testing.T) {
 	if sink.okCount != 1 {
 		t.Errorf("zero-tenant pass should count as ok, got %d", sink.okCount)
 	}
-	if _, ok := r.Latest(); ok {
-		t.Error("zero-tenant pass should not publish a recommendation")
+	// The empty-fleet pass caches a cleared recommendation so Latest()
+	// agrees with the gauges (which are cleared, not stale). It must not
+	// fabricate a plan or flag any axis pending.
+	got, ok := r.Latest()
+	if !ok {
+		t.Fatal("zero-tenant pass should cache the cleared recommendation")
+	}
+	if got.Plan != nil {
+		t.Error("cached zero-tenant recommendation should have a nil Plan")
+	}
+	if got.Pending {
+		t.Error("cached zero-tenant recommendation should not be pending")
+	}
+	if got.Observation.TenantCount != 0 {
+		t.Errorf("cached observation TenantCount = %d, want 0", got.Observation.TenantCount)
 	}
 }
 

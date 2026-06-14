@@ -287,7 +287,17 @@ func (r *Reconciler) Reconcile(ctx context.Context) (Recommendation, error) {
 		r.metricsClearSettings()
 		r.logger.Info("capacity: no live tenants yet; skipping sizing")
 		r.metricsIncReconcile("ok")
-		return Recommendation{Observation: obs, At: r.now()}, nil
+		// Cache the empty-fleet result so Latest() agrees with the gauges
+		// we just cleared. Without this, an operator endpoint reading
+		// Latest() would keep serving the prior non-empty recommendation
+		// (e.g. Pending=true for batch_size at 5K tenants) while the
+		// dashboard shows fleet_tenants=0 and no pending axes — a
+		// confusing split-brain. nil Plan / nil Axes / Pending=false
+		// faithfully represents "nothing to size yet"; the At timestamp
+		// lets a consumer see the recommendation is current.
+		empty := Recommendation{Observation: obs, At: r.now()}
+		r.store(empty)
+		return empty, nil
 	}
 
 	knobs := r.knobs()
