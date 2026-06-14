@@ -94,6 +94,7 @@ type Config struct {
 	RBI                RBI
 	TenantMigration    TenantMigration
 	Activity           Activity
+	RolloutAutopilot   RolloutAutopilot
 	Hibernation        Hibernation
 	AlertFeedback      AlertFeedback
 }
@@ -487,6 +488,56 @@ type CASB struct {
 	// Defaults to 1h. Anything <= 0 is treated as the default by the
 	// loop; the strict parser still rejects un-parseable values.
 	NoOpsReconcileInterval time.Duration
+}
+
+// RolloutAutopilot carries the fleet/MSP-level knobs for the NoOps
+// auto-promoter (WS-5). The autopilot advances tenant/capability rollout
+// state along the existing off->monitor->enforce machine without operator
+// action: it auto-enrols a fresh tenant into monitor (dry-run) and, once
+// the monitor-phase guardrail metrics have held under the promotion
+// ceiling for the dwell window, promotes monitor->enforce.
+//
+// It is itself a DEFAULT-OFF gate: Enabled defaults false, so an upgrade
+// never silently starts auto-promoting — turning on the NoOps autopilot
+// is an explicit operator decision. The auto-demote-to-safety guardrail
+// (CapabilityRollout's Threshold) is unchanged and always faster/easier
+// than promotion: demotion needs no dwell and no minimum evidence beyond
+// its own MinSamples, while promotion needs the full dwell window, the
+// MinSamples floor, and an under-ceiling reading.
+type RolloutAutopilot struct {
+	// Enabled is the master default-OFF gate. When false the autopilot
+	// is neither constructed nor scheduled and nothing auto-advances.
+	Enabled bool
+	// Interval is the cadence of the leader-only promotion sweep.
+	// Defaults to 1h. Anything <= 0 is treated as the default by the
+	// loop; the strict parser still rejects un-parseable values.
+	Interval time.Duration
+	// AutoEnrol advances off->monitor on enrolment so a freshly-seeded
+	// tenant begins dry-running with zero operator clicks. Defaults true
+	// (only consulted when Enabled). Set false for the most conservative
+	// posture: promote only tenants an operator already moved to monitor.
+	AutoEnrol bool
+	// DwellWindow is the minimum time a capability must dwell in monitor
+	// before it is eligible for monitor->enforce. Defaults to 24h. A
+	// value <= 0 disables promotion (the autopilot is enrol-only).
+	DwellWindow time.Duration
+	// MinSamples is the minimum monitor observations required as
+	// promotion evidence. Defaults to 200. Must be >= the demote
+	// threshold's MinSamples (the autopilot constructor enforces this).
+	MinSamples int
+	// MaxErrorRate is the promotion ceiling on the monitor-phase error
+	// rate (0..1). Defaults to 0.01. Must be <= the demote threshold's
+	// MaxErrorRate so a demote-worthy reading also blocks promotion.
+	MaxErrorRate float64
+	// MaxDenyRate is the promotion ceiling on the monitor-phase
+	// would-have-block (deny) rate (0..1). Defaults to 0.05. Must be <=
+	// the demote threshold's MaxDenyRate.
+	MaxDenyRate float64
+	// Capabilities restricts which rollout capabilities the autopilot
+	// governs (CSV of capability ids, e.g. "idp_directory_sync"). Empty
+	// means "all governed capabilities". A capability not in the set is
+	// only ever advanced by an operator.
+	Capabilities []string
 }
 
 // AI carries runtime knobs for the AI assistant service
@@ -1723,6 +1774,15 @@ func Load() (Config, error) {
 			ArtifactFileDownload:      getBoolLenient("RBI_ARTIFACT_FILE_DOWNLOAD", false),
 			ArtifactFileUpload:        getBoolLenient("RBI_ARTIFACT_FILE_UPLOAD", false),
 		},
+		RolloutAutopilot: RolloutAutopilot{
+			// Enabled, Interval, AutoEnrol, DwellWindow, MinSamples,
+			// MaxErrorRate and MaxDenyRate are populated by the strict
+			// tables below (single source of truth for default + env var
+			// name). Only the CSV capability allow-list is parsed
+			// leniently here — an empty/typo'd list safely means "all
+			// governed capabilities", never a security regression.
+			Capabilities: splitCSV(getStr("ROLLOUT_AUTOPILOT_CAPABILITIES", "")),
+		},
 		Telemetry: Telemetry{
 			OTLPEndpoint:   getStr("OTEL_EXPORTER_OTLP_ENDPOINT", ""),
 			ServiceVersion: getStr("SERVICE_VERSION", ""),
@@ -1876,6 +1936,10 @@ func Load() (Config, error) {
 		// Per-tenant cap on registered OIDC IdP configs. Parsed
 		// strictly so a typo can't silently revert the limit.
 		{"MOBILE_AUTH_MAX_PROVIDERS_PER_TENANT", 10, &cfg.MobileAuth.MaxProvidersPerTenant},
+		// WS-5 NoOps auto-promoter promotion evidence floor. Parsed
+		// strictly so a typo can't silently lower the minimum number of
+		// monitor observations required before a capability may promote.
+		{"ROLLOUT_AUTOPILOT_MIN_SAMPLES", 200, &cfg.RolloutAutopilot.MinSamples},
 		// Internal Prometheus scrape port. Parsed strictly so a
 		// typo can't silently relocate the operational surface
 		// onto an unexpected port.
@@ -1965,6 +2029,11 @@ func Load() (Config, error) {
 		{"POP_GEODNS_PUBLISH_INTERVAL", 30 * time.Second, &cfg.PoP.GeoDNSPublishInterval},
 		{"POP_REBALANCE_INTERVAL", 60 * time.Second, &cfg.PoP.RebalanceInterval},
 		{"WS11_MIGRATION_RESUME_INTERVAL", 5 * time.Minute, &cfg.TenantMigration.ResumeInterval},
+		// WS-5 NoOps auto-promoter. Sweep cadence and monitor dwell
+		// window. Parsed strictly so a typo can't silently revert the
+		// dwell window and let a capability promote sooner than intended.
+		{"ROLLOUT_AUTOPILOT_INTERVAL", time.Hour, &cfg.RolloutAutopilot.Interval},
+		{"ROLLOUT_AUTOPILOT_DWELL_WINDOW", 24 * time.Hour, &cfg.RolloutAutopilot.DwellWindow},
 		// Alert false-positive feedback tuning sweep cadence (only
 		// consulted when ALERT_FEEDBACK_TUNING_ENABLED). Defaults to 30m.
 		{"ALERT_FEEDBACK_TUNING_INTERVAL", 30 * time.Minute, &cfg.AlertFeedback.TuningInterval},
@@ -1979,6 +2048,11 @@ func Load() (Config, error) {
 		// silently reverting to the default would weaken the capacity
 		// guardrail that keeps a PoP from being over-subscribed.
 		{"POP_HIGH_WATER_FRACTION", 0.85, &cfg.PoP.HighWaterFraction},
+		// WS-5 NoOps auto-promoter promotion ceilings. Parsed strictly
+		// because a typo silently reverting to the default would weaken
+		// the guardrail that gates monitor->enforce.
+		{"ROLLOUT_AUTOPILOT_MAX_ERROR_RATE", 0.01, &cfg.RolloutAutopilot.MaxErrorRate},
+		{"ROLLOUT_AUTOPILOT_MAX_DENY_RATE", 0.05, &cfg.RolloutAutopilot.MaxDenyRate},
 		// WS8 ClickHouse row-write limiter steady-state rate, in rows/s.
 		// 0 ⇒ use the metering package default (2000). Parsed strictly so
 		// a typo can't silently revert a tightened cost ceiling.
@@ -2026,6 +2100,14 @@ func Load() (Config, error) {
 		{"APP_REGISTRY_SYNC_ENABLED", true, &cfg.AppRegistry.SyncEnabled},
 		{"CASB_NOOPS_ENABLED", false, &cfg.CASB.NoOpsEnabled},
 		{"CASB_NOOPS_AUTO_ENFORCE", false, &cfg.CASB.NoOpsAutoEnforce},
+		// WS-5 NoOps auto-promoter. DEFAULT-OFF master gate: the
+		// leader-only promotion loop is only registered when this is
+		// explicitly enabled, so an upgrade never silently starts
+		// auto-promoting. AutoEnrol defaults true so an enabled autopilot
+		// dry-runs fresh tenants with zero clicks; both parsed strictly so
+		// a typo fails boot rather than silently mis-gating the autopilot.
+		{"ROLLOUT_AUTOPILOT_ENABLED", false, &cfg.RolloutAutopilot.Enabled},
+		{"ROLLOUT_AUTOPILOT_AUTO_ENROL", true, &cfg.RolloutAutopilot.AutoEnrol},
 		// Margin/cost autopilot sweep (WS-7). DEFAULT-OFF: the leader-only
 		// sweep is only registered when explicitly enabled. The narrow auto
 		// action is a further per-tenant rollout opt-in, so the engine is
