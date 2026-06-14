@@ -145,6 +145,19 @@ type Metrics struct {
 	PolicyBundleSizeBytes    prometheus.Histogram
 	PolicyRolloutState       *prometheus.GaugeVec
 
+	// --- Rollout autopilot (WS-5 NoOps auto-promoter) ------------
+	// RolloutAutopilotTransitions counts the state transitions the
+	// NoOps autopilot drove without operator action, by capability and
+	// kind (enrol|promote|demote). It is the proof that operator toil
+	// moved: every increment is a posture change a human would otherwise
+	// have had to make by hand.
+	RolloutAutopilotTransitions *prometheus.CounterVec
+	// RolloutAutopilotPromotionsBlocked counts promotions the autopilot
+	// withheld this sweep, by capability and reason
+	// (dwell|insufficient_samples|guardrail|stale_metrics). It proves the
+	// guardrails are doing work — promotions are gated, not rubber-stamped.
+	RolloutAutopilotPromotionsBlocked *prometheus.CounterVec
+
 	// --- AI ------------------------------------------------------
 	AILLMCalls            *prometheus.CounterVec
 	AILLMLatency          *prometheus.HistogramVec
@@ -394,6 +407,18 @@ func New(cfg config.Metrics) *Metrics {
 		Name:      "rollout_state",
 		Help:      "Current policy rollout state per tenant, encoded as an integer state code.",
 	}, []string{"tenant"})
+	m.RolloutAutopilotTransitions = f.NewCounterVec(prometheus.CounterOpts{
+		Namespace: ns,
+		Subsystem: "rollout_autopilot",
+		Name:      "transitions_total",
+		Help:      "NoOps autopilot state transitions driven without operator action, by capability and kind (enrol|promote|demote).",
+	}, []string{"capability", "kind"})
+	m.RolloutAutopilotPromotionsBlocked = f.NewCounterVec(prometheus.CounterOpts{
+		Namespace: ns,
+		Subsystem: "rollout_autopilot",
+		Name:      "promotions_blocked_total",
+		Help:      "NoOps autopilot promotions withheld this sweep, by capability and reason (dwell|insufficient_samples|guardrail|stale_metrics).",
+	}, []string{"capability", "reason"})
 
 	// --- AI ----------------------------------------------------------
 	m.AILLMCalls = f.NewCounterVec(prometheus.CounterOpts{

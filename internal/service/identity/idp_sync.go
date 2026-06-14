@@ -247,6 +247,20 @@ type SyncService struct {
 	// dirObs receives per-provider directory-read telemetry (see
 	// DirectoryObserver). Optional: nil disables it.
 	dirObs DirectoryObserver
+
+	// monitorSink receives the monitor-phase metrics each dry-run pass
+	// observes, so the WS-5 NoOps auto-promoter can read them as promotion
+	// evidence (see MonitorMetricsSink). Optional: nil is a no-op.
+	monitorSink MonitorMetricsSink
+}
+
+// MonitorMetricsSink receives the monitor-phase metrics a dry-run pass
+// observed for a capability, so the WS-5 NoOps auto-promoter can read
+// them as promotion evidence. It is declared here (dependency inverted,
+// like RolloutGate) and is satisfied by rollout.MonitorMetricsRecorder.
+// A nil sink is a no-op, so wiring is fail-safe.
+type MonitorMetricsSink interface {
+	Record(tenantID uuid.UUID, c rollout.Capability, m rollout.MonitorMetrics)
 }
 
 // NewSyncService wires an IdP directory sync service.
@@ -319,6 +333,19 @@ func (s *SyncService) WithRolloutGate(gate RolloutGate) *SyncService {
 func (s *SyncService) WithDirectoryObserver(obs DirectoryObserver) *SyncService {
 	if obs != nil {
 		s.dirObs = obs
+	}
+	return s
+}
+
+// WithMonitorMetricsSink wires the WS-5 auto-promoter's evidence sink.
+// Once set, every monitor (dry-run) pass records the same MonitorMetrics
+// it feeds the auto-rollback guardrail, so the promoter can later read
+// whether the dry-run stayed under the promotion ceiling. A nil sink is a
+// no-op (no evidence recorded, so the capability simply never auto-
+// promotes), so wiring is fail-safe. Returns the receiver for chaining.
+func (s *SyncService) WithMonitorMetricsSink(sink MonitorMetricsSink) *SyncService {
+	if sink != nil {
+		s.monitorSink = sink
 	}
 	return s
 }
@@ -490,6 +517,14 @@ func (s *SyncService) SyncTenant(ctx context.Context, tenantID uuid.UUID) (SyncR
 		metrics := rollout.MonitorMetrics{
 			Samples: report.UsersSeen + report.MonitorErrorSamples,
 			Errors:  len(report.Errors),
+		}
+		// Record this pass's evidence for the WS-5 auto-promoter before
+		// evaluating the rollback: the promoter discards a snapshot older
+		// than the capability's current monitor entry, so a snapshot taken
+		// just before an auto-rollback can never promote the re-enrolled
+		// capability.
+		if s.monitorSink != nil {
+			s.monitorSink.Record(tenantID, rollout.CapabilityIDPDirectorySync, metrics)
 		}
 		rec, rolled, rbErr := s.rolloutGate.EvaluateAutoRollback(ctx, tenantID, rollout.CapabilityIDPDirectorySync, metrics)
 		switch {

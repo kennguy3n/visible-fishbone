@@ -18,6 +18,8 @@
 //! separators the pattern allowed — spaces and hyphens) and strip
 //! them internally, so the caller hands the matched text straight in.
 
+use sha2::Digest;
+
 /// Collect the decimal digits of `s`, ignoring any other byte
 /// (separators, letters). Each element is the digit's value `0..=9`.
 pub(crate) fn digits(s: &str) -> Vec<u8> {
@@ -585,6 +587,302 @@ pub fn jwt(s: &str) -> bool {
     }
 }
 
+// --- Crypto-wallet address validators ---
+//
+// Wallet addresses carry their own structural checksum, so — like the
+// national-ID check digits above — the validator can re-derive it and
+// reject a same-shaped random run with near-certainty. A 34-character
+// base58 run or a 40-hex string is far too common to gate on shape
+// alone; the checksum is what makes these near-zero-FP. Each has a
+// byte-identical twin in `validators.go`.
+
+/// True iff every byte of `s` is in `[A-Za-z0-9_-]` (URL-safe token
+/// charset shared by several vendor credentials below).
+fn all_token_byte(s: &str) -> bool {
+    !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// Decode a Bitcoin base58 string to bytes (no checksum check here).
+/// Returns `None` on any character outside the Bitcoin alphabet.
+fn base58_decode(s: &str) -> Option<Vec<u8>> {
+    const ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    if s.is_empty() {
+        return None;
+    }
+    // Big-endian base-58 → base-256 accumulation.
+    let mut bytes: Vec<u8> = Vec::with_capacity(s.len());
+    for ch in s.bytes() {
+        let value = u32::try_from(ALPHABET.iter().position(|&a| a == ch)?).ok()?;
+        let mut carry = value;
+        for byte in &mut bytes {
+            carry += u32::from(*byte) * 58;
+            *byte = (carry & 0xff) as u8;
+            carry >>= 8;
+        }
+        while carry > 0 {
+            bytes.push((carry & 0xff) as u8);
+            carry >>= 8;
+        }
+    }
+    // Each leading '1' is a leading zero byte.
+    for ch in s.bytes() {
+        if ch == b'1' {
+            bytes.push(0);
+        } else {
+            break;
+        }
+    }
+    bytes.reverse();
+    Some(bytes)
+}
+
+/// Bitcoin legacy address (P2PKH `1…` / P2SH `3…`): base58check with a
+/// 1-byte version (`0x00` or `0x05`), 20-byte hash and a 4-byte
+/// double-SHA-256 checksum. The checksum makes a same-shaped base58 run
+/// reject with probability `1 - 2^-32`.
+#[must_use]
+pub fn btc_address_base58(s: &str) -> bool {
+    let Some(raw) = base58_decode(s) else {
+        return false;
+    };
+    if raw.len() != 25 {
+        return false;
+    }
+    if raw[0] != 0x00 && raw[0] != 0x05 {
+        return false;
+    }
+    let (payload, checksum) = raw.split_at(21);
+    let first = sha2::Sha256::digest(payload);
+    let second = sha2::Sha256::digest(first);
+    second[..4] == *checksum
+}
+
+/// Bech32 / bech32m polymod over the human-readable-part expansion plus
+/// data values. Returns the residual constant (`1` for bech32, the
+/// bech32m constant `0x2bc8_30a3` for bech32m).
+fn bech32_polymod(values: &[u8]) -> u32 {
+    const GEN: [u32; 5] = [
+        0x3b6a_57b2,
+        0x2650_8e6d,
+        0x1ea1_19fa,
+        0x3d42_33dd,
+        0x2a14_62b3,
+    ];
+    let mut chk: u32 = 1;
+    for &v in values {
+        let top = chk >> 25;
+        chk = ((chk & 0x01ff_ffff) << 5) ^ u32::from(v);
+        for (i, g) in GEN.iter().enumerate() {
+            if (top >> i) & 1 == 1 {
+                chk ^= g;
+            }
+        }
+    }
+    chk
+}
+
+/// Convert a slice of 5-bit groups to 8-bit bytes, rejecting if any
+/// padding bits are non-zero or more than 4 bits remain.
+fn convert_bits_5_to_8(data: &[u8]) -> Option<Vec<u8>> {
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    let mut out = Vec::new();
+    for &value in data {
+        acc = (acc << 5) | u32::from(value);
+        bits += 5;
+        while bits >= 8 {
+            bits -= 8;
+            out.push(((acc >> bits) & 0xff) as u8);
+        }
+    }
+    if bits > 4 || (acc << (8 - bits)) & 0xff != 0 {
+        return None;
+    }
+    Some(out)
+}
+
+/// Bitcoin SegWit address (`bc1…`): BIP-173/350 bech32 (witness v0) or
+/// bech32m (v1-16) with the `bc` human-readable part. Validates the
+/// 30-bit checksum, the witness version, and that the decoded program
+/// is 2-40 bytes (20/32 for the standard v0 forms). Lowercase only —
+/// BIP-173 forbids mixed case, and the scanning regex enforces it.
+#[must_use]
+pub fn btc_address_bech32(s: &str) -> bool {
+    const CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+    // HRP must be exactly "bc" followed by the '1' separator.
+    let Some(data_part) = s.strip_prefix("bc1") else {
+        return false;
+    };
+    // Need at least version (1) + one program group + checksum (6); a
+    // real address is ≥11 data symbols, so this only guards the slice.
+    if data_part.len() < 8 || s.len() > 90 {
+        return false;
+    }
+    let mut values: Vec<u8> = Vec::with_capacity(data_part.len());
+    for ch in data_part.bytes() {
+        let Some(pos) = CHARSET.iter().position(|&c| c == ch) else {
+            return false;
+        };
+        let Ok(pos) = u8::try_from(pos) else {
+            return false;
+        };
+        values.push(pos);
+    }
+    // Expand HRP "bc": high bits, separator 0, low bits.
+    let hrp = b"bc";
+    let mut combined: Vec<u8> = Vec::with_capacity(hrp.len() * 2 + 1 + values.len());
+    for &c in hrp {
+        combined.push(c >> 5);
+    }
+    combined.push(0);
+    for &c in hrp {
+        combined.push(c & 0x1f);
+    }
+    combined.extend_from_slice(&values);
+    let residual = bech32_polymod(&combined);
+    let version = values[0];
+    // bech32 for witness v0, bech32m for v1-16.
+    let expected = if version == 0 { 1 } else { 0x2bc8_30a3 };
+    if residual != expected || version > 16 {
+        return false;
+    }
+    // Strip the 6-symbol checksum, decode the program, length-check it.
+    let program_5bit = &values[1..values.len() - 6];
+    let Some(program) = convert_bits_5_to_8(program_5bit) else {
+        return false;
+    };
+    if program.len() < 2 || program.len() > 40 {
+        return false;
+    }
+    // v0 programs are exactly 20 (P2WPKH) or 32 (P2WSH) bytes.
+    if version == 0 && program.len() != 20 && program.len() != 32 {
+        return false;
+    }
+    true
+}
+
+/// Ethereum address: `0x` + 40 hex with a valid EIP-55 mixed-case
+/// checksum. Requiring the checksum (rather than accepting any 40-hex
+/// run) is what makes this near-zero-FP: each cased letter must agree
+/// with the corresponding keccak-256 nibble of the lowercased address.
+/// All-lowercase / all-uppercase addresses are *not* accepted — they
+/// carry no checksum to verify, so they would reduce this to a bare
+/// 40-hex shape. (Documented FN: non-checksummed addresses are missed.)
+#[must_use]
+pub fn eth_address(s: &str) -> bool {
+    let Some(body) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) else {
+        return false;
+    };
+    if body.len() != 40 || !body.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return false;
+    }
+    // Must contain at least one alphabetic hex digit to carry a checksum.
+    if !body.bytes().any(|b| b.is_ascii_alphabetic()) {
+        return false;
+    }
+    let lower = body.to_ascii_lowercase();
+    let hash = crate::keccak::keccak256(lower.as_bytes());
+    for (i, b) in body.bytes().enumerate() {
+        if !b.is_ascii_alphabetic() {
+            continue;
+        }
+        // High nibble for even index, low nibble for odd.
+        let nibble = if i % 2 == 0 {
+            hash[i / 2] >> 4
+        } else {
+            hash[i / 2] & 0x0f
+        };
+        let should_upper = nibble >= 8;
+        if should_upper != b.is_ascii_uppercase() {
+            return false;
+        }
+    }
+    true
+}
+
+// --- AI-provider / SaaS credential validators ---
+//
+// Distinctive vendor prefixes plus an exact charset + length re-assert
+// the invariant the broad scanning regex only loosely bounds, the same
+// near-zero-FP role the secret validators above play. Twins in
+// `validators.go`.
+
+/// OpenAI API key: legacy `sk-` + 48 base62, or project `sk-proj-` +
+/// ≥20 URL-safe chars. Re-asserts the exact prefix/length the broad
+/// `sk-…` regex shape only loosely bounds (and rejects the Anthropic
+/// `sk-ant-…` family, which the `anthropic_api_key` validator owns).
+#[must_use]
+pub fn openai_api_key(s: &str) -> bool {
+    if let Some(body) = s.strip_prefix("sk-proj-") {
+        body.len() >= 20 && all_token_byte(body)
+    } else if let Some(body) = s.strip_prefix("sk-") {
+        body.len() == 48 && all_ascii_alnum(body)
+    } else {
+        false
+    }
+}
+
+/// Anthropic API key: `sk-ant-` + ≥20 URL-safe chars (the live form is
+/// `sk-ant-api03-…`). The `sk-ant-` prefix is distinctive enough to gate
+/// on; the charset + length floor rejects truncated placeholders.
+#[must_use]
+pub fn anthropic_api_key(s: &str) -> bool {
+    match s.strip_prefix("sk-ant-") {
+        Some(body) => body.len() >= 20 && all_token_byte(body),
+        None => false,
+    }
+}
+
+/// GitLab personal access token: `glpat-` + ≥20 URL-safe chars.
+#[must_use]
+pub fn gitlab_pat(s: &str) -> bool {
+    match s.strip_prefix("glpat-") {
+        Some(body) => body.len() >= 20 && all_token_byte(body),
+        None => false,
+    }
+}
+
+/// SendGrid API key: `SG.` + 22-char selector + `.` + 43-char secret,
+/// both URL-safe. The fixed two-segment geometry is near-zero-FP.
+#[must_use]
+pub fn sendgrid_api_key(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix("SG.") else {
+        return false;
+    };
+    let mut parts = rest.split('.');
+    let (Some(sel), Some(secret), None) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    sel.len() == 22 && all_token_byte(sel) && secret.len() == 43 && all_token_byte(secret)
+}
+
+/// npm access token: `npm_` + 36 base62 characters.
+#[must_use]
+pub fn npm_token(s: &str) -> bool {
+    match s.strip_prefix("npm_") {
+        Some(body) => body.len() == 36 && all_ascii_alnum(body),
+        None => false,
+    }
+}
+
+/// Twilio SID-form credential: `AC` (Account) or `SK` (API key) + 32
+/// lowercase-hex characters, 34 total.
+#[must_use]
+pub fn twilio_api_key(s: &str) -> bool {
+    if s.len() != 34 {
+        return false;
+    }
+    let Some(body) = s.strip_prefix("AC").or_else(|| s.strip_prefix("SK")) else {
+        return false;
+    };
+    body.len() == 32
+        && body
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -866,5 +1164,106 @@ mod tests {
         assert!(!jwt(no_alg));
         // Only two segments.
         assert!(!jwt("eyJhbGciOiJIUzI1NiJ9.payloadsegment"));
+    }
+
+    // --- Crypto-wallet validators ---
+
+    #[test]
+    fn btc_base58_accepts_known_addresses_and_rejects_bad_checksum() {
+        // Genesis P2PKH and a canonical P2SH address.
+        assert!(btc_address_base58("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNa"));
+        assert!(btc_address_base58("3J98t1WpEZ73CNmQviecrnyiWrnqRhWNLy"));
+        // Flip the final character → checksum no longer holds.
+        assert!(!btc_address_base58("1A1zP1eP5QGefi2DMPTfTL5SLmv7DivfNb"));
+        // A short base58 run decodes to far fewer than 25 bytes.
+        assert!(!btc_address_base58("1abcdef"));
+        // '0', 'O', 'I', 'l' are not in the base58 alphabet.
+        assert!(!btc_address_base58("1A1zP1eP5QGefi2DMPTfTL5SLmv7Divf0O"));
+    }
+
+    #[test]
+    fn btc_bech32_accepts_valid_segwit_and_rejects_corruption() {
+        // BIP-173 reference P2WPKH (witness v0).
+        assert!(btc_address_bech32(
+            "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"
+        ));
+        // Corrupt a data character → polymod checksum fails.
+        assert!(!btc_address_bech32(
+            "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t5"
+        ));
+        // Wrong HRP (testnet) is not a `bc` mainnet address.
+        assert!(!btc_address_bech32(
+            "tb1qw508d6qejxtdg4y5r3zarvary0c5xw7kxpjzsx"
+        ));
+    }
+
+    #[test]
+    fn eth_eip55_checksum_required() {
+        // EIP-55 reference addresses (correct mixed-case checksum).
+        assert!(eth_address("0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"));
+        assert!(eth_address("0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359"));
+        // All-lowercase carries no checksum to verify → rejected.
+        assert!(!eth_address("0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed"));
+        // One letter mis-cased → checksum mismatch.
+        assert!(!eth_address("0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAeD"));
+        // Wrong length / missing prefix.
+        assert!(!eth_address("0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAe"));
+        assert!(!eth_address("5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed"));
+    }
+
+    // --- AI-provider / SaaS credential validators ---
+
+    #[test]
+    fn openai_legacy_and_project_forms() {
+        let legacy = format!("sk-{}", "a".repeat(48));
+        assert!(openai_api_key(&legacy));
+        assert!(openai_api_key(&format!("sk-proj-{}", "Ab9_-".repeat(5))));
+        // Legacy must be exactly 48 base62 chars.
+        assert!(!openai_api_key(&format!("sk-{}", "a".repeat(47))));
+        // `sk-ant-…` belongs to the Anthropic validator, not OpenAI.
+        assert!(!openai_api_key(&format!("sk-ant-{}", "a".repeat(30))));
+    }
+
+    #[test]
+    fn anthropic_gitlab_prefixes() {
+        assert!(anthropic_api_key(&format!(
+            "sk-ant-api03-{}",
+            "Ab9_-".repeat(6)
+        )));
+        assert!(!anthropic_api_key(&format!("sk-ant-{}", "a".repeat(10)))); // too short
+        assert!(gitlab_pat(&format!("glpat-{}", "Ab9_-".repeat(5))));
+        assert!(!gitlab_pat(&format!("glpat-{}", "a".repeat(10)))); // too short
+    }
+
+    #[test]
+    fn sendgrid_two_segment_geometry() {
+        let sel = "A".repeat(22);
+        let secret = "B".repeat(43);
+        assert!(sendgrid_api_key(&format!("SG.{sel}.{secret}")));
+        assert!(!sendgrid_api_key(&format!(
+            "SG.{}.{secret}",
+            "A".repeat(21)
+        ))); // selector len
+        assert!(!sendgrid_api_key(&format!("SG.{sel}.{}", "B".repeat(42)))); // secret len
+        assert!(!sendgrid_api_key(&format!("SG.{sel}"))); // one segment
+    }
+
+    #[test]
+    fn npm_and_twilio_shapes() {
+        assert!(npm_token(&format!("npm_{}", "a".repeat(36))));
+        assert!(!npm_token(&format!("npm_{}", "a".repeat(35))));
+        assert!(twilio_api_key(&format!(
+            "AC{}",
+            "0123456789abcdef".repeat(2)
+        )));
+        assert!(twilio_api_key(&format!(
+            "SK{}",
+            "fedcba9876543210".repeat(2)
+        )));
+        assert!(!twilio_api_key(&format!("AC{}", "0".repeat(31)))); // length
+        assert!(!twilio_api_key(&format!(
+            "AC{}",
+            "0123456789ABCDEF".repeat(2)
+        ))); // uppercase hex
     }
 }

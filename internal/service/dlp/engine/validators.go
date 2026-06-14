@@ -79,6 +79,17 @@ func validatorFor(name string) func(string) bool {
 		return philippinesUMID
 	case "indonesia_nik":
 		return indonesiaNIK
+	// WS-10c jurisdiction breadth — twins in validators_ws10c.go.
+	case "ireland_ppsn":
+		return irelandPPSN
+	case "switzerland_ahv":
+		return switzerlandAHV
+	case "israel_id":
+		return israelID
+	case "romania_cnp":
+		return romaniaCNP
+	case "mexico_curp":
+		return mexicoCURP
 	// Secret / credential detectors — twins in validators.rs.
 	case "private_key_block":
 		return privateKeyBlock
@@ -96,6 +107,26 @@ func validatorFor(name string) func(string) bool {
 		return stripeSecretKey
 	case "jwt":
 		return jwtToken
+	// Crypto-wallet + AI-provider/SaaS credentials — twins in
+	// validators_secrets.go.
+	case "btc_address_base58":
+		return btcAddressBase58
+	case "btc_address_bech32":
+		return btcAddressBech32
+	case "eth_address":
+		return ethAddress
+	case "openai_api_key":
+		return openAIAPIKey
+	case "anthropic_api_key":
+		return anthropicAPIKey
+	case "gitlab_pat":
+		return gitlabPAT
+	case "sendgrid_api_key":
+		return sendgridAPIKey
+	case "npm_token":
+		return npmToken
+	case "twilio_api_key":
+		return twilioAPIKey
 	default:
 		return nil
 	}

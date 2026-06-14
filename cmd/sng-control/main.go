@@ -541,6 +541,20 @@ func run() error {
 			slog.Duration("reconcile_interval", cfg.CASB.NoOpsReconcileInterval))
 	}
 
+	// Leader-only margin/cost autopilot sweep (WS-7). DEFAULT-OFF: only
+	// registered when METERING_AUTOPILOT_ENABLED. Leader-gated so a
+	// multi-replica deployment evaluates each tenant exactly once per
+	// interval; runs in its own goroutine because RunIfLeader blocks
+	// until rootCtx is cancelled. Recommend-only unless a tenant has
+	// opted into the margin_autopilot rollout gate.
+	if cfg.Metering.AutopilotEnabled {
+		go elector.RunIfLeader(rootCtx, "metering-margin-autopilot", func(ctx context.Context) {
+			runMarginAutopilot(ctx, rc.MarginAutopilot, cfg.Metering.AutopilotInterval, logger)
+		})
+		logger.Info("sng-control: margin/cost autopilot enabled",
+			slog.Duration("sweep_interval", cfg.Metering.AutopilotInterval))
+	}
+
 	// Leader-only IdP directory-sync loop. Nil unless
 	// IDP_DIRECTORY_SYNC_ENABLED=true (rc.IDPSyncService is only built
 	// in that case), so this is a no-op by default. Leader-gated like
@@ -558,6 +572,24 @@ func run() error {
 		})
 		logger.Info("sng-control: IdP directory sync enabled",
 			slog.Duration("interval", cfg.MobileAuth.DirectorySyncInterval))
+	}
+
+	// WS-5 NoOps auto-promoter. Nil unless ROLLOUT_AUTOPILOT_ENABLED=true
+	// (the fleet-level default-OFF gate), so this is a no-op by default —
+	// an upgrade never silently starts auto-promoting. Leader-gated so a
+	// multi-replica deployment advances each tenant/capability exactly
+	// once per interval; runs in its own goroutine because RunIfLeader
+	// blocks until rootCtx is cancelled. Autopilot.Run sweeps once
+	// immediately on leadership acquisition, then on each interval tick.
+	if rc.RolloutAutopilot != nil {
+		autopilot := rc.RolloutAutopilot
+		go elector.RunIfLeader(rootCtx, "rollout-autopilot", func(ctx context.Context) {
+			autopilot.Run(ctx, cfg.RolloutAutopilot.Interval)
+		})
+		logger.Info("sng-control: rollout NoOps autopilot enabled (leader-gated)",
+			slog.Duration("interval", autopilotSweepInterval(cfg.RolloutAutopilot.Interval)),
+			slog.Bool("auto_enrol", cfg.RolloutAutopilot.AutoEnrol),
+			slog.Duration("dwell_window", cfg.RolloutAutopilot.DwellWindow))
 	}
 
 	// Leader-only alert false-positive feedback tuning loop. DEFAULT-OFF
@@ -914,6 +946,17 @@ type routerComponents struct {
 	// activity observer; the control-plane signal is wired into the
 	// router here in buildRouter.
 	ActivityRecorder *activity.Recorder
+	// RolloutAutopilot is the WS-5 NoOps auto-promoter. Nil unless
+	// ROLLOUT_AUTOPILOT_ENABLED=true (the fleet-level default-OFF gate),
+	// in which case main() runs its leader-only sweep via
+	// elector.RunIfLeader on cfg.RolloutAutopilot.Interval.
+	RolloutAutopilot *rollout.Autopilot
+	// MarginAutopilot is the margin/cost NoOps engine (WS-7). main()
+	// runs its leader-only Reconcile sweep when cfg.Metering.AutopilotEnabled.
+	// Always non-nil; the engine is recommend-only unless a tenant opts
+	// into the margin_autopilot rollout gate (the auto action is further
+	// gated on that per-tenant state).
+	MarginAutopilot *metering.MarginAutopilot
 	// AIInferencePool is the WS-9 fleet-scale shared inference pool. Nil
 	// unless AI_INFERENCE_POOL_ENABLED and an AI_LLM_ENDPOINT are set.
 	// main() closes it on shutdown so the scheduler goroutine exits and
@@ -1278,10 +1321,22 @@ func buildRouter(
 			MaxErrorRate: 0.05,
 			MinSamples:   50,
 		}),
+		// Audit every transition — operator-driven AND the WS-5
+		// autopilot's enrol/promote and the framework's auto-demote — so
+		// the staged-enablement history is reconstructable for compliance
+		// (a freshly-seeded tenant's zero-click path to enforce leaves an
+		// audit trail proving the guardrails held throughout).
+		rollout.WithTransitionSink(newRolloutAuditSink(auditRepo, logger)),
 	)
 	if err != nil {
 		return routerComponents{}, fmt.Errorf("rollout framework: %w", err)
 	}
+	// Shared monitor-phase evidence cache for the WS-5 NoOps auto-promoter:
+	// capabilities running in monitor (dry-run) record the metrics they
+	// observe here, and the autopilot reads them as promotion evidence.
+	// Always constructed (cheap, in-memory); only consulted when the
+	// autopilot is enabled.
+	rolloutMonitorMetrics := rollout.NewMonitorMetricsRecorder(nil)
 
 	// Per-tenant shadow-IT NoOps engine (migration 061). It classifies
 	// each discovered app, records an immutable audit row and recommends
@@ -1769,6 +1824,27 @@ func buildRouter(
 	}
 	meteringHandler := handler.NewMeteringHandler(meteringSvc, budgetEnforcer, meteringReports, meteringAnomalies, meteringReports, rbacSvc)
 
+	// Margin/cost autopilot (WS-7). It composes the read-only metering
+	// signals (cost report margin, per-meter projection + effective caps,
+	// the anomaly detector) into audited NoOps recommendations and, for a
+	// tenant that has opted into the margin_autopilot rollout gate, the
+	// single narrow auto action (pinning a trial's hard cap at its tier
+	// policy ceiling). The audit log is always wired. The rollout gate is
+	// always wired too, but it is recommend-only by construction unless a
+	// tenant's state is enforce, so this never silently mutates a budget.
+	// The activity-tiered planner keeps the leader-only sweep from
+	// re-pricing thousands of dormant trials every interval. main() runs
+	// the sweep via elector.RunIfLeader only when cfg.Metering.AutopilotEnabled.
+	marginAutopilot, err := metering.NewMarginAutopilot(meteringReports, meteringAnomalies, budgetEnforcer, logger)
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("control: margin autopilot: %w", err)
+	}
+	marginAutopilot.SetTenantLister(tenantRepo)
+	marginAutopilot.SetAuditLog(auditRepo)
+	marginAutopilot.SetGate(marginAutopilotGate{rollout: rolloutSvc})
+	marginAutopilotPlanner := tenancy.DefaultPlanner()
+	marginAutopilot.WithDormancyPlanner(&marginAutopilotPlanner)
+
 	aiHandler, aiSvc, aiInferencePool := buildAIHandler(cfg, policySvc, store.NewAICorrelationRepository(), alertRepo, auditSvc, aiSuggestionRepo,
 		metering.NewGuardrailBudgetGate(budgetEnforcer), metering.NewGuardrailUsageRecorder(meteringSvc), iocStore, userRepo, roleRepo, logger)
 
@@ -1915,7 +1991,11 @@ func buildRouter(
 			// mutating nothing), and only enforce performs the full sync —
 			// so flipping directory sync on for a tenant never off-boards
 			// users until it has been rehearsed in monitor.
-			WithRolloutGate(rolloutSvc)
+			WithRolloutGate(rolloutSvc).
+			// Record each monitor (dry-run) pass's metrics so the WS-5
+			// NoOps auto-promoter can read them as promotion evidence. A
+			// no-op for the guardrail itself; it only feeds the promoter.
+			WithMonitorMetricsSink(rolloutMonitorMetrics)
 		if mx != nil {
 			// Per-provider directory-read telemetry (which connectors run,
 			// success/error, users pulled) — proves connector breadth and
@@ -1984,6 +2064,15 @@ func buildRouter(
 		pop.WithTenantRegionResolver(tenantRegionResolver{tenants: tenantRepo}),
 	)
 	popHandler := handler.NewPoPHandler(popSvc, rbacSvc)
+
+	// Read-only threat-intel feed coverage surface. Feeds are
+	// platform-global, so the route is platform-gated (threatfeeds:read)
+	// and reads the shared FeedManager's live health + indicator
+	// cardinality. feedMgr is always constructed above, so the handler's
+	// nil-source guard is purely defensive here; if feedMgr ever becomes
+	// conditional, gate this construction on feedMgr != nil so a typed-nil
+	// never reaches the interface parameter.
+	threatFeedHandler := handler.NewThreatFeedHandler(feedMgr, rbacSvc)
 
 	// --- WORKSTREAM 11: cross-region tenant migration -----------------
 	// The RegionMigrator drives the resumable migration state machine
@@ -2214,6 +2303,7 @@ func buildRouter(
 		Mobile:            handler.NewMobileHandler(identitySvc),
 		Metering:          meteringHandler,
 		PoP:               popHandler,
+		ThreatFeed:        threatFeedHandler,
 		Sandbox:           handler.NewSandboxHandler(sandboxSvc),
 		RBI:               handler.NewRBIHandler(rbiSvc),
 		DLP:               handler.NewDLPHandler(dlpSvc),
@@ -2244,6 +2334,18 @@ func buildRouter(
 	// admin `POST /admin/app-registry/sync` endpoint is the only
 	// way to refresh vendor endpoints — which contradicts
 	// docs/TRAFFIC_CLASSIFICATION.md's "24h cadence" contract.
+
+	// WS-5 NoOps auto-promoter. Built behind the
+	// cfg.RolloutAutopilot.Enabled default-OFF gate (returns nil when
+	// disabled); main() schedules it leader-only. NewAutopilot rejects a
+	// policy whose promotion ceiling is looser than the rollout demote
+	// threshold, so a mis-tuned guardrail fails boot rather than silently
+	// auto-promoting past a breach.
+	rolloutAutopilot, err := buildRolloutAutopilot(cfg, rolloutSvc, tenantRepo, rolloutMonitorMetrics, mx, logger)
+	if err != nil {
+		return routerComponents{}, err
+	}
+
 	return routerComponents{
 		Router:                 router,
 		WebhookWorker:          webhookWorker,
@@ -2264,6 +2366,8 @@ func buildRouter(
 		IDPSyncService:         idpSyncSvc,
 		DLPReviewService:       dlpReviewSvc,
 		ActivityRecorder:       activityRecorder,
+		RolloutAutopilot:       rolloutAutopilot,
+		MarginAutopilot:        marginAutopilot,
 		AIInferencePool:        aiInferencePool,
 		HibernationRegistry:    hibRegistry,
 		HibernationSyncer:      hibSyncer,
@@ -2274,6 +2378,29 @@ func buildRouter(
 		AlertFeedback:          alertFeedback,
 		AlertFeedbackTenants:   idpTenantSource{activity: tenantRepo}.ListTenants,
 	}, nil
+}
+
+// marginAutopilotGate adapts the staged-rollout service onto the
+// metering engine's AutopilotGate. It maps the per-tenant
+// margin_autopilot capability state onto the engine's auto-action mode:
+// enforce applies the narrow auto action, monitor dry-runs it (records
+// the would-have action as a recommendation), and off — the default for
+// any tenant that has never opted in — keeps the engine recommend-only.
+// EffectiveState fails closed to off, so an unreadable rollout row can
+// only ever make the engine MORE conservative, never auto-enforce.
+type marginAutopilotGate struct {
+	rollout *rollout.Service
+}
+
+func (g marginAutopilotGate) AutoAct(ctx context.Context, tenantID uuid.UUID) metering.AutoActMode {
+	switch g.rollout.EffectiveState(ctx, tenantID, rollout.CapabilityMarginAutopilot) {
+	case rollout.StateEnforce:
+		return metering.AutoActEnforce
+	case rollout.StateMonitor:
+		return metering.AutoActDryRun
+	default:
+		return metering.AutoActRecommend
+	}
 }
 
 // meteringTierResolver adapts the TenantRepository onto the metering
@@ -3810,6 +3937,59 @@ func runCASBNoOps(ctx context.Context, engine *casb.AppNoOpsEngine, interval tim
 		if err := engine.RunDigests(ctx); err != nil && ctx.Err() == nil {
 			logger.Warn("casb: NoOps digest pass failed", slog.Any("error", err))
 		}
+	}
+	sweep()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			sweep()
+		}
+	}
+}
+
+// runMarginAutopilot drives the leader-only margin/cost autopilot sweep
+// (WS-7): each tick it evaluates every active tenant, turning the
+// engine's underwater / over-budget / anomaly signals into audited
+// recommendations and applying the narrow auto action only for tenants
+// opted into the margin_autopilot rollout gate. The activity-tiered
+// planner keeps the sweep from re-pricing thousands of dormant trials
+// every interval while still bounding how stale any tenant's evaluation
+// can get. Like runCASBNoOps it sweeps once immediately on entry — so a
+// leader that has just taken over reacts without waiting a full interval
+// — then re-sweeps every interval. A failed pass is logged and the loop
+// continues so one tenant's error never stalls the fleet.
+func runMarginAutopilot(ctx context.Context, engine *metering.MarginAutopilot, interval time.Duration, logger *slog.Logger) {
+	if engine == nil {
+		return
+	}
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	sweep := func() {
+		s, err := engine.Reconcile(ctx)
+		if err != nil {
+			// A cancelled context is a normal shutdown, not a failure, and
+			// leaves the sweep partial — don't warn and don't log a
+			// misleading "complete" line in either case.
+			if ctx.Err() == nil {
+				logger.Warn("metering: margin autopilot sweep failed", slog.Any("error", err))
+			}
+			return
+		}
+		// s is per-sweep (this pass only), not cumulative, so the
+		// figures describe the workload of the sweep that just finished.
+		logger.Info("metering: margin autopilot sweep complete",
+			slog.Int64("cycle", s.Cycle),
+			slog.Int64("visited", s.TenantsVisited),
+			slog.Int64("skipped_idle", s.SkippedIdle),
+			slog.Int64("skipped_dormant", s.SkippedDormant),
+			slog.Int64("recommendations", s.Recommendations),
+			slog.Int64("caps_enforced", s.CapsEnforced),
+			slog.Int64("eval_errors", s.EvalErrors))
 	}
 	sweep()
 	t := time.NewTicker(interval)

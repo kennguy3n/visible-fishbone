@@ -72,6 +72,7 @@ pub mod edm;
 pub mod engine;
 pub mod error;
 pub mod fingerprint;
+pub mod keccak;
 pub mod ml_classifier;
 pub mod policy;
 pub mod rules;

@@ -1,24 +1,29 @@
 //! DLP efficacy: drive the *real* `sng_dlp::ContentClassifier` over a
-//! generated corpus of national identifiers for every Asia + GCC
-//! detector and confirm it catches the structurally-valid identifiers
-//! (true positives) while leaving same-shaped invalid digit runs
-//! alone (the false-positive suppressor — the check-digit validators).
+//! generated corpus of national identifiers, crypto-wallet addresses and
+//! AI-provider/SaaS credentials for every validated detector and confirm
+//! it catches the structurally-valid items (true positives) while leaving
+//! same-shaped but wrong-check items alone (the false-positive suppressor
+//! — the check-digit / checksum / geometry validators).
 //!
 //! The corpus is *generated*, not hand-written: for each detector we
-//! synthesise 50 valid identifiers (correct check digit / date / prefix
-//! invariants) as known-bad cases that MUST be caught, and 50 same-length
-//! identifiers whose check digit is deliberately wrong as known-good
-//! cases that MUST be ignored. The validated detectors are graded against
-//! the default `catch ≥ 0.99` / `fp ≤ 0.02` security targets.
+//! synthesise `PER_PATTERN` valid items (correct check digit / address
+//! checksum / exact credential geometry) as known-bad cases that MUST be
+//! caught, and the same number of same-shaped items with a deliberately
+//! wrong check (wrong check digit, corrupted base58check/bech32/EIP-55
+//! checksum, or off-by-one credential length) as known-good cases that
+//! MUST be ignored. The validated detectors are graded against the
+//! default `catch ≥ 0.99` / `fp ≤ 0.02` security targets.
 //!
-//! The check-digit math here is an independent re-implementation: it
-//! generates inputs, and the classifier (the code under test) decides
-//! them, so the test is not circular.
+//! The check-digit math and the wallet *encoders* here are an independent
+//! re-implementation: they generate inputs, and the classifier (the code
+//! under test) decodes and decides them, so the test is not circular.
 
 use sng_dlp::{
     ContentClassifier, ContentMetadata, DlpChannel, DlpRule, EntityClass, NerModel, PatternType,
     RuleAction, Severity,
 };
+
+use sha2::{Digest, Sha256};
 
 use crate::report::{measure, Case, Feature, FunctionReport, Kind, Targets};
 
@@ -32,11 +37,11 @@ const NER_MODEL_BYTES: &[u8] = include_bytes!("../../../crates/sng-dlp/assets/ne
 /// to amortise warm-up and produce a stable per-scan mean.
 const THROUGHPUT_ITERS: u64 = 5_000;
 
-/// Number of valid (and, separately, invalid) identifiers generated
-/// per detector. 100 each keeps the confusion matrix statistically
-/// meaningful and, across the 24 validated detectors (Asia + GCC plus
-/// the WS5 jurisdiction breadth), drives several thousand generated
-/// cases — well past the WS5 corpus-size requirement.
+/// Number of valid (and, separately, invalid) items generated per
+/// detector. 100 each keeps the confusion matrix statistically
+/// meaningful and, across the 38 validated detectors (national IDs plus
+/// the WS-10c crypto-wallet + credential breadth), drives several
+/// thousand generated cases.
 const PER_PATTERN: usize = 100;
 
 // ---- check-digit primitives (input generators, independent of the
@@ -629,6 +634,437 @@ fn indonesia_nik(counter: usize) -> (String, String) {
     (format!("{province:02}{tail}"), format!("99{tail}"))
 }
 
+/// Ireland PPSN: seven digits + a weighted mod-23 check letter
+/// (alphabet `WABCDEFGHIJKLMNOPQRSTUV`, weights 8..=2). Invalid form:
+/// the next letter in the alphabet.
+fn ireland_ppsn(counter: usize) -> (String, String) {
+    const ALPHA: &[u8; 23] = b"WABCDEFGHIJKLMNOPQRSTUV";
+    let mut body = [0u8; 7];
+    for (i, b) in body.iter_mut().enumerate() {
+        *b = ((counter + i * 7) % 10) as u8;
+    }
+    let sum: u32 = (0..7).map(|i| u32::from(body[i]) * (8 - i as u32)).sum();
+    let idx = (sum % 23) as usize;
+    let valid = format!("{}{}", digits_to_string(&body), char::from(ALPHA[idx]));
+    let invalid = format!(
+        "{}{}",
+        digits_to_string(&body),
+        char::from(ALPHA[(idx + 1) % 23])
+    );
+    (valid, invalid)
+}
+
+/// Switzerland AHV: `756` + nine digits + an EAN-13 check digit
+/// (weights alternate 1,3 from the left). Invalid form: a wrong check.
+fn switzerland_ahv(counter: usize) -> (String, String) {
+    let mut d = vec![7u8, 5, 6];
+    for i in 0..9 {
+        d.push(((counter + i * 3) % 10) as u8);
+    }
+    let sum: u32 = (0..12)
+        .map(|i| u32::from(d[i]) * if i % 2 == 0 { 1 } else { 3 })
+        .sum();
+    let check = ((10 - sum % 10) % 10) as u8;
+    let valid = format!("{}{}", digits_to_string(&d), char::from(b'0' + check));
+    let invalid = format!(
+        "{}{}",
+        digits_to_string(&d),
+        char::from(b'0' + (check + 1) % 10)
+    );
+    (valid, invalid)
+}
+
+/// Israel Teudat Zehut: eight body digits + a Luhn-style check (odd
+/// positions weight 1, even weight 2). Invalid form: a wrong check.
+fn israel_id(counter: usize) -> (String, String) {
+    let mut body = [0u8; 8];
+    for (i, b) in body.iter_mut().enumerate() {
+        *b = ((counter + i * 5) % 10) as u8;
+    }
+    let mut sum = 0u32;
+    for (i, &digit) in body.iter().enumerate() {
+        let mut v = u32::from(digit) * if i % 2 == 0 { 1 } else { 2 };
+        if v > 9 {
+            v -= 9;
+        }
+        sum += v;
+    }
+    let check = ((10 - sum % 10) % 10) as u8;
+    let valid = format!("{}{}", digits_to_string(&body), char::from(b'0' + check));
+    let invalid = format!(
+        "{}{}",
+        digits_to_string(&body),
+        char::from(b'0' + (check + 1) % 10)
+    );
+    (valid, invalid)
+}
+
+/// Romania CNP: sex/century digit + DOB + county + serial + a weighted
+/// mod-11 check digit (weights `279146358279`). Invalid form: a wrong
+/// check.
+fn romania_cnp(counter: usize) -> (String, String) {
+    const W: [u32; 12] = [2, 7, 9, 1, 4, 6, 3, 5, 8, 2, 7, 9];
+    let sex = (counter % 8 + 1) as u8;
+    let yy = (counter % 100) as u32;
+    let mm = (counter % 12 + 1) as u32;
+    let dd = (counter % 28 + 1) as u32;
+    let county = (counter % 52 + 1) as u32;
+    let serial = (counter % 999 + 1) as u32;
+    let body = vec![
+        sex,
+        (yy / 10) as u8,
+        (yy % 10) as u8,
+        (mm / 10) as u8,
+        (mm % 10) as u8,
+        (dd / 10) as u8,
+        (dd % 10) as u8,
+        (county / 10) as u8,
+        (county % 10) as u8,
+        (serial / 100 % 10) as u8,
+        (serial / 10 % 10) as u8,
+        (serial % 10) as u8,
+    ];
+    let sum: u32 = (0..12).map(|i| W[i] * u32::from(body[i])).sum();
+    let r = sum % 11;
+    let check = if r == 10 { 1 } else { r as u8 };
+    let valid = format!("{}{}", digits_to_string(&body), char::from(b'0' + check));
+    let invalid = format!(
+        "{}{}",
+        digits_to_string(&body),
+        char::from(b'0' + (check + 1) % 10)
+    );
+    (valid, invalid)
+}
+
+/// Mexico CURP: name letters + DOB + sex + state + consonants +
+/// homoclave + a RENAPO mod-10 check digit (dictionary `0-9 A-N Ñ O-Z`,
+/// weights 18..=2). Invalid form: a wrong check.
+fn mexico_curp(counter: usize) -> (String, String) {
+    const NAMES: [&str; 5] = ["PEPP", "MARL", "GOHM", "LOAN", "RAQU"];
+    const CONS: [&str; 5] = ["RRL", "NXX", "BCD", "FGH", "JKL"];
+    const STATES: [&str; 6] = ["AS", "BC", "DF", "JC", "NL", "VZ"];
+    fn value(ch: char) -> u32 {
+        match ch {
+            '0'..='9' => ch as u32 - '0' as u32,
+            'A'..='N' => ch as u32 - 'A' as u32 + 10,
+            'Ñ' => 24,
+            'O'..='Z' => ch as u32 - 'O' as u32 + 25,
+            _ => 0,
+        }
+    }
+    let name = NAMES[counter % NAMES.len()];
+    let cons = CONS[counter % CONS.len()];
+    let state = STATES[counter % STATES.len()];
+    let yy = counter % 100;
+    let mm = counter % 12 + 1;
+    let dd = counter % 28 + 1;
+    let sex = if counter.is_multiple_of(2) { 'H' } else { 'M' };
+    let homoclave = counter % 10;
+    let head = format!("{name}{yy:02}{mm:02}{dd:02}{sex}{state}{cons}{homoclave}");
+    let sum: u32 = head
+        .chars()
+        .enumerate()
+        .map(|(i, ch)| value(ch) * (18 - i as u32))
+        .sum();
+    let check = (10 - sum % 10) % 10;
+    let valid = format!("{head}{check}");
+    let invalid = format!("{head}{}", (check + 1) % 10);
+    (valid, invalid)
+}
+
+// ---- crypto-wallet + credential input generators ----
+//
+// Unlike the national-ID generators above (which only need check-digit
+// arithmetic), wallet addresses require the real *encoders* — base58check
+// and bech32 — to synthesise inputs whose checksum the validator under
+// test will re-derive and accept. These encoders are an independent
+// re-implementation (the validator only ever *decodes*), so the test
+// stays non-circular: the harness encodes, `ContentClassifier` decodes
+// and decides.
+
+/// Double SHA-256, the Bitcoin base58check checksum hash.
+fn sha256d(data: &[u8]) -> [u8; 32] {
+    let first = Sha256::digest(data);
+    let second = Sha256::digest(first);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&second);
+    out
+}
+
+/// Encode bytes as a Bitcoin base58 string (big-endian).
+fn base58_encode(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 58] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let mut digits: Vec<u8> = Vec::new();
+    for &byte in data {
+        let mut carry = u32::from(byte);
+        for d in &mut digits {
+            carry += u32::from(*d) * 256;
+            *d = (carry % 58) as u8;
+            carry /= 58;
+        }
+        while carry > 0 {
+            digits.push((carry % 58) as u8);
+            carry /= 58;
+        }
+    }
+    let zeros = data.iter().take_while(|&&b| b == 0).count();
+    let mut out = String::with_capacity(zeros + digits.len());
+    for _ in 0..zeros {
+        out.push('1');
+    }
+    for &d in digits.iter().rev() {
+        out.push(ALPHABET[d as usize] as char);
+    }
+    out
+}
+
+/// BIP-173 polymod (same as the validator's; re-implemented here for the
+/// encoder side).
+fn bech32_polymod(values: &[u8]) -> u32 {
+    const GEN: [u32; 5] = [
+        0x3b6a_57b2,
+        0x2650_8e6d,
+        0x1ea1_19fa,
+        0x3d42_33dd,
+        0x2a14_62b3,
+    ];
+    let mut chk: u32 = 1;
+    for &v in values {
+        let top = chk >> 25;
+        chk = ((chk & 0x01ff_ffff) << 5) ^ u32::from(v);
+        for (i, g) in GEN.iter().enumerate() {
+            if (top >> i) & 1 == 1 {
+                chk ^= g;
+            }
+        }
+    }
+    chk
+}
+
+fn bech32_hrp_expand(hrp: &str) -> Vec<u8> {
+    let mut v: Vec<u8> = hrp.bytes().map(|c| c >> 5).collect();
+    v.push(0);
+    v.extend(hrp.bytes().map(|c| c & 0x1f));
+    v
+}
+
+/// Pack 8-bit bytes into 5-bit groups (bech32 data encoding).
+fn convert_bits_8_to_5(data: &[u8]) -> Vec<u8> {
+    let mut acc: u32 = 0;
+    let mut bits: u32 = 0;
+    let mut out = Vec::new();
+    for &b in data {
+        acc = (acc << 8) | u32::from(b);
+        bits += 8;
+        while bits >= 5 {
+            bits -= 5;
+            out.push(((acc >> bits) & 0x1f) as u8);
+        }
+    }
+    if bits > 0 {
+        out.push(((acc << (5 - bits)) & 0x1f) as u8);
+    }
+    out
+}
+
+/// Encode a witness-v0 bech32 address (P2WPKH/P2WSH); the only form the
+/// generator emits, so the checksum constant is always `1` (bech32).
+fn bech32_encode_v0(hrp: &str, program: &[u8]) -> String {
+    const CHARSET: &[u8; 32] = b"qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+    let mut data = vec![0u8]; // witness version 0
+    data.extend(convert_bits_8_to_5(program));
+    let mut values = bech32_hrp_expand(hrp);
+    values.extend_from_slice(&data);
+    values.extend_from_slice(&[0u8; 6]);
+    let polymod = bech32_polymod(&values) ^ 1;
+    let mut checksum = [0u8; 6];
+    for (i, c) in checksum.iter_mut().enumerate() {
+        *c = ((polymod >> (5 * (5 - i))) & 0x1f) as u8;
+    }
+    let mut s = String::from(hrp);
+    s.push('1');
+    for &d in data.iter().chain(checksum.iter()) {
+        s.push(CHARSET[d as usize] as char);
+    }
+    s
+}
+
+/// Replace the final character of `s` with a different one drawn from
+/// `alphabet`, corrupting a base58check / bech32 checksum while keeping
+/// the string within its scanning regex's charset.
+fn corrupt_last(s: &str, alphabet: &str) -> String {
+    let mut chars: Vec<char> = s.chars().collect();
+    if let Some(&last) = chars.last() {
+        let repl = alphabet.chars().find(|&c| c != last).unwrap_or(last);
+        *chars.last_mut().unwrap() = repl;
+    }
+    chars.into_iter().collect()
+}
+
+/// Apply EIP-55 mixed-case checksumming to a 40-char lowercase hex body
+/// (independent re-implementation of the validator's casing rule).
+fn eip55(lower_hex: &str) -> String {
+    let hash = sng_dlp::keccak::keccak256(lower_hex.as_bytes());
+    let mut out = String::with_capacity(lower_hex.len());
+    for (i, c) in lower_hex.chars().enumerate() {
+        if c.is_ascii_alphabetic() {
+            let nibble = if i % 2 == 0 {
+                hash[i / 2] >> 4
+            } else {
+                hash[i / 2] & 0x0f
+            };
+            if nibble >= 8 {
+                out.push(c.to_ascii_uppercase());
+            } else {
+                out.push(c);
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Flip the case of the first alphabetic character, breaking an EIP-55
+/// checksum while leaving the `0x`+40-hex shape intact.
+fn flip_first_alpha(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut flipped = false;
+    for c in s.chars() {
+        if !flipped && c.is_ascii_alphabetic() {
+            out.push(if c.is_ascii_uppercase() {
+                c.to_ascii_lowercase()
+            } else {
+                c.to_ascii_uppercase()
+            });
+            flipped = true;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Deterministic n-char base62 body (varied per counter).
+fn alnum_body(counter: usize, n: usize) -> String {
+    const A: &[u8; 62] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+    (0..n)
+        .map(|i| A[(counter.wrapping_mul(31) + i.wrapping_mul(17)) % 62] as char)
+        .collect()
+}
+
+/// Deterministic n-char lowercase-hex body (varied per counter).
+fn hex_body(counter: usize, n: usize) -> String {
+    const H: &[u8; 16] = b"0123456789abcdef";
+    (0..n)
+        .map(|i| H[(counter.wrapping_mul(13) + i.wrapping_mul(7)) % 16] as char)
+        .collect()
+}
+
+/// BTC legacy P2PKH (`1…`) / P2SH (`3…`): base58check over a version +
+/// 20-byte hash + double-SHA-256 checksum. Invalid: a corrupted final
+/// character (wrong checksum).
+fn btc_address_base58(counter: usize) -> (String, String) {
+    const BTC58: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    let seed = Sha256::digest((counter as u64).to_be_bytes());
+    let version: u8 = if counter.is_multiple_of(2) {
+        0x00
+    } else {
+        0x05
+    };
+    let mut payload = Vec::with_capacity(21);
+    payload.push(version);
+    payload.extend_from_slice(&seed[..20]);
+    let check = sha256d(&payload);
+    let mut full = payload;
+    full.extend_from_slice(&check[..4]);
+    let valid = base58_encode(&full);
+    let invalid = corrupt_last(&valid, BTC58);
+    (valid, invalid)
+}
+
+/// BTC SegWit P2WPKH (`bc1…`): bech32 over witness v0 + 20-byte program.
+/// Invalid: a corrupted final character (wrong checksum).
+fn btc_address_bech32(counter: usize) -> (String, String) {
+    const BECH32: &str = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+    let seed = Sha256::digest((counter as u64).to_le_bytes());
+    let valid = bech32_encode_v0("bc", &seed[..20]);
+    let invalid = corrupt_last(&valid, BECH32);
+    (valid, invalid)
+}
+
+/// Ethereum `0x`+40-hex with a valid EIP-55 mixed-case checksum.
+/// Invalid: one alphabetic hex char with flipped case (checksum break).
+fn eth_address(counter: usize) -> (String, String) {
+    use std::fmt::Write as _;
+    let seed = Sha256::digest((counter as u64).to_be_bytes());
+    let lower = seed[..20]
+        .iter()
+        .fold(String::with_capacity(40), |mut s, b| {
+            let _ = write!(s, "{b:02x}");
+            s
+        });
+    let cased = eip55(&lower);
+    let valid = format!("0x{cased}");
+    let invalid = format!("0x{}", flip_first_alpha(&cased));
+    (valid, invalid)
+}
+
+/// OpenAI key: legacy `sk-` + 48 base62. Invalid: legacy prefix but a
+/// 47-char body — still matches the broad `sk-…` regex, but the
+/// validator's exact `== 48` length check suppresses it.
+fn openai_api_key(counter: usize) -> (String, String) {
+    let valid = format!("sk-{}", alnum_body(counter, 48));
+    let invalid = format!("sk-{}", alnum_body(counter, 47));
+    (valid, invalid)
+}
+
+/// Anthropic key: `sk-ant-api03-` + body. Invalid: an OpenAI project key
+/// (`sk-proj-…`) — the Anthropic detector must not claim the `sk-` family
+/// it does not own.
+fn anthropic_api_key(counter: usize) -> (String, String) {
+    let valid = format!("sk-ant-api03-{}", alnum_body(counter, 30));
+    let invalid = format!("sk-proj-{}", alnum_body(counter, 24));
+    (valid, invalid)
+}
+
+/// GitLab PAT: `glpat-` + ≥20 chars. Invalid: a 12-char body below the
+/// length floor.
+fn gitlab_pat(counter: usize) -> (String, String) {
+    let valid = format!("glpat-{}", alnum_body(counter, 20));
+    let invalid = format!("glpat-{}", alnum_body(counter, 12));
+    (valid, invalid)
+}
+
+/// SendGrid key: `SG.` + 22-char selector + `.` + 43-char secret.
+/// Invalid: a 21-char selector (wrong fixed-segment geometry).
+fn sendgrid_api_key(counter: usize) -> (String, String) {
+    let secret = alnum_body(counter + 7, 43);
+    let valid = format!("SG.{}.{}", alnum_body(counter, 22), secret);
+    let invalid = format!("SG.{}.{}", alnum_body(counter, 21), secret);
+    (valid, invalid)
+}
+
+/// npm token: `npm_` + 36 base62. Invalid: a 35-char body.
+fn npm_token(counter: usize) -> (String, String) {
+    let valid = format!("npm_{}", alnum_body(counter, 36));
+    let invalid = format!("npm_{}", alnum_body(counter, 35));
+    (valid, invalid)
+}
+
+/// Twilio SID: `AC`/`SK` + 32 lowercase-hex. Invalid: a 31-char hex body
+/// (wrong fixed length).
+fn twilio_api_key(counter: usize) -> (String, String) {
+    let prefix = if counter.is_multiple_of(2) {
+        "AC"
+    } else {
+        "SK"
+    };
+    let valid = format!("{prefix}{}", hex_body(counter, 32));
+    let invalid = format!("{prefix}{}", hex_body(counter, 31));
+    (valid, invalid)
+}
+
 type Gen = fn(usize) -> (String, String);
 
 /// All validated detectors and their input generators.
@@ -659,6 +1095,23 @@ fn detectors() -> Vec<(&'static str, Gen)> {
         ("eu_vat", eu_vat),
         ("philippines_umid", philippines_umid),
         ("indonesia_nik", indonesia_nik),
+        // --- WS-10c jurisdiction breadth ---
+        ("ireland_ppsn", ireland_ppsn),
+        ("switzerland_ahv", switzerland_ahv),
+        ("israel_id", israel_id),
+        ("romania_cnp", romania_cnp),
+        ("mexico_curp", mexico_curp),
+        // --- WS-10c Phase 2: crypto-wallet detectors (checksum-validated) ---
+        ("btc_address_base58", btc_address_base58),
+        ("btc_address_bech32", btc_address_bech32),
+        ("eth_address", eth_address),
+        // --- WS-10c Phase 2: AI-provider / SaaS credential detectors ---
+        ("openai_api_key", openai_api_key),
+        ("anthropic_api_key", anthropic_api_key),
+        ("gitlab_pat", gitlab_pat),
+        ("sendgrid_api_key", sendgrid_api_key),
+        ("npm_token", npm_token),
+        ("twilio_api_key", twilio_api_key),
     ]
 }
 
@@ -746,10 +1199,12 @@ pub async fn run() -> FunctionReport {
         Targets::default(),
         cases,
         Some(
-            "Real ContentClassifier over generated Asia + GCC national-ID corpora. \
-             Valid identifiers (correct check digit) must be detected; same-length \
-             identifiers with a wrong check digit must be suppressed by the \
-             validators."
+            "Real ContentClassifier over generated national-ID, crypto-wallet \
+             and AI-provider/SaaS-credential corpora. Valid items (correct check \
+             digit / address checksum / exact credential geometry) must be \
+             detected; same-shaped items with a wrong check (wrong check digit, \
+             corrupted base58check/bech32/EIP-55 checksum, or off-by-one credential \
+             length) must be suppressed by the validators."
                 .into(),
         ),
     )
@@ -775,10 +1230,24 @@ fn features() -> Vec<Feature> {
              algorithm (ISO 7064 Mod 11-2, weighted mod-11, Luhn, Verhoeff, per-series \
              tables) plus date/prefix invariants; a pass boosts confidence to 1.0, a \
              fail suppresses the match — this is what keeps the false-positive rate at 0%.",
-            "24 validated detectors: China, Japan, Korea, Singapore, Malaysia, \
-             Thailand, India (Aadhaar+PAN), UAE, Saudi, Kuwait, plus the WS5 breadth — \
+            "29 validated detectors: China, Japan, Korea, Singapore, Malaysia, \
+             Thailand, India (Aadhaar+PAN), UAE, Saudi, Kuwait, the WS5 breadth — \
              UK (NINO+NHS), Canada SIN, Australia (TFN+Medicare), Germany Personalausweis, \
-             France INSEE, Brazil (CPF+CNPJ), EU (IBAN+VAT), Philippines UMID, Indonesia NIK",
+             France INSEE, Brazil (CPF+CNPJ), EU (IBAN+VAT), Philippines UMID, Indonesia NIK — \
+             plus the WS-10c breadth — Ireland PPSN, Switzerland AHV, Israel Teudat Zehut, \
+             Romania CNP, Mexico CURP",
+        ),
+        f(
+            "Crypto-wallet + credential checksum validators",
+            "Wallet addresses and vendor credentials are confirmed by re-deriving \
+             their structural checksum (Bitcoin base58check double-SHA-256, BIP-173 \
+             bech32 polymod, Ethereum EIP-55 keccak-256 mixed-case) or re-asserting \
+             an exact prefix + charset + length (OpenAI, Anthropic, GitLab, SendGrid, \
+             npm, Twilio); the checksum/geometry suppresses same-shaped random runs \
+             at ~2^-32, keeping these near-zero-FP with zero per-tenant tuning.",
+            "9 detectors: BTC base58 (P2PKH/P2SH), BTC bech32 (P2WPKH/P2WSH), \
+             ETH (EIP-55); OpenAI, Anthropic, GitLab PAT, SendGrid, npm, Twilio \
+             — Rust validators with byte-identical Go twins",
         ),
         f(
             "Proximity context analysis",
