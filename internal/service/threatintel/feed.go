@@ -202,6 +202,15 @@ type Source struct {
 	// store genuinely holds no (unexpired) domains, so the last set must
 	// drain rather than persist past the indicators' TTL. Set on the
 	// IOC-aggregator bridge source; leave false for upstream URL feeds.
+	//
+	// An AllowEmpty source that returns empty contributes nothing to the
+	// refresh, so it can never be the SOLE contributor to a published
+	// bundle: if it were the only configured source and went empty,
+	// RefreshOnce would suppress the publish (errAllSourcesEmpty) and the
+	// last good bundle would stand. That is fine in the current wiring
+	// (the bridge always accompanies URL-based reputation/category
+	// sources), but reuse alongside no other source should account for
+	// it.
 	AllowEmpty bool
 }
 
