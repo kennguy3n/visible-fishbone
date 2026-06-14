@@ -43,7 +43,7 @@ const (
 	IOCTypeHash IOCType = "hash"
 )
 
-// Valid reports whether t is one of the four known IOC types.
+// Valid reports whether t is one of the known IOC types.
 func (t IOCType) Valid() bool {
 	switch t {
 	case IOCTypeDomain, IOCTypeIP, IOCTypeCIDR, IOCTypeURL, IOCTypeHash:
