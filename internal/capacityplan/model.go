@@ -1,0 +1,1191 @@
+// Package capacityplan is the deterministic, dependency-free
+// analytical model that projects the control plane's data-plane
+// footprint at a given tenant count across the three horizontal-
+// scaling axes the platform exposes:
+//
+//   - Postgres connection-pool pressure (PG_MAX_OPEN_CONNS,
+//     read replicas, PgBouncer transaction pooling).
+//   - ClickHouse write throughput (CLICKHOUSE_SHARDING, batch size).
+//   - NATS subject cardinality (NATS_PARTITIONS fan-out).
+//
+// It answers "what does the data plane look like at N tenants?"
+// without standing up a 5,000-tenant fleet, so it is always
+// deterministic — a reproducible projection an operator can re-run
+// with different knobs (partition count, shard count, pool size) and
+// diff.
+//
+// The model lives in this importable package (rather than the
+// bench/controlplane command that birthed it) so it has exactly one
+// implementation: the offline `capacity-plan` bench artifact and the
+// live capacity reconciler (internal/service/capacity) both call
+// Run, guaranteeing the recommendations an operator sees at runtime
+// match the documented planning numbers in docs/scaling.md to the
+// row.
+package capacityplan
+
+import (
+	"fmt"
+	"math"
+	"sort"
+
+	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy"
+)
+
+// secondsPerMonth is the month length used to project monthly row
+// counts and storage from a steady-state per-second rate.
+const secondsPerMonth = 30.0 * 24 * 3600
+
+// BoolPtr returns a pointer to v, for the tri-state Config.PGBouncerMode
+// field where the nil zero value means "unset — apply the documented
+// default".
+func BoolPtr(v bool) *bool { return &v }
+
+// derefBool reports *p, treating a nil pointer as false.
+func derefBool(p *bool) bool { return p != nil && *p }
+
+// ClassEventRate is the modelled sustained per-tenant publish rate
+// (events/sec) for one telemetry class. flow dominates; control-plane
+// classes (ztna, agent) are sparse. These are deliberately conservative
+// steady-state averages for a mid-market tenant; an operator tunes them
+// for their own traffic mix.
+type ClassEventRate struct {
+	Class       string
+	PerTenantPS float64
+}
+
+// DefaultClassRates is the canonical set of telemetry event classes the
+// data plane partitions subjects by, per ARCHITECTURE.md §3.3
+// (`sng.<tenant>.telemetry.<class>`), each paired with its modelled
+// per-tenant rate. The NATS subject-cardinality and ClickHouse
+// throughput models fan out across exactly these seven.
+func DefaultClassRates() []ClassEventRate {
+	return []ClassEventRate{
+		{"flow", 2.0},
+		{"dns", 1.0},
+		{"http", 1.5},
+		{"ips", 0.2},
+		{"ztna", 0.3},
+		{"sdwan", 0.2},
+		{"agent", 0.1},
+	}
+}
+
+// Config parameterises the capacity model. Zero values are replaced
+// with the documented defaults by withDefaults so a caller can pass an
+// empty struct to model the default 5,000-tenant tier.
+type Config struct {
+	// TenantCount is the fleet size to model.
+	TenantCount int
+	// ControlPlaneReplicas is the number of sng-control pods sharing
+	// the Postgres backend.
+	ControlPlaneReplicas int
+	// PGMaxOpenConns is PG_MAX_OPEN_CONNS — the per-replica app pool
+	// ceiling.
+	PGMaxOpenConns int
+	// PGBouncerMode mirrors PG_PGBOUNCER_MODE: when true, a
+	// transaction pooler multiplexes the app pools onto a far smaller
+	// set of backend connections. It is a tri-state pointer rather than
+	// a bare bool so withDefaults can tell "unset" (nil → apply the
+	// default, which is enabled) apart from an explicit false — a plain
+	// bool's zero value would silently disable pooling on a partial
+	// config and contradict the documented default.
+	PGBouncerMode *bool
+	// PGMaxConnections is the Postgres server's max_connections the
+	// plan is graded against.
+	PGMaxConnections int
+	// ControlPlaneRPS is the aggregate control-plane API request rate
+	// (policy pulls, enrolments, telemetry acks) — NOT the telemetry
+	// event rate, which never touches Postgres. When 0 it is derived
+	// from ControlPlaneRPSPerTenant × TenantCount so the Postgres
+	// pressure scales with the fleet instead of being pinned to one
+	// tier's headline number.
+	ControlPlaneRPS float64
+	// ControlPlaneRPSPerTenant is the per-tenant control-plane request
+	// rate used to derive ControlPlaneRPS when it is not set explicitly.
+	ControlPlaneRPSPerTenant float64
+	// AvgQueryMs is the mean Postgres query service time used in the
+	// Little's-law concurrency estimate.
+	AvgQueryMs float64
+
+	// ClickHouseShards is the CLICKHOUSE_SHARDING shard count rows are
+	// hash-routed across.
+	ClickHouseShards int
+	// ClickHouseBatchSize is CLICKHOUSE_BATCH_SIZE (rows per insert).
+	ClickHouseBatchSize int
+	// BytesPerEvent is the normalized (metadata-first) uncompressed row
+	// size in bytes.
+	BytesPerEvent int
+	// ClickHouseCompression is the columnar+zstd compression ratio used
+	// to size on-disk hot storage.
+	ClickHouseCompression float64
+	// ClickHouseMaxBatchSize caps how large CLICKHOUSE_BATCH_SIZE may be
+	// grown before sharding becomes the lever instead. Bounds insert
+	// latency and writer memory.
+	ClickHouseMaxBatchSize int
+
+	// NATSPartitions is NATS_PARTITIONS — the telemetry stream fan-out.
+	NATSPartitions int
+	// NATSRetentionHours is the hot-stream retention window used to
+	// size JetStream file storage.
+	NATSRetentionHours float64
+	// NATSMsgOverheadBytes is the per-message JetStream framing
+	// overhead (subject + headers + index) added to BytesPerEvent.
+	NATSMsgOverheadBytes int
+
+	// --- WS-9 shared AI inference model -----------------------------
+	// These knobs model the fleet's AI inference footprint under two
+	// architectures: per-tenant model residency (one model instance per
+	// tenant) versus a single shared, fair-scheduled pool. They prove
+	// the cost/efficiency claim that a bounded shared pool — not N
+	// instances — serves the whole fleet.
+
+	// AIActiveTenantFraction is the share of the fleet active enough to
+	// issue AI calls in a peak window. In the NoOps dormancy posture
+	// most SME tenants are dormant trials, so this is small.
+	AIActiveTenantFraction float64
+	// AICallsPerActiveTenantPerHour is the modelled per-active-tenant AI
+	// request rate (policy suggestions, summaries, troubleshooting).
+	AICallsPerActiveTenantPerHour float64
+	// AIBurstFactor scales the average call rate to a peak so the pool
+	// is sized for bursts, not just the mean.
+	AIBurstFactor float64
+	// AIAvgLatencySec is the mean wall-clock time the shared model
+	// takes to serve one request (Ternary-Bonsai-8B Q2_0 on CPU,
+	// ~2–5s for a 512-token reply; default 3.5s midpoint).
+	AIAvgLatencySec float64
+	// AIPoolConcurrency is the shared pool's global concurrency cap
+	// (InferencePoolConfig.MaxConcurrent) — the model server's real
+	// parallel-slot count, NOT the tenant count.
+	AIPoolConcurrency int
+	// AIModelResidentGB is the resident memory of one loaded model
+	// instance (Q2_0 ≈ 3 GB recommended).
+	AIModelResidentGB float64
+	// AIKVCacheGBPerSlot is the additional KV-cache memory each
+	// concurrent in-flight request adds to a model server.
+	AIKVCacheGBPerSlot float64
+
+	// MeasuredEventsPerSec is an optional live, fleet-wide telemetry
+	// publish rate (events/sec) observed at runtime. When > 0 the
+	// throughput models (ClickHouse rows/s, NATS msgs/s) use it in
+	// place of the synthetic ClassRates × TenantCount projection, so a
+	// reconciler fed real metrics sizes the write path against what the
+	// fleet is actually emitting rather than a worst-case assumption.
+	// It deliberately does NOT affect subject cardinality (subjects
+	// exist per tenant×class regardless of how busy they are) or the
+	// Postgres pressure model (driven by control-plane RPS, not
+	// telemetry). Zero (the default) keeps the projection identical to
+	// the offline bench model.
+	//
+	// CONTRACT: this is the PRE-sampling publish rate — what producers
+	// hand to NATS before the telemetry consumer applies any WS-4 tier
+	// sampling. natsEventsPerSec uses it directly; effectiveEventsPerSec
+	// (ClickHouse) uses it as-is too, which is exact only when sampling
+	// is OFF. With tier sampling active the stored (post-sampling) rate
+	// is lower, so a single measured number would over-size ClickHouse.
+	// That is why the production RepoFleetObserver leaves this 0 (the
+	// synthetic split below sizes each path correctly) and the live
+	// reconciler never sets TierSampling. A future observer that feeds a
+	// real rate here must either (a) keep sampling OFF in the model, or
+	// (b) split this into separate pre-/post-sampling inputs before
+	// wiring a measured ClickHouse rate.
+	MeasuredEventsPerSec float64
+
+	// ClassRates is the per-class per-tenant event rate. Unset uses
+	// DefaultClassRates.
+	ClassRates []ClassEventRate
+
+	// --- Activity-tier telemetry sampling (WS-4) --------------------
+	//
+	// TierSampling models the WS-4 activity-tier-aware telemetry
+	// sampling policy: the fleet is split into active / idle / dormant
+	// cohorts, active tenants write full fidelity, idle tenants sample
+	// at IdleSampleMultiplier, and dormant tenants write
+	// security-events-only (ips / ztna / dlp). When false the model is
+	// the pre-WS-4 projection (every tenant writes every class at full
+	// rate), so the default output is unchanged — this is the bench
+	// twin of the DEFAULT-OFF runtime gate.
+	TierSampling bool
+	// ActiveFraction / IdleFraction are the share of the fleet in the
+	// active / idle cohorts; the remainder is dormant. Only consulted
+	// when TierSampling is true. Defaults model a NoOps fleet where most
+	// tenants are dormant trials (10% active, 15% idle, 75% dormant).
+	//
+	// They are not validated to sum to <= 1: tierTenantCounts clamps the
+	// idle count so active+idle never exceeds TenantCount and derives
+	// dormant as the remainder, so an over-1 sum is silently renormalised
+	// (dormant collapses to 0) rather than rejected. Pass fractions that
+	// sum to <= 1 for the cohort split you intend.
+	//
+	// A zero (or negative) value means "unset" and is replaced with the
+	// default by withDefaults — consistent with every other knob in this
+	// config. To model a fully-dormant fleet, pass a tiny positive
+	// ActiveFraction (e.g. 0.001) rather than 0.
+	ActiveFraction float64
+	IdleFraction   float64
+	// IdleSampleMultiplier is the keep fraction applied to an idle
+	// tenant's events. Defaults to the telemetry package default (0.25).
+	// Only consulted when TierSampling is true.
+	IdleSampleMultiplier float64
+
+	// --- Dormant-tenant hibernation (WS-3 scale-to-zero) ------------
+	//
+	// DormantFraction is the share of the fleet (0..1) in TierDormant —
+	// the hibernation candidates. WS-3's dormant-tenant hibernation parks
+	// these tenants' telemetry at HibernatedSampleRate. 0 (the default)
+	// models the pre-hibernation world where every tenant emits at full
+	// fidelity, so an empty config reproduces the original projection
+	// exactly. A NoOps trial-heavy fleet runs ~0.8.
+	//
+	// DormantFraction is the WS-3 hibernation lens and is only consulted
+	// when TierSampling is off; the WS-4 cohort model above supersedes it
+	// when both are set (it carries its own dormant cohort).
+	DormantFraction float64
+	// HibernatedSampleRate is the near-zero telemetry keep-probability a
+	// hibernated tenant's non-security classes are sampled to (mirrors
+	// hibernation.DefaultHibernatedSampleRate). Only consulted when
+	// DormantFraction > 0. Security-relevant events (inspect_full) are
+	// pinned at 1:1 by the live sampler and are not part of this model's
+	// class set, so the near-zero rate applies cleanly to the modelled
+	// classes. Unset uses DefaultHibernatedSampleRate.
+	HibernatedSampleRate float64
+
+	// --- Periodic per-tenant sweep (WS-1 dormancy dividend) ---------
+	//
+	// SweepActiveFraction / SweepIdleFraction / SweepDormantFraction are
+	// the modelled activity mix of the fleet: the share of tenants the
+	// SweepPlanner classifies active (seen < IdleAfter), idle (seen <
+	// DormantAfter) and dormant (never/long-since seen). At ~5000 SME
+	// tenants where most are dormant trials the tail dominates, so the
+	// defaults are deliberately dormant-heavy. They need not sum to
+	// exactly 1.0 — planPeriodicSweep normalises them — but the defaults
+	// do. Each is a fraction in [0,1].
+	SweepActiveFraction  float64
+	SweepIdleFraction    float64
+	SweepDormantFraction float64
+	// SweepJobs is the set of periodic per-tenant sweep loops wired
+	// through tenancy.TieredSweep. Unset uses DefaultSweepJobs.
+	SweepJobs []string
+}
+
+// DefaultSweepJobs is the set of periodic per-tenant sweep loops that
+// adopt the shared tenancy.TieredSweep helper (the {job} label values of
+// the sweep_tenants_visited metric). The capacity model fans the
+// dormancy dividend across exactly these.
+func DefaultSweepJobs() []string {
+	return []string{
+		"idp_directory_sync",
+		"casb_noops_reconcile",
+		"alert_feedback_tuning",
+	}
+}
+
+// securityClass reports whether a telemetry class is security-relevant
+// and therefore never shed by the dormant tier. Mirrors the runtime
+// predicate (telemetry.isSecurityRelevantEventClass): ips / ztna / dlp.
+func securityClass(class string) bool {
+	switch class {
+	case "ips", "ztna", "dlp":
+		return true
+	default:
+		return false
+	}
+}
+
+// Default cohort split + idle keep fraction for the tier-sampling
+// model. Most tenants in a NoOps trial fleet are dormant.
+const (
+	defaultActiveFraction       = 0.10
+	defaultIdleFraction         = 0.15
+	defaultIdleSampleMultiplier = 0.25
+)
+
+// DefaultHibernatedSampleRate mirrors
+// hibernation.DefaultHibernatedSampleRate (1-in-10000): the near-zero
+// keep probability a hibernated tenant's non-security telemetry is
+// sampled to. Duplicated here so the dependency-free model carries no
+// import of the control-plane service packages.
+const DefaultHibernatedSampleRate = 0.0001
+
+// DefaultConfig models the headline 5,000-tenant tier with the
+// platform's documented default knobs.
+func DefaultConfig() Config {
+	return Config{
+		TenantCount:          5000,
+		ControlPlaneReplicas: 3,
+		PGMaxOpenConns:       20,
+		PGBouncerMode:        BoolPtr(true),
+		PGMaxConnections:     200,
+		// ControlPlaneRPS left 0 so it derives from the per-tenant rate
+		// below and scales with TenantCount (0.5 × 5000 = 2500 RPS at the
+		// headline tier).
+		ControlPlaneRPSPerTenant: 0.5,
+		AvgQueryMs:               4.0,
+		ClickHouseShards:         2,
+		ClickHouseBatchSize:      1024,
+		BytesPerEvent:            256,
+		ClickHouseCompression:    8.0,
+		ClickHouseMaxBatchSize:   65536,
+		NATSPartitions:           16,
+		NATSRetentionHours:       24,
+		NATSMsgOverheadBytes:     64,
+		// WS-9 shared AI inference defaults. ~5% of SME tenants active
+		// in a peak window (dormancy posture), ~6 AI calls/active-tenant
+		// per hour, 3× burst, 3.5s mean inference, a shared pool of 4
+		// parallel slots, 3 GB resident model, 0.4 GB KV-cache/slot.
+		AIActiveTenantFraction:        0.05,
+		AICallsPerActiveTenantPerHour: 6,
+		AIBurstFactor:                 3,
+		AIAvgLatencySec:               3.5,
+		AIPoolConcurrency:             4,
+		AIModelResidentGB:             3.0,
+		AIKVCacheGBPerSlot:            0.4,
+		ClassRates:                    DefaultClassRates(),
+		// Dormant-heavy trial mix: most of a 5000-SME fleet are
+		// long-idle trials. 8% active / 12% idle / 80% dormant.
+		SweepActiveFraction:  0.08,
+		SweepIdleFraction:    0.12,
+		SweepDormantFraction: 0.80,
+		SweepJobs:            DefaultSweepJobs(),
+	}
+}
+
+// withDefaults fills any zero-valued field with its default so a
+// partially-specified config (e.g. only TenantCount set) is still
+// internally consistent.
+func (c Config) withDefaults() Config {
+	d := DefaultConfig()
+	if c.TenantCount <= 0 {
+		c.TenantCount = d.TenantCount
+	}
+	if c.ControlPlaneReplicas <= 0 {
+		c.ControlPlaneReplicas = d.ControlPlaneReplicas
+	}
+	if c.PGMaxOpenConns <= 0 {
+		c.PGMaxOpenConns = d.PGMaxOpenConns
+	}
+	if c.PGMaxConnections <= 0 {
+		c.PGMaxConnections = d.PGMaxConnections
+	}
+	if c.PGBouncerMode == nil {
+		c.PGBouncerMode = d.PGBouncerMode
+	}
+	if c.ControlPlaneRPSPerTenant <= 0 {
+		c.ControlPlaneRPSPerTenant = d.ControlPlaneRPSPerTenant
+	}
+	if c.ControlPlaneRPS <= 0 {
+		c.ControlPlaneRPS = c.ControlPlaneRPSPerTenant * float64(c.TenantCount)
+	}
+	if c.AvgQueryMs <= 0 {
+		c.AvgQueryMs = d.AvgQueryMs
+	}
+	if c.ClickHouseShards <= 0 {
+		c.ClickHouseShards = d.ClickHouseShards
+	}
+	if c.ClickHouseBatchSize <= 0 {
+		c.ClickHouseBatchSize = d.ClickHouseBatchSize
+	}
+	if c.BytesPerEvent <= 0 {
+		c.BytesPerEvent = d.BytesPerEvent
+	}
+	if c.ClickHouseCompression <= 0 {
+		c.ClickHouseCompression = d.ClickHouseCompression
+	}
+	if c.ClickHouseMaxBatchSize <= 0 {
+		c.ClickHouseMaxBatchSize = d.ClickHouseMaxBatchSize
+	}
+	if c.NATSPartitions <= 0 {
+		c.NATSPartitions = d.NATSPartitions
+	}
+	if c.NATSRetentionHours <= 0 {
+		c.NATSRetentionHours = d.NATSRetentionHours
+	}
+	if c.NATSMsgOverheadBytes <= 0 {
+		c.NATSMsgOverheadBytes = d.NATSMsgOverheadBytes
+	}
+	if c.AIActiveTenantFraction <= 0 {
+		c.AIActiveTenantFraction = d.AIActiveTenantFraction
+	}
+	if c.AICallsPerActiveTenantPerHour <= 0 {
+		c.AICallsPerActiveTenantPerHour = d.AICallsPerActiveTenantPerHour
+	}
+	if c.AIBurstFactor <= 0 {
+		c.AIBurstFactor = d.AIBurstFactor
+	}
+	if c.AIAvgLatencySec <= 0 {
+		c.AIAvgLatencySec = d.AIAvgLatencySec
+	}
+	if c.AIPoolConcurrency <= 0 {
+		c.AIPoolConcurrency = d.AIPoolConcurrency
+	}
+	if c.AIModelResidentGB <= 0 {
+		c.AIModelResidentGB = d.AIModelResidentGB
+	}
+	if c.AIKVCacheGBPerSlot <= 0 {
+		c.AIKVCacheGBPerSlot = d.AIKVCacheGBPerSlot
+	}
+	if len(c.ClassRates) == 0 {
+		c.ClassRates = d.ClassRates
+	}
+	// Tier-sampling cohort knobs only matter when the policy is modelled;
+	// fill them with NoOps-fleet defaults so an operator can flip
+	// TierSampling on without having to specify the whole split.
+	if c.TierSampling {
+		if c.ActiveFraction <= 0 {
+			c.ActiveFraction = defaultActiveFraction
+		}
+		if c.IdleFraction <= 0 {
+			c.IdleFraction = defaultIdleFraction
+		}
+		if c.IdleSampleMultiplier <= 0 {
+			c.IdleSampleMultiplier = defaultIdleSampleMultiplier
+		}
+	}
+	// DormantFraction defaults to 0 (no hibernation) on purpose: an empty
+	// config reproduces the pre-WS-3 projection. Clamp an out-of-range
+	// value into [0,1] rather than rejecting it (the model never errors).
+	if c.DormantFraction < 0 {
+		c.DormantFraction = 0
+	}
+	if c.DormantFraction > 1 {
+		c.DormantFraction = 1
+	}
+	if c.HibernatedSampleRate <= 0 {
+		c.HibernatedSampleRate = DefaultHibernatedSampleRate
+	}
+	// HibernatedSampleRate is a keep-probability; clamp the upper bound so
+	// a fat-fingered flag can never project MORE telemetry than the
+	// un-hibernated fleet (effectiveTelemetryTenants would otherwise
+	// exceed TenantCount).
+	if c.HibernatedSampleRate > 1 {
+		c.HibernatedSampleRate = 1
+	}
+	// The three sweep fractions are filled as a group: if none was set
+	// (all <= 0) apply the default mix; a partially-specified mix is left
+	// as given and normalised by planPeriodicSweep.
+	if c.SweepActiveFraction <= 0 && c.SweepIdleFraction <= 0 && c.SweepDormantFraction <= 0 {
+		c.SweepActiveFraction = d.SweepActiveFraction
+		c.SweepIdleFraction = d.SweepIdleFraction
+		c.SweepDormantFraction = d.SweepDormantFraction
+	} else {
+		// A partially-specified mix may carry a stray negative weight;
+		// clamp each to 0 so a single negative fraction can never produce
+		// a negative tenant count (the normalisation in planPeriodicSweep
+		// divides by the sum, which a negative term could otherwise skew).
+		c.SweepActiveFraction = max(c.SweepActiveFraction, 0)
+		c.SweepIdleFraction = max(c.SweepIdleFraction, 0)
+		c.SweepDormantFraction = max(c.SweepDormantFraction, 0)
+	}
+	if len(c.SweepJobs) == 0 {
+		c.SweepJobs = d.SweepJobs
+	}
+	return c
+}
+
+// perTenantEventsPerSec sums every modelled telemetry class's per-tenant
+// publish rate — what one full-fidelity tenant emits each second.
+func (c Config) perTenantEventsPerSec() float64 {
+	var sum float64
+	for _, r := range c.ClassRates {
+		sum += r.PerTenantPS
+	}
+	return sum
+}
+
+// perTenantSecurityEventsPerSec sums only the security-relevant classes
+// (ips / ztna / dlp) — the floor a dormant tenant always writes.
+func (c Config) perTenantSecurityEventsPerSec() float64 {
+	var sum float64
+	for _, r := range c.ClassRates {
+		if securityClass(r.Class) {
+			sum += r.PerTenantPS
+		}
+	}
+	return sum
+}
+
+// modelledEventsPerSec is the synthetic fleet-wide telemetry publish
+// rate: every tenant emits every class at its per-class rate.
+func (c Config) modelledEventsPerSec() float64 {
+	return c.perTenantEventsPerSec() * float64(c.TenantCount)
+}
+
+// tierTenantCounts splits the fleet into active / idle / dormant
+// cohorts. Dormant absorbs the remainder (and any rounding slack) so
+// the three always sum to TenantCount.
+func (c Config) tierTenantCounts() (active, idle, dormant int) {
+	active = int(math.Round(c.ActiveFraction * float64(c.TenantCount)))
+	idle = int(math.Round(c.IdleFraction * float64(c.TenantCount)))
+	if active > c.TenantCount {
+		active = c.TenantCount
+	}
+	if active+idle > c.TenantCount {
+		idle = c.TenantCount - active
+	}
+	dormant = c.TenantCount - active - idle
+	return active, idle, dormant
+}
+
+// tierRowsPerSec returns each cohort's contribution to the fleet write
+// rate under the tier-sampling policy: active full fidelity, idle scaled
+// by the idle multiplier, dormant security-events-only.
+func (c Config) tierRowsPerSec() (active, idle, dormant float64) {
+	na, ni, nd := c.tierTenantCounts()
+	perTenant := c.perTenantEventsPerSec()
+	active = float64(na) * perTenant
+	idle = float64(ni) * perTenant * c.IdleSampleMultiplier
+	dormant = float64(nd) * c.perTenantSecurityEventsPerSec()
+	return active, idle, dormant
+}
+
+// effectiveTelemetryTenants is the hibernation-adjusted count of tenants
+// worth of telemetry the data plane actually carries: the active tenants
+// emit at full fidelity, while the dormant (hibernated) tenants emit
+// only HibernatedSampleRate of their events. With DormantFraction == 0
+// this is exactly TenantCount, so the pre-hibernation projection is
+// unchanged. The dormant count is rounded so the split is a whole number
+// of tenants.
+func (c Config) effectiveTelemetryTenants() float64 {
+	dormant := math.Round(float64(c.TenantCount) * c.DormantFraction)
+	active := float64(c.TenantCount) - dormant
+	return active + dormant*c.HibernatedSampleRate
+}
+
+// activeTenants is the count of full-fidelity (non-hibernated) tenants.
+// It is the denominator for per-active-tenant sizing. Floored at 1 so a
+// 100%-dormant fleet never divides by zero.
+func (c Config) activeTenants() float64 {
+	dormant := math.Round(float64(c.TenantCount) * c.DormantFraction)
+	active := float64(c.TenantCount) - dormant
+	if active < 1 {
+		return 1
+	}
+	return active
+}
+
+// effectiveEventsPerSec is the rate the ClickHouse write model sizes
+// against — the rate of rows actually stored. A live MeasuredEventsPerSec
+// always wins (it already reflects whatever sampling production is doing).
+// Otherwise two orthogonal reductions apply:
+//
+//   - WS-4 tier sampling (TierSampling) takes precedence: it carries its
+//     own active / idle / dormant cohort split, so its post-sampling sum
+//     supersedes the hibernation lens when enabled.
+//   - WS-3 hibernation (DormantFraction > 0) applies otherwise, parking
+//     the dormant share to HibernatedSampleRate via
+//     effectiveTelemetryTenants.
+//
+// With both gates off effectiveTelemetryTenants collapses to TenantCount,
+// so this is exactly the full publish rate and the baseline projection is
+// unchanged.
+//
+// It is deliberately NOT used by the NATS model: see natsEventsPerSec.
+func (c Config) effectiveEventsPerSec() float64 {
+	if c.MeasuredEventsPerSec > 0 {
+		return c.MeasuredEventsPerSec
+	}
+	if c.TierSampling {
+		a, i, d := c.tierRowsPerSec()
+		return a + i + d
+	}
+	return c.perTenantEventsPerSec() * c.effectiveTelemetryTenants()
+}
+
+// natsEventsPerSec is the rate the NATS subject/storage model sizes
+// against: the full pre-sampling publish rate. The JetStream stream is
+// sized for the whole fleet publishing — neither reduction shrinks it:
+//   - WS-4 tier sampling runs in the telemetry consumer downstream of
+//     NATS, so the stream carries every message regardless of the policy.
+//   - WS-3 hibernation is a dynamic, wake-on-activity state: a hibernated
+//     tenant can resume publishing at any moment, so the stream must stay
+//     sized for the un-hibernated fleet rather than the parked rate.
+//
+// A live MeasuredEventsPerSec (the observed publish rate, which is itself
+// the NATS rate) wins; otherwise it is the synthetic full-fidelity
+// per-class projection — never the tier-sampled or hibernated rate.
+func (c Config) natsEventsPerSec() float64 {
+	if c.MeasuredEventsPerSec > 0 {
+		return c.MeasuredEventsPerSec
+	}
+	return c.modelledEventsPerSec()
+}
+
+// Section is the deterministic capacity projection: the data-plane
+// footprint at a given tenant count across the three horizontal-
+// scaling axes.
+type Section struct {
+	// TenantCount is the modelled fleet size.
+	TenantCount int `json:"tenant_count"`
+	// DormantFraction is the share of the fleet modelled as dormant
+	// (hibernation candidates). 0 reproduces the pre-WS-3 projection.
+	DormantFraction float64 `json:"dormant_fraction"`
+	// EmittingTenantsEffective is the hibernation-adjusted count of
+	// full-fidelity tenants worth of telemetry the data plane carries:
+	// active tenants plus dormant tenants scaled by the near-zero
+	// hibernated sample rate. Equals TenantCount when DormantFraction=0.
+	EmittingTenantsEffective float64 `json:"emitting_tenants_effective"`
+	// TelemetryClasses is the set of telemetry classes the throughput
+	// and subject-cardinality models fan out across.
+	TelemetryClasses []string `json:"telemetry_classes"`
+	// Postgres is the connection-pool pressure projection.
+	Postgres PostgresPoolPlan `json:"postgres"`
+	// ClickHouse is the hot-path write-throughput projection.
+	ClickHouse ClickHouseWritePlan `json:"clickhouse"`
+	// NATS is the subject-cardinality + JetStream storage projection.
+	NATS NATSSubjectPlan `json:"nats"`
+	// AIInference is the WS-9 shared-inference footprint projection:
+	// fleet AI demand vs. a single bounded shared pool, and the memory
+	// it saves over the naive per-tenant model-residency architecture.
+	AIInference AIInferencePlan `json:"ai_inference"`
+	// TierSampling is the WS-4 activity-tier sampling breakdown. Present
+	// only when the policy is modelled (default-OFF), so the baseline
+	// projection's JSON is byte-for-byte unchanged.
+	TierSampling *TierSamplingPlan `json:"tier_sampling,omitempty"`
+	// PeriodicSweep is the control-plane dormancy-dividend projection:
+	// tenants-visited/cycle for the periodic per-tenant sweeps, before
+	// vs after activity-tiered gating (WS-1).
+	PeriodicSweep PeriodicSweepPlan `json:"periodic_sweep"`
+}
+
+// AIInferencePlan models the WS-9 shared-inference footprint: the
+// fleet's peak AI demand (Little's law) sized against a single bounded,
+// fair-scheduled pool, contrasted with the naive per-tenant
+// model-residency architecture the pool replaces.
+type AIInferencePlan struct {
+	// ActiveTenants is the modelled count of tenants issuing AI calls
+	// in a peak window (TenantCount × AIActiveTenantFraction).
+	ActiveTenants int `json:"active_tenants"`
+	// AvgCallsPerSec is the fleet-wide mean AI request rate.
+	AvgCallsPerSec float64 `json:"avg_calls_per_sec"`
+	// PeakCallsPerSec is AvgCallsPerSec scaled by the burst factor.
+	PeakCallsPerSec float64 `json:"peak_calls_per_sec"`
+	// OfferedConcurrency is the demanded parallel in-flight request
+	// count at peak (Little's law: PeakCallsPerSec × AIAvgLatencySec).
+	OfferedConcurrency float64 `json:"offered_concurrency"`
+	// PoolConcurrency is the shared pool's configured global slot cap.
+	PoolConcurrency int `json:"pool_concurrency"`
+	// PoolUtilization is OfferedConcurrency / PoolConcurrency. >1 means
+	// the steady peak exceeds the slots and requests queue (absorbed up
+	// to MaxWait, then degrade to the template path).
+	PoolUtilization float64 `json:"pool_utilization"`
+	// RecommendedPoolConcurrency keeps utilization within the healthy
+	// envelope (≤0.7) at the modelled peak.
+	RecommendedPoolConcurrency int `json:"recommended_pool_concurrency"`
+	// SharedPoolGB is the resident memory of the shared architecture:
+	// one loaded model + KV-cache per concurrency slot.
+	SharedPoolGB float64 `json:"shared_pool_gb"`
+	// PerTenantResidencyGB is the naive footprint the shared pool
+	// avoids: one warm model instance per tenant across the fleet.
+	PerTenantResidencyGB float64 `json:"per_tenant_residency_gb"`
+	// MemorySavingsFactor is PerTenantResidencyGB / SharedPoolGB — the
+	// headline efficiency multiple.
+	MemorySavingsFactor float64 `json:"memory_savings_factor"`
+	// Note summarises pool adequacy and the savings claim.
+	Note string `json:"note"`
+}
+
+// TierSamplingPlan decomposes the fleet write rate by activity tier
+// under the WS-4 sampling policy: active tenants write full fidelity,
+// idle tenants sample at IdleSampleMultiplier, dormant tenants write
+// security-events-only. It is the metric proving dormant-tenant rows/s
+// collapse and that total write cost tracks the active cohort.
+type TierSamplingPlan struct {
+	IdleSampleMultiplier float64 `json:"idle_sample_multiplier"`
+	ActiveTenants        int     `json:"active_tenants"`
+	IdleTenants          int     `json:"idle_tenants"`
+	DormantTenants       int     `json:"dormant_tenants"`
+	ActiveRowsPerSec     float64 `json:"active_rows_per_sec"`
+	IdleRowsPerSec       float64 `json:"idle_rows_per_sec"`
+	DormantRowsPerSec    float64 `json:"dormant_rows_per_sec"`
+	SampledRowsPerSec    float64 `json:"sampled_rows_per_sec"`
+	BaselineRowsPerSec   float64 `json:"baseline_rows_per_sec"`
+	ReductionPct         float64 `json:"reduction_pct"`
+	ActiveCohortSharePct float64 `json:"active_cohort_share_pct"`
+}
+
+// PeriodicSweepPlan projects the WS-1 dormancy dividend: how many
+// tenants the periodic per-tenant sweeps (idp_directory_sync,
+// casb_noops_reconcile, alert_feedback_tuning) visit per cycle once the
+// shared tenancy.TieredSweep gates them by activity tier, versus the
+// legacy every-tenant-every-cycle fan-out. The dominant avoidable
+// control-plane cost at a dormant-heavy 5000-SME fleet.
+type PeriodicSweepPlan struct {
+	// Jobs is the set of sweep loops modelled (the {job} label values
+	// of sweep_tenants_visited).
+	Jobs []string `json:"jobs"`
+	// JobCount is len(Jobs), surfaced for the aggregate roll-up.
+	JobCount int `json:"job_count"`
+	// IdleEvery / DormantEvery are the planner cadences the model used
+	// (idle tenants visited every Nth cycle, dormant every Mth).
+	IdleEvery    int64 `json:"idle_every"`
+	DormantEvery int64 `json:"dormant_every"`
+	// ActiveTenants / IdleTenants / DormantTenants is the modelled
+	// activity-tier breakdown of the fleet.
+	ActiveTenants  int `json:"active_tenants"`
+	IdleTenants    int `json:"idle_tenants"`
+	DormantTenants int `json:"dormant_tenants"`
+	// UntieredVisitsPerCyclePerJob is the legacy cost: every tenant,
+	// every cycle (== TenantCount).
+	UntieredVisitsPerCyclePerJob int `json:"untiered_visits_per_cycle_per_job"`
+	// TieredVisitsPerCyclePerJob is the steady-state cost after tiering,
+	// averaged over one full cadence period.
+	TieredVisitsPerCyclePerJob float64 `json:"tiered_visits_per_cycle_per_job"`
+	// ActiveVisitsPerCycle / IdleVisitsPerCycle / DormantVisitsPerCycle
+	// decompose the tiered per-job cost by tier.
+	ActiveVisitsPerCycle  float64 `json:"active_visits_per_cycle"`
+	IdleVisitsPerCycle    float64 `json:"idle_visits_per_cycle"`
+	DormantVisitsPerCycle float64 `json:"dormant_visits_per_cycle"`
+	// UntieredVisitsPerCycleTotal / TieredVisitsPerCycleTotal aggregate
+	// across all modelled jobs.
+	UntieredVisitsPerCycleTotal int     `json:"untiered_visits_per_cycle_total"`
+	TieredVisitsPerCycleTotal   float64 `json:"tiered_visits_per_cycle_total"`
+	// ReductionFactor is untiered/tiered per job (aggregate dividend).
+	ReductionFactor float64 `json:"reduction_factor"`
+	// IdleReductionFactor / DormantReductionFactor are the per-tier
+	// dividends on the idle/dormant tail (the headline 10-100x).
+	IdleReductionFactor    float64 `json:"idle_reduction_factor"`
+	DormantReductionFactor float64 `json:"dormant_reduction_factor"`
+	Note                   string  `json:"note"`
+}
+
+// PostgresPoolPlan projects connection-pool pressure at scale.
+type PostgresPoolPlan struct {
+	Replicas              int     `json:"replicas"`
+	PoolSizePerReplica    int     `json:"pool_size_per_replica"`
+	TotalAppConns         int     `json:"total_app_conns"`
+	PeakConcurrentQueries float64 `json:"peak_concurrent_queries"`
+	RecommendedPoolSize   int     `json:"recommended_pool_size"`
+	PGBouncerMode         bool    `json:"pgbouncer_mode"`
+	BackendConnsRequired  int     `json:"backend_conns_required"`
+	MaxConnections        int     `json:"max_connections"`
+	WithinMaxConnections  bool    `json:"within_max_connections"`
+	Note                  string  `json:"note"`
+}
+
+// ClickHouseWritePlan projects hot-path write load at scale.
+type ClickHouseWritePlan struct {
+	Shards                int     `json:"shards"`
+	BatchSize             int     `json:"batch_size"`
+	TotalRowsPerSec       float64 `json:"total_rows_per_sec"`
+	RowsPerSecPerShard    float64 `json:"rows_per_sec_per_shard"`
+	InsertsPerSecPerShard float64 `json:"inserts_per_sec_per_shard"`
+	MonthlyRows           int64   `json:"monthly_rows"`
+	// PerTenantMonthlyRows is the fleet-wide mean (total ÷ full tenant
+	// count). With DormantFraction > 0 (or tier sampling on) it is NOT
+	// any single tenant's volume — an active tenant writes far more and a
+	// dormant one far less. Use PerActiveTenantMonthlyRows (or the
+	// tier_sampling section) for the per-cohort breakdown. Equals
+	// PerActiveTenantMonthlyRows when DormantFraction=0.
+	PerTenantMonthlyRows int64 `json:"per_tenant_monthly_rows"`
+	// PerActiveTenantMonthlyRows is rows/month per ACTIVE (emitting)
+	// tenant — total ÷ the non-hibernated count. Equals
+	// PerTenantMonthlyRows when DormantFraction=0.
+	PerActiveTenantMonthlyRows int64   `json:"per_active_tenant_monthly_rows"`
+	HotStorageGBCompressed     float64 `json:"hot_storage_gb_compressed"`
+	IngestBytesPerSec          int64   `json:"ingest_bytes_per_sec"`
+	RecommendedShards          int     `json:"recommended_shards"`
+	RecommendedBatchSize       int     `json:"recommended_batch_size"`
+	Note                       string  `json:"note"`
+}
+
+// NATSSubjectPlan projects subject cardinality + JetStream storage.
+type NATSSubjectPlan struct {
+	Partitions              int     `json:"partitions"`
+	DistinctSubjects        int     `json:"distinct_subjects"`
+	SubjectsPerPartitionAvg float64 `json:"subjects_per_partition_avg"`
+	SubjectsPerPartitionMax int     `json:"subjects_per_partition_max"`
+	MsgsPerSec              float64 `json:"msgs_per_sec"`
+	RetentionHours          float64 `json:"retention_hours"`
+	StreamBytesHot          int64   `json:"stream_bytes_hot"`
+	RecommendedPartitions   int     `json:"recommended_partitions"`
+	Note                    string  `json:"note"`
+}
+
+// Run evaluates the three sub-models and returns the assembled
+// section. It never errors: the model is a pure transform over the
+// config.
+func Run(cfg Config) *Section {
+	cfg = cfg.withDefaults()
+	classes := make([]string, 0, len(cfg.ClassRates))
+	for _, r := range cfg.ClassRates {
+		classes = append(classes, r.Class)
+	}
+	sort.Strings(classes)
+	return &Section{
+		TenantCount:              cfg.TenantCount,
+		DormantFraction:          cfg.DormantFraction,
+		EmittingTenantsEffective: round1(cfg.effectiveTelemetryTenants()),
+		TelemetryClasses:         classes,
+		Postgres:                 planPostgresPool(cfg),
+		ClickHouse:               planClickHouseWrite(cfg),
+		NATS:                     planNATSSubjects(cfg),
+		AIInference:              planAIInference(cfg),
+		TierSampling:             planTierSampling(cfg),
+		PeriodicSweep:            planPeriodicSweep(cfg),
+	}
+}
+
+// planAIInference models the WS-9 shared-inference footprint. It sizes
+// the fleet's peak AI demand (Little's law) against a single bounded,
+// fair-scheduled pool and contrasts the pool's resident memory with the
+// naive per-tenant model-residency architecture the pool replaces.
+//
+// The shared pool is the lever: instead of one warm model per tenant
+// (TenantCount × model RAM, which does not fit at 5,000 tenants), a
+// single loaded model with a small concurrency cap serves the whole
+// fleet because, under the dormancy posture, only a fraction of tenants
+// are active at once and each request occupies a slot for only its
+// inference latency. Bursts beyond the slot count queue (fair, per
+// tenant) up to MaxWait rather than spawning capacity.
+func planAIInference(cfg Config) AIInferencePlan {
+	activeTenants := float64(cfg.TenantCount) * cfg.AIActiveTenantFraction
+	avgCallsPerSec := activeTenants * cfg.AICallsPerActiveTenantPerHour / 3600.0
+	peakCallsPerSec := avgCallsPerSec * cfg.AIBurstFactor
+	// Little's law: mean concurrent in-flight requests = arrival rate ×
+	// service time. This is the parallelism the shared model must offer
+	// to keep the steady peak from backing up into the queue.
+	offeredConcurrency := peakCallsPerSec * cfg.AIAvgLatencySec
+
+	sharedPoolGB := cfg.AIModelResidentGB + float64(cfg.AIPoolConcurrency)*cfg.AIKVCacheGBPerSlot
+	// The architecture the pool replaces: a warm model instance per
+	// tenant across the whole fleet (each carries the resident model
+	// plus a single request's KV-cache).
+	perTenantResidencyGB := float64(cfg.TenantCount) * (cfg.AIModelResidentGB + cfg.AIKVCacheGBPerSlot)
+
+	util := offeredConcurrency / float64(cfg.AIPoolConcurrency)
+	const healthyUtil = 0.7
+	recommended := cfg.AIPoolConcurrency
+	if util > healthyUtil {
+		recommended = int(math.Ceil(offeredConcurrency / healthyUtil))
+	}
+
+	plan := AIInferencePlan{
+		ActiveTenants:              int(math.Round(activeTenants)),
+		AvgCallsPerSec:             round2c(avgCallsPerSec),
+		PeakCallsPerSec:            round2c(peakCallsPerSec),
+		OfferedConcurrency:         round2c(offeredConcurrency),
+		PoolConcurrency:            cfg.AIPoolConcurrency,
+		PoolUtilization:            round2c(util),
+		RecommendedPoolConcurrency: recommended,
+		SharedPoolGB:               round1(sharedPoolGB),
+		PerTenantResidencyGB:       round1(perTenantResidencyGB),
+		MemorySavingsFactor:        round1(perTenantResidencyGB / sharedPoolGB),
+	}
+	if util > healthyUtil {
+		plan.Note = fmt.Sprintf("peak demand needs ~%.2f parallel slots; raise AI_INFERENCE_POOL_MAX_CONCURRENT to %d (bursts above the cap queue fairly up to MaxWait, then degrade to the template path).",
+			offeredConcurrency, recommended)
+	} else {
+		plan.Note = fmt.Sprintf("one shared pool of %d slots (%.1f GB) absorbs the modelled peak at %.0f%% utilization, vs %.1f GB for per-tenant residency — ~%.0f× less memory.",
+			cfg.AIPoolConcurrency, sharedPoolGB, util*100, perTenantResidencyGB, perTenantResidencyGB/sharedPoolGB)
+	}
+	return plan
+}
+
+// planTierSampling projects the WS-4 cohort breakdown. Returns nil when
+// the policy is not modelled (default-OFF), so the section is omitted
+// from the report and the baseline projection is untouched. When on, it
+// shows fleet rows/s decomposed by activity tier — the proof that write
+// cost tracks the active cohort rather than the raw tenant count.
+func planTierSampling(cfg Config) *TierSamplingPlan {
+	if !cfg.TierSampling {
+		return nil
+	}
+	na, ni, nd := cfg.tierTenantCounts()
+	activeRows, idleRows, dormantRows := cfg.tierRowsPerSec()
+	sampledTotal := activeRows + idleRows + dormantRows
+	baselineTotal := cfg.modelledEventsPerSec()
+
+	var reductionPct float64
+	if baselineTotal > 0 {
+		reductionPct = (1 - sampledTotal/baselineTotal) * 100
+	}
+	var activeShare float64
+	if sampledTotal > 0 {
+		activeShare = activeRows / sampledTotal * 100
+	}
+
+	return &TierSamplingPlan{
+		IdleSampleMultiplier: cfg.IdleSampleMultiplier,
+		ActiveTenants:        na,
+		IdleTenants:          ni,
+		DormantTenants:       nd,
+		ActiveRowsPerSec:     round1(activeRows),
+		IdleRowsPerSec:       round1(idleRows),
+		DormantRowsPerSec:    round1(dormantRows),
+		SampledRowsPerSec:    round1(sampledTotal),
+		BaselineRowsPerSec:   round1(baselineTotal),
+		ReductionPct:         round1(reductionPct),
+		ActiveCohortSharePct: round1(activeShare),
+	}
+}
+
+// planPeriodicSweep models the WS-1 dormancy dividend: how many tenants
+// each periodic per-tenant sweep visits per cycle, before vs after the
+// activity-tiered SweepPlanner gating, fanned across the jobs that adopt
+// tenancy.TieredSweep.
+//
+// Fidelity: it does NOT re-derive the cadence arithmetic — it drives the
+// real tenancy.DefaultPlanner().ShouldVisit over one full DormantEvery
+// period and averages the per-tier visit rate, so the model and the
+// shipped gate can never silently diverge. Cycle 0 is the full startup
+// sweep, so it is included in the period average (every tier is visited
+// on cycle 0), which is why the per-tier rates are marginally above the
+// raw 1/IdleEvery and 1/DormantEvery cadences.
+func planPeriodicSweep(cfg Config) PeriodicSweepPlan {
+	planner := tenancy.DefaultPlanner()
+
+	// Normalise the activity mix to fractions of the fleet.
+	total := cfg.SweepActiveFraction + cfg.SweepIdleFraction + cfg.SweepDormantFraction
+	if total <= 0 {
+		// Degenerate config: treat everyone active (the planner's own
+		// fail-safe posture — more work, never less).
+		total = 1
+		cfg.SweepActiveFraction = 1
+	}
+	activeFrac := cfg.SweepActiveFraction / total
+	idleFrac := cfg.SweepIdleFraction / total
+	dormantFrac := cfg.SweepDormantFraction / total
+
+	n := float64(cfg.TenantCount)
+	activeN := activeFrac * n
+	idleN := idleFrac * n
+	dormantN := dormantFrac * n
+
+	// Average per-cycle visit rate per tier over one full cadence
+	// period, using the real gate so this stays in lock-step with
+	// production. The period is DormantEvery (the longest cadence); a
+	// non-positive cadence (fail-safe planner) collapses to period 1.
+	period := planner.DormantEvery
+	if period <= 0 {
+		period = 1
+	}
+	visitRate := func(tier tenancy.Tier) float64 {
+		visits := 0
+		for cycle := int64(0); cycle < period; cycle++ {
+			if planner.ShouldVisit(tier, cycle) {
+				visits++
+			}
+		}
+		return float64(visits) / float64(period)
+	}
+	activeRate := visitRate(tenancy.TierActive)
+	idleRate := visitRate(tenancy.TierIdle)
+	dormantRate := visitRate(tenancy.TierDormant)
+
+	activeVisits := activeN * activeRate
+	idleVisits := idleN * idleRate
+	dormantVisits := dormantN * dormantRate
+	tieredPerJob := activeVisits + idleVisits + dormantVisits
+
+	jobCount := len(cfg.SweepJobs)
+	untieredPerJob := n // legacy fan-out visits every tenant every cycle
+
+	plan := PeriodicSweepPlan{
+		Jobs:           append([]string(nil), cfg.SweepJobs...),
+		JobCount:       jobCount,
+		IdleEvery:      planner.IdleEvery,
+		DormantEvery:   planner.DormantEvery,
+		ActiveTenants:  int(math.Round(activeN)),
+		IdleTenants:    int(math.Round(idleN)),
+		DormantTenants: int(math.Round(dormantN)),
+
+		UntieredVisitsPerCyclePerJob: int(math.Round(untieredPerJob)),
+		TieredVisitsPerCyclePerJob:   round1(tieredPerJob),
+
+		ActiveVisitsPerCycle:  round1(activeVisits),
+		IdleVisitsPerCycle:    round1(idleVisits),
+		DormantVisitsPerCycle: round1(dormantVisits),
+
+		UntieredVisitsPerCycleTotal: int(math.Round(untieredPerJob * float64(jobCount))),
+		TieredVisitsPerCycleTotal:   round1(tieredPerJob * float64(jobCount)),
+	}
+	// Reduction factors: aggregate, and per-tier on the dormant tail
+	// (the headline 10-100x). Guard against divide-by-zero on a
+	// degenerate (all-active) mix.
+	if tieredPerJob > 0 {
+		plan.ReductionFactor = round1(untieredPerJob / tieredPerJob)
+	}
+	if idleRate > 0 {
+		plan.IdleReductionFactor = round1(1 / idleRate)
+	}
+	if dormantRate > 0 {
+		plan.DormantReductionFactor = round1(1 / dormantRate)
+	}
+	plan.Note = fmt.Sprintf(
+		"%d job(s) tiered: %.0f tenants/cycle/job → %.1f (%.1fx); idle tail %.1fx, dormant tail %.1fx.",
+		jobCount, untieredPerJob, plan.TieredVisitsPerCyclePerJob, plan.ReductionFactor,
+		plan.IdleReductionFactor, plan.DormantReductionFactor)
+	return plan
+}
+
+// planPostgresPool models connection-pool pressure. Concurrent in-flight
+// queries follow Little's law (concurrency = arrival_rate ×
+// service_time); the app pool must cover that with headroom, and the
+// Postgres backend must cover the app pools (directly, or via PgBouncer
+// transaction multiplexing).
+func planPostgresPool(cfg Config) PostgresPoolPlan {
+	peakConcurrent := cfg.ControlPlaneRPS * (cfg.AvgQueryMs / 1000.0)
+	const headroom = 1.5
+	requiredPerReplica := int(math.Ceil(peakConcurrent * headroom / float64(cfg.ControlPlaneReplicas)))
+	totalAppConns := cfg.PGMaxOpenConns * cfg.ControlPlaneReplicas
+
+	// cfg has been through withDefaults, so PGBouncerMode is non-nil here;
+	// derefBool stays defensive in case planPostgresPool is ever called
+	// on a raw config.
+	pgbouncer := derefBool(cfg.PGBouncerMode)
+
+	// Without PgBouncer every app connection is a backend connection.
+	// With transaction pooling the backend only needs to cover the
+	// genuinely concurrent transactions (peak, with headroom).
+	backendConns := totalAppConns
+	if pgbouncer {
+		backendConns = int(math.Ceil(peakConcurrent * headroom))
+	}
+
+	plan := PostgresPoolPlan{
+		Replicas:              cfg.ControlPlaneReplicas,
+		PoolSizePerReplica:    cfg.PGMaxOpenConns,
+		TotalAppConns:         totalAppConns,
+		PeakConcurrentQueries: round1(peakConcurrent),
+		RecommendedPoolSize:   requiredPerReplica,
+		PGBouncerMode:         pgbouncer,
+		BackendConnsRequired:  backendConns,
+		MaxConnections:        cfg.PGMaxConnections,
+		WithinMaxConnections:  backendConns <= cfg.PGMaxConnections,
+	}
+	switch {
+	case cfg.PGMaxOpenConns < requiredPerReplica:
+		plan.Note = fmt.Sprintf("PG_MAX_OPEN_CONNS=%d is below the modelled per-replica peak of %d; raise it or add replicas.",
+			cfg.PGMaxOpenConns, requiredPerReplica)
+	case !plan.WithinMaxConnections:
+		plan.Note = fmt.Sprintf("backend connections (%d) exceed max_connections (%d); enable PG_PGBOUNCER_MODE or raise max_connections.",
+			backendConns, cfg.PGMaxConnections)
+	default:
+		plan.Note = "pool sized comfortably for the modelled load."
+	}
+	return plan
+}
+
+// planClickHouseWrite models the hot-path write load. Rows fan out
+// across CLICKHOUSE_SHARDING shards by tenant hash; each shard's insert
+// frequency is its row rate over the batch size.
+//
+// ClickHouse's dominant write-side failure mode is "too many parts":
+// each INSERT creates a part, and a high part-creation rate starves the
+// background merge scheduler. The healthy target is ≤ ~1 insert/s/shard
+// (the same envelope the writer's 2s flush interval already aims for).
+// The *primary* lever to hit it is a larger CLICKHOUSE_BATCH_SIZE (more
+// rows per part), not more shards — sharding multiplies hardware and is
+// only the right answer once a single shard's batch would have to grow
+// past ClickHouseMaxBatchSize to keep up.
+func planClickHouseWrite(cfg Config) ClickHouseWritePlan {
+	rowsPerSec := cfg.effectiveEventsPerSec()
+	rowsPerSecPerShard := rowsPerSec / float64(cfg.ClickHouseShards)
+	insertsPerSecPerShard := rowsPerSecPerShard / float64(cfg.ClickHouseBatchSize)
+
+	monthlyRows := rowsPerSec * secondsPerMonth
+	uncompressedGBPerMonth := monthlyRows * float64(cfg.BytesPerEvent) / 1e9
+	compressedGBPerMonth := uncompressedGBPerMonth / cfg.ClickHouseCompression
+
+	plan := ClickHouseWritePlan{
+		Shards:                     cfg.ClickHouseShards,
+		BatchSize:                  cfg.ClickHouseBatchSize,
+		TotalRowsPerSec:            round1(rowsPerSec),
+		RowsPerSecPerShard:         round1(rowsPerSecPerShard),
+		InsertsPerSecPerShard:      round2c(insertsPerSecPerShard),
+		MonthlyRows:                int64(monthlyRows),
+		PerTenantMonthlyRows:       int64(monthlyRows / float64(cfg.TenantCount)),
+		PerActiveTenantMonthlyRows: int64(monthlyRows / cfg.activeTenants()),
+		HotStorageGBCompressed:     round1(compressedGBPerMonth),
+		IngestBytesPerSec:          int64(rowsPerSec * float64(cfg.BytesPerEvent)),
+		RecommendedShards:          cfg.ClickHouseShards,
+		RecommendedBatchSize:       cfg.ClickHouseBatchSize,
+	}
+
+	const insertCeilingPerShard = 1.0
+	if insertsPerSecPerShard <= insertCeilingPerShard {
+		plan.Note = "insert frequency within the healthy ≤1/s/shard envelope."
+		return plan
+	}
+
+	// Batch size needed to hold the current shard count at ≤1 insert/s.
+	neededBatch := int(math.Ceil(rowsPerSecPerShard / insertCeilingPerShard))
+	if neededBatch <= cfg.ClickHouseMaxBatchSize {
+		plan.RecommendedBatchSize = neededBatch
+		plan.Note = fmt.Sprintf("%.2f inserts/s/shard exceeds the ~1/s target; raise CLICKHOUSE_BATCH_SIZE to %d (more rows per part, same shard count).",
+			insertsPerSecPerShard, neededBatch)
+		return plan
+	}
+	// Even a max-size batch can't keep one shard under the ceiling, so
+	// fan out: each shard then carries MaxBatchSize rows/insert at 1/s.
+	plan.RecommendedBatchSize = cfg.ClickHouseMaxBatchSize
+	plan.RecommendedShards = int(math.Ceil(rowsPerSec / (float64(cfg.ClickHouseMaxBatchSize) * insertCeilingPerShard)))
+	plan.Note = fmt.Sprintf("%.2f inserts/s/shard exceeds the ~1/s target even at the max batch of %d; CLICKHOUSE_SHARDING across %d shards is required.",
+		insertsPerSecPerShard, cfg.ClickHouseMaxBatchSize, plan.RecommendedShards)
+	return plan
+}
+
+// planNATSSubjects models subject cardinality and JetStream storage.
+// Distinct subjects = tenants × classes; they hash-distribute across
+// NATS_PARTITIONS streams. FNV-1a over UUIDs spreads evenly, so the
+// busiest partition runs only modestly above the mean — captured by a
+// skew factor.
+func planNATSSubjects(cfg Config) NATSSubjectPlan {
+	distinct := cfg.TenantCount * len(cfg.ClassRates)
+	avgPerPartition := float64(distinct) / float64(cfg.NATSPartitions)
+
+	// Hash-balanced skew: with thousands of keys over tens of buckets
+	// the busiest bucket is ~15% above the mean. Floor at the mean so a
+	// single-partition layout reports no skew.
+	const skew = 1.15
+	maxPerPartition := int(math.Ceil(avgPerPartition * skew))
+	if cfg.NATSPartitions <= 1 {
+		maxPerPartition = distinct
+	}
+
+	msgsPerSec := cfg.natsEventsPerSec()
+	retentionSec := cfg.NATSRetentionHours * 3600
+	bytesPerMsg := float64(cfg.BytesPerEvent + cfg.NATSMsgOverheadBytes)
+	streamBytesHot := int64(msgsPerSec * retentionSec * bytesPerMsg)
+
+	plan := NATSSubjectPlan{
+		Partitions:              cfg.NATSPartitions,
+		DistinctSubjects:        distinct,
+		SubjectsPerPartitionAvg: round1(avgPerPartition),
+		SubjectsPerPartitionMax: maxPerPartition,
+		MsgsPerSec:              round1(msgsPerSec),
+		RetentionHours:          cfg.NATSRetentionHours,
+		StreamBytesHot:          streamBytesHot,
+	}
+	// Keep each stream's subject filter under ~5k distinct subjects so
+	// interest propagation and consumer filtering stay cheap.
+	const subjectCeilingPerPartition = 5000.0
+	if float64(maxPerPartition) > subjectCeilingPerPartition {
+		plan.RecommendedPartitions = NextPow2(int(math.Ceil(float64(distinct) * skew / subjectCeilingPerPartition)))
+		plan.Note = fmt.Sprintf("busiest partition holds ~%d subjects (>%.0f target); NATS_PARTITIONS=%d brings it under.",
+			maxPerPartition, subjectCeilingPerPartition, plan.RecommendedPartitions)
+	} else {
+		plan.RecommendedPartitions = cfg.NATSPartitions
+		plan.Note = "subject cardinality per partition within the healthy envelope."
+	}
+	return plan
+}
+
+// NextPow2 rounds n up to the next power of two, clamped to the
+// config-validated NATS_PARTITIONS ceiling of 256. Powers of two keep
+// the hash distribution even when operators step the partition count.
+func NextPow2(n int) int {
+	if n < 1 {
+		return 1
+	}
+	p := 1
+	for p < n && p < 256 {
+		p <<= 1
+	}
+	if p > 256 {
+		p = 256
+	}
+	return p
+}
+
+func round1(v float64) float64  { return math.Round(v*10) / 10 }
+func round2c(v float64) float64 { return math.Round(v*100) / 100 }

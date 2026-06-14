@@ -4,35 +4,43 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kennguy3n/visible-fishbone/internal/capacityplan"
 	"github.com/kennguy3n/visible-fishbone/internal/service/telemetry"
 	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy/hibernation"
 )
 
 // TestHibernatedSampleRateMatchesService guards against silent drift
-// between the bench model's DefaultHibernatedSampleRate and the
-// control-plane sampler's. The bench binary deliberately re-declares the
-// constant to stay free of any service-layer import; this test-only
-// import keeps that decoupling while still failing CI if the two values
-// diverge.
+// between the capacity model's DefaultHibernatedSampleRate and the
+// control-plane sampler's. The capacityplan package deliberately
+// re-declares the constant to stay free of any service-layer import;
+// this test-only import keeps that decoupling while still failing CI if
+// the two values diverge.
 func TestHibernatedSampleRateMatchesService(t *testing.T) {
-	if DefaultHibernatedSampleRate != hibernation.DefaultHibernatedSampleRate {
-		t.Fatalf("bench DefaultHibernatedSampleRate (%v) drifted from hibernation.DefaultHibernatedSampleRate (%v); keep them in lock-step",
-			DefaultHibernatedSampleRate, hibernation.DefaultHibernatedSampleRate)
+	if capacityplan.DefaultHibernatedSampleRate != hibernation.DefaultHibernatedSampleRate {
+		t.Fatalf("capacityplan.DefaultHibernatedSampleRate (%v) drifted from hibernation.DefaultHibernatedSampleRate (%v); keep them in lock-step",
+			capacityplan.DefaultHibernatedSampleRate, hibernation.DefaultHibernatedSampleRate)
 	}
 }
 
-// TestCapacityPlanIdleMultiplierTracksRuntime guards against the bench
-// model's idle keep fraction silently drifting from the runtime sampler
-// default. The two constants live in separate packages on purpose (the
-// bench is an analytical projection, not a runtime import in its hot
-// path), so this test — not a shared symbol — is what keeps the
+// TestCapacityPlanIdleMultiplierTracksRuntime guards against the
+// capacity model's idle keep fraction silently drifting from the runtime
+// sampler default. The model's default lives in internal/capacityplan
+// (unexported) and the runtime default in internal/service/telemetry on
+// purpose — the bench is an analytical projection, not a runtime import
+// in its hot path — so this test, not a shared symbol, is what keeps the
 // capacity projection honest about what the deployed sampler actually
-// does. If the runtime default changes, update defaultIdleSampleMultiplier
-// (and the calibrated expectations in the tier-sampling tests) to match.
+// does. It reads the model's applied default through the public API (the
+// idle multiplier withDefaults fills when TierSampling is on). If the
+// runtime default changes, update the model default (and the calibrated
+// expectations in the tier-sampling tests) to match.
 func TestCapacityPlanIdleMultiplierTracksRuntime(t *testing.T) {
-	if defaultIdleSampleMultiplier != telemetry.DefaultIdleSampleMultiplier {
-		t.Fatalf("bench defaultIdleSampleMultiplier = %v, runtime telemetry.DefaultIdleSampleMultiplier = %v; the bench projection has drifted from the deployed sampler",
-			defaultIdleSampleMultiplier, telemetry.DefaultIdleSampleMultiplier)
+	ts := RunCapacityPlan(CapacityPlanConfig{TierSampling: true}).TierSampling
+	if ts == nil {
+		t.Fatal("TierSampling section nil with the policy enabled")
+	}
+	if ts.IdleSampleMultiplier != telemetry.DefaultIdleSampleMultiplier {
+		t.Fatalf("capacity model idle multiplier = %v, runtime telemetry.DefaultIdleSampleMultiplier = %v; the bench projection has drifted from the deployed sampler",
+			ts.IdleSampleMultiplier, telemetry.DefaultIdleSampleMultiplier)
 	}
 }
 
@@ -268,6 +276,36 @@ func TestCapacityPlanRendersInMarkdown(t *testing.T) {
 		if !strings.Contains(md, want) {
 			t.Errorf("markdown missing %q", want)
 		}
+	}
+}
+
+// TestCapacityPlanMarkdownSurfacesPerActiveTenantRows guards the
+// hibernation branch of the ClickHouse section: when DormantFraction > 0
+// the fleet-average rows/tenant averages in the near-zero parked
+// telemetry, so the report must additionally surface the per-active-tenant
+// figure (the rate the tenants that still write full fidelity drive). The
+// baseline render (no hibernation) must stay on the single-figure line.
+func TestCapacityPlanMarkdownSurfacesPerActiveTenantRows(t *testing.T) {
+	render := func(cfg CapacityPlanConfig) string {
+		r := &BusinessBenchmarkReport{
+			SchemaVersion: SchemaVersion,
+			Mode:          ModeCapacityPlan,
+			Theoretical:   DefaultTheoreticalTargets(),
+			Competitor:    DefaultCompetitorBaselines(),
+			CapacityPlan:  RunCapacityPlan(cfg),
+		}
+		r.Grade()
+		return r.ToMarkdown()
+	}
+
+	hib := render(CapacityPlanConfig{DormantFraction: 0.8})
+	if !strings.Contains(hib, "active-tenant") {
+		t.Errorf("hibernated render must surface the per-active-tenant rows/month figure; got:\n%s", hib)
+	}
+
+	base := render(CapacityPlanConfig{})
+	if strings.Contains(base, "active-tenant") {
+		t.Errorf("baseline render (no hibernation) must not show the per-active-tenant figure; got:\n%s", base)
 	}
 }
 

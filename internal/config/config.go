@@ -94,9 +94,52 @@ type Config struct {
 	RBI                RBI
 	TenantMigration    TenantMigration
 	Activity           Activity
+	Capacity           Capacity
 	RolloutAutopilot   RolloutAutopilot
 	Hibernation        Hibernation
 	AlertFeedback      AlertFeedback
+}
+
+// Capacity carries the runtime knobs for the WS6 capacity autopilot
+// (internal/service/capacity): the leader-only reconciler that reads
+// the live fleet size, runs the same analytical model as the offline
+// `bench/controlplane capacity-plan` artifact (internal/capacityplan),
+// and surfaces current-vs-recommended sizing per axis (Postgres pool /
+// ClickHouse / NATS) as metrics + log lines.
+//
+// Enabled defaults to OFF: like every new capability the reconciler is
+// gated so an out-of-the-box install does nothing until an operator
+// opts in (the honesty-contract "no surprise behaviour on upgrade"
+// rule). It only ever observes and recommends — it never mutates a
+// runtime knob, restarts a service, or takes any destructive action —
+// so turning it on is safe, but it stays opt-in for parity with the
+// other staged-rollout features.
+type Capacity struct {
+	// Enabled wires the leader-only capacity reconciler loop. Default
+	// false. When false the loop is not registered and the reconciler
+	// is never constructed (zero cost).
+	Enabled bool
+	// Interval is the reconcile cadence: how often the leader re-reads
+	// the fleet size and re-emits the recommendation. Defaults to 5m —
+	// capacity sizing moves on the timescale of tenant growth, not
+	// request rate, so a slow cadence keeps the once-per-cycle fleet
+	// count query negligible. Anything <= 0 is treated as the default
+	// by the reconciler.
+	Interval time.Duration
+	// ControlPlaneReplicas is the number of sng-control replicas the
+	// model grades pool pressure against. It is an operator-declared
+	// deployment fact (the reconciler cannot reliably self-count peers
+	// without a coordination round-trip), defaulting to 3 to match
+	// docs/scaling.md's 5K reference. Surfaced so the recommended
+	// per-replica pool size reflects the real fleet.
+	ControlPlaneReplicas int
+	// PGMaxConnections is the Postgres server's max_connections the
+	// backend-connection projection is graded against. Defaults to 200
+	// (the docs/scaling.md reference). The reconciler reads the app
+	// pool size, PgBouncer mode, and NATS/ClickHouse knobs from their
+	// existing config; max_connections has no other home, so it lives
+	// here.
+	PGMaxConnections int
 }
 
 // AlertFeedback carries the runtime knobs for the leader-only alert
@@ -1964,6 +2007,12 @@ func Load() (Config, error) {
 		// typo can't silently relocate the operational surface
 		// onto an unexpected port.
 		{"METRICS_PORT", 9090, &cfg.Metrics.Port},
+		// WS6 capacity autopilot: replica count and Postgres
+		// max_connections the analytical model grades against. Parsed
+		// strictly so a typo can't silently revert the fleet-size
+		// assumption the sizing recommendation is built on.
+		{"CAPACITY_CONTROL_PLANE_REPLICAS", 3, &cfg.Capacity.ControlPlaneReplicas},
+		{"CAPACITY_PG_MAX_CONNECTIONS", 200, &cfg.Capacity.PGMaxConnections},
 	}
 	strictDurations := []struct {
 		key string
@@ -2049,6 +2098,9 @@ func Load() (Config, error) {
 		{"POP_GEODNS_PUBLISH_INTERVAL", 30 * time.Second, &cfg.PoP.GeoDNSPublishInterval},
 		{"POP_REBALANCE_INTERVAL", 60 * time.Second, &cfg.PoP.RebalanceInterval},
 		{"WS11_MIGRATION_RESUME_INTERVAL", 5 * time.Minute, &cfg.TenantMigration.ResumeInterval},
+		// WS6 capacity-autopilot reconcile cadence (only consulted when
+		// CAPACITY_AUTOPILOT_ENABLED). Defaults to 5m.
+		{"CAPACITY_AUTOPILOT_INTERVAL", 5 * time.Minute, &cfg.Capacity.Interval},
 		// WS-5 NoOps auto-promoter. Sweep cadence and monitor dwell
 		// window. Parsed strictly so a typo can't silently revert the
 		// dwell window and let a capability promote sooner than intended.
@@ -2158,6 +2210,11 @@ func Load() (Config, error) {
 		// planner sees every tenant as dormant. Cheap (debounced, async)
 		// so there is no reason to ship it off by default.
 		{"ACTIVITY_TRACKING_ENABLED", true, &cfg.Activity.Enabled},
+		// WS6 capacity autopilot. DEFAULT-OFF: the leader-only reconciler
+		// loop is only registered when this is explicitly enabled. Parsed
+		// strictly so a typo fails boot rather than silently leaving the
+		// autopilot off when an operator meant to turn it on.
+		{"CAPACITY_AUTOPILOT_ENABLED", false, &cfg.Capacity.Enabled},
 		// WS-9 fleet-scale shared inference pool. DEFAULT-OFF: when
 		// unset the AI LLM path keeps its current behaviour (no fair
 		// scheduling / admission). Parsed strictly so a typo fails boot
@@ -2679,6 +2736,22 @@ func (c Config) validate() error {
 	}
 	if c.TenantMigration.ResumeInterval <= 0 {
 		return fmt.Errorf("WS11_MIGRATION_RESUME_INTERVAL must be > 0, got %s", c.TenantMigration.ResumeInterval)
+	}
+	// WS6 capacity autopilot. The reconcile cadence must be positive so
+	// the leader loop ticks; the replica count and max_connections feed
+	// the analytical model and must be sane positive integers (a typo
+	// like CAPACITY_CONTROL_PLANE_REPLICAS=0 would divide-by-zero the
+	// per-replica pool projection). Validated unconditionally — not just
+	// when Enabled — so a misconfiguration is caught at boot rather than
+	// the first time an operator flips the flag on.
+	if c.Capacity.Interval <= 0 {
+		return fmt.Errorf("CAPACITY_AUTOPILOT_INTERVAL must be > 0, got %s", c.Capacity.Interval)
+	}
+	if c.Capacity.ControlPlaneReplicas < 1 || c.Capacity.ControlPlaneReplicas > 10_000 {
+		return fmt.Errorf("CAPACITY_CONTROL_PLANE_REPLICAS out of range [1,10000]: %d", c.Capacity.ControlPlaneReplicas)
+	}
+	if c.Capacity.PGMaxConnections < 1 || c.Capacity.PGMaxConnections > 1_000_000 {
+		return fmt.Errorf("CAPACITY_PG_MAX_CONNECTIONS out of range [1,1000000]: %d", c.Capacity.PGMaxConnections)
 	}
 	return nil
 }
