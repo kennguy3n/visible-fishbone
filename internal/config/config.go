@@ -815,6 +815,34 @@ type ManagedDNSFeeds struct {
 	// IPS bundle and the DNS feed bundle move together unless an operator
 	// deliberately decouples them. THREAT_INTEL_IPS_REFRESH_INTERVAL.
 	IPSRulesRefreshInterval time.Duration
+	// RetroHuntEnabled gates the leader-only retro-hunt producer: when
+	// on, each time the store learns of a NEW domain/IP/CIDR indicator
+	// the producer sweeps every active tenant's recent ClickHouse
+	// telemetry (DNS / flow / HTTP) for prior exposure that predates
+	// enforcement, emitting findings to logs + a metric. Independent of
+	// (and default-OFF like) Enabled. Requires the ClickHouse hot tier;
+	// a no-op with a loud log when no reader is available.
+	// THREAT_INTEL_RETROHUNT.
+	RetroHuntEnabled bool
+	// RetroHuntLookback is how far back each sweep reaches. Zero (the
+	// default) falls back to ai.DefaultRetroLookback (7 days), which
+	// fits inside the per-tenant telemetry retention floor.
+	// THREAT_INTEL_RETROHUNT_LOOKBACK.
+	RetroHuntLookback time.Duration
+	// RetroHuntInterval is the cadence at which the producer checks for
+	// newly-arrived indicators to hunt. Zero falls back to
+	// RefreshInterval so a new indicator is swept about as soon as the
+	// feed loop ingests it. THREAT_INTEL_RETROHUNT_INTERVAL.
+	RetroHuntInterval time.Duration
+	// RetroHuntMaxEvents caps the events scanned per tenant per sweep,
+	// bounding a wide-window hunt on a busy tenant. Zero falls back to
+	// ai.DefaultRetroMaxEvents (100k). THREAT_INTEL_RETROHUNT_MAX_EVENTS.
+	RetroHuntMaxEvents int
+	// RetroHuntMinConfidence is the confidence floor an indicator must
+	// clear to be hunted, on top of the store's ingest floor. Mirrors
+	// IOCMinConfidence / IPSRulesMinConfidence.
+	// THREAT_INTEL_RETROHUNT_MIN_CONFIDENCE.
+	RetroHuntMinConfidence float64
 }
 
 // Log carries structured-logging configuration.
@@ -1948,6 +1976,11 @@ func Load() (Config, error) {
 			IPSRulesSubject:         getStr("THREAT_INTEL_IPS_SUBJECT", ""),
 			IPSRulesMinConfidence:   getFloatLenient("THREAT_INTEL_IPS_MIN_CONFIDENCE", 0.5),
 			IPSRulesRefreshInterval: getDuration("THREAT_INTEL_IPS_REFRESH_INTERVAL", 0),
+			// RetroHuntEnabled is parsed strictly below (default-OFF flag).
+			RetroHuntLookback:      getDuration("THREAT_INTEL_RETROHUNT_LOOKBACK", 0),
+			RetroHuntInterval:      getDuration("THREAT_INTEL_RETROHUNT_INTERVAL", 0),
+			RetroHuntMaxEvents:     getIntLenient("THREAT_INTEL_RETROHUNT_MAX_EVENTS", 0),
+			RetroHuntMinConfidence: getFloatLenient("THREAT_INTEL_RETROHUNT_MIN_CONFIDENCE", 0.5),
 		},
 	}
 
@@ -2244,6 +2277,10 @@ func Load() (Config, error) {
 		// reason as the pipeline flag above: a typo should fail boot, not
 		// silently leave the IOC->Suricata rule bundle unpublished.
 		{"THREAT_INTEL_IPS_RULES", false, &cfg.ManagedDNSFeeds.IPSRulesEnabled},
+		// Retro-hunt producer. DEFAULT-OFF and parsed strictly for the
+		// same reason: a typo should fail boot, not silently leave the
+		// historical-exposure sweep disabled.
+		{"THREAT_INTEL_RETROHUNT", false, &cfg.ManagedDNSFeeds.RetroHuntEnabled},
 		{"METRICS_ENABLED", true, &cfg.Metrics.Enabled},
 		{"POP_REBALANCE_ENABLED", true, &cfg.PoP.RebalanceEnabled},
 		// Per-tenant activity tracking. Default ON: it is the writer

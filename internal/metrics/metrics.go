@@ -194,6 +194,7 @@ type Metrics struct {
 	ThreatIntelStoreIOCs         *prometheus.GaugeVec
 	ThreatIntelRecompileTotal    *prometheus.CounterVec
 	ThreatIntelRecompileDuration prometheus.Histogram
+	ThreatIntelRetroHits         *prometheus.CounterVec
 
 	// --- Webhook / integration ----------------------------------
 	WebhookDeliveries      *prometheus.CounterVec
@@ -543,6 +544,12 @@ func New(cfg config.Metrics) *Metrics {
 		Help:      "Latency of feed-driven policy recompiles across all tenants.",
 		Buckets:   recompileLatencyBuckets,
 	})
+	m.ThreatIntelRetroHits = f.NewCounterVec(prometheus.CounterOpts{
+		Namespace: ns,
+		Subsystem: "threatintel",
+		Name:      "retrohunt_hits_total",
+		Help:      "Historical telemetry events that matched a newly-arrived IOC during a retro-hunt sweep, by indicator type (domain|ip|cidr).",
+	}, []string{"type"})
 
 	// --- Webhook / integration --------------------------------------
 	m.WebhookDeliveries = f.NewCounterVec(prometheus.CounterOpts{

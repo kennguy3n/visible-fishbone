@@ -448,6 +448,15 @@ func (m *FeedManager) DomainIndicators(minConfidence float64) []string {
 	return out
 }
 
+// Snapshot returns the store's current active-indicator snapshot
+// (grouped by type, sorted deterministically). It is the read seam
+// the retro-hunt coordinator diffs each interval to discover newly-
+// arrived indicators to sweep historical telemetry for. Read-only
+// and safe to call concurrently with feed refreshes.
+func (m *FeedManager) Snapshot() IOCSnapshot {
+	return m.store.Snapshot()
+}
+
 // stalenessThreshold is staleFactor x the feed's effective refresh
 // interval.
 func (m *FeedManager) stalenessThreshold(feed Feed) time.Duration {
