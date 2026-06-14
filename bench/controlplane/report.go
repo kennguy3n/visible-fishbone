@@ -297,6 +297,10 @@ type CapacityPlanSection struct {
 	ClickHouse ClickHouseWritePlan `json:"clickhouse"`
 	// NATS is the subject-cardinality + JetStream storage projection.
 	NATS NATSSubjectPlan `json:"nats"`
+	// AIInference is the WS-9 shared-inference footprint projection:
+	// fleet AI demand vs. a single bounded shared pool, and the memory
+	// saved versus per-tenant model residency.
+	AIInference AIInferencePlan `json:"ai_inference"`
 	// TierSampling is the WS-4 activity-tier sampling breakdown. Present
 	// only when the policy is modelled (default-OFF), so the baseline
 	// projection's JSON is byte-for-byte unchanged.
@@ -305,6 +309,44 @@ type CapacityPlanSection struct {
 	// tenants-visited/cycle for the periodic per-tenant sweeps, before
 	// vs after activity-tiered gating (WS-1).
 	PeriodicSweep PeriodicSweepPlan `json:"periodic_sweep"`
+}
+
+// AIInferencePlan projects the fleet's AI inference footprint and
+// proves the shared-pool cost claim. It contrasts a single bounded,
+// fair-scheduled pool against the naive per-tenant model-residency
+// architecture (one warm model instance per tenant), and sizes the
+// pool's concurrency against the modelled peak demand.
+type AIInferencePlan struct {
+	// ActiveTenants is the modelled count of tenants issuing AI calls
+	// in a peak window (TenantCount × AIActiveTenantFraction).
+	ActiveTenants int `json:"active_tenants"`
+	// AvgCallsPerSec is the fleet-wide mean AI request rate.
+	AvgCallsPerSec float64 `json:"avg_calls_per_sec"`
+	// PeakCallsPerSec is AvgCallsPerSec scaled by the burst factor.
+	PeakCallsPerSec float64 `json:"peak_calls_per_sec"`
+	// OfferedConcurrency is the demanded parallel in-flight request
+	// count at peak (Little's law: PeakCallsPerSec × AIAvgLatencySec).
+	OfferedConcurrency float64 `json:"offered_concurrency"`
+	// PoolConcurrency is the shared pool's configured global slot cap.
+	PoolConcurrency int `json:"pool_concurrency"`
+	// PoolUtilization is OfferedConcurrency / PoolConcurrency. >1 means
+	// the steady peak exceeds the slots and requests queue (absorbed up
+	// to MaxWait, then degrade to the template path).
+	PoolUtilization float64 `json:"pool_utilization"`
+	// RecommendedPoolConcurrency keeps utilization within the healthy
+	// envelope (≤0.7) at the modelled peak.
+	RecommendedPoolConcurrency int `json:"recommended_pool_concurrency"`
+	// SharedPoolGB is the resident memory of the shared architecture:
+	// one loaded model + KV-cache per concurrency slot.
+	SharedPoolGB float64 `json:"shared_pool_gb"`
+	// PerTenantResidencyGB is the naive footprint the shared pool
+	// avoids: one warm model instance per tenant across the fleet.
+	PerTenantResidencyGB float64 `json:"per_tenant_residency_gb"`
+	// MemorySavingsFactor is PerTenantResidencyGB / SharedPoolGB — the
+	// headline efficiency multiple.
+	MemorySavingsFactor float64 `json:"memory_savings_factor"`
+	// Note summarises pool adequacy and the savings claim.
+	Note string `json:"note"`
 }
 
 // TierSamplingPlan decomposes the fleet write rate by activity tier

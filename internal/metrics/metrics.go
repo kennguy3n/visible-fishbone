@@ -151,6 +151,28 @@ type Metrics struct {
 	AILLMTokensUsed       *prometheus.CounterVec
 	AIGuardrailRejections *prometheus.CounterVec
 
+	// --- AI shared inference pool (WS-9) -------------------------
+	// These prove the fleet-scale efficiency claim: peak in-flight
+	// concurrency is held at the pool cap (not the tenant count) while
+	// fair admission keeps any one tenant from monopolising the shared
+	// model. Sampled from ai.PoolMetrics.Snapshot by AIPoolCollector.
+	// Instantaneous state is exposed as gauges; cumulative lifetime
+	// totals are exposed as counters (so PromQL rate() is correct).
+	// AIPoolCollector converts ai.PoolMetrics' cumulative snapshot into
+	// monotonic counter increments via last-observed deltas, exactly as
+	// PGCollector does for the pg pool's acquire count.
+	AIPoolInflight     prometheus.Gauge
+	AIPoolPeakInflight prometheus.Gauge
+	AIPoolQueued       prometheus.Gauge
+	AIPoolPeakQueued   prometheus.Gauge
+	AIPoolAdmitted     prometheus.Counter
+	AIPoolCompleted    prometheus.Counter
+	AIPoolErrors       prometheus.Counter
+	AIPoolRejected     prometheus.Counter
+	AIPoolWaitTimeouts prometheus.Counter
+	AIPoolCancelled    prometheus.Counter
+	AIPoolAvgWaitMS    prometheus.Gauge
+
 	// --- Threat intel / IOC feeds -------------------------------
 	ThreatFeedRefreshTotal       *prometheus.CounterVec
 	ThreatFeedIngestedTotal      *prometheus.CounterVec
@@ -399,6 +421,40 @@ func New(cfg config.Metrics) *Metrics {
 		Name:      "guardrail_rejections_total",
 		Help:      "Total AI requests rejected by a guardrail, by reason.",
 	}, []string{"reason"})
+
+	// WS-9 shared inference pool. Instantaneous state (inflight/queued
+	// and their peaks, plus the mean wait) is exposed as gauges that the
+	// AIPoolCollector Set()s in place each scrape. Lifetime totals are
+	// real counters: the collector converts ai.PoolMetrics' cumulative
+	// snapshot into monotonic increments via last-observed deltas (as
+	// PGCollector does for the pg pool), so rate() over them is correct.
+	newPoolGauge := func(name, help string) prometheus.Gauge {
+		return f.NewGauge(prometheus.GaugeOpts{
+			Namespace: ns,
+			Subsystem: "ai_inference_pool",
+			Name:      name,
+			Help:      help,
+		})
+	}
+	newPoolCounter := func(name, help string) prometheus.Counter {
+		return f.NewCounter(prometheus.CounterOpts{
+			Namespace: ns,
+			Subsystem: "ai_inference_pool",
+			Name:      name,
+			Help:      help,
+		})
+	}
+	m.AIPoolInflight = newPoolGauge("inflight", "Current in-flight requests to the shared LLM backend.")
+	m.AIPoolPeakInflight = newPoolGauge("peak_inflight", "Peak observed in-flight requests; should track the configured concurrency cap, not the tenant count.")
+	m.AIPoolQueued = newPoolGauge("queued", "Current requests waiting in per-tenant admission queues.")
+	m.AIPoolPeakQueued = newPoolGauge("peak_queued", "Peak observed queued requests across all tenants.")
+	m.AIPoolAdmitted = newPoolCounter("admitted_total", "Cumulative requests admitted to the backend.")
+	m.AIPoolCompleted = newPoolCounter("completed_total", "Cumulative requests that completed successfully.")
+	m.AIPoolErrors = newPoolCounter("errors_total", "Cumulative admitted requests whose backend call errored.")
+	m.AIPoolRejected = newPoolCounter("rejected_queue_full_total", "Cumulative requests shed because a tenant's queue was full (degraded to template path).")
+	m.AIPoolWaitTimeouts = newPoolCounter("wait_timeouts_total", "Cumulative requests that exceeded the max queue wait (degraded to template path).")
+	m.AIPoolCancelled = newPoolCounter("cancelled_total", "Cumulative queued requests withdrawn by caller context cancellation.")
+	m.AIPoolAvgWaitMS = newPoolGauge("avg_wait_ms", "Mean admission wait (ms) over all admitted requests.")
 
 	// --- Threat intel / IOC feeds -----------------------------------
 	m.ThreatFeedRefreshTotal = f.NewCounterVec(prometheus.CounterOpts{
