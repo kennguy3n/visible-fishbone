@@ -128,6 +128,22 @@ var builtinPatterns = map[string]*regexp.Regexp{
 	"slack_token":       regexp.MustCompile(`\bxox[abprs]-[0-9A-Za-z-]{10,}\b`),
 	"stripe_secret_key": regexp.MustCompile(`\b(?:sk|rk)_live_[0-9A-Za-z]{16,}\b`),
 	"jwt":               regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b`),
+
+	// --- Crypto-wallet addresses (confirmed by validators_secrets.go) ---
+	// The base58 / bech32 / 40-hex shapes are common enough that the
+	// structural checksum in the validator — not the regex — suppresses
+	// false positives. Shapes mirror `builtin_pattern` in classifier.rs.
+	"btc_address_base58": regexp.MustCompile(`\b[13][1-9A-HJ-NP-Za-km-z]{25,34}\b`),
+	"btc_address_bech32": regexp.MustCompile(`\bbc1[ac-hj-np-z02-9]{6,87}\b`),
+	"eth_address":        regexp.MustCompile(`\b0x[0-9a-fA-F]{40}\b`),
+
+	// --- AI-provider / SaaS credentials (confirmed by validators_secrets.go) ---
+	"openai_api_key":    regexp.MustCompile(`\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b`),
+	"anthropic_api_key": regexp.MustCompile(`\bsk-ant-[A-Za-z0-9_-]{20,}\b`),
+	"gitlab_pat":        regexp.MustCompile(`\bglpat-[A-Za-z0-9_-]{20,}\b`),
+	"sendgrid_api_key":  regexp.MustCompile(`\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b`),
+	"npm_token":         regexp.MustCompile(`\bnpm_[A-Za-z0-9]{36}\b`),
+	"twilio_api_key":    regexp.MustCompile(`\b(?:AC|SK)[0-9a-f]{32}\b`),
 }
 
 // RegexEngine provides pre-compiled regex matching for PII patterns.

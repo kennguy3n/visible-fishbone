@@ -107,6 +107,26 @@ func validatorFor(name string) func(string) bool {
 		return stripeSecretKey
 	case "jwt":
 		return jwtToken
+	// Crypto-wallet + AI-provider/SaaS credentials — twins in
+	// validators_secrets.go.
+	case "btc_address_base58":
+		return btcAddressBase58
+	case "btc_address_bech32":
+		return btcAddressBech32
+	case "eth_address":
+		return ethAddress
+	case "openai_api_key":
+		return openAIAPIKey
+	case "anthropic_api_key":
+		return anthropicAPIKey
+	case "gitlab_pat":
+		return gitlabPAT
+	case "sendgrid_api_key":
+		return sendgridAPIKey
+	case "npm_token":
+		return npmToken
+	case "twilio_api_key":
+		return twilioAPIKey
 	default:
 		return nil
 	}
