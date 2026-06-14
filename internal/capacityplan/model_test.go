@@ -271,3 +271,57 @@ func TestNextPow2(t *testing.T) {
 		}
 	}
 }
+
+// TestAIInferenceSharedPoolBeatsPerTenantResidency locks the WS-9 model:
+// the bounded shared pool's resident memory is a tiny fraction of the
+// naive one-model-per-tenant architecture, and Little's-law sizing is
+// independent of the fleet headcount (it tracks the active cohort's peak
+// call rate, not TenantCount). At 5,000 tenants per-tenant residency is
+// physically infeasible, which is the whole point of the shared pool.
+func TestAIInferenceSharedPoolBeatsPerTenantResidency(t *testing.T) {
+	ai := Run(Config{TenantCount: 5000}).AIInference
+
+	if ai.SharedPoolGB >= ai.PerTenantResidencyGB {
+		t.Fatalf("shared pool (%.1f GB) should be far below per-tenant residency (%.1f GB)",
+			ai.SharedPoolGB, ai.PerTenantResidencyGB)
+	}
+	if ai.MemorySavingsFactor <= 1 {
+		t.Fatalf("memory savings factor (%.1f) should be >1", ai.MemorySavingsFactor)
+	}
+	// The pool's resident footprint is fixed by model size + slots, NOT
+	// the tenant count: a 10× larger fleet leaves SharedPoolGB unchanged
+	// while per-tenant residency grows linearly.
+	big := Run(Config{TenantCount: 50000}).AIInference
+	if big.SharedPoolGB != ai.SharedPoolGB {
+		t.Fatalf("shared pool memory must not scale with fleet size: %.1f vs %.1f GB",
+			big.SharedPoolGB, ai.SharedPoolGB)
+	}
+	if big.PerTenantResidencyGB <= ai.PerTenantResidencyGB {
+		t.Fatalf("per-tenant residency should scale with fleet size: %.1f vs %.1f GB",
+			big.PerTenantResidencyGB, ai.PerTenantResidencyGB)
+	}
+}
+
+// TestAIInferenceRecommendsMoreSlotsWhenSaturated checks the pool's
+// recommendation lever: when offered concurrency pushes utilization past
+// the healthy envelope, the model recommends raising the slot cap (never
+// lowering it below the configured value) and says so in the note.
+func TestAIInferenceRecommendsMoreSlotsWhenSaturated(t *testing.T) {
+	// Force saturation: many active tenants calling often, tiny pool.
+	hot := Run(Config{
+		TenantCount:                   5000,
+		AIActiveTenantFraction:        0.5,
+		AICallsPerActiveTenantPerHour: 60,
+		AIPoolConcurrency:             1,
+	}).AIInference
+	if hot.PoolUtilization <= 0.7 {
+		t.Fatalf("expected saturated utilization >0.7, got %.2f", hot.PoolUtilization)
+	}
+	if hot.RecommendedPoolConcurrency <= hot.PoolConcurrency {
+		t.Fatalf("saturated pool should recommend more slots (%d) than configured (%d)",
+			hot.RecommendedPoolConcurrency, hot.PoolConcurrency)
+	}
+	if !strings.Contains(hot.Note, "raise AI_INFERENCE_POOL_MAX_CONCURRENT") {
+		t.Fatalf("saturated note should advise raising the cap; got %q", hot.Note)
+	}
+}

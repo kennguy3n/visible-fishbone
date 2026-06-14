@@ -276,8 +276,8 @@ type PostgresScaleSection struct {
 
 // The capacity-plan projection types (CapacityPlanSection,
 // PostgresPoolPlan, ClickHouseWritePlan, NATSSubjectPlan,
-// TierSamplingPlan, PeriodicSweepPlan) are aliases for the shared
-// internal/capacityplan model — see capacity_plan.go.
+// AIInferencePlan, TierSamplingPlan, PeriodicSweepPlan) are aliases for
+// the shared internal/capacityplan model — see capacity_plan.go.
 
 // TheoreticalTargets are the design goals the verdicts grade against.
 // Sourced from PROPOSAL.md / ARCHITECTURE.md; see field docs.

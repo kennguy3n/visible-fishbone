@@ -39,6 +39,7 @@ type (
 	PostgresPoolPlan    = capacityplan.PostgresPoolPlan
 	ClickHouseWritePlan = capacityplan.ClickHouseWritePlan
 	NATSSubjectPlan     = capacityplan.NATSSubjectPlan
+	AIInferencePlan     = capacityplan.AIInferencePlan
 	TierSamplingPlan    = capacityplan.TierSamplingPlan
 	PeriodicSweepPlan   = capacityplan.PeriodicSweepPlan
 )
@@ -95,6 +96,13 @@ func (r *BusinessBenchmarkReport) writeCapacityPlanMarkdown(b *strings.Builder) 
 	fmt.Fprintf(b, "- %d distinct subjects across %d partition(s) = %.1f avg (busiest ~%d)\n", n.DistinctSubjects, n.Partitions, n.SubjectsPerPartitionAvg, n.SubjectsPerPartitionMax)
 	fmt.Fprintf(b, "- %.1f msgs/s, %.0fh retention → ~%d bytes hot JetStream storage\n", n.MsgsPerSec, n.RetentionHours, n.StreamBytesHot)
 	fmt.Fprintf(b, "- recommended NATS_PARTITIONS: %d — %s\n\n", n.RecommendedPartitions, n.Note)
+
+	ai := cp.AIInference
+	b.WriteString("**AI inference footprint (WS-9 shared pool)**\n\n")
+	fmt.Fprintf(b, "- %d active tenants → %.2f avg calls/s, %.2f peak calls/s (burst)\n", ai.ActiveTenants, ai.AvgCallsPerSec, ai.PeakCallsPerSec)
+	fmt.Fprintf(b, "- offered concurrency (Little's law): %.2f vs pool slots %d → %.0f%% utilization (recommended slots %d)\n", ai.OfferedConcurrency, ai.PoolConcurrency, ai.PoolUtilization*100, ai.RecommendedPoolConcurrency)
+	fmt.Fprintf(b, "- shared pool %.1f GB vs per-tenant residency %.1f GB → ~%.0f× less memory\n", ai.SharedPoolGB, ai.PerTenantResidencyGB, ai.MemorySavingsFactor)
+	fmt.Fprintf(b, "- %s\n\n", ai.Note)
 
 	if ts := cp.TierSampling; ts != nil {
 		b.WriteString("**WS-4 activity-tier telemetry sampling** (ClickHouse rows/s)\n\n")

@@ -51,7 +51,12 @@ func (a *Assistant) Respond(ctx context.Context, tenantID uuid.UUID, issue strin
 
 	if a.llm != nil {
 		prompt := buildPrompt(issue, message, kbEntries, diagnosticResults)
-		resp, err := a.llm.Complete(ctx, ai.LLMRequest{
+		// Carry the tenant ID on the context so the guardrails attribute
+		// rate limit / budget / audit per tenant and the shared inference
+		// pool fair-queues per tenant — without it these calls would all
+		// collapse onto a single uuid.Nil bucket.
+		llmCtx := ai.ContextWithTenantID(ctx, tenantID)
+		resp, err := a.llm.Complete(llmCtx, ai.LLMRequest{
 			Prompt:         prompt,
 			TemperatureX10: 3,
 			MaxTokens:      1024,

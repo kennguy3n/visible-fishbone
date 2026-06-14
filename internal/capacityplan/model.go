@@ -132,6 +132,38 @@ type Config struct {
 	// overhead (subject + headers + index) added to BytesPerEvent.
 	NATSMsgOverheadBytes int
 
+	// --- WS-9 shared AI inference model -----------------------------
+	// These knobs model the fleet's AI inference footprint under two
+	// architectures: per-tenant model residency (one model instance per
+	// tenant) versus a single shared, fair-scheduled pool. They prove
+	// the cost/efficiency claim that a bounded shared pool — not N
+	// instances — serves the whole fleet.
+
+	// AIActiveTenantFraction is the share of the fleet active enough to
+	// issue AI calls in a peak window. In the NoOps dormancy posture
+	// most SME tenants are dormant trials, so this is small.
+	AIActiveTenantFraction float64
+	// AICallsPerActiveTenantPerHour is the modelled per-active-tenant AI
+	// request rate (policy suggestions, summaries, troubleshooting).
+	AICallsPerActiveTenantPerHour float64
+	// AIBurstFactor scales the average call rate to a peak so the pool
+	// is sized for bursts, not just the mean.
+	AIBurstFactor float64
+	// AIAvgLatencySec is the mean wall-clock time the shared model
+	// takes to serve one request (Ternary-Bonsai-8B Q2_0 on CPU,
+	// ~2–5s for a 512-token reply; default 3.5s midpoint).
+	AIAvgLatencySec float64
+	// AIPoolConcurrency is the shared pool's global concurrency cap
+	// (InferencePoolConfig.MaxConcurrent) — the model server's real
+	// parallel-slot count, NOT the tenant count.
+	AIPoolConcurrency int
+	// AIModelResidentGB is the resident memory of one loaded model
+	// instance (Q2_0 ≈ 3 GB recommended).
+	AIModelResidentGB float64
+	// AIKVCacheGBPerSlot is the additional KV-cache memory each
+	// concurrent in-flight request adds to a model server.
+	AIKVCacheGBPerSlot float64
+
 	// MeasuredEventsPerSec is an optional live, fleet-wide telemetry
 	// publish rate (events/sec) observed at runtime. When > 0 the
 	// throughput models (ClickHouse rows/s, NATS msgs/s) use it in
@@ -283,7 +315,18 @@ func DefaultConfig() Config {
 		NATSPartitions:           16,
 		NATSRetentionHours:       24,
 		NATSMsgOverheadBytes:     64,
-		ClassRates:               DefaultClassRates(),
+		// WS-9 shared AI inference defaults. ~5% of SME tenants active
+		// in a peak window (dormancy posture), ~6 AI calls/active-tenant
+		// per hour, 3× burst, 3.5s mean inference, a shared pool of 4
+		// parallel slots, 3 GB resident model, 0.4 GB KV-cache/slot.
+		AIActiveTenantFraction:        0.05,
+		AICallsPerActiveTenantPerHour: 6,
+		AIBurstFactor:                 3,
+		AIAvgLatencySec:               3.5,
+		AIPoolConcurrency:             4,
+		AIModelResidentGB:             3.0,
+		AIKVCacheGBPerSlot:            0.4,
+		ClassRates:                    DefaultClassRates(),
 		// Dormant-heavy trial mix: most of a 5000-SME fleet are
 		// long-idle trials. 8% active / 12% idle / 80% dormant.
 		SweepActiveFraction:  0.08,
@@ -345,6 +388,27 @@ func (c Config) withDefaults() Config {
 	}
 	if c.NATSMsgOverheadBytes <= 0 {
 		c.NATSMsgOverheadBytes = d.NATSMsgOverheadBytes
+	}
+	if c.AIActiveTenantFraction <= 0 {
+		c.AIActiveTenantFraction = d.AIActiveTenantFraction
+	}
+	if c.AICallsPerActiveTenantPerHour <= 0 {
+		c.AICallsPerActiveTenantPerHour = d.AICallsPerActiveTenantPerHour
+	}
+	if c.AIBurstFactor <= 0 {
+		c.AIBurstFactor = d.AIBurstFactor
+	}
+	if c.AIAvgLatencySec <= 0 {
+		c.AIAvgLatencySec = d.AIAvgLatencySec
+	}
+	if c.AIPoolConcurrency <= 0 {
+		c.AIPoolConcurrency = d.AIPoolConcurrency
+	}
+	if c.AIModelResidentGB <= 0 {
+		c.AIModelResidentGB = d.AIModelResidentGB
+	}
+	if c.AIKVCacheGBPerSlot <= 0 {
+		c.AIKVCacheGBPerSlot = d.AIKVCacheGBPerSlot
 	}
 	if len(c.ClassRates) == 0 {
 		c.ClassRates = d.ClassRates
@@ -555,6 +619,10 @@ type Section struct {
 	ClickHouse ClickHouseWritePlan `json:"clickhouse"`
 	// NATS is the subject-cardinality + JetStream storage projection.
 	NATS NATSSubjectPlan `json:"nats"`
+	// AIInference is the WS-9 shared-inference footprint projection:
+	// fleet AI demand vs. a single bounded shared pool, and the memory
+	// it saves over the naive per-tenant model-residency architecture.
+	AIInference AIInferencePlan `json:"ai_inference"`
 	// TierSampling is the WS-4 activity-tier sampling breakdown. Present
 	// only when the policy is modelled (default-OFF), so the baseline
 	// projection's JSON is byte-for-byte unchanged.
@@ -563,6 +631,43 @@ type Section struct {
 	// tenants-visited/cycle for the periodic per-tenant sweeps, before
 	// vs after activity-tiered gating (WS-1).
 	PeriodicSweep PeriodicSweepPlan `json:"periodic_sweep"`
+}
+
+// AIInferencePlan models the WS-9 shared-inference footprint: the
+// fleet's peak AI demand (Little's law) sized against a single bounded,
+// fair-scheduled pool, contrasted with the naive per-tenant
+// model-residency architecture the pool replaces.
+type AIInferencePlan struct {
+	// ActiveTenants is the modelled count of tenants issuing AI calls
+	// in a peak window (TenantCount × AIActiveTenantFraction).
+	ActiveTenants int `json:"active_tenants"`
+	// AvgCallsPerSec is the fleet-wide mean AI request rate.
+	AvgCallsPerSec float64 `json:"avg_calls_per_sec"`
+	// PeakCallsPerSec is AvgCallsPerSec scaled by the burst factor.
+	PeakCallsPerSec float64 `json:"peak_calls_per_sec"`
+	// OfferedConcurrency is the demanded parallel in-flight request
+	// count at peak (Little's law: PeakCallsPerSec × AIAvgLatencySec).
+	OfferedConcurrency float64 `json:"offered_concurrency"`
+	// PoolConcurrency is the shared pool's configured global slot cap.
+	PoolConcurrency int `json:"pool_concurrency"`
+	// PoolUtilization is OfferedConcurrency / PoolConcurrency. >1 means
+	// the steady peak exceeds the slots and requests queue (absorbed up
+	// to MaxWait, then degrade to the template path).
+	PoolUtilization float64 `json:"pool_utilization"`
+	// RecommendedPoolConcurrency keeps utilization within the healthy
+	// envelope (≤0.7) at the modelled peak.
+	RecommendedPoolConcurrency int `json:"recommended_pool_concurrency"`
+	// SharedPoolGB is the resident memory of the shared architecture:
+	// one loaded model + KV-cache per concurrency slot.
+	SharedPoolGB float64 `json:"shared_pool_gb"`
+	// PerTenantResidencyGB is the naive footprint the shared pool
+	// avoids: one warm model instance per tenant across the fleet.
+	PerTenantResidencyGB float64 `json:"per_tenant_residency_gb"`
+	// MemorySavingsFactor is PerTenantResidencyGB / SharedPoolGB — the
+	// headline efficiency multiple.
+	MemorySavingsFactor float64 `json:"memory_savings_factor"`
+	// Note summarises pool adequacy and the savings claim.
+	Note string `json:"note"`
 }
 
 // TierSamplingPlan decomposes the fleet write rate by activity tier
@@ -700,9 +805,66 @@ func Run(cfg Config) *Section {
 		Postgres:                 planPostgresPool(cfg),
 		ClickHouse:               planClickHouseWrite(cfg),
 		NATS:                     planNATSSubjects(cfg),
+		AIInference:              planAIInference(cfg),
 		TierSampling:             planTierSampling(cfg),
 		PeriodicSweep:            planPeriodicSweep(cfg),
 	}
+}
+
+// planAIInference models the WS-9 shared-inference footprint. It sizes
+// the fleet's peak AI demand (Little's law) against a single bounded,
+// fair-scheduled pool and contrasts the pool's resident memory with the
+// naive per-tenant model-residency architecture the pool replaces.
+//
+// The shared pool is the lever: instead of one warm model per tenant
+// (TenantCount × model RAM, which does not fit at 5,000 tenants), a
+// single loaded model with a small concurrency cap serves the whole
+// fleet because, under the dormancy posture, only a fraction of tenants
+// are active at once and each request occupies a slot for only its
+// inference latency. Bursts beyond the slot count queue (fair, per
+// tenant) up to MaxWait rather than spawning capacity.
+func planAIInference(cfg Config) AIInferencePlan {
+	activeTenants := float64(cfg.TenantCount) * cfg.AIActiveTenantFraction
+	avgCallsPerSec := activeTenants * cfg.AICallsPerActiveTenantPerHour / 3600.0
+	peakCallsPerSec := avgCallsPerSec * cfg.AIBurstFactor
+	// Little's law: mean concurrent in-flight requests = arrival rate ×
+	// service time. This is the parallelism the shared model must offer
+	// to keep the steady peak from backing up into the queue.
+	offeredConcurrency := peakCallsPerSec * cfg.AIAvgLatencySec
+
+	sharedPoolGB := cfg.AIModelResidentGB + float64(cfg.AIPoolConcurrency)*cfg.AIKVCacheGBPerSlot
+	// The architecture the pool replaces: a warm model instance per
+	// tenant across the whole fleet (each carries the resident model
+	// plus a single request's KV-cache).
+	perTenantResidencyGB := float64(cfg.TenantCount) * (cfg.AIModelResidentGB + cfg.AIKVCacheGBPerSlot)
+
+	util := offeredConcurrency / float64(cfg.AIPoolConcurrency)
+	const healthyUtil = 0.7
+	recommended := cfg.AIPoolConcurrency
+	if util > healthyUtil {
+		recommended = int(math.Ceil(offeredConcurrency / healthyUtil))
+	}
+
+	plan := AIInferencePlan{
+		ActiveTenants:              int(math.Round(activeTenants)),
+		AvgCallsPerSec:             round2c(avgCallsPerSec),
+		PeakCallsPerSec:            round2c(peakCallsPerSec),
+		OfferedConcurrency:         round2c(offeredConcurrency),
+		PoolConcurrency:            cfg.AIPoolConcurrency,
+		PoolUtilization:            round2c(util),
+		RecommendedPoolConcurrency: recommended,
+		SharedPoolGB:               round1(sharedPoolGB),
+		PerTenantResidencyGB:       round1(perTenantResidencyGB),
+		MemorySavingsFactor:        round1(perTenantResidencyGB / sharedPoolGB),
+	}
+	if util > healthyUtil {
+		plan.Note = fmt.Sprintf("peak demand needs ~%.2f parallel slots; raise AI_INFERENCE_POOL_MAX_CONCURRENT to %d (bursts above the cap queue fairly up to MaxWait, then degrade to the template path).",
+			offeredConcurrency, recommended)
+	} else {
+		plan.Note = fmt.Sprintf("one shared pool of %d slots (%.1f GB) absorbs the modelled peak at %.0f%% utilization, vs %.1f GB for per-tenant residency — ~%.0f× less memory.",
+			cfg.AIPoolConcurrency, sharedPoolGB, util*100, perTenantResidencyGB, perTenantResidencyGB/sharedPoolGB)
+	}
+	return plan
 }
 
 // planTierSampling projects the WS-4 cohort breakdown. Returns nil when
