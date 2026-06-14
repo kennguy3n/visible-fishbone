@@ -377,6 +377,20 @@ type Metering struct {
 	// feature), so operators who need cost containment to hold even
 	// during a DB outage should configure them.
 	DefaultBudgets map[string]int64
+	// AutopilotEnabled gates the margin/cost autopilot's leader-only
+	// sweep (WS-7), which turns the engine's underwater / over-budget /
+	// anomaly signals into audited recommendations. DEFAULT-OFF: the
+	// sweep loop is only registered when this is explicitly true, so a
+	// fresh deployment keeps the prior report-only behaviour. Even when
+	// enabled the engine is recommend-only by default — the narrow
+	// auto action (pinning a trial's hard cap) is a further per-tenant
+	// opt-in through the margin_autopilot rollout gate, so enabling the
+	// sweep never silently mutates a budget.
+	AutopilotEnabled bool
+	// AutopilotInterval is the cadence of that leader-only sweep.
+	// Defaults to 1h. Anything <= 0 is treated as the default by the
+	// loop; the strict parser still rejects un-parseable values.
+	AutopilotInterval time.Duration
 }
 
 // PoP carries the runtime knobs for the Cloud PoP
@@ -1986,6 +2000,10 @@ func Load() (Config, error) {
 		// Session K spec and metering.DefaultFlushInterval). Parsed
 		// strictly so a typo can't silently skew cost accounting.
 		{"METERING_FLUSH_INTERVAL", 60 * time.Second, &cfg.Metering.FlushInterval},
+		// Margin/cost autopilot sweep cadence (WS-7). Only consulted when
+		// METERING_AUTOPILOT_ENABLED. Defaults to 1h. Parsed strictly so a
+		// typo fails boot rather than silently reverting.
+		{"METERING_AUTOPILOT_INTERVAL", time.Hour, &cfg.Metering.AutopilotInterval},
 		// Cloud PoP service duration knobs. Parsed strictly so an
 		// operator typo fails boot rather than silently reverting to
 		// the default (a stale-beacon TTL or refresh cadence quietly
@@ -2060,6 +2078,11 @@ func Load() (Config, error) {
 		{"APP_REGISTRY_SYNC_ENABLED", true, &cfg.AppRegistry.SyncEnabled},
 		{"CASB_NOOPS_ENABLED", false, &cfg.CASB.NoOpsEnabled},
 		{"CASB_NOOPS_AUTO_ENFORCE", false, &cfg.CASB.NoOpsAutoEnforce},
+		// Margin/cost autopilot sweep (WS-7). DEFAULT-OFF: the leader-only
+		// sweep is only registered when explicitly enabled. The narrow auto
+		// action is a further per-tenant rollout opt-in, so the engine is
+		// recommend-only even when this is on.
+		{"METERING_AUTOPILOT_ENABLED", false, &cfg.Metering.AutopilotEnabled},
 		// Dormant-tenant hibernation. DEFAULT-OFF: the leader-only
 		// controller, registry sync, wake coordinator, and the telemetry
 		// /retention/metering hooks are only wired when this is explicitly
