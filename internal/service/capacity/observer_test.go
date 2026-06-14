@@ -62,12 +62,30 @@ func TestRepoFleetObserverPropagatesError(t *testing.T) {
 	}
 }
 
+// stubTenantRepo is a non-nil repository.TenantRepository for the
+// defaults test. It embeds the interface so it satisfies the full
+// contract without implementing every method; no method is called here
+// (the defaults test never reaches Observe).
+type stubTenantRepo struct{ repository.TenantRepository }
+
 func TestNewRepoFleetObserverDefaults(t *testing.T) {
-	o := NewRepoFleetObserver(nil, 0, nil)
+	o := NewRepoFleetObserver(stubTenantRepo{}, 0, nil)
 	if o.activeWindow != DefaultActiveWindow {
 		t.Errorf("activeWindow = %v, want default %v", o.activeWindow, DefaultActiveWindow)
 	}
 	if o.now == nil {
 		t.Error("now should default to time.Now")
 	}
+}
+
+// TestNewRepoFleetObserverPanicsOnNilRepo locks the explicit wiring
+// contract: a nil TenantRepository fails fast at construction (mirrors
+// Reconciler.New) rather than nil-dereferencing on the first reconcile.
+func TestNewRepoFleetObserverPanicsOnNilRepo(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic on nil TenantRepository")
+		}
+	}()
+	NewRepoFleetObserver(nil, 0, nil)
 }

@@ -37,7 +37,13 @@ type RepoFleetObserver struct {
 
 // NewRepoFleetObserver builds an observer over the tenant repository.
 // A nil now uses time.Now; a non-positive window uses DefaultActiveWindow.
+// It panics if tenants is nil — a wiring bug the boot path should surface
+// immediately (mirrors Reconciler.New), since an Observe call would
+// otherwise nil-dereference on the first reconcile.
 func NewRepoFleetObserver(tenants repository.TenantRepository, activeWindow time.Duration, now func() time.Time) *RepoFleetObserver {
+	if tenants == nil {
+		panic("capacity: NewRepoFleetObserver requires a non-nil TenantRepository")
+	}
 	if activeWindow <= 0 {
 		activeWindow = DefaultActiveWindow
 	}
