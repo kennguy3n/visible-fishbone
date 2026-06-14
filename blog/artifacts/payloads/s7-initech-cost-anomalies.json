@@ -1,13 +1,13 @@
 {
-    "tenant_id": "b6520bda-e7bb-4af9-9c53-7b0051eae65b",
-    "anomalies": [
-        {
-            "meter": "url_cat_lookups",
-            "severity": "warning",
-            "baseline_monthly_usd": 72.31,
-            "projected_monthly_usd": 224.77,
-            "ratio": 3.1083,
-            "baseline_months": 5
-        }
-    ]
+  "anomalies": [
+    {
+      "baseline_monthly_usd": 72.31,
+      "baseline_months": 5,
+      "meter": "url_cat_lookups",
+      "projected_monthly_usd": 221.85,
+      "ratio": 3.0679,
+      "severity": "warning"
+    }
+  ],
+  "tenant_id": "b6520bda-e7bb-4af9-9c53-7b0051eae65b"
 }

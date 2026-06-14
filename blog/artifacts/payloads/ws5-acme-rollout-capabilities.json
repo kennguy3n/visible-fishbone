@@ -1,0 +1,32 @@
+{
+  "items": [
+    {
+      "capability": "clamav_swg",
+      "enforces": false,
+      "evaluates": false,
+      "state": "off",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "capability": "noops_autoenforce",
+      "enforces": false,
+      "evaluates": false,
+      "state": "off",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "capability": "idp_directory_sync",
+      "enforces": false,
+      "evaluates": false,
+      "state": "off",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    },
+    {
+      "capability": "margin_autopilot",
+      "enforces": false,
+      "evaluates": false,
+      "state": "off",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+    }
+  ]
+}

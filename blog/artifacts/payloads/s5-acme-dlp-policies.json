@@ -2,10 +2,10 @@
   "items": [
     {
       "action": "block",
-      "created_at": "2026-06-11T04:40:15.1004Z",
+      "created_at": "2026-06-14T11:40:51.110611Z",
       "description": "Detects credit card numbers (Luhn-validated) and blocks transmission.",
       "enabled": true,
-      "id": "7962040e-2886-4d96-a2f4-fe89b5d5034d",
+      "id": "5e5cde8a-d0e9-46af-978b-9cdee5a533b2",
       "name": "PCI-DSS",
       "rules": [
         {
@@ -15,7 +15,7 @@
         }
       ],
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-11T04:40:15.1004Z"
+      "updated_at": "2026-06-14T11:40:51.110611Z"
     }
   ],
   "next_cursor": ""

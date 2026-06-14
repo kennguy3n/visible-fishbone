@@ -1,5 +1,5 @@
 {
-  "created_at": "2026-06-12T01:01:44.541721Z",
+  "created_at": "2026-06-14T11:40:51.145051Z",
   "graph": {
     "default_action": "deny",
     "edges": [
@@ -277,8 +277,8 @@
       }
     ]
   },
-  "id": "c38877dc-829f-4b3c-8ded-2e1ea1b31189",
+  "id": "7e48995e-842d-4a66-a67f-dbda56c6666b",
   "is_draft": false,
   "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-  "version": 2
+  "version": 1
 }

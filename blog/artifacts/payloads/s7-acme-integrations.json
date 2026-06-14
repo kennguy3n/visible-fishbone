@@ -2,16 +2,16 @@
   "items": [
     {
       "config": {},
-      "created_at": "2026-06-11T04:40:15.120593Z",
+      "created_at": "2026-06-14T11:40:51.135414Z",
       "event_types": [],
-      "id": "9b041794-5dbc-4464-b964-420a6b5f4697",
+      "id": "2edc1301-3d21-4419-8dcd-be6aa0ba35b8",
       "last_test_result": "never",
       "name": "Acme Splunk HEC",
       "secret_set": false,
       "status": "active",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
       "type": "siem_webhook",
-      "updated_at": "2026-06-11T04:40:15.120593Z"
+      "updated_at": "2026-06-14T11:40:51.135414Z"
     }
   ]
 }
