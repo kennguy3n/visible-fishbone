@@ -509,6 +509,29 @@ type AI struct {
 	// GuardrailMaxTokensPerDay is the per-tenant daily token budget
 	// for LLM-backed AI calls (cost control). Defaults to 100000.
 	GuardrailMaxTokensPerDay int
+
+	// InferencePoolEnabled gates the WS-9 fleet-scale shared inference
+	// pool: a fair, tenant-aware admission layer with a bounded global
+	// concurrency cap in front of the single shared LLM backend.
+	// DEFAULT-OFF — when false the LLM path is exactly as before
+	// (per-tenant guardrails directly wrapping the HTTP provider) so an
+	// upgrade introduces no new scheduling behaviour. When true, every
+	// tenant's call is fair-queued so one bursty tenant cannot starve
+	// the fleet's shared model capacity.
+	InferencePoolEnabled bool
+	// InferencePoolMaxConcurrent is the global cap on in-flight requests
+	// to the shared backend. Size it to the model server's real
+	// parallelism (e.g. llama-server --parallel), NOT the tenant count.
+	// Defaults to 4.
+	InferencePoolMaxConcurrent int
+	// InferencePoolMaxQueuePerTenant bounds how many requests one tenant
+	// may have waiting before the pool sheds its load (graceful
+	// template fallback). Defaults to 8.
+	InferencePoolMaxQueuePerTenant int
+	// InferencePoolMaxWait caps how long a request may sit queued before
+	// it degrades to the template path. 0 ⇒ bounded only by the request
+	// context. Defaults to the AI_LLM_TIMEOUT-aligned 15s.
+	InferencePoolMaxWait time.Duration
 }
 
 // ThreatIntel carries the runtime knobs for the WORKSTREAM 8 threat
@@ -1831,6 +1854,13 @@ func Load() (Config, error) {
 		// limit / cost control.
 		{"AI_GUARDRAIL_MAX_REQUESTS_PER_MINUTE", 60, &cfg.AI.GuardrailMaxRequestsPerMinute},
 		{"AI_GUARDRAIL_MAX_TOKENS_PER_DAY", 100000, &cfg.AI.GuardrailMaxTokensPerDay},
+		// WS-9 shared inference pool sizing. Parsed strictly because a
+		// typo silently reverting the concurrency cap could either
+		// over-subscribe the shared model (latency collapse) or
+		// needlessly throttle the fleet. Defaults match
+		// internal/service/ai.InferencePoolConfig.normalize().
+		{"AI_INFERENCE_POOL_MAX_CONCURRENT", 4, &cfg.AI.InferencePoolMaxConcurrent},
+		{"AI_INFERENCE_POOL_MAX_QUEUE_PER_TENANT", 8, &cfg.AI.InferencePoolMaxQueuePerTenant},
 		{"CLICKHOUSE_BATCH_SIZE", 1024, &cfg.TelemetryAnalytics.ClickHouseBatchSize},
 		{"CLICKHOUSE_MAX_BACKLOG_MULTIPLIER", 4, &cfg.TelemetryAnalytics.ClickHouseMaxBacklogMultiplier},
 		// WS8 ClickHouse row-write limiter burst, in rows. 0 ⇒ use the
@@ -1905,6 +1935,12 @@ func Load() (Config, error) {
 		// 15s default: local quantized (Ternary-Bonsai-8B) inference is
 		// slower than a hosted API call. Matches ai.defaultTimeout.
 		{"AI_LLM_TIMEOUT", 15 * time.Second, &cfg.AI.Timeout},
+		// WS-9 shared inference pool max queue wait. 0 ⇒ bounded only by
+		// the request context. Defaults to 15s, aligned with
+		// AI_LLM_TIMEOUT, so a queued request never waits materially
+		// longer than a single inference would take before degrading to
+		// the deterministic template path.
+		{"AI_INFERENCE_POOL_MAX_WAIT", 15 * time.Second, &cfg.AI.InferencePoolMaxWait},
 		// Mobile IdP-federation session + discovery-cache lifetimes.
 		{"MOBILE_AUTH_SESSION_TOKEN_TTL", time.Hour, &cfg.MobileAuth.SessionTokenTTL},
 		{"MOBILE_AUTH_DISCOVERY_CACHE_TTL", 24 * time.Hour, &cfg.MobileAuth.DiscoveryCacheTTL},
@@ -2015,6 +2051,12 @@ func Load() (Config, error) {
 		// planner sees every tenant as dormant. Cheap (debounced, async)
 		// so there is no reason to ship it off by default.
 		{"ACTIVITY_TRACKING_ENABLED", true, &cfg.Activity.Enabled},
+		// WS-9 fleet-scale shared inference pool. DEFAULT-OFF: when
+		// unset the AI LLM path keeps its current behaviour (no fair
+		// scheduling / admission). Parsed strictly so a typo fails boot
+		// rather than silently leaving the pool off when an operator
+		// meant to turn it on.
+		{"AI_INFERENCE_POOL_ENABLED", false, &cfg.AI.InferencePoolEnabled},
 		// Alert false-positive feedback tuning loop. DEFAULT-OFF: the
 		// leader-only sweep mutates baseline Z-thresholds, so it is only
 		// registered when an operator explicitly opts in. Parsed strictly
@@ -2413,6 +2455,21 @@ func (c Config) validate() error {
 	// pipeline is enabled — the default-off path ignores the interval.
 	if c.ManagedDNSFeeds.Enabled && c.ManagedDNSFeeds.RefreshInterval <= 0 {
 		return fmt.Errorf("THREAT_INTEL_REFRESH_INTERVAL must be > 0 when THREAT_INTEL_ENABLED=true, got %s", c.ManagedDNSFeeds.RefreshInterval)
+	}
+	// WS-9 shared inference pool: when enabled, the concurrency cap and
+	// per-tenant queue depth must be positive. A <= 0 value would
+	// otherwise be silently overridden by InferencePoolConfig.normalize()
+	// (4 / 8 respectively), so an operator who sets the cap to 0 expecting
+	// "no pooling" would instead get a 4-slot pool. Fail loudly rather
+	// than run on sizing the operator never chose. Only enforced when the
+	// pool is enabled — the default-off path ignores these values.
+	if c.AI.InferencePoolEnabled {
+		if c.AI.InferencePoolMaxConcurrent <= 0 {
+			return fmt.Errorf("AI_INFERENCE_POOL_MAX_CONCURRENT must be > 0 when AI_INFERENCE_POOL_ENABLED=true, got %d", c.AI.InferencePoolMaxConcurrent)
+		}
+		if c.AI.InferencePoolMaxQueuePerTenant <= 0 {
+			return fmt.Errorf("AI_INFERENCE_POOL_MAX_QUEUE_PER_TENANT must be > 0 when AI_INFERENCE_POOL_ENABLED=true, got %d", c.AI.InferencePoolMaxQueuePerTenant)
+		}
 	}
 	// Alert feedback tuning loop: when enabled its cadence must be
 	// positive (a <= 0 interval would be silently overridden by the
