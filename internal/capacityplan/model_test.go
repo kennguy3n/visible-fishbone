@@ -177,6 +177,67 @@ func TestTierSamplingShrinksClickHouseNotNATS(t *testing.T) {
 	}
 }
 
+func TestHibernationShrinksClickHouseNotNATS(t *testing.T) {
+	// WS-3 hibernation parks the dormant share's telemetry at the
+	// near-zero sample rate, so ClickHouse stores far fewer rows. NATS
+	// is sized for the un-hibernated fleet, though: a hibernated tenant
+	// wakes on activity and resumes publishing, so the JetStream stream
+	// must keep its full-rate capacity. Same fleet, hibernation off vs on.
+	base := Run(Config{TenantCount: 5000})
+	s := Run(Config{TenantCount: 5000, DormantFraction: 0.8})
+
+	// 80% dormant → effective emitting tenants well below the headcount,
+	// surfaced for the operator.
+	if s.DormantFraction != 0.8 {
+		t.Fatalf("dormant fraction = %v, want 0.8", s.DormantFraction)
+	}
+	if s.EmittingTenantsEffective >= float64(s.TenantCount) {
+		t.Fatalf("effective emitting tenants (%.1f) should be below the headcount (%d) under hibernation",
+			s.EmittingTenantsEffective, s.TenantCount)
+	}
+	// ClickHouse only stores what the parked fleet emits, so its write
+	// rate collapses below the full-fidelity baseline.
+	if s.ClickHouse.TotalRowsPerSec >= base.ClickHouse.TotalRowsPerSec {
+		t.Fatalf("clickhouse rows/s with hibernation (%.1f) should be below baseline (%.1f)",
+			s.ClickHouse.TotalRowsPerSec, base.ClickHouse.TotalRowsPerSec)
+	}
+	// Per-ACTIVE-tenant rows track the full per-tenant rate (the active
+	// cohort still writes full fidelity); the fleet mean drops because it
+	// averages in the parked dormant tenants.
+	if s.ClickHouse.PerActiveTenantMonthlyRows <= s.ClickHouse.PerTenantMonthlyRows {
+		t.Fatalf("per-active rows/mo (%d) should exceed the fleet mean (%d) under hibernation",
+			s.ClickHouse.PerActiveTenantMonthlyRows, s.ClickHouse.PerTenantMonthlyRows)
+	}
+	// NATS stays sized for the full fleet — hibernation is a dynamic,
+	// wake-on-activity state, so the stream never shrinks.
+	if s.NATS.MsgsPerSec != base.NATS.MsgsPerSec {
+		t.Fatalf("nats msgs/s with hibernation (%.1f) should equal the full-rate baseline (%.1f); a parked tenant can wake and publish",
+			s.NATS.MsgsPerSec, base.NATS.MsgsPerSec)
+	}
+	if s.NATS.StreamBytesHot != base.NATS.StreamBytesHot {
+		t.Fatalf("nats stream bytes with hibernation (%d) should equal the full-rate baseline (%d)",
+			s.NATS.StreamBytesHot, base.NATS.StreamBytesHot)
+	}
+}
+
+// TestHibernationOffReproducesBaseline locks in that an empty / zero
+// DormantFraction config reproduces the pre-WS-3 projection exactly, so
+// the default output is unchanged (the model's honesty contract).
+func TestHibernationOffReproducesBaseline(t *testing.T) {
+	base := Run(Config{TenantCount: 5000})
+	if base.DormantFraction != 0 {
+		t.Fatalf("default dormant fraction = %v, want 0", base.DormantFraction)
+	}
+	if base.EmittingTenantsEffective != float64(base.TenantCount) {
+		t.Fatalf("effective emitting tenants (%.1f) should equal the headcount (%d) with hibernation off",
+			base.EmittingTenantsEffective, base.TenantCount)
+	}
+	if base.ClickHouse.PerActiveTenantMonthlyRows != base.ClickHouse.PerTenantMonthlyRows {
+		t.Fatalf("per-active rows/mo (%d) should equal the fleet mean (%d) with hibernation off",
+			base.ClickHouse.PerActiveTenantMonthlyRows, base.ClickHouse.PerTenantMonthlyRows)
+	}
+}
+
 func TestClickHouseShardsWhenBatchCapped(t *testing.T) {
 	s := Run(Config{TenantCount: 1_000_000})
 	ch := s.ClickHouse

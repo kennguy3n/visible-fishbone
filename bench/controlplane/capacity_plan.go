@@ -63,6 +63,10 @@ func (r *BusinessBenchmarkReport) writeCapacityPlanMarkdown(b *strings.Builder) 
 	fmt.Fprintf(b, "### Capacity plan @ %d tenants × %d telemetry classes\n\n",
 		cp.TenantCount, len(cp.TelemetryClasses))
 	fmt.Fprintf(b, "Telemetry classes: `%s`\n\n", strings.Join(cp.TelemetryClasses, "`, `"))
+	if cp.DormantFraction > 0 {
+		fmt.Fprintf(b, "Hibernation: %.0f%% dormant → **%.1f** effective emitting tenants (parked telemetry at the near-zero hibernated sample rate).\n\n",
+			cp.DormantFraction*100, cp.EmittingTenantsEffective)
+	}
 
 	pg := cp.Postgres
 	b.WriteString("**Postgres connection-pool pressure**\n\n")

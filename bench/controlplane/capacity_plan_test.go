@@ -4,8 +4,23 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kennguy3n/visible-fishbone/internal/capacityplan"
 	"github.com/kennguy3n/visible-fishbone/internal/service/telemetry"
+	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy/hibernation"
 )
+
+// TestHibernatedSampleRateMatchesService guards against silent drift
+// between the capacity model's DefaultHibernatedSampleRate and the
+// control-plane sampler's. The capacityplan package deliberately
+// re-declares the constant to stay free of any service-layer import;
+// this test-only import keeps that decoupling while still failing CI if
+// the two values diverge.
+func TestHibernatedSampleRateMatchesService(t *testing.T) {
+	if capacityplan.DefaultHibernatedSampleRate != hibernation.DefaultHibernatedSampleRate {
+		t.Fatalf("capacityplan.DefaultHibernatedSampleRate (%v) drifted from hibernation.DefaultHibernatedSampleRate (%v); keep them in lock-step",
+			capacityplan.DefaultHibernatedSampleRate, hibernation.DefaultHibernatedSampleRate)
+	}
+}
 
 // TestCapacityPlanIdleMultiplierTracksRuntime guards against the
 // capacity model's idle keep fraction silently drifting from the runtime
