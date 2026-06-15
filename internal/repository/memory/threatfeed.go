@@ -2,8 +2,10 @@ package memory
 
 import (
 	"context"
+	"runtime"
 	"sort"
 	"sync"
+	"weak"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 )
@@ -15,13 +17,20 @@ import (
 // state cannot live as new fields on Store.
 //
 // Instead the state hangs off a package-private side table keyed by the
-// owning *Store. That preserves the backend's "one shared store"
+// owning Store. That preserves the backend's "one shared store"
 // semantics — every NewThreatFeedRepository(s) for the same Store sees
 // the same data, exactly like the field-on-Store repos — while keeping
 // per-test isolation (each test builds a fresh Store) and touching no
 // shared file. Timestamps still come from the Store's injected clock
 // (r.s.clock()) so deterministic-clock tests behave identically to the
 // other memory repos.
+//
+// The side table is keyed by a weak.Pointer[Store] and paired with a
+// runtime.AddCleanup hook so it never keeps a Store alive: once a Store
+// becomes unreachable (e.g. the fresh Store every test builds) it is
+// reclaimed and its entry is deleted. Keying by a strong *Store would
+// instead pin every Store ever constructed for the lifetime of the
+// process — a genuine leak under a large test suite.
 
 // threatFeedState is the mutable in-memory state for one Store's managed
 // threat-content tables. Its own mutex guards it independently of the
@@ -44,21 +53,38 @@ func newThreatFeedState() *threatFeedState {
 
 var threatFeedStates = struct {
 	mu sync.Mutex
-	m  map[*Store]*threatFeedState
-}{m: map[*Store]*threatFeedState{}}
+	m  map[weak.Pointer[Store]]*threatFeedState
+}{m: map[weak.Pointer[Store]]*threatFeedState{}}
 
 // threatFeedStateFor lazily allocates and returns the managed
 // threat-content state for a Store, so repeated repository constructions
-// share one state per Store.
+// share one state per Store. weak.Make returns equal pointers for equal
+// inputs, so a lookup while the Store is live behaves like an ordinary
+// identity-keyed map.
 func (s *Store) threatFeedStateFor() *threatFeedState {
+	key := weak.Make(s)
 	threatFeedStates.mu.Lock()
 	defer threatFeedStates.mu.Unlock()
-	st := threatFeedStates.m[s]
-	if st == nil {
-		st = newThreatFeedState()
-		threatFeedStates.m[s] = st
+	if st := threatFeedStates.m[key]; st != nil {
+		return st
 	}
+	st := newThreatFeedState()
+	threatFeedStates.m[key] = st
+	// Reclaim the entry once the Store is garbage-collected so the side
+	// table never pins freed Stores. The cleanup captures only the weak
+	// key (never the Store), so registering it does not itself keep the
+	// Store alive and defeat the cleanup.
+	runtime.AddCleanup(s, cleanupThreatFeedState, key)
 	return st
+}
+
+// cleanupThreatFeedState removes a reclaimed Store's entry from the side
+// table. It is a package-level function (not a closure over the Store) so
+// it holds no strong reference back to the collected Store.
+func cleanupThreatFeedState(key weak.Pointer[Store]) {
+	threatFeedStates.mu.Lock()
+	delete(threatFeedStates.m, key)
+	threatFeedStates.mu.Unlock()
 }
 
 // ThreatFeedRepository is the in-memory managed threat-content
