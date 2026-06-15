@@ -30,6 +30,8 @@ import type {
 
 import type {
   AdminListAppRegistry200,
+  AdminListGlobalAuditLog200,
+  AdminListGlobalAuditLogParams,
   AdminSyncAppRegistry200,
   AppRegistry,
   AppRegistryRequest
@@ -39,6 +41,102 @@ import { sngRequest } from '../../../http-client';
 
 
 type SecondParameter<T extends (...args: never) => unknown> = Parameters<T>[1];
+
+
+
+/**
+ * Returns append-only audit rows that have no owning tenant (tenant_id is null) — e.g. global app-registry catalog mutations and vendor-feed syncs. These are invisible to the tenant-scoped audit-log endpoint.
+
+Platform admin only: the caller must present a platform-scoped credential (no tenant_id claim) holding the `audit:read_platform` permission (or the platform wildcard). An MSP- or tenant-scoped grant does not satisfy it — a tenant-bound credential is rejected with 403.
+
+ * @summary List platform-scoped (tenant-less) audit entries
+ */
+export const adminListGlobalAuditLog = (
+    params?: AdminListGlobalAuditLogParams,
+ options?: SecondParameter<typeof sngRequest>,signal?: AbortSignal
+) => {
+      
+      
+      return sngRequest<AdminListGlobalAuditLog200>(
+      {url: `/admin/audit-log`, method: 'GET',
+        params, signal
+    },
+      options);
+    }
+  
+
+
+
+export const getAdminListGlobalAuditLogQueryKey = (params?: AdminListGlobalAuditLogParams,) => {
+    return [
+    `/admin/audit-log`, ...(params ? [params]: [])
+    ] as const;
+    }
+
+    
+export const getAdminListGlobalAuditLogQueryOptions = <TData = Awaited<ReturnType<typeof adminListGlobalAuditLog>>, TError = void | void>(params?: AdminListGlobalAuditLogParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof adminListGlobalAuditLog>>, TError, TData>>, request?: SecondParameter<typeof sngRequest>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getAdminListGlobalAuditLogQueryKey(params);
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof adminListGlobalAuditLog>>> = ({ signal }) => adminListGlobalAuditLog(params, requestOptions, signal);
+
+      
+
+      
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof adminListGlobalAuditLog>>, TError, TData> & { queryKey: DataTag<QueryKey, TData> }
+}
+
+export type AdminListGlobalAuditLogQueryResult = NonNullable<Awaited<ReturnType<typeof adminListGlobalAuditLog>>>
+export type AdminListGlobalAuditLogQueryError = void | void
+
+
+export function useAdminListGlobalAuditLog<TData = Awaited<ReturnType<typeof adminListGlobalAuditLog>>, TError = void | void>(
+ params: undefined |  AdminListGlobalAuditLogParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof adminListGlobalAuditLog>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof adminListGlobalAuditLog>>,
+          TError,
+          Awaited<ReturnType<typeof adminListGlobalAuditLog>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> }
+export function useAdminListGlobalAuditLog<TData = Awaited<ReturnType<typeof adminListGlobalAuditLog>>, TError = void | void>(
+ params?: AdminListGlobalAuditLogParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof adminListGlobalAuditLog>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof adminListGlobalAuditLog>>,
+          TError,
+          Awaited<ReturnType<typeof adminListGlobalAuditLog>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> }
+export function useAdminListGlobalAuditLog<TData = Awaited<ReturnType<typeof adminListGlobalAuditLog>>, TError = void | void>(
+ params?: AdminListGlobalAuditLogParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof adminListGlobalAuditLog>>, TError, TData>>, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> }
+/**
+ * @summary List platform-scoped (tenant-less) audit entries
+ */
+
+export function useAdminListGlobalAuditLog<TData = Awaited<ReturnType<typeof adminListGlobalAuditLog>>, TError = void | void>(
+ params?: AdminListGlobalAuditLogParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof adminListGlobalAuditLog>>, TError, TData>>, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient 
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> } {
+
+  const queryOptions = getAdminListGlobalAuditLogQueryOptions(params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
 
 
 

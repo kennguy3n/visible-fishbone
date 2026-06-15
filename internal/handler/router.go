@@ -93,6 +93,12 @@ type RouterDeps struct {
 	// middleware degrades to a transparent pass-through), so tests
 	// that don't care about metrics can leave it unset.
 	Metrics *metrics.Metrics
+	// ManagedThreatContent, when set, exposes the managed (curated)
+	// threat-content surface (WP3): a tenant-scoped read of the
+	// fleet-wide curated bundle a tenant receives and a system-scoped
+	// manual refresh trigger. Distinct from ThreatFeed, which serves
+	// the operator-configured ai feed-coverage view.
+	ManagedThreatContent *ManagedThreatContentHandler
 }
 
 // NewRouter composes the full API mux + middleware chain.
@@ -238,6 +244,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.RBI != nil {
 		deps.RBI.Register(apiMux)
+	}
+	if deps.ManagedThreatContent != nil {
+		deps.ManagedThreatContent.Register(apiMux)
 	}
 
 	authOpts := []middleware.AuthOption{}

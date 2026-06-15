@@ -13,7 +13,12 @@ import type { AuditEntryDetails } from './auditEntryDetails';
 
 export interface AuditEntry {
   id: string;
-  tenant_id: string;
+  /**
+   * Owning tenant, or null for platform-scoped rows returned by the admin audit-log endpoint (global catalog mutations and vendor syncs have no owning tenant).
+
+   * @nullable
+   */
+  tenant_id: string | null;
   actor_id?: string;
   action: string;
   resource_type: string;
