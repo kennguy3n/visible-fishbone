@@ -86,6 +86,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/troubleshoot"
 	"github.com/kennguy3n/visible-fishbone/internal/service/troubleshoot/checks"
 	"github.com/kennguy3n/visible-fishbone/internal/service/webhook"
+	"github.com/kennguy3n/visible-fishbone/internal/service/workshard"
 )
 
 func main() {
@@ -666,21 +667,55 @@ func run() error {
 			slog.Duration("dwell_window", cfg.RolloutAutopilot.DwellWindow))
 	}
 
-	// Leader-only alert false-positive feedback tuning loop. DEFAULT-OFF
+	// Active/active tenant-shard work distributor (WP2). Every replica
+	// registers in the Postgres-backed worker registry, heartbeats its
+	// liveness, and leases the shards it owns by rendezvous hashing, so
+	// the per-tenant background jobs below can run active/active (each
+	// tenant owned by exactly one live worker) instead of serially on a
+	// single elected leader. Start runs one assignment cycle
+	// synchronously, so ownership is established before any gated job
+	// first consults it; its failure is non-fatal (the loop retries and
+	// ownership stays empty/fail-closed until a cycle succeeds). The
+	// deferred Stop cancels the loop, releasing this worker's leases for
+	// an immediate handoff, and blocks until that completes. It is
+	// registered after the earlier `defer pool.Close()`, so LIFO
+	// ordering runs the release against a live pool; using the
+	// distributor's own context (not rootCtx) keeps Stop safe on early
+	// error-return paths, where rootCtx is never cancelled.
+	if err := rc.WorkShard.Start(rootCtx); err != nil {
+		logger.Warn("sng-control: workshard initial cycle failed; retrying in background",
+			slog.Any("error", err))
+	}
+	defer rc.WorkShard.Stop()
+	logger.Info("sng-control: tenant-shard work distributor enabled (active/active)",
+		slog.String("worker_id", rc.WorkShard.WorkerID().String()),
+		slog.Int("shard_count", rc.WorkShard.ShardCount()))
+
+	// Alert false-positive feedback tuning loop. DEFAULT-OFF
 	// (cfg.AlertFeedback.TuningEnabled): the sweep mutates baseline
 	// Z-thresholds, so it is registered only when an operator opts in.
-	// Leader-gated so only the lock holder tunes, and activity-tiered
-	// (the configured TieredSweep) so dormant trials are re-tuned at a
-	// reduced cadence while active tenants stay on the per-tick cadence.
-	// Own goroutine because RunIfLeader blocks until rootCtx is cancelled.
+	// Re-gated from leader-only onto workshard ownership so it runs
+	// active/active — each tenant tuned by exactly one live worker per
+	// cycle, spreading the work across replicas instead of serializing it
+	// on the lock holder. The activity-tiered TieredSweep path (the prod
+	// configuration) is ownership-filtered at its activity source (wired
+	// in buildRouter); the fallback enumeration below is filtered here too
+	// so both paths agree. A single-replica deployment owns every shard,
+	// so this tunes exactly the tenants the old leader path did.
 	if cfg.AlertFeedback.TuningEnabled && rc.AlertFeedback != nil {
 		feedbackSvc := rc.AlertFeedback
-		tenantsFn := rc.AlertFeedbackTenants
+		allTenantsFn := rc.AlertFeedbackTenants
+		workShard := rc.WorkShard
+		ownedTenantsFn := func(ctx context.Context) ([]uuid.UUID, error) {
+			all, err := allTenantsFn(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return workShard.FilterOwned(all), nil
+		}
 		interval := cfg.AlertFeedback.TuningInterval
-		go elector.RunIfLeader(rootCtx, "alert-feedback-tuning", func(ctx context.Context) {
-			feedbackSvc.Run(ctx, interval, tenantsFn)
-		})
-		logger.Info("sng-control: alert feedback tuning loop enabled (runs on leader only)",
+		go feedbackSvc.Run(rootCtx, interval, ownedTenantsFn)
+		logger.Info("sng-control: alert feedback tuning loop enabled (active/active via workshard ownership)",
 			slog.Duration("interval", interval))
 	}
 
@@ -1165,6 +1200,14 @@ type routerComponents struct {
 	// ManagedThreatContentEnabled mirrors the kill switch
 	// (MANAGED_THREAT_CONTENT_ENABLED) for the leader-loop boot decision.
 	ManagedThreatContentEnabled bool
+	// WorkShard is the active/active tenant-shard work distributor (WP2).
+	// Always non-nil. main() Starts it (every replica registers + leases
+	// the shards it owns) and Stops it on shutdown for a clean handoff;
+	// the per-tenant background jobs that used to be leader-gated consult
+	// its ownership instead, so they spread across replicas with exactly
+	// one worker per tenant. A single-replica deployment owns every shard
+	// and behaves identically to the old leader path.
+	WorkShard *workshard.Distributor
 }
 
 // hibernationActivityLister adapts the tenant repository's
@@ -1206,6 +1249,35 @@ func (l retroTenantLister) ListRetroHuntTenants(ctx context.Context) ([]uuid.UUI
 	out := make([]uuid.UUID, 0, len(acts))
 	for _, a := range acts {
 		out = append(out, a.ID)
+	}
+	return out, nil
+}
+
+// workshardActivityFilter gates a TenantActivitySource on shard
+// ownership so a per-tenant background sweep runs active/active: it
+// returns only the (id, last_active_at) rows for tenants this worker
+// currently owns. Wrapping the activity source — rather than only the
+// fallback tenant lister — is what makes the dormancy-swept path
+// (alert.Feedback's prod configuration) ownership-aware, since that path
+// consults the activity source directly. The distributor fails closed
+// (owns nothing until its first assignment cycle completes), so a
+// tenant is never tuned by two workers at once; a single-replica
+// deployment owns every shard, leaving the projection unfiltered.
+type workshardActivityFilter struct {
+	inner alert.TenantActivitySource
+	owner *workshard.Distributor
+}
+
+func (f workshardActivityFilter) ListTenantActivity(ctx context.Context) ([]repository.TenantActivity, error) {
+	acts, err := f.inner.ListTenantActivity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := acts[:0]
+	for _, a := range acts {
+		if f.owner.Owns(a.ID) {
+			out = append(out, a)
+		}
 	}
 	return out, nil
 }
@@ -1326,6 +1398,18 @@ func buildRouter(
 	store := postgres.NewStoreWithPool(pool)
 
 	tenantRepo := store.NewTenantRepository()
+
+	// Active/active tenant-shard work distributor (WP2). Constructed
+	// here so the leader-gated per-tenant jobs below can be re-gated on
+	// shard ownership instead of single-leader election; main() owns its
+	// Start/Stop lifecycle. Defaults (1024 shards, 20s lease, 5s cycle)
+	// keep per-replica cost to a bounded handful of queries per cycle
+	// regardless of tenant count, and a single replica owns every shard
+	// so small deployments behave exactly as before at near-zero cost.
+	workShard := workshard.New(
+		store.NewWorkShardRepository(),
+		workshard.WithLogger(logger.With(slog.String("component", "workshard"))),
+	)
 
 	// Per-tenant activity recorder. This is the writer that makes the
 	// dormancy story real: it advances tenants.last_active_at from the
@@ -1979,7 +2063,15 @@ func buildRouter(
 	// sweep_tenants_visited{job="alert_feedback_tuning"}. tenantRepo
 	// supplies the cheap (id, last_active_at) projection.
 	alertFeedbackSweep := tenancy.NewTieredSweep("alert_feedback_tuning", tenancy.DefaultPlanner(), sweepObs)
-	alertFeedback.WithDormancySweep(alertFeedbackSweep, tenantRepo)
+	// Gate the activity-tiered sweep on shard ownership so the tuning
+	// loop runs active/active (each tenant tuned by exactly one live
+	// worker) instead of leader-only. The filter wraps tenantRepo's cheap
+	// (id, last_active_at) projection and drops tenants this worker does
+	// not currently own, so the TieredSweep still buckets by activity but
+	// only over this replica's share. A single replica owns every shard,
+	// so the projection is unfiltered and behaviour is unchanged.
+	alertFeedback.WithDormancySweep(alertFeedbackSweep,
+		workshardActivityFilter{inner: tenantRepo, owner: workShard})
 	// NOTE: baseline.NewService(baselineRepo) is intentionally
 	// NOT constructed here. The Service / Detector pair is
 	// wired by the telemetry consumer (future block) once the
@@ -2726,6 +2818,7 @@ func buildRouter(
 		ManagedThreatContentEngine:   managedThreatContentEngine,
 		ManagedThreatContentInterval: tfCfg.RefreshInterval,
 		ManagedThreatContentEnabled:  tfCfg.Enabled,
+		WorkShard:                    workShard,
 	}, nil
 }
 
