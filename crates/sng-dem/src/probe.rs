@@ -112,16 +112,21 @@ where
 }
 
 /// Classify a `reqwest` transport error into a probe-failure kind.
-fn classify_reqwest(e: &reqwest::Error) -> ProbeFail {
+///
+/// `fallback` buckets an error that is neither a timeout nor a connect
+/// fault, which depends on the phase: the TTFB (`send`) phase passes
+/// [`ProbeErrorKind::Tls`] (a handshake fault sits just above the
+/// completed TCP connect), while the body-drain phase passes
+/// [`ProbeErrorKind::Http`] — TLS is already established by then, so a
+/// mid-body fault (e.g. a connection reset) is a transport/HTTP-layer
+/// error, not a TLS one.
+fn classify_reqwest(e: &reqwest::Error, fallback: ProbeErrorKind) -> ProbeFail {
     let kind = if e.is_timeout() {
         ProbeErrorKind::Timeout
     } else if e.is_connect() {
         ProbeErrorKind::Connect
     } else {
-        // TLS handshake faults and other request-layer errors are
-        // bucketed as `Tls` — they sit above the TCP connect that
-        // already succeeded.
-        ProbeErrorKind::Tls
+        fallback
     };
     ProbeFail::new(kind, e.to_string())
 }
@@ -152,7 +157,7 @@ async fn http_phase(
             .get(url)
             .send()
             .await
-            .map_err(|e| classify_reqwest(&e))
+            .map_err(|e| classify_reqwest(&e, ProbeErrorKind::Tls))
     })
     .await?;
     let ttfb_ms = elapsed_ms(start);
@@ -162,7 +167,9 @@ async fn http_phase(
     // from the same shared budget, so a slow body cannot extend the
     // probe past one `timeout_ms`.
     let _body = with_timeout(remaining(deadline), async {
-        resp.bytes().await.map_err(|e| classify_reqwest(&e))
+        resp.bytes()
+            .await
+            .map_err(|e| classify_reqwest(&e, ProbeErrorKind::Http))
     })
     .await?;
     let total_ms = elapsed_ms(start);
