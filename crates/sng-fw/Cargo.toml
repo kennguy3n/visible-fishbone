@@ -18,6 +18,12 @@ sng-core = { workspace = true }
 # compile the NGFW slice of the bundle into nftables rule sets.
 sng-policy-eval = { workspace = true }
 
+# Application-identity catalog. The L7 classifier enriches its
+# closed-set protocol verdict with a data-driven app-id (e.g.
+# `microsoft.teams`) from the signed, versioned signature catalog.
+# Enrichment is additive — the legacy `L7Protocol` is unchanged.
+sng-appid = { workspace = true }
+
 # eBPF/XDP fast path. The `DataPathBackend` abstraction's
 # `EbpfDataPath` impl translates the hot-path L3/L4 subset of a
 # compiled ruleset into this crate's userspace XDP model. The

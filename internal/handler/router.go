@@ -51,6 +51,7 @@ type RouterDeps struct {
 	Metering     *MeteringHandler
 	PoP          *PoPHandler
 	ThreatFeed   *ThreatFeedHandler
+	AppID        *AppIDHandler
 	Sandbox      *SandboxHandler
 	RBI          *RBIHandler
 	OpenAPISpec  *OpenAPIHandler
@@ -239,6 +240,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.ThreatFeed != nil {
 		deps.ThreatFeed.Register(apiMux)
+	}
+	if deps.AppID != nil {
+		deps.AppID.Register(apiMux)
 	}
 	if deps.Sandbox != nil {
 		deps.Sandbox.Register(apiMux)

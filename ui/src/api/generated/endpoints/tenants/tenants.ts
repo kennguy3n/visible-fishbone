@@ -32,7 +32,9 @@ import type {
   ErrorResponse,
   ListTenants200,
   ListTenantsParams,
+  MigrateRegionRequest,
   TenantCreateRequest,
+  TenantMigrationResponse,
   TenantResponse,
   TenantUpdateRequest
 } from '../../model';
@@ -478,4 +480,161 @@ export const useSuspendTenant = <TError = unknown,
 
       return useMutation(mutationOptions, queryClient);
     }
+    /**
+ * Drives a resumable migration state machine that re-wraps the tenant's data-encryption keys under the target region's KEK, copies telemetry and object storage, re-pins the tenant onto a target-region PoP, and finally flips the authoritative tenants.region column. Any step failure rolls back every completed step in reverse; the tenant is dual-read throughout so no traffic is lost. Returns 202 with the migration record on a successful run, 200 with a terminal record (rolled_back/failed) if the run rolled back, 409 if a migration is already in flight, and 422 if the tenant has no source region to migrate from.
+
+ * @summary Start a cross-region migration for the tenant
+ */
+export const migrateTenantRegion = (
+    tenantId: string,
+    migrateRegionRequest: MigrateRegionRequest,
+ options?: SecondParameter<typeof sngRequest>,signal?: AbortSignal
+) => {
+      
+      
+      return sngRequest<TenantMigrationResponse | TenantMigrationResponse>(
+      {url: `/tenants/${tenantId}/migrate-region`, method: 'POST',
+      headers: {'Content-Type': 'application/json', },
+      data: migrateRegionRequest, signal
+    },
+      options);
+    }
+  
+
+
+export const getMigrateTenantRegionMutationOptions = <TError = ErrorResponse | ErrorResponse | ErrorResponse | ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof migrateTenantRegion>>, TError,{tenantId: string;data: MigrateRegionRequest}, TContext>, request?: SecondParameter<typeof sngRequest>}
+): UseMutationOptions<Awaited<ReturnType<typeof migrateTenantRegion>>, TError,{tenantId: string;data: MigrateRegionRequest}, TContext> => {
+
+const mutationKey = ['migrateTenantRegion'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof migrateTenantRegion>>, {tenantId: string;data: MigrateRegionRequest}> = (props) => {
+          const {tenantId,data} = props ?? {};
+
+          return  migrateTenantRegion(tenantId,data,requestOptions)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type MigrateTenantRegionMutationResult = NonNullable<Awaited<ReturnType<typeof migrateTenantRegion>>>
+    export type MigrateTenantRegionMutationBody = MigrateRegionRequest
+    export type MigrateTenantRegionMutationError = ErrorResponse | ErrorResponse | ErrorResponse | ErrorResponse
+
+    /**
+ * @summary Start a cross-region migration for the tenant
+ */
+export const useMigrateTenantRegion = <TError = ErrorResponse | ErrorResponse | ErrorResponse | ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof migrateTenantRegion>>, TError,{tenantId: string;data: MigrateRegionRequest}, TContext>, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof migrateTenantRegion>>,
+        TError,
+        {tenantId: string;data: MigrateRegionRequest},
+        TContext
+      > => {
+
+      const mutationOptions = getMigrateTenantRegionMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    /**
+ * @summary Get the tenant's most recent migration record
+ */
+export const getTenantMigrationStatus = (
+    tenantId: string,
+ options?: SecondParameter<typeof sngRequest>,signal?: AbortSignal
+) => {
+      
+      
+      return sngRequest<TenantMigrationResponse>(
+      {url: `/tenants/${tenantId}/migration-status`, method: 'GET', signal
+    },
+      options);
+    }
+  
+
+
+
+export const getGetTenantMigrationStatusQueryKey = (tenantId?: string,) => {
+    return [
+    `/tenants/${tenantId}/migration-status`
+    ] as const;
+    }
+
     
+export const getGetTenantMigrationStatusQueryOptions = <TData = Awaited<ReturnType<typeof getTenantMigrationStatus>>, TError = ErrorResponse>(tenantId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTenantMigrationStatus>>, TError, TData>>, request?: SecondParameter<typeof sngRequest>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetTenantMigrationStatusQueryKey(tenantId);
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getTenantMigrationStatus>>> = ({ signal }) => getTenantMigrationStatus(tenantId, requestOptions, signal);
+
+      
+
+      
+
+   return  { queryKey, queryFn, enabled: !!(tenantId), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getTenantMigrationStatus>>, TError, TData> & { queryKey: DataTag<QueryKey, TData> }
+}
+
+export type GetTenantMigrationStatusQueryResult = NonNullable<Awaited<ReturnType<typeof getTenantMigrationStatus>>>
+export type GetTenantMigrationStatusQueryError = ErrorResponse
+
+
+export function useGetTenantMigrationStatus<TData = Awaited<ReturnType<typeof getTenantMigrationStatus>>, TError = ErrorResponse>(
+ tenantId: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTenantMigrationStatus>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getTenantMigrationStatus>>,
+          TError,
+          Awaited<ReturnType<typeof getTenantMigrationStatus>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> }
+export function useGetTenantMigrationStatus<TData = Awaited<ReturnType<typeof getTenantMigrationStatus>>, TError = ErrorResponse>(
+ tenantId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTenantMigrationStatus>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getTenantMigrationStatus>>,
+          TError,
+          Awaited<ReturnType<typeof getTenantMigrationStatus>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> }
+export function useGetTenantMigrationStatus<TData = Awaited<ReturnType<typeof getTenantMigrationStatus>>, TError = ErrorResponse>(
+ tenantId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTenantMigrationStatus>>, TError, TData>>, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> }
+/**
+ * @summary Get the tenant's most recent migration record
+ */
+
+export function useGetTenantMigrationStatus<TData = Awaited<ReturnType<typeof getTenantMigrationStatus>>, TError = ErrorResponse>(
+ tenantId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getTenantMigrationStatus>>, TError, TData>>, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient 
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> } {
+
+  const queryOptions = getGetTenantMigrationStatusQueryOptions(tenantId,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
