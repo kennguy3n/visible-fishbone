@@ -33,6 +33,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"sync/atomic"
@@ -199,6 +200,15 @@ func (h *PolicyRecommendationHandler) generate(w http.ResponseWriter, r *http.Re
 
 	rec, err := engine.Generate(r.Context(), tenantID, actorFromCtx(r), genReq)
 	if err != nil {
+		// ErrTelemetryUnavailable is not a repository sentinel, so map it
+		// to 503 here (the status the OpenAPI spec declares) rather than
+		// letting WriteRepositoryError fall through to 500. The Ready()
+		// gate above normally makes this unreachable, but mapping it keeps
+		// the contract correct independent of that gate.
+		if errors.Is(err, policyrec.ErrTelemetryUnavailable) {
+			WriteError(w, http.StatusServiceUnavailable, "unavailable", "policy recommendation engine requires the telemetry hot tier, which is not configured on this deployment")
+			return
+		}
 		WriteRepositoryError(w, err)
 		return
 	}

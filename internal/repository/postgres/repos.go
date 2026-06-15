@@ -316,4 +316,5 @@ var (
 	_ repository.DLPModelRepository              = (*DLPModelRepository)(nil)
 	_ repository.BrowserPolicyRepository         = (*BrowserPolicyRepository)(nil)
 	_ repository.DataClassificationRepository    = (*DataClassificationRepository)(nil)
+	_ repository.PolicyRecommendationRepository  = (*PolicyRecommendationRepository)(nil)
 )
