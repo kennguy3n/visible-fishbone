@@ -51,10 +51,16 @@ type stubRefresher struct {
 	result  threatfeed.RefreshResult
 	err     error
 	calls   int
+	// ctxErrAtCall and ctxHasDeadline observe the context as seen *during*
+	// the call, before the handler's deferred cancel() can fire.
+	ctxErrAtCall   error
+	ctxHasDeadline bool
 }
 
-func (r *stubRefresher) RefreshOnce(context.Context) (threatfeed.RefreshResult, error) {
+func (r *stubRefresher) RefreshOnce(ctx context.Context) (threatfeed.RefreshResult, error) {
 	r.calls++
+	r.ctxErrAtCall = ctx.Err()
+	_, r.ctxHasDeadline = ctx.Deadline()
 	return r.result, r.err
 }
 
@@ -223,6 +229,37 @@ func TestManagedThreatContent_RefreshHappyPath(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"disabled":true`) {
 		t.Fatalf("expected \"disabled\":true in JSON body: %s", rec.Body.String())
+	}
+}
+
+// A manual refresh produces fleet-wide content and holds the engine's
+// refresh lock for the whole cycle, so a client disconnect or gateway
+// timeout must not abort it. The handler detaches the ingestion context
+// from the HTTP request: even when the request context is already dead,
+// the refresh runs and the context it receives is not cancelled.
+func TestManagedThreatContent_RefreshDetachesFromRequestContext(t *testing.T) {
+	t.Parallel()
+	ref := &stubRefresher{enabled: true, result: threatfeed.RefreshResult{Serial: 9}}
+	mux := managedMux(&stubThreatContentStore{}, ref, platformAuthz{allow: true})
+
+	req := authedReq(httptest.NewRequest(http.MethodPost, "/api/v1/threat-content/refresh", nil))
+	ctx, cancel := context.WithCancel(req.Context())
+	cancel() // request is already cancelled before the handler runs
+	req = req.WithContext(ctx)
+
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if ref.calls != 1 {
+		t.Fatalf("RefreshOnce called %d times, want 1", ref.calls)
+	}
+	if ref.ctxErrAtCall != nil {
+		t.Fatalf("refresh context must be detached from the cancelled request, got Err()=%v", ref.ctxErrAtCall)
+	}
+	if !ref.ctxHasDeadline {
+		t.Fatal("detached refresh context must still carry a bounded deadline")
 	}
 }
 

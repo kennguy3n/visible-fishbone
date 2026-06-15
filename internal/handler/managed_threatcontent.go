@@ -29,6 +29,14 @@ const permManagedThreatContentWrite = "threatcontent:write"
 // not flap the status, while a genuinely stuck feed surfaces clearly.
 const managedContentStaleAfter = 6 * time.Hour
 
+// managedRefreshTimeout bounds a manual (operator-triggered) refresh.
+// The cycle is detached from the HTTP request context so a client
+// disconnect or gateway timeout cannot abort an in-flight fleet-wide
+// build, but it is still bounded so a stuck upstream cannot hold the
+// engine's refresh lock indefinitely. It is generous relative to the
+// worst-case sequential fetch of every built-in feed.
+const managedRefreshTimeout = 5 * time.Minute
+
 // ManagedThreatContentStore is the read surface the posture endpoint
 // needs. It is the read subset of repository.ThreatFeedRepository, so
 // both the postgres and in-memory implementations satisfy it; kept
@@ -265,7 +273,16 @@ func (h *ManagedThreatContentHandler) refresh(w http.ResponseWriter, r *http.Req
 			"managed threat-content ingestion is disabled by the kill switch")
 		return
 	}
-	res, err := h.refresher.RefreshOnce(r.Context())
+	// Detach the ingestion cycle from the HTTP request lifecycle. A
+	// manual refresh produces fleet-wide content and holds the engine's
+	// refresh lock while fetching every upstream feed, so a client
+	// disconnect or gateway timeout must not abort it mid-cycle (which
+	// would waste the in-flight upstream fetches). Keep request values
+	// (auth/trace) but drop cancellation, and bound the work so a stuck
+	// upstream cannot run unboundedly.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), managedRefreshTimeout)
+	defer cancel()
+	res, err := h.refresher.RefreshOnce(ctx)
 	if err != nil {
 		WriteError(w, http.StatusInternalServerError, "refresh_failed",
 			"managed threat-content refresh failed")
