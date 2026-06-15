@@ -2,6 +2,7 @@ package dem_test
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -136,6 +137,70 @@ func TestService_Ingest_ComputesHealthyScore(t *testing.T) {
 	}
 	if len(latest) != 1 || latest[0].TargetKey != "zoom" {
 		t.Fatalf("latest scores = %+v", latest)
+	}
+}
+
+// failingBaselineRepo wraps a real DEMRepository but forces
+// MutateTargetState to fail, simulating the baseline-update backend
+// going down *after* a score has already been durably stored by
+// InsertScore. It counts successful InsertScore calls so the test can
+// assert the score really was persisted.
+type failingBaselineRepo struct {
+	repository.DEMRepository
+	insertedScores int
+}
+
+func (f *failingBaselineRepo) InsertScore(ctx context.Context, tenantID uuid.UUID, s repository.DEMExperienceScore) (repository.DEMExperienceScore, error) {
+	out, err := f.DEMRepository.InsertScore(ctx, tenantID, s)
+	if err == nil {
+		f.insertedScores++
+	}
+	return out, err
+}
+
+func (f *failingBaselineRepo) MutateTargetState(
+	_ context.Context,
+	_ uuid.UUID,
+	_, _ string,
+	_ func(repository.DEMTargetState) (repository.DEMTargetState, error),
+) (repository.DEMTargetState, error) {
+	return repository.DEMTargetState{}, errors.New("baseline backend unavailable")
+}
+
+// TestService_Ingest_ReportsStoredScoreWhenBaselineUpdateFails proves
+// that a score which was durably stored is still returned in the
+// ingest response even when the secondary baseline update fails. The
+// baseline fold / alert emission is best-effort and must not erase a
+// score the client could otherwise read back via GET /scores.
+func TestService_Ingest_ReportsStoredScoreWhenBaselineUpdateFails(t *testing.T) {
+	store := memory.NewStore()
+	now := time.Date(2025, 6, 1, 12, 0, 0, 0, time.UTC)
+	store.SetClock(func() time.Time { return now })
+	repo := &failingBaselineRepo{DEMRepository: memory.NewDEMRepository(store)}
+	alerts := &stubAlerts{}
+	svc, err := dem.NewService(repo, alerts, dem.DefaultConfig(),
+		dem.WithClock(func() time.Time { return now }))
+	if err != nil {
+		t.Fatalf("new service: %v", err)
+	}
+
+	res, err := svc.Ingest(context.Background(), uuid.New(), []repository.DEMProbeResult{
+		okResult(now, 20),
+		okResult(now, 30),
+	})
+	// Ingest must not fail: raw results and the score are durably
+	// stored; only the secondary baseline update failed (logged).
+	if err != nil {
+		t.Fatalf("ingest returned error: %v", err)
+	}
+	if res.Accepted != 2 {
+		t.Fatalf("accepted = %d, want 2", res.Accepted)
+	}
+	if repo.insertedScores != 1 {
+		t.Fatalf("insertedScores = %d, want 1 (score must be durably stored)", repo.insertedScores)
+	}
+	if len(res.Scores) != 1 {
+		t.Fatalf("scores = %d, want 1 — a durably stored score must be reported even when the baseline update fails", len(res.Scores))
 	}
 }
 

@@ -354,11 +354,17 @@ func (s *Service) Ingest(ctx context.Context, tenantID uuid.UUID, results []repo
 	for _, key := range keys {
 		score, scored, err := s.recomputeTarget(ctx, tenantID, key, targetNames[key])
 		if err != nil {
+			// A non-nil err can still arrive with scored == true:
+			// recomputeTarget persists the score (InsertScore) before
+			// folding it into the baseline, so a baseline / alert
+			// failure must not erase a score that is already durably
+			// stored. Log the failure but still report the stored
+			// score below, so the response matches what a follow-up
+			// GET /scores would return.
 			s.logger.ErrorContext(ctx, "dem: score recompute failed",
 				slog.String("tenant_id", tenantID.String()),
 				slog.String("target_key", key),
 				slog.Any("error", err))
-			continue
 		}
 		if scored {
 			out.Scores = append(out.Scores, score)
@@ -396,6 +402,13 @@ func normalizeResult(r *repository.DEMProbeResult) error {
 // degradation). scored is false when the window held no samples (e.g.
 // only stale buffered results were ingested), in which case no score
 // row is written.
+//
+// scored reports whether a score row was durably written, independent
+// of err: the score is persisted (InsertScore) before the baseline
+// fold, so a baseline-update / alert-emission failure returns
+// (saved, true, err) — the caller should still surface saved. err is
+// non-nil with scored == false only when the failure happened before
+// the score was stored (window aggregate or InsertScore itself).
 func (s *Service) recomputeTarget(ctx context.Context, tenantID uuid.UUID, key, name string) (repository.DEMExperienceScore, bool, error) {
 	since := s.now().Add(-time.Duration(s.cfg.WindowSeconds) * time.Second)
 	agg, err := s.repo.WindowAggregate(ctx, tenantID, key, since)
