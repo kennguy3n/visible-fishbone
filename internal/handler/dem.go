@@ -242,6 +242,11 @@ func (h *DEMHandler) ingest(w http.ResponseWriter, r *http.Request) {
 			TotalMs:    in.TotalMs,
 			HTTPStatus: in.HTTPStatus,
 			ErrorKind:  in.ErrorKind,
+			// Realistic Unix-millis (~1.7e12) are far below MaxInt64;
+			// the edge crate derives this from SystemTime::now() so it
+			// can never overflow. A crafted huge value would map to a
+			// pre-epoch time that falls outside the rolling window and
+			// is reaped by retention — a no-op, not a corruption.
 			ObservedAt: time.UnixMilli(int64(in.ObservedAtMs)).UTC(),
 		})
 	}

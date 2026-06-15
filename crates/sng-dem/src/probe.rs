@@ -201,6 +201,15 @@ fn build_result(
 
 /// Probe a single target end-to-end. Never returns an error: a failed
 /// probe is a `success == false` result.
+///
+/// Note on phase timings: for HTTP(S) targets the `dns_ms`/`tcp_ms`
+/// phases are measured on a manual connect, while `ttfb_ms`/`total_ms`
+/// come from a separate `reqwest` GET (connection pooling is disabled,
+/// so it is its own fresh connection). The phases are therefore
+/// independent diagnostic dimensions and are deliberately *not*
+/// summed into a single end-to-end latency — the scorer treats DNS/TCP
+/// as drill-down signals and uses `total_ms`/`ttfb_ms` for the latency
+/// term.
 async fn probe_target<R: Resolver>(
     resolver: &R,
     client: &reqwest::Client,

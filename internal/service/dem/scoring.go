@@ -32,7 +32,13 @@ func (c Config) normalizedWeights() (availability, latency float64) {
 
 // experienceScore composes availability and latency into a 0..100
 // score. availability is in [0,1]; p50 is nil when no successful
-// probe yielded a latency, in which case latency contributes 0.
+// probe yielded a latency, in which case the latency term contributes
+// 0 (a deliberately conservative floor — we under-state rather than
+// over-state experience when latency data is missing). In practice
+// every successful DNS/TCP/HTTP probe carries at least dns_ms and the
+// window aggregate coalesces to it, so p50 is non-nil whenever
+// availability > 0; the nil case coincides with all-failure windows
+// (availability 0 → score 0).
 func (c Config) experienceScore(availability float64, p50 *float64) float64 {
 	lat := 0.0
 	if p50 != nil {
