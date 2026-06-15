@@ -33,7 +33,11 @@ type SourceStat struct {
 	Indicators  int    `json:"indicators"`
 	NotModified bool   `json:"not_modified,omitempty"`
 	UsedCache   bool   `json:"used_cache,omitempty"`
-	Err         string `json:"error,omitempty"`
+	// Disabled is true when an operator has switched the source off in
+	// the registry (enabled=false): the feed was not fetched or parsed
+	// this cycle and contributes no indicators.
+	Disabled bool   `json:"disabled,omitempty"`
+	Err      string `json:"error,omitempty"`
 }
 
 // RefreshResult summarizes one ingestion cycle.
@@ -240,12 +244,23 @@ func (e *Engine) RefreshOnce(ctx context.Context) (RefreshResult, error) {
 	e.seedFromRepo(ctx)
 
 	prevStates := e.loadIngestStates(ctx)
+	disabled := e.disabledSources(ctx)
 
 	var (
 		all   []ai.IOC
 		stats = make([]SourceStat, 0, len(e.feeds))
 	)
 	for _, feed := range e.feeds {
+		if disabled[feed.Name] {
+			// Operator has switched this feed off in the registry. Skip
+			// the fetch/parse entirely and drop any cached payload so
+			// the disable takes effect immediately (its indicators fall
+			// out of the aggregated set this cycle) and a later re-enable
+			// forces a fresh full fetch rather than serving stale cache.
+			delete(e.lastGood, feed.Name)
+			stats = append(stats, SourceStat{Source: feed.Name, Disabled: true})
+			continue
+		}
 		iocs, stat := e.ingestFeed(ctx, feed, prevStates[feed.Name], now)
 		all = append(all, iocs...)
 		stats = append(stats, stat)
@@ -459,6 +474,36 @@ func (e *Engine) loadIngestStates(ctx context.Context) map[string]repository.Thr
 		m[s.SourceName] = s
 	}
 	return m
+}
+
+// disabledSources returns the set of registry source names an operator
+// has switched off (enabled=false). Honoring it lets an operator quench
+// a single misbehaving curated feed by flipping one registry row — no
+// redeploy, no effect on the rest of the managed set.
+//
+// On a registry read error it returns nil (fail-OPEN to the curated
+// all-on default): the per-feed switch is an operator refinement, not
+// the engine's master kill switch (that is the env-backed flag checked
+// at the top of RefreshOnce), so a transient DB blip must never silently
+// blank the fleet's threat content. An empty/unseeded registry likewise
+// disables nothing.
+func (e *Engine) disabledSources(ctx context.Context) map[string]bool {
+	sources, err := e.repo.ListSources(ctx)
+	if err != nil {
+		e.logger.Warn("threatfeed: list sources for enable-filter failed; treating all feeds as enabled",
+			"error", err)
+		return nil
+	}
+	var disabled map[string]bool
+	for _, s := range sources {
+		if !s.Enabled {
+			if disabled == nil {
+				disabled = make(map[string]bool, len(sources))
+			}
+			disabled[s.Name] = true
+		}
+	}
+	return disabled
 }
 
 // seedFromRepo lazily restores the monotonic serial and last content

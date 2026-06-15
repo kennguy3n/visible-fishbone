@@ -44,21 +44,45 @@ func TestThreatFeed_Integration(t *testing.T) {
 		created := got[0].CreatedAt
 
 		time.Sleep(5 * time.Millisecond)
-		// Re-upsert with a changed weight: created_at preserved, fields updated.
+		// Re-upsert with changed curated metadata: created_at preserved,
+		// curated fields updated. The seed passes Enabled=false but the
+		// flag is operator-owned and PRESERVED on conflict (stays true),
+		// so the curated boot re-seed can never silently re-enable a feed
+		// an operator turned off.
 		if err := repo.UpsertSources(bgCtx(), []repository.ThreatFeedSource{
 			{Name: "abuse.ch:feodo", DisplayName: "Feodo v2", Kind: "ip", URL: "https://x/feodo2", Weight: 0.95, Enabled: false, DefaultTTLSeconds: 100},
 		}); err != nil {
 			t.Fatalf("re-upsert: %v", err)
 		}
 		got, _ = repo.ListSources(bgCtx())
-		if got[0].DisplayName != "Feodo v2" || got[0].Weight != 0.95 || got[0].Enabled {
-			t.Fatalf("update not applied: %+v", got[0])
+		if got[0].DisplayName != "Feodo v2" || got[0].Weight != 0.95 {
+			t.Fatalf("curated update not applied: %+v", got[0])
+		}
+		if !got[0].Enabled {
+			t.Fatalf("enabled should be preserved on conflict, not overwritten by seed: %+v", got[0])
 		}
 		if !got[0].CreatedAt.Equal(created) {
 			t.Fatalf("created_at changed on update: %v vs %v", got[0].CreatedAt, created)
 		}
 		if !got[0].UpdatedAt.After(created) {
 			t.Fatalf("updated_at not bumped: %v", got[0].UpdatedAt)
+		}
+
+		// A real operator disable (direct UPDATE on the platform table)
+		// followed by another curated re-seed must remain disabled: the
+		// operator's choice is durable across reboots/re-seeds.
+		if _, err := store.Pool().Exec(bgCtx(),
+			`UPDATE threat_content_sources SET enabled = false WHERE name = 'abuse.ch:feodo'`); err != nil {
+			t.Fatalf("operator disable: %v", err)
+		}
+		if err := repo.UpsertSources(bgCtx(), []repository.ThreatFeedSource{
+			{Name: "abuse.ch:feodo", DisplayName: "Feodo v2", Kind: "ip", URL: "https://x/feodo2", Weight: 0.95, Enabled: true, DefaultTTLSeconds: 100},
+		}); err != nil {
+			t.Fatalf("re-seed after disable: %v", err)
+		}
+		got, _ = repo.ListSources(bgCtx())
+		if got[0].Enabled {
+			t.Fatalf("operator disable not preserved across re-seed: %+v", got[0])
 		}
 	})
 
@@ -139,7 +163,10 @@ func TestThreatFeed_Integration(t *testing.T) {
 			t.Fatalf("LatestSerial = %d, want 3000", s)
 		}
 
+		firstCreated := latest.CreatedAt
+
 		// Serial collision: re-save 3000 with a new envelope -> last-writer-wins.
+		time.Sleep(5 * time.Millisecond)
 		if err := repo.SaveBundle(bgCtx(), repository.ThreatFeedBundle{
 			Serial: 3000, SchemaVersion: 1, GeneratedAt: gen, KeyID: "k2", Algorithm: "ed25519",
 			IndicatorCount: 9, Digest: "d2", Envelope: []byte(`{"alg":"ed25519","v":2}`),
@@ -149,6 +176,10 @@ func TestThreatFeed_Integration(t *testing.T) {
 		latest, _ = repo.LatestBundle(bgCtx())
 		if latest.KeyID != "k2" || latest.IndicatorCount != 9 {
 			t.Fatalf("collision did not overwrite: %+v", latest)
+		}
+		// created_at marks first-persisted and is preserved on conflict.
+		if !latest.CreatedAt.Equal(firstCreated) {
+			t.Fatalf("created_at changed on serial collision: %v vs %v", latest.CreatedAt, firstCreated)
 		}
 
 		// Keep only the newest 2 (3000, 2000); 1000 is pruned.

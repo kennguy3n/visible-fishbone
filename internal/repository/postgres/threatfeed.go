@@ -37,7 +37,10 @@ var _ repository.ThreatFeedRepository = (*ThreatFeedRepository)(nil)
 // UpsertSources idempotently writes the managed source registry inside
 // one system-role transaction. created_at is preserved on an existing
 // row (the column default only applies on insert); updated_at is bumped
-// every call.
+// every call. The enabled flag is also preserved on conflict (NOT
+// overwritten from the seed) so an operator's per-feed disable survives
+// the curated re-seed every leader runs at boot; it is set from the
+// input only on the initial insert.
 func (r *ThreatFeedRepository) UpsertSources(ctx context.Context, sources []repository.ThreatFeedSource) error {
 	if len(sources) == 0 {
 		return nil
@@ -52,9 +55,11 @@ ON CONFLICT (name) DO UPDATE SET
     kind                = EXCLUDED.kind,
     url                 = EXCLUDED.url,
     weight              = EXCLUDED.weight,
-    enabled             = EXCLUDED.enabled,
     default_ttl_seconds = EXCLUDED.default_ttl_seconds,
     updated_at          = now()
+    -- enabled is intentionally NOT updated here: it is operator-owned
+    -- (see UpsertSources doc) and preserving it keeps a manual disable
+    -- durable across the boot re-seed.
 `
 		for _, src := range sources {
 			if _, err := tx.Exec(ctx, q,
@@ -176,7 +181,8 @@ ORDER BY source_name`)
 // replicas producing within the same wall-clock second) overwrites the
 // row with the newer envelope: both are valid managed content, so
 // last-writer-wins keeps the monotonic-serial contract without an
-// expensive re-sign loop.
+// expensive re-sign loop. created_at is preserved on conflict (it marks
+// when the serial was first persisted), matching UpsertSources.
 func (r *ThreatFeedRepository) SaveBundle(ctx context.Context, bundle repository.ThreatFeedBundle) error {
 	counts := bundle.CountsByType
 	if counts == nil {
@@ -201,8 +207,7 @@ ON CONFLICT (serial) DO UPDATE SET
     size_bytes      = EXCLUDED.size_bytes,
     digest          = EXCLUDED.digest,
     counts_by_type  = EXCLUDED.counts_by_type,
-    envelope        = EXCLUDED.envelope,
-    created_at      = now()
+    envelope        = EXCLUDED.envelope
 `
 		if _, err := tx.Exec(ctx, q,
 			bundle.Serial, bundle.SchemaVersion, bundle.GeneratedAt.UTC(),

@@ -86,10 +86,13 @@ func (r *ThreatFeedRepository) UpsertSources(_ context.Context, sources []reposi
 	r.st.mu.Lock()
 	defer r.st.mu.Unlock()
 	for _, src := range sources {
-		// Preserve the original CreatedAt on an existing row so the
-		// registry reflects first-seen, not last-upserted.
 		if prev, ok := r.st.sources[src.Name]; ok {
+			// Preserve the original CreatedAt so the registry reflects
+			// first-seen, not last-upserted, and PRESERVE the operator-
+			// owned Enabled flag so a manual disable survives the curated
+			// boot re-seed (mirrors the postgres ON CONFLICT clause).
 			src.CreatedAt = prev.CreatedAt
+			src.Enabled = prev.Enabled
 		} else {
 			src.CreatedAt = now
 		}

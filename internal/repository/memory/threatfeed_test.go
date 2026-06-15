@@ -33,18 +33,49 @@ func TestThreatFeedRepository_SourcesUpsertPreservesCreatedAt(t *testing.T) {
 	}
 	firstCreated := got[0].CreatedAt
 
-	// Re-upsert feedA with a changed weight: CreatedAt preserved, UpdatedAt bumped.
+	// Re-upsert feedA with changed curated metadata: those fields update,
+	// CreatedAt is preserved, UpdatedAt is bumped. The Enabled flag is
+	// operator-owned, so even though the seed passes Enabled=false here
+	// it is PRESERVED at its existing value (true) on conflict.
 	if err := repo.UpsertSources(ctx, []repository.ThreatFeedSource{
 		{Name: "feedA", DisplayName: "A2", Kind: "url", Weight: 0.5, Enabled: false},
 	}); err != nil {
 		t.Fatalf("re-upsert: %v", err)
 	}
 	got, _ = repo.ListSources(ctx)
-	if got[0].DisplayName != "A2" || got[0].Weight != 0.5 || got[0].Enabled {
-		t.Fatalf("update not applied: %+v", got[0])
+	if got[0].DisplayName != "A2" || got[0].Weight != 0.5 {
+		t.Fatalf("curated update not applied: %+v", got[0])
+	}
+	if !got[0].Enabled {
+		t.Fatalf("enabled should be preserved (operator-owned), not overwritten by seed: %+v", got[0])
 	}
 	if !got[0].CreatedAt.Equal(firstCreated) {
 		t.Fatalf("CreatedAt changed on update: %v vs %v", got[0].CreatedAt, firstCreated)
+	}
+}
+
+func TestThreatFeedRepository_UpsertPreservesOperatorDisable(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	repo := memory.NewStore().NewThreatFeedRepository()
+
+	// An operator-disabled source (inserted with enabled=false).
+	if err := repo.UpsertSources(ctx, []repository.ThreatFeedSource{
+		{Name: "feedA", DisplayName: "A", Kind: "ip", Weight: 0.9, Enabled: false},
+	}); err != nil {
+		t.Fatalf("insert disabled: %v", err)
+	}
+
+	// The curated boot re-seed upserts it enabled=true; the disable must
+	// survive (operator intent wins over the seed default).
+	if err := repo.UpsertSources(ctx, []repository.ThreatFeedSource{
+		{Name: "feedA", DisplayName: "A", Kind: "ip", Weight: 0.9, Enabled: true},
+	}); err != nil {
+		t.Fatalf("reseed: %v", err)
+	}
+	got, _ := repo.ListSources(ctx)
+	if len(got) != 1 || got[0].Enabled {
+		t.Fatalf("operator disable not preserved across reseed: %+v", got)
 	}
 }
 

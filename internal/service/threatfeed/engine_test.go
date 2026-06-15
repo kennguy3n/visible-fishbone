@@ -332,6 +332,124 @@ func TestEngine_ContinuesVersionLineAcrossRestart(t *testing.T) {
 	}
 }
 
+// mutableClock is a test clock that can be advanced between refreshes.
+type mutableClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *mutableClock) now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *mutableClock) advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.t = c.t.Add(d)
+}
+
+func TestEngine_NoVersionChurnFromRecencyDecay(t *testing.T) {
+	t.Parallel()
+	// A feed whose content never changes (conditional-GET 304 after the
+	// warm-up). As wall-clock time advances between refreshes the
+	// recency-decayed score of the cached indicators drifts downward,
+	// but the engine must NOT mint a new bundle version: the content
+	// digest tracks the indicator SET, not its decaying score. This is
+	// the fleet-scale churn-avoidance guarantee — without it every
+	// hourly tick would re-sign and re-publish to all tenants.
+	clk := &mutableClock{t: fixedNow}
+	signer, _ := GenerateSigner()
+	repo := memory.NewStore().NewThreatFeedRepository()
+	eng, err := NewEngine(DefaultConfig(), []Feed{ipFeed("ipfeed", "203.0.113.10\n", "e1")},
+		signer, repo, WithLogger(silentLogger()), WithClock(clk.now))
+	if err != nil {
+		t.Fatalf("engine: %v", err)
+	}
+	ctx := context.Background()
+
+	first, err := eng.RefreshOnce(ctx)
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if first.Unchanged || first.Indicators != 1 {
+		t.Fatalf("warm-up should mint 1 indicator: %+v", first)
+	}
+
+	// Advance a full day per refresh; the score decays but the set is
+	// identical, so every subsequent refresh must be Unchanged and keep
+	// the same serial.
+	for i := 0; i < 3; i++ {
+		clk.advance(24 * time.Hour)
+		res, err := eng.RefreshOnce(ctx)
+		if err != nil {
+			t.Fatalf("refresh %d: %v", i, err)
+		}
+		if !res.Unchanged {
+			t.Fatalf("refresh %d minted a churn version despite identical set: %+v", i, res)
+		}
+		if res.Serial != first.Serial {
+			t.Fatalf("refresh %d changed serial %d -> %d", i, first.Serial, res.Serial)
+		}
+	}
+}
+
+func TestEngine_HonorsDisabledSource(t *testing.T) {
+	t.Parallel()
+	good := ipFeed("good", "203.0.113.10\n", "g1")
+	off := ipFeed("off", "198.51.100.5\n", "o1")
+	eng, repo, _ := newTestEngine(t, []Feed{good, off})
+	ctx := context.Background()
+
+	// Operator switches "off" off in the registry (insert as disabled).
+	if err := repo.UpsertSources(ctx, []repository.ThreatFeedSource{
+		{Name: "off", DisplayName: "Off", Kind: "ip", Weight: 0.9, Enabled: false},
+	}); err != nil {
+		t.Fatalf("disable source: %v", err)
+	}
+
+	res, err := eng.RefreshOnce(ctx)
+	if err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	if res.Indicators != 1 {
+		t.Fatalf("only the enabled feed should contribute, got %d", res.Indicators)
+	}
+	var offStat SourceStat
+	for _, s := range res.Sources {
+		if s.Source == "off" {
+			offStat = s
+		}
+	}
+	if !offStat.Disabled || offStat.Indicators != 0 {
+		t.Fatalf("disabled feed should be skipped with no indicators: %+v", offStat)
+	}
+
+	// The disable must survive the curated re-seed a leader runs at boot
+	// (SeedRegistry upserts every feed enabled=true; the conflict path
+	// preserves the operator's choice).
+	if err := eng.SeedRegistry(ctx); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	sources, err := repo.ListSources(ctx)
+	if err != nil {
+		t.Fatalf("list sources: %v", err)
+	}
+	for _, s := range sources {
+		if s.Name == "off" && s.Enabled {
+			t.Fatal("re-seed re-enabled an operator-disabled source")
+		}
+	}
+	again, err := eng.RefreshOnce(ctx)
+	if err != nil {
+		t.Fatalf("refresh after reseed: %v", err)
+	}
+	if again.Indicators != 1 {
+		t.Fatalf("disabled feed should stay skipped after reseed, got %d", again.Indicators)
+	}
+}
+
 func TestEngine_SeedRegistry(t *testing.T) {
 	t.Parallel()
 	feeds := DefaultFeeds(nil, 0)

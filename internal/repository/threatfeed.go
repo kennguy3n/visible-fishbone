@@ -45,7 +45,11 @@ type ThreatFeedSource struct {
 	// corroboration score. Higher means a more authoritative feed.
 	Weight float64
 	// Enabled gates ingestion. A disabled source is retained in the
-	// registry (for history/telemetry) but skipped by the refresh loop.
+	// registry (for history/telemetry) but skipped by the refresh loop
+	// (the engine drops its cached payload and contributes none of its
+	// indicators). It is operator-owned: the curated boot seed only sets
+	// it on first insert and UpsertSources preserves it thereafter, so an
+	// operator disable survives leader restarts and re-seeds.
 	Enabled bool
 	// DefaultTTLSeconds is how long an indicator from this feed stays
 	// live after it was last seen, when the feed itself supplies no
@@ -114,11 +118,15 @@ type ThreatFeedBundle struct {
 	IndicatorCount int64
 	// SizeBytes is the marshalled envelope size, for telemetry.
 	SizeBytes int64
-	// Digest is the lowercase-hex SHA-256 of the bundle's CONTENT (the
-	// scored indicator set only, excluding Serial and GeneratedAt which
-	// change every run). It lets the producer detect that a refresh
-	// yielded identical content and skip minting/re-publishing a new
-	// version — the churn-avoidance fast path at fleet scale.
+	// Digest is the lowercase-hex SHA-256 of the bundle's CONTENT
+	// IDENTITY: each indicator's type/value/hash plus its sorted
+	// contributing sources. It deliberately excludes Serial, GeneratedAt,
+	// the recency-decayed score, and the observation timestamps — all of
+	// which drift every run — so the producer can detect that a refresh
+	// reproduced the same indicator set and skip minting/re-publishing a
+	// new version. This churn-avoidance fast path is what keeps the
+	// bounded refresh cheap at fleet scale (see ContentDigest in the
+	// threatfeed service for the full rationale).
 	Digest string
 	// CountsByType is the per-type indicator cardinality
 	// (domain/ip/cidr/url/hash) surfaced on the posture endpoint without
@@ -140,8 +148,13 @@ type ThreatFeedBundle struct {
 // touches no shared repository file.
 type ThreatFeedRepository interface {
 	// UpsertSources idempotently writes the managed source registry.
-	// Called at boot to seed/refresh the built-in feed set; preserves
-	// CreatedAt on an existing row and bumps UpdatedAt.
+	// Called at boot to seed/refresh the built-in feed set. On an
+	// existing row it updates the curated metadata (display name, kind,
+	// URL, weight, default TTL), preserves CreatedAt, and bumps
+	// UpdatedAt. It deliberately PRESERVES the existing Enabled flag
+	// rather than overwriting it from the seed, so an operator's per-feed
+	// disable is durable across leader restarts and re-seeds; Enabled is
+	// only set from the input on the initial insert.
 	UpsertSources(ctx context.Context, sources []ThreatFeedSource) error
 	// ListSources returns the registry ordered by Name.
 	ListSources(ctx context.Context) ([]ThreatFeedSource, error)

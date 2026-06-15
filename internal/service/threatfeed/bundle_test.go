@@ -146,18 +146,56 @@ func TestBundle_ContentDigestStability(t *testing.T) {
 	gen1 := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
 	gen2 := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 
-	// Same content, different Serial + GeneratedAt -> identical digest.
+	// Same indicator set, different Serial + GeneratedAt -> identical digest.
 	d1 := sampleBundle(1, gen1).ContentDigest()
 	d2 := sampleBundle(999, gen2).ContentDigest()
 	if d1 != d2 {
 		t.Fatalf("digest changed with serial/generatedAt: %s vs %s", d1, d2)
 	}
 
-	// Different content -> different digest.
-	changed := sampleBundle(1, gen1)
-	changed.Indicators[0].Score = 0.1
-	if changed.ContentDigest() == d1 {
-		t.Fatal("digest unchanged after score mutation")
+	// The digest covers the indicator SET identity (type/value/hash +
+	// contributing sources), NOT the recency-decayed score. A score-only
+	// change must reproduce the SAME digest, otherwise the engine would
+	// mint and re-publish a new bundle version on every refresh as the
+	// recency factor drifts — fleet-wide churn for 5,000 tenants over
+	// content that did not actually change.
+	scoreOnly := sampleBundle(1, gen1)
+	scoreOnly.Indicators[0].Score = 0.0123
+	scoreOnly.Indicators[1].Score = 0.999
+	if scoreOnly.ContentDigest() != d1 {
+		t.Fatal("digest changed after score-only mutation (would defeat churn-avoidance)")
+	}
+
+	// Observation timestamps are re-stamped every full re-parse, so a
+	// timestamp-only change must likewise leave the digest unchanged.
+	timeOnly := sampleBundle(1, gen1)
+	timeOnly.Indicators[0].FirstSeen = sampleSeen.Add(-72 * time.Hour)
+	timeOnly.Indicators[0].LastSeen = sampleSeen.Add(72 * time.Hour)
+	timeOnly.Indicators[0].ExpiresAt = sampleSeen.Add(240 * time.Hour)
+	if timeOnly.ContentDigest() != d1 {
+		t.Fatal("digest changed after timestamp-only mutation (would defeat churn-avoidance)")
+	}
+
+	// A change to the SET identity DOES move the digest: a new value, a
+	// change in corroboration (sources), or an added/removed indicator.
+	valueChanged := sampleBundle(1, gen1)
+	valueChanged.Indicators[0].Value = "203.0.113.99"
+	if valueChanged.ContentDigest() == d1 {
+		t.Fatal("digest unchanged after indicator value mutation")
+	}
+
+	sourcesChanged := sampleBundle(1, gen1)
+	sourcesChanged.Indicators[0].Sources = []string{"feedA", "feedB", "feedC"}
+	if sourcesChanged.ContentDigest() == d1 {
+		t.Fatal("digest unchanged after corroboration (sources) mutation")
+	}
+
+	added := sampleBundle(1, gen1)
+	added.Indicators = append(added.Indicators, Indicator{
+		Type: "domain", Value: "new.example", Sources: []string{"feedA"}, LastSeen: sampleSeen,
+	})
+	if added.ContentDigest() == d1 {
+		t.Fatal("digest unchanged after adding an indicator")
 	}
 }
 

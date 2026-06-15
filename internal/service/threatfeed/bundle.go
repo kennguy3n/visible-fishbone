@@ -101,10 +101,11 @@ func newBundle(serial int64, generatedAt time.Time) *ContentBundle {
 }
 
 // normalize makes the bundle deterministic: every indicator's source
-// list is sorted+deduped and the indicators are sorted by (type,
-// value). Two bundles with the same logical content marshal to
-// identical bytes, which is what makes the content digest stable and
-// the signature reproducible.
+// list is sorted+deduped, its timestamps are coerced to UTC, and the
+// indicators are sorted by (type, value). Two bundles with the same
+// logical content therefore marshal to identical bytes, which is what
+// makes the signature reproducible (and keeps ContentDigest's iteration
+// order stable).
 func (b *ContentBundle) normalize() {
 	for i := range b.Indicators {
 		b.Indicators[i].Sources = sortedUnique(b.Indicators[i].Sources)
@@ -137,27 +138,45 @@ func (b *ContentBundle) CanonicalBytes() ([]byte, error) {
 	return json.Marshal(b)
 }
 
-// ContentDigest is a SHA-256 over only the indicator SET (type, value,
-// hash, score, sources, observation window) — deliberately excluding
-// Serial and GeneratedAt, which change on every run. It lets the engine
-// detect that a refresh produced identical content and skip minting a
-// new version / re-publishing, avoiding needless churn at scale.
+// ContentDigest is a SHA-256 over the indicator SET's stable identity:
+// for each indicator its type, value, hash-algo, and sorted contributing
+// sources. It powers the engine's churn-avoidance fast path — when a
+// refresh reproduces the same digest the engine keeps the current serial
+// and skips re-signing / re-persisting / re-publishing.
+//
+// Score, FirstSeen, LastSeen and ExpiresAt are DELIBERATELY EXCLUDED.
+// The score carries a recency-decay factor (see score.go) that drifts
+// continuously with wall-clock time, and the observation timestamps are
+// re-stamped to "now" on every full re-parse; including any of them
+// would change the digest on essentially every refresh and defeat the
+// fast path this digest exists to enable (turning the hourly tick into a
+// fleet-wide re-sign + re-publish for 5,000 tenants even when the threat
+// set is unchanged). A new version is therefore minted exactly when the
+// membership or corroboration of the set changes — a new sighting, an
+// expiry-driven drop, or a feed gaining/losing a source — which are the
+// events a consumer's blocklist actually cares about. Serial and
+// GeneratedAt are excluded for the same reason (they change every run).
+//
+// Source weights are code-defined constants (builtinFeedSpecs); a weight
+// retune ships via a deploy and takes effect on the next genuine content
+// change (sub-day for these churny abuse feeds), so it does not need a
+// score term in the digest to be picked up.
 func (b *ContentBundle) ContentDigest() string {
 	b.normalize()
 	h := sha256.New()
 	for _, ind := range b.Indicators {
-		// NUL-separated fields with a 0x1f sub-separator for the source
-		// list. None of the field values (normalized type/value/hash/
-		// source strings, fixed-format score, decimal unix seconds) can
-		// contain those control bytes, so the encoding is injective and
-		// no value can be confused with a separator. hash.Hash.Write
-		// never errors, so the Fprintf returns are intentionally ignored.
-		_, _ = fmt.Fprintf(h, "%s\x00%s\x00%s\x00%0.6f\x00", ind.Type, ind.Value, ind.HashAlgo, ind.Score)
+		// NUL-separated identity fields with a 0x1f sub-separator for
+		// the source list and a trailing newline terminating each
+		// record. None of the field values (normalized type/value/hash
+		// and source strings) can contain those control bytes, so the
+		// encoding is injective and no value can be confused with a
+		// separator. hash.Hash.Write never errors, so the Fprintf
+		// returns are intentionally ignored.
+		_, _ = fmt.Fprintf(h, "%s\x00%s\x00%s\x00", ind.Type, ind.Value, ind.HashAlgo)
 		for _, s := range ind.Sources {
 			_, _ = fmt.Fprintf(h, "%s\x1f", s)
 		}
-		_, _ = fmt.Fprintf(h, "\x00%d\x00%d\x00%d\n",
-			ind.FirstSeen.Unix(), ind.LastSeen.Unix(), ind.ExpiresAt.Unix())
+		_, _ = h.Write([]byte{'\n'})
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
