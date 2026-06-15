@@ -137,9 +137,19 @@ func (r *ThreatFeedRepository) ListIngestState(_ context.Context) ([]repository.
 // --- signed bundle versions -------------------------------------------
 
 func (r *ThreatFeedRepository) SaveBundle(_ context.Context, bundle repository.ThreatFeedBundle) error {
-	bundle.CreatedAt = r.s.clock()
 	r.st.mu.Lock()
 	defer r.st.mu.Unlock()
+	if prev, ok := r.st.bundles[bundle.Serial]; ok {
+		// Preserve the original CreatedAt on a serial collision so it marks
+		// when the version was FIRST persisted, not last-overwritten. This
+		// mirrors the postgres backend, whose ON CONFLICT clause omits
+		// created_at; keeping the two backends identical means tests against
+		// the in-memory store observe the same created_at-on-conflict
+		// semantics as production.
+		bundle.CreatedAt = prev.CreatedAt
+	} else {
+		bundle.CreatedAt = r.s.clock()
+	}
 	r.st.bundles[bundle.Serial] = cloneThreatFeedBundle(bundle)
 	return nil
 }

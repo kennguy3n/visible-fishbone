@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
@@ -146,6 +147,52 @@ func TestThreatFeedRepository_BundleLifecycle(t *testing.T) {
 	again, _ := repo.LatestBundle(ctx)
 	if again.Envelope[0] == 'X' || again.CountsByType["ip"] == 999 {
 		t.Fatal("stored bundle aliased by returned copy")
+	}
+}
+
+func TestThreatFeedRepository_BundleSavePreservesCreatedAtOnCollision(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	store := memory.NewStore()
+	// An advancing clock: every read returns a strictly later instant, so a
+	// re-save that (incorrectly) re-stamped created_at would observe a
+	// different value than the original insert.
+	base := time.Unix(1_700_000_000, 0).UTC()
+	var ticks int64
+	store.SetClock(func() time.Time {
+		ticks++
+		return base.Add(time.Duration(ticks) * time.Second)
+	})
+	repo := store.NewThreatFeedRepository()
+
+	if err := repo.SaveBundle(ctx, repository.ThreatFeedBundle{
+		Serial: 42, KeyID: "k1", IndicatorCount: 5, Envelope: []byte("v1"),
+	}); err != nil {
+		t.Fatalf("first save: %v", err)
+	}
+	first, err := repo.LatestBundle(ctx)
+	if err != nil {
+		t.Fatalf("latest: %v", err)
+	}
+	firstCreated := first.CreatedAt
+
+	// Re-save the same serial with different metadata (a collision). The
+	// envelope/metadata is overwritten last-writer-wins, but created_at must
+	// reflect the FIRST persist, matching the postgres ON CONFLICT clause.
+	if err := repo.SaveBundle(ctx, repository.ThreatFeedBundle{
+		Serial: 42, KeyID: "k2", IndicatorCount: 9, Envelope: []byte("v2"),
+	}); err != nil {
+		t.Fatalf("re-save: %v", err)
+	}
+	again, err := repo.LatestBundle(ctx)
+	if err != nil {
+		t.Fatalf("latest 2: %v", err)
+	}
+	if again.KeyID != "k2" || again.IndicatorCount != 9 {
+		t.Fatalf("collision should overwrite metadata: %+v", again)
+	}
+	if !again.CreatedAt.Equal(firstCreated) {
+		t.Fatalf("CreatedAt not preserved on collision: %v vs %v", again.CreatedAt, firstCreated)
 	}
 }
 

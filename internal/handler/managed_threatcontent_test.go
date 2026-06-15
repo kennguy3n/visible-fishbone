@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -184,7 +185,10 @@ func TestManagedThreatContent_RefreshHappyPath(t *testing.T) {
 		enabled: true,
 		result: threatfeed.RefreshResult{
 			Serial: 7, Indicators: 3, Published: true,
-			Sources: []threatfeed.SourceStat{{Source: "feedA", Indicators: 3}},
+			Sources: []threatfeed.SourceStat{
+				{Source: "feedA", Indicators: 3},
+				{Source: "feedOff", Disabled: true},
+			},
 		},
 	}
 	mux := managedMux(&stubThreatContentStore{}, ref, platformAuthz{allow: true})
@@ -205,8 +209,20 @@ func TestManagedThreatContent_RefreshHappyPath(t *testing.T) {
 	if resp.Serial != 7 || resp.Indicators != 3 || !resp.Published {
 		t.Fatalf("resp = %+v", resp)
 	}
-	if len(resp.Sources) != 1 || resp.Sources[0].Source != "feedA" {
+	if len(resp.Sources) != 2 || resp.Sources[0].Source != "feedA" {
 		t.Fatalf("sources = %+v", resp.Sources)
+	}
+	// A disabled source must be distinguishable from one that ran but
+	// produced nothing: the engine's Disabled flag is surfaced through the
+	// refresh response (and serialized as "disabled" in the JSON body).
+	if resp.Sources[1].Source != "feedOff" || !resp.Sources[1].Disabled {
+		t.Fatalf("disabled source not surfaced: %+v", resp.Sources[1])
+	}
+	if resp.Sources[0].Disabled {
+		t.Fatalf("active source wrongly marked disabled: %+v", resp.Sources[0])
+	}
+	if !strings.Contains(rec.Body.String(), `"disabled":true`) {
+		t.Fatalf("expected \"disabled\":true in JSON body: %s", rec.Body.String())
 	}
 }
 

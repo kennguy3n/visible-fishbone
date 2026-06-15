@@ -3823,6 +3823,12 @@ components:
         used_cache:
           type: boolean
           description: True when last-known-good was reused (fetch/parse failed).
+        disabled:
+          type: boolean
+          description: >
+            True when the source is switched off in the registry and was
+            skipped this cycle (distinguishes a disabled feed from one that
+            ran but produced no indicators).
         error: { type: string }
     PolicyTemplate:
       type: object

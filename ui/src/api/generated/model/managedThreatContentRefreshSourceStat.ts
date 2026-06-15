@@ -20,5 +20,8 @@ export interface ManagedThreatContentRefreshSourceStat {
   not_modified?: boolean;
   /** True when last-known-good was reused (fetch/parse failed). */
   used_cache?: boolean;
+  /** True when the source is switched off in the registry and was skipped this cycle (distinguishes a disabled feed from one that ran but produced no indicators).
+ */
+  disabled?: boolean;
   error?: string;
 }

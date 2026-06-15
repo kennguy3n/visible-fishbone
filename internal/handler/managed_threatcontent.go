@@ -170,7 +170,12 @@ type ManagedRefreshSourceStat struct {
 	Indicators  int    `json:"indicators"`
 	NotModified bool   `json:"not_modified,omitempty"`
 	UsedCache   bool   `json:"used_cache,omitempty"`
-	Error       string `json:"error,omitempty"`
+	// Disabled is true when the source is switched off in the registry, so
+	// it was skipped this cycle. Surfacing it keeps a disabled feed (which
+	// reports indicators=0 and no error) distinguishable from one that ran
+	// but produced nothing.
+	Disabled bool   `json:"disabled,omitempty"`
+	Error    string `json:"error,omitempty"`
 }
 
 // posture returns the managed threat content the tenant receives. The
@@ -274,6 +279,7 @@ func (h *ManagedThreatContentHandler) refresh(w http.ResponseWriter, r *http.Req
 			Indicators:  s.Indicators,
 			NotModified: s.NotModified,
 			UsedCache:   s.UsedCache,
+			Disabled:    s.Disabled,
 			Error:       s.Err,
 		})
 	}
