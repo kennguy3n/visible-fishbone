@@ -54,6 +54,7 @@ import (
 	casbconnectors "github.com/kennguy3n/visible-fishbone/internal/service/casb/connectors"
 	"github.com/kennguy3n/visible-fishbone/internal/service/compliance"
 	"github.com/kennguy3n/visible-fishbone/internal/service/dlp"
+	"github.com/kennguy3n/visible-fishbone/internal/service/dlpidm"
 	"github.com/kennguy3n/visible-fishbone/internal/service/dlpreview"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
 	"github.com/kennguy3n/visible-fishbone/internal/service/integration"
@@ -1435,6 +1436,11 @@ func buildRouter(
 		dlp.WithBlockedApps(dlpReviewRepo))
 	browserPolicyRepo := store.NewBrowserPolicyRepository()
 	dataClassificationRepo := store.NewDataClassificationRepository()
+	// WP4: DLP OCR/IDM control-plane state (protected-document
+	// fingerprint sets + OCR/IDM config). Stores only fingerprints and
+	// configuration, never raw protected-document contents.
+	dlpIDMRepo := store.NewDLPIDMRepository()
+	dlpIDMSvc := dlpidm.New(dlpIDMRepo, logger)
 
 	tenantSvc := tenant.New(tenantRepo, auditRepo, logger)
 	siteSvc := site.New(siteRepo, auditRepo, logger)
@@ -2567,6 +2573,7 @@ func buildRouter(
 		RBI:               handler.NewRBIHandler(rbiSvc),
 		DLP:               handler.NewDLPHandler(dlpSvc),
 		DLPReview:         handler.NewDLPReviewHandler(dlpReviewSvc),
+		DLPIDM:            handler.NewDLPIDMHandler(dlpIDMSvc),
 		Rollout:           handler.NewRolloutHandler(rolloutSvc, handler.WithRolloutAuthorizer(rbacSvc)),
 		Browser:           handler.NewBrowserHandler(browserSvc),
 		Terraform:         handler.NewTerraformHandler(terraformProvider),
