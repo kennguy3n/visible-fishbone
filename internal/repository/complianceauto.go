@@ -98,11 +98,34 @@ type ComplianceAutoFrameworkStateRow struct {
 	UpdatedAt     time.Time
 }
 
+// ComplianceAutoEvaluation is the complete result of one evaluation
+// sweep for a tenant, applied atomically by ApplyEvaluation: the run
+// summary, every control's latest status, every appended evidence
+// observation, and the per-framework rollups. The run's id/created_at
+// are assigned by the implementation; the RunID/LastRunID fields on the
+// child rows are ignored on input and stamped with the newly created run
+// id, so callers build the slices without knowing the run id in advance.
+type ComplianceAutoEvaluation struct {
+	Run        ComplianceAutoRunRow
+	Statuses   []ComplianceAutoControlStatusRow
+	Evidence   []ComplianceAutoEvidenceRow
+	Frameworks []ComplianceAutoFrameworkStateRow
+}
+
 // ComplianceAutoRepository is the persistence surface for the continuous
 // compliance evidence service. Every method is tenant-scoped: drivers
 // set the RLS GUC for the duration of each call, and the leader-only
 // collector reaches across tenants via the system-role path.
 type ComplianceAutoRepository interface {
+	// ApplyEvaluation persists an entire sweep for a tenant atomically:
+	// the run summary, all control statuses, all evidence rows, and the
+	// per-framework rollups are committed in a single transaction.
+	// Either the whole posture advances or none of it does, so a
+	// mid-sweep failure never leaves a partially-updated posture. The
+	// implementation assigns the run id server-side and stamps it onto
+	// the child rows. It returns the stored run row.
+	ApplyEvaluation(ctx context.Context, tenantID uuid.UUID, eval ComplianceAutoEvaluation) (ComplianceAutoRunRow, error)
+
 	// RecordRun persists a completed sweep summary and returns the
 	// stored row (with server-assigned id/created_at).
 	RecordRun(ctx context.Context, tenantID uuid.UUID, run ComplianceAutoRunRow) (ComplianceAutoRunRow, error)

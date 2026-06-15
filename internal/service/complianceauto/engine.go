@@ -97,9 +97,12 @@ func NewEngine(source PlatformSource, repo repository.ComplianceAutoRepository, 
 		initialDelay = DefaultInitialDelay
 	}
 	return &Engine{
-		source:       source,
-		repo:         repo,
-		catalog:      catalog,
+		source: source,
+		repo:   repo,
+		// Snapshot the package catalog into an engine-owned slice so the
+		// engine never shares a backing array with the global var; a
+		// future hot-reload of the global cannot mutate a running engine.
+		catalog:      append([]Control(nil), catalog...),
 		clock:        clock,
 		logger:       logger,
 		interval:     interval,
@@ -144,20 +147,26 @@ func (e *Engine) Evaluate(ctx context.Context, tenantID uuid.UUID) (TenantPostur
 	}
 
 	finishedAt := e.clock().UTC()
-	run, err := e.repo.RecordRun(ctx, tenantID, repository.ComplianceAutoRunRow{
-		StartedAt:     startedAt,
-		FinishedAt:    finishedAt,
-		ControlsTotal: total,
-		ControlsPass:  pass,
-		ControlsFail:  fail,
-		ControlsNA:    na,
-	})
-	if err != nil {
-		return TenantPosture{}, fmt.Errorf("record run: %w", err)
-	}
 
+	// Assemble the full sweep, then persist it in ONE transaction so a
+	// posture read never observes a half-applied sweep. The repository
+	// assigns the run id and stamps it onto the child rows, so they are
+	// built without it here.
+	eval := repository.ComplianceAutoEvaluation{
+		Run: repository.ComplianceAutoRunRow{
+			StartedAt:     startedAt,
+			FinishedAt:    finishedAt,
+			ControlsTotal: total,
+			ControlsPass:  pass,
+			ControlsFail:  fail,
+			ControlsNA:    na,
+		},
+		Statuses:   make([]repository.ComplianceAutoControlStatusRow, 0, len(results)),
+		Evidence:   make([]repository.ComplianceAutoEvidenceRow, 0, len(results)),
+		Frameworks: make([]repository.ComplianceAutoFrameworkStateRow, 0, len(e.catalog)),
+	}
 	for _, r := range results {
-		if _, err := e.repo.UpsertControlStatus(ctx, tenantID, repository.ComplianceAutoControlStatusRow{
+		eval.Statuses = append(eval.Statuses, repository.ComplianceAutoControlStatusRow{
 			Framework:   string(r.control.Framework),
 			ControlID:   r.control.ID,
 			Status:      string(r.obs.Status),
@@ -166,12 +175,8 @@ func (e *Engine) Evaluate(ctx context.Context, tenantID uuid.UUID) (TenantPostur
 			Source:      r.obs.Source,
 			Details:     r.details,
 			ObservedAt:  r.obs.ObservedAt,
-			RunID:       run.ID,
-		}); err != nil {
-			return TenantPosture{}, fmt.Errorf("upsert control status %s: %w", r.control.ID, err)
-		}
-		if _, err := e.repo.AppendEvidence(ctx, tenantID, repository.ComplianceAutoEvidenceRow{
-			RunID:       run.ID,
+		})
+		eval.Evidence = append(eval.Evidence, repository.ComplianceAutoEvidenceRow{
 			Framework:   string(r.control.Framework),
 			ControlID:   r.control.ID,
 			CollectorID: string(r.control.CollectorID),
@@ -180,12 +185,10 @@ func (e *Engine) Evaluate(ctx context.Context, tenantID uuid.UUID) (TenantPostur
 			Source:      r.obs.Source,
 			Details:     r.details,
 			ObservedAt:  r.obs.ObservedAt,
-		}); err != nil {
-			return TenantPosture{}, fmt.Errorf("append evidence %s: %w", r.control.ID, err)
-		}
+		})
 	}
 
-	// Per-framework rollups.
+	// Per-framework rollups, in catalog-first-seen framework order.
 	for _, fw := range Frameworks() {
 		var ft, fp, ff, fna int
 		for _, r := range results {
@@ -205,17 +208,18 @@ func (e *Engine) Evaluate(ctx context.Context, tenantID uuid.UUID) (TenantPostur
 		if ft == 0 {
 			continue
 		}
-		if _, err := e.repo.UpsertFrameworkState(ctx, tenantID, repository.ComplianceAutoFrameworkStateRow{
+		eval.Frameworks = append(eval.Frameworks, repository.ComplianceAutoFrameworkStateRow{
 			Framework:     string(fw),
 			ControlsTotal: ft,
 			ControlsPass:  fp,
 			ControlsFail:  ff,
 			ControlsNA:    fna,
-			LastRunID:     run.ID,
 			EvaluatedAt:   finishedAt,
-		}); err != nil {
-			return TenantPosture{}, fmt.Errorf("upsert framework state %s: %w", fw, err)
-		}
+		})
+	}
+
+	if _, err := e.repo.ApplyEvaluation(ctx, tenantID, eval); err != nil {
+		return TenantPosture{}, fmt.Errorf("apply evaluation: %w", err)
 	}
 
 	return e.buildPostureFromResults(tenantID, finishedAt, results), nil
@@ -328,6 +332,14 @@ func (e *Engine) CollectAll(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("enumerate tenants: %w", err)
 	}
+	// A single reused timer paces the sweep instead of allocating one
+	// short-lived timer per tenant — at 5,000 tenants that is one timer
+	// for the whole sweep rather than 5,000.
+	var pacer *time.Timer
+	if e.perTenant > 0 {
+		pacer = time.NewTimer(e.perTenant)
+		defer pacer.Stop()
+	}
 	var evaluated, failed int
 	for _, tenantID := range tenants {
 		if err := ctx.Err(); err != nil {
@@ -340,11 +352,12 @@ func (e *Engine) CollectAll(ctx context.Context) error {
 		} else {
 			evaluated++
 		}
-		if e.perTenant > 0 {
+		if pacer != nil {
+			pacer.Reset(e.perTenant)
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(e.perTenant):
+			case <-pacer.C:
 			}
 		}
 	}

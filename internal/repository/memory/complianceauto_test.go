@@ -55,6 +55,125 @@ func TestComplianceAutoRepository_RunsLatest(t *testing.T) {
 	}
 }
 
+func TestComplianceAutoRepository_ApplyEvaluation(t *testing.T) {
+	t.Parallel()
+	repo := memory.NewComplianceAutoRepository()
+	ctx := context.Background()
+	tenant := uuid.New()
+	base := time.Date(2026, 3, 1, 0, 0, 0, 0, time.UTC)
+
+	first := repository.ComplianceAutoEvaluation{
+		Run: repository.ComplianceAutoRunRow{
+			StartedAt: base, FinishedAt: base.Add(time.Second),
+			ControlsTotal: 2, ControlsPass: 1, ControlsFail: 1,
+		},
+		Statuses: []repository.ComplianceAutoControlStatusRow{
+			{Framework: "SOC2", ControlID: "CC6.1", Status: "fail", CollectorID: "policy_default_deny", ObservedAt: base},
+			{Framework: "SOC2", ControlID: "CC6.7", Status: "pass", CollectorID: "encryption_at_rest", ObservedAt: base},
+		},
+		Evidence: []repository.ComplianceAutoEvidenceRow{
+			{Framework: "SOC2", ControlID: "CC6.1", Status: "fail", CollectorID: "policy_default_deny", ObservedAt: base},
+			{Framework: "SOC2", ControlID: "CC6.7", Status: "pass", CollectorID: "encryption_at_rest", ObservedAt: base},
+		},
+		Frameworks: []repository.ComplianceAutoFrameworkStateRow{
+			{Framework: "SOC2", ControlsTotal: 2, ControlsPass: 1, ControlsFail: 1, EvaluatedAt: base},
+		},
+	}
+
+	run, err := repo.ApplyEvaluation(ctx, tenant, first)
+	if err != nil {
+		t.Fatalf("apply first: %v", err)
+	}
+	if run.ID == uuid.Nil || run.TenantID != tenant {
+		t.Fatalf("run not stamped: %+v", run)
+	}
+
+	// The run is the latest, and every child row is stamped with its id.
+	latest, err := repo.LatestRun(ctx, tenant)
+	if err != nil || latest.ID != run.ID {
+		t.Fatalf("latest run = %v (err %v), want %s", latest.ID, err, run.ID)
+	}
+	statuses, err := repo.ListControlStatus(ctx, tenant, "")
+	if err != nil {
+		t.Fatalf("list status: %v", err)
+	}
+	if len(statuses) != 2 {
+		t.Fatalf("status rows = %d, want 2", len(statuses))
+	}
+	for _, s := range statuses {
+		if s.RunID != run.ID {
+			t.Fatalf("status %s run id = %s, want %s", s.ControlID, s.RunID, run.ID)
+		}
+	}
+	ev, err := repo.ListEvidence(ctx, tenant, "", 0)
+	if err != nil {
+		t.Fatalf("list evidence: %v", err)
+	}
+	if len(ev) != 2 {
+		t.Fatalf("evidence rows = %d, want 2", len(ev))
+	}
+	for _, e := range ev {
+		if e.RunID != run.ID {
+			t.Fatalf("evidence %s run id = %s, want %s", e.ControlID, e.RunID, run.ID)
+		}
+	}
+
+	// A second sweep upserts control + framework state in place (no
+	// duplicates) and appends fresh evidence, all under the new run id.
+	second := repository.ComplianceAutoEvaluation{
+		Run: repository.ComplianceAutoRunRow{
+			StartedAt: base.Add(time.Hour), FinishedAt: base.Add(time.Hour + time.Second),
+			ControlsTotal: 2, ControlsPass: 2,
+		},
+		Statuses: []repository.ComplianceAutoControlStatusRow{
+			{Framework: "SOC2", ControlID: "CC6.1", Status: "pass", CollectorID: "policy_default_deny", ObservedAt: base.Add(time.Hour)},
+			{Framework: "SOC2", ControlID: "CC6.7", Status: "pass", CollectorID: "encryption_at_rest", ObservedAt: base.Add(time.Hour)},
+		},
+		Evidence: []repository.ComplianceAutoEvidenceRow{
+			{Framework: "SOC2", ControlID: "CC6.1", Status: "pass", CollectorID: "policy_default_deny", ObservedAt: base.Add(time.Hour)},
+		},
+		Frameworks: []repository.ComplianceAutoFrameworkStateRow{
+			{Framework: "SOC2", ControlsTotal: 2, ControlsPass: 2, EvaluatedAt: base.Add(time.Hour)},
+		},
+	}
+	run2, err := repo.ApplyEvaluation(ctx, tenant, second)
+	if err != nil {
+		t.Fatalf("apply second: %v", err)
+	}
+
+	statuses, err = repo.ListControlStatus(ctx, tenant, "")
+	if err != nil {
+		t.Fatalf("list status after second: %v", err)
+	}
+	if len(statuses) != 2 {
+		t.Fatalf("status rows after second = %d, want 2 (upsert in place)", len(statuses))
+	}
+	for _, s := range statuses {
+		if s.Status != "pass" || s.RunID != run2.ID {
+			t.Fatalf("status %s not advanced: status=%q run=%s", s.ControlID, s.Status, s.RunID)
+		}
+	}
+	states, err := repo.ListFrameworkState(ctx, tenant)
+	if err != nil {
+		t.Fatalf("list framework: %v", err)
+	}
+	if len(states) != 1 || states[0].ControlsPass != 2 || states[0].LastRunID != run2.ID {
+		t.Fatalf("framework state not advanced in place: %+v", states)
+	}
+	ev, err = repo.ListEvidence(ctx, tenant, "", 0)
+	if err != nil {
+		t.Fatalf("list evidence after second: %v", err)
+	}
+	if len(ev) != 3 {
+		t.Fatalf("evidence rows after second = %d, want 3 (append-only)", len(ev))
+	}
+
+	// Tenant isolation: another tenant sees nothing.
+	if _, err := repo.LatestRun(ctx, uuid.New()); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("other tenant LatestRun = %v, want ErrNotFound", err)
+	}
+}
+
 func TestComplianceAutoRepository_ControlStatusUpsert(t *testing.T) {
 	t.Parallel()
 	repo := memory.NewComplianceAutoRepository()

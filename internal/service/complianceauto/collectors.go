@@ -30,7 +30,11 @@ type Snapshot struct {
 	// Managed platform defaults derived from control-plane config.
 	RLSEnforced      bool
 	EncryptionAtRest bool
-	TLSEnforced      bool
+	// TLSEnforced is the computed verdict for transport encryption;
+	// TLSMode is the raw libpq sslmode it was derived from, recorded as
+	// evidence so the posture shows WHY the control passed or failed.
+	TLSEnforced bool
+	TLSMode     string
 
 	// Identity federation (read from IDPConfigRepository.List).
 	IDPConfigured int
@@ -176,6 +180,9 @@ func collectEncryptionTransit(s Snapshot) Observation {
 		obs.Summary = "TLS is not enforced for data in transit"
 	}
 	obs.Details["tls_enforced"] = s.TLSEnforced
+	if s.TLSMode != "" {
+		obs.Details["tls_mode"] = s.TLSMode
+	}
 	return obs
 }
 

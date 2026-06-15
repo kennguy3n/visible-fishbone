@@ -48,7 +48,7 @@ func (f fakeComplianceAutoSource) Snapshot(_ context.Context, id uuid.UUID) (com
 	}, nil
 }
 
-func newComplianceAutoTestRouter(t *testing.T) (http.Handler, uuid.UUID, string) {
+func newComplianceAutoTestRouter(t *testing.T, opts ...handler.ComplianceAutoOption) (http.Handler, uuid.UUID, string) {
 	t.Helper()
 	tenantID := uuid.New()
 	engine := complianceauto.NewEngine(
@@ -68,11 +68,25 @@ func newComplianceAutoTestRouter(t *testing.T) (http.Handler, uuid.UUID, string)
 	}
 	router := handler.NewRouter(handler.RouterDeps{
 		Config:         cfg,
-		ComplianceAuto: handler.NewComplianceAutoHandler(engine),
+		ComplianceAuto: handler.NewComplianceAutoHandler(engine, opts...),
 	})
 
 	token := tokenForTenant(t, jwtSecret, tenantID)
 	return router, tenantID, token
+}
+
+// stubComplianceAutoAuthorizer is a deterministic ComplianceAutoAuthorizer
+// for the RBAC-gate tests. It records the permission it was asked about so
+// a test can assert the handler checks the right one.
+type stubComplianceAutoAuthorizer struct {
+	allow   bool
+	err     error
+	checked string
+}
+
+func (s *stubComplianceAutoAuthorizer) HasPermission(_ context.Context, _ uuid.UUID, permission string) (bool, error) {
+	s.checked = permission
+	return s.allow, s.err
 }
 
 func tokenForTenant(t *testing.T, secret string, tenantID uuid.UUID) string {
@@ -221,5 +235,50 @@ func TestComplianceAutoHandler_TenantMismatchForbidden(t *testing.T) {
 	rec := doJSON(t, router, http.MethodGet, path, otherToken, nil)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("tenant mismatch: status = %d, want 403", rec.Code)
+	}
+}
+
+func TestComplianceAutoHandler_CollectRBACDenied(t *testing.T) {
+	t.Parallel()
+	authz := &stubComplianceAutoAuthorizer{allow: false}
+	router, tenantID, token := newComplianceAutoTestRouter(t, handler.WithComplianceAutoAuthorizer(authz))
+	base := "/api/v1/tenants/" + tenantID.String() + "/compliance-auto"
+
+	rec := doJSON(t, router, http.MethodPost, base+"/collect", token, nil)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("collect without permission: status = %d, want 403", rec.Code)
+	}
+	if authz.checked != "compliance:write" {
+		t.Fatalf("checked permission = %q, want compliance:write", authz.checked)
+	}
+
+	// The gate must not have run the sweep: posture stays empty.
+	rec = doJSON(t, router, http.MethodGet, base+"/posture", token, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("posture: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	var posture struct {
+		Frameworks []json.RawMessage `json:"frameworks"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &posture); err != nil {
+		t.Fatalf("decode posture: %v", err)
+	}
+	if len(posture.Frameworks) != 0 {
+		t.Fatalf("denied collect still produced posture: %d frameworks", len(posture.Frameworks))
+	}
+}
+
+func TestComplianceAutoHandler_CollectRBACAllowed(t *testing.T) {
+	t.Parallel()
+	authz := &stubComplianceAutoAuthorizer{allow: true}
+	router, tenantID, token := newComplianceAutoTestRouter(t, handler.WithComplianceAutoAuthorizer(authz))
+	base := "/api/v1/tenants/" + tenantID.String() + "/compliance-auto"
+
+	rec := doJSON(t, router, http.MethodPost, base+"/collect", token, nil)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("collect with permission: status = %d, body = %s", rec.Code, rec.Body.String())
+	}
+	if authz.checked != "compliance:write" {
+		t.Fatalf("checked permission = %q, want compliance:write", authz.checked)
 	}
 }

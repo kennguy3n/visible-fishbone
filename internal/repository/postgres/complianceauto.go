@@ -35,6 +35,124 @@ func jsonOrEmpty(raw json.RawMessage) json.RawMessage {
 	return raw
 }
 
+// The write statements are shared by the single-row methods and by the
+// atomic ApplyEvaluation path so the SQL has exactly one definition.
+const (
+	sqlInsertRun = `
+INSERT INTO compliance_auto_runs
+    (tenant_id, started_at, finished_at, controls_total, controls_pass, controls_fail, controls_na)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
+RETURNING id, tenant_id, started_at, finished_at, controls_total, controls_pass, controls_fail, controls_na, created_at`
+
+	sqlUpsertControlStatus = `
+INSERT INTO compliance_auto_control_status
+    (tenant_id, framework, control_id, status, collector_id, summary, source, details, observed_at, run_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+ON CONFLICT (tenant_id, framework, control_id) DO UPDATE SET
+    status       = EXCLUDED.status,
+    collector_id = EXCLUDED.collector_id,
+    summary      = EXCLUDED.summary,
+    source       = EXCLUDED.source,
+    details      = EXCLUDED.details,
+    observed_at  = EXCLUDED.observed_at,
+    run_id       = EXCLUDED.run_id,
+    updated_at   = now()
+RETURNING id, tenant_id, framework, control_id, status, collector_id, summary, source, details, observed_at, run_id, created_at, updated_at`
+
+	sqlInsertEvidence = `
+INSERT INTO compliance_auto_evidence
+    (tenant_id, run_id, framework, control_id, collector_id, status, summary, source, details, observed_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+RETURNING id, tenant_id, run_id, framework, control_id, collector_id, status, summary, source, details, observed_at, created_at`
+
+	sqlUpsertFrameworkState = `
+INSERT INTO compliance_auto_framework_state
+    (tenant_id, framework, controls_total, controls_pass, controls_fail, controls_na, last_run_id, evaluated_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+ON CONFLICT (tenant_id, framework) DO UPDATE SET
+    controls_total = EXCLUDED.controls_total,
+    controls_pass  = EXCLUDED.controls_pass,
+    controls_fail  = EXCLUDED.controls_fail,
+    controls_na    = EXCLUDED.controls_na,
+    last_run_id    = EXCLUDED.last_run_id,
+    evaluated_at   = EXCLUDED.evaluated_at,
+    updated_at     = now()
+RETURNING id, tenant_id, framework, controls_total, controls_pass, controls_fail, controls_na, last_run_id, evaluated_at, created_at, updated_at`
+)
+
+// ApplyEvaluation persists a complete sweep for a tenant in ONE
+// transaction so the stored posture never reflects a half-applied sweep.
+// The run is inserted first (RETURNING its server-assigned id), then every
+// control status, evidence row, and framework rollup is written stamped
+// with that run id. Any failure rolls back the whole transaction via the
+// withTenant closure, leaving the prior posture intact.
+func (r *ComplianceAutoRepository) ApplyEvaluation(ctx context.Context, tenantID uuid.UUID, eval repository.ComplianceAutoEvaluation) (repository.ComplianceAutoRunRow, error) {
+	var out repository.ComplianceAutoRunRow
+	err := r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		run, err := scanRun(tx.QueryRow(ctx, sqlInsertRun,
+			tenantID,
+			eval.Run.StartedAt,
+			eval.Run.FinishedAt,
+			eval.Run.ControlsTotal,
+			eval.Run.ControlsPass,
+			eval.Run.ControlsFail,
+			eval.Run.ControlsNA,
+		))
+		if err != nil {
+			return fmt.Errorf("insert compliance_auto_runs: %w", err)
+		}
+		for _, row := range eval.Statuses {
+			if _, err := tx.Exec(ctx, sqlUpsertControlStatus,
+				tenantID,
+				row.Framework,
+				row.ControlID,
+				row.Status,
+				row.CollectorID,
+				row.Summary,
+				row.Source,
+				jsonOrEmpty(row.Details),
+				row.ObservedAt,
+				run.ID,
+			); err != nil {
+				return fmt.Errorf("upsert compliance_auto_control_status %s: %w", row.ControlID, err)
+			}
+		}
+		for _, row := range eval.Evidence {
+			if _, err := tx.Exec(ctx, sqlInsertEvidence,
+				tenantID,
+				run.ID,
+				row.Framework,
+				row.ControlID,
+				row.CollectorID,
+				row.Status,
+				row.Summary,
+				row.Source,
+				jsonOrEmpty(row.Details),
+				row.ObservedAt,
+			); err != nil {
+				return fmt.Errorf("insert compliance_auto_evidence %s: %w", row.ControlID, err)
+			}
+		}
+		for _, row := range eval.Frameworks {
+			if _, err := tx.Exec(ctx, sqlUpsertFrameworkState,
+				tenantID,
+				row.Framework,
+				row.ControlsTotal,
+				row.ControlsPass,
+				row.ControlsFail,
+				row.ControlsNA,
+				run.ID,
+				row.EvaluatedAt,
+			); err != nil {
+				return fmt.Errorf("upsert compliance_auto_framework_state %s: %w", row.Framework, err)
+			}
+		}
+		out = run
+		return nil
+	})
+	return out, err
+}
+
 // --- runs -----------------------------------------------------------------
 
 func scanRun(row pgx.Row) (repository.ComplianceAutoRunRow, error) {
@@ -58,12 +176,7 @@ func scanRun(row pgx.Row) (repository.ComplianceAutoRunRow, error) {
 func (r *ComplianceAutoRepository) RecordRun(ctx context.Context, tenantID uuid.UUID, run repository.ComplianceAutoRunRow) (repository.ComplianceAutoRunRow, error) {
 	var out repository.ComplianceAutoRunRow
 	err := r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
-		const q = `
-INSERT INTO compliance_auto_runs
-    (tenant_id, started_at, finished_at, controls_total, controls_pass, controls_fail, controls_na)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, tenant_id, started_at, finished_at, controls_total, controls_pass, controls_fail, controls_na, created_at`
-		scanned, err := scanRun(tx.QueryRow(ctx, q,
+		scanned, err := scanRun(tx.QueryRow(ctx, sqlInsertRun,
 			tenantID,
 			run.StartedAt,
 			run.FinishedAt,
@@ -137,21 +250,7 @@ func scanControlStatus(row pgx.Row) (repository.ComplianceAutoControlStatusRow, 
 func (r *ComplianceAutoRepository) UpsertControlStatus(ctx context.Context, tenantID uuid.UUID, row repository.ComplianceAutoControlStatusRow) (repository.ComplianceAutoControlStatusRow, error) {
 	var out repository.ComplianceAutoControlStatusRow
 	err := r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
-		const q = `
-INSERT INTO compliance_auto_control_status
-    (tenant_id, framework, control_id, status, collector_id, summary, source, details, observed_at, run_id)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-ON CONFLICT (tenant_id, framework, control_id) DO UPDATE SET
-    status       = EXCLUDED.status,
-    collector_id = EXCLUDED.collector_id,
-    summary      = EXCLUDED.summary,
-    source       = EXCLUDED.source,
-    details      = EXCLUDED.details,
-    observed_at  = EXCLUDED.observed_at,
-    run_id       = EXCLUDED.run_id,
-    updated_at   = now()
-RETURNING id, tenant_id, framework, control_id, status, collector_id, summary, source, details, observed_at, run_id, created_at, updated_at`
-		scanned, err := scanControlStatus(tx.QueryRow(ctx, q,
+		scanned, err := scanControlStatus(tx.QueryRow(ctx, sqlUpsertControlStatus,
 			tenantID,
 			row.Framework,
 			row.ControlID,
@@ -230,12 +329,7 @@ func scanEvidence(row pgx.Row) (repository.ComplianceAutoEvidenceRow, error) {
 func (r *ComplianceAutoRepository) AppendEvidence(ctx context.Context, tenantID uuid.UUID, row repository.ComplianceAutoEvidenceRow) (repository.ComplianceAutoEvidenceRow, error) {
 	var out repository.ComplianceAutoEvidenceRow
 	err := r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
-		const q = `
-INSERT INTO compliance_auto_evidence
-    (tenant_id, run_id, framework, control_id, collector_id, status, summary, source, details, observed_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-RETURNING id, tenant_id, run_id, framework, control_id, collector_id, status, summary, source, details, observed_at, created_at`
-		scanned, err := scanEvidence(tx.QueryRow(ctx, q,
+		scanned, err := scanEvidence(tx.QueryRow(ctx, sqlInsertEvidence,
 			tenantID,
 			row.RunID,
 			row.Framework,
@@ -323,20 +417,7 @@ func scanFrameworkState(row pgx.Row) (repository.ComplianceAutoFrameworkStateRow
 func (r *ComplianceAutoRepository) UpsertFrameworkState(ctx context.Context, tenantID uuid.UUID, row repository.ComplianceAutoFrameworkStateRow) (repository.ComplianceAutoFrameworkStateRow, error) {
 	var out repository.ComplianceAutoFrameworkStateRow
 	err := r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
-		const q = `
-INSERT INTO compliance_auto_framework_state
-    (tenant_id, framework, controls_total, controls_pass, controls_fail, controls_na, last_run_id, evaluated_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-ON CONFLICT (tenant_id, framework) DO UPDATE SET
-    controls_total = EXCLUDED.controls_total,
-    controls_pass  = EXCLUDED.controls_pass,
-    controls_fail  = EXCLUDED.controls_fail,
-    controls_na    = EXCLUDED.controls_na,
-    last_run_id    = EXCLUDED.last_run_id,
-    evaluated_at   = EXCLUDED.evaluated_at,
-    updated_at     = now()
-RETURNING id, tenant_id, framework, controls_total, controls_pass, controls_fail, controls_na, last_run_id, evaluated_at, created_at, updated_at`
-		scanned, err := scanFrameworkState(tx.QueryRow(ctx, q,
+		scanned, err := scanFrameworkState(tx.QueryRow(ctx, sqlUpsertFrameworkState,
 			tenantID,
 			row.Framework,
 			row.ControlsTotal,

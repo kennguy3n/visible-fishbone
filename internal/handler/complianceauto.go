@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,8 +9,23 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/service/complianceauto"
 )
+
+// permComplianceAutoCollect is the RBAC permission required to trigger an
+// on-demand collection sweep — a write that creates run/evidence rows and
+// upserts control + framework state. It mirrors the existing compliance
+// evidence-write permission string.
+const permComplianceAutoCollect = "compliance:write"
+
+// ComplianceAutoAuthorizer is the narrow, OPTIONAL authorization seam for
+// the write endpoint. It is satisfied by *rbac.Service. When left nil
+// (minimal wiring / tests) the collect endpoint is ungated, matching the
+// rollout handler's pattern.
+type ComplianceAutoAuthorizer interface {
+	HasPermission(ctx context.Context, userID uuid.UUID, permission string) (bool, error)
+}
 
 // ComplianceAutoHandler exposes the continuous compliance evidence REST
 // surface (WP6): a tenant's live posture per framework/control with
@@ -18,11 +34,56 @@ import (
 // ComplianceHandler, which serves the point-in-time compliance reports.
 type ComplianceAutoHandler struct {
 	engine *complianceauto.Engine
+	authz  ComplianceAutoAuthorizer
+}
+
+// ComplianceAutoOption customizes a ComplianceAutoHandler.
+type ComplianceAutoOption func(*ComplianceAutoHandler)
+
+// WithComplianceAutoAuthorizer gates the on-demand collect endpoint
+// behind an RBAC permission check. A nil authorizer is ignored so the
+// endpoint stays ungated in minimal wiring.
+func WithComplianceAutoAuthorizer(authz ComplianceAutoAuthorizer) ComplianceAutoOption {
+	return func(h *ComplianceAutoHandler) {
+		if authz != nil {
+			h.authz = authz
+		}
+	}
 }
 
 // NewComplianceAutoHandler wires the handler over the engine.
-func NewComplianceAutoHandler(engine *complianceauto.Engine) *ComplianceAutoHandler {
-	return &ComplianceAutoHandler{engine: engine}
+func NewComplianceAutoHandler(engine *complianceauto.Engine, opts ...ComplianceAutoOption) *ComplianceAutoHandler {
+	h := &ComplianceAutoHandler{engine: engine}
+	for _, opt := range opts {
+		opt(h)
+	}
+	return h
+}
+
+// authorize enforces an RBAC permission on a write path. It returns true
+// (allowing the request) when no authorizer is configured. Otherwise it
+// resolves the caller from the request context and returns false after
+// writing the appropriate 401/403/500 response when the check does not
+// pass.
+func (h *ComplianceAutoHandler) authorize(w http.ResponseWriter, r *http.Request, permission string) bool {
+	if h.authz == nil {
+		return true
+	}
+	userID := middleware.UserIDFromContext(r.Context())
+	if userID == uuid.Nil {
+		WriteError(w, http.StatusUnauthorized, "unauthenticated", "missing authenticated user")
+		return false
+	}
+	allowed, err := h.authz.HasPermission(r.Context(), userID, permission)
+	if err != nil {
+		WriteError(w, http.StatusInternalServerError, "authorization_failed", "permission check failed")
+		return false
+	}
+	if !allowed {
+		WriteError(w, http.StatusForbidden, "forbidden", "missing required permission")
+		return false
+	}
+	return true
 }
 
 // Register attaches the continuous-compliance routes. All are
@@ -137,6 +198,9 @@ func (h *ComplianceAutoHandler) getPosture(w http.ResponseWriter, r *http.Reques
 func (h *ComplianceAutoHandler) collect(w http.ResponseWriter, r *http.Request) {
 	tenantID, ok := PathUUID(w, r, "tenant_id")
 	if !ok {
+		return
+	}
+	if !h.authorize(w, r, permComplianceAutoCollect) {
 		return
 	}
 	posture, err := h.engine.Evaluate(r.Context(), tenantID)

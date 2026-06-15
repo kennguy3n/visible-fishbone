@@ -3580,7 +3580,6 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ComplianceAutoPosture" }
         "400": { $ref: "#/components/responses/Error" }
-        "404": { $ref: "#/components/responses/Error" }
   /tenants/{tenant_id}/compliance-auto/collect:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     post:
@@ -3599,6 +3598,8 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/ComplianceAutoPosture" }
         "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
         "500": { $ref: "#/components/responses/Error" }
   /tenants/{tenant_id}/compliance-auto/evidence-pack:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]

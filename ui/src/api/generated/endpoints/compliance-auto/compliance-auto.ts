@@ -76,7 +76,7 @@ export const getGetComplianceAutoPostureQueryKey = (tenantId?: string,
     }
 
     
-export const getGetComplianceAutoPostureQueryOptions = <TData = Awaited<ReturnType<typeof getComplianceAutoPosture>>, TError = ErrorResponse | ErrorResponse>(tenantId: string,
+export const getGetComplianceAutoPostureQueryOptions = <TData = Awaited<ReturnType<typeof getComplianceAutoPosture>>, TError = ErrorResponse>(tenantId: string,
     params?: GetComplianceAutoPostureParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getComplianceAutoPosture>>, TError, TData>>, request?: SecondParameter<typeof sngRequest>}
 ) => {
 
@@ -96,10 +96,10 @@ const {query: queryOptions, request: requestOptions} = options ?? {};
 }
 
 export type GetComplianceAutoPostureQueryResult = NonNullable<Awaited<ReturnType<typeof getComplianceAutoPosture>>>
-export type GetComplianceAutoPostureQueryError = ErrorResponse | ErrorResponse
+export type GetComplianceAutoPostureQueryError = ErrorResponse
 
 
-export function useGetComplianceAutoPosture<TData = Awaited<ReturnType<typeof getComplianceAutoPosture>>, TError = ErrorResponse | ErrorResponse>(
+export function useGetComplianceAutoPosture<TData = Awaited<ReturnType<typeof getComplianceAutoPosture>>, TError = ErrorResponse>(
  tenantId: string,
     params: undefined |  GetComplianceAutoPostureParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getComplianceAutoPosture>>, TError, TData>> & Pick<
         DefinedInitialDataOptions<
@@ -110,7 +110,7 @@ export function useGetComplianceAutoPosture<TData = Awaited<ReturnType<typeof ge
       >, request?: SecondParameter<typeof sngRequest>}
  , queryClient?: QueryClient
   ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> }
-export function useGetComplianceAutoPosture<TData = Awaited<ReturnType<typeof getComplianceAutoPosture>>, TError = ErrorResponse | ErrorResponse>(
+export function useGetComplianceAutoPosture<TData = Awaited<ReturnType<typeof getComplianceAutoPosture>>, TError = ErrorResponse>(
  tenantId: string,
     params?: GetComplianceAutoPostureParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getComplianceAutoPosture>>, TError, TData>> & Pick<
         UndefinedInitialDataOptions<
@@ -121,7 +121,7 @@ export function useGetComplianceAutoPosture<TData = Awaited<ReturnType<typeof ge
       >, request?: SecondParameter<typeof sngRequest>}
  , queryClient?: QueryClient
   ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> }
-export function useGetComplianceAutoPosture<TData = Awaited<ReturnType<typeof getComplianceAutoPosture>>, TError = ErrorResponse | ErrorResponse>(
+export function useGetComplianceAutoPosture<TData = Awaited<ReturnType<typeof getComplianceAutoPosture>>, TError = ErrorResponse>(
  tenantId: string,
     params?: GetComplianceAutoPostureParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getComplianceAutoPosture>>, TError, TData>>, request?: SecondParameter<typeof sngRequest>}
  , queryClient?: QueryClient
@@ -130,7 +130,7 @@ export function useGetComplianceAutoPosture<TData = Awaited<ReturnType<typeof ge
  * @summary View continuous compliance posture
  */
 
-export function useGetComplianceAutoPosture<TData = Awaited<ReturnType<typeof getComplianceAutoPosture>>, TError = ErrorResponse | ErrorResponse>(
+export function useGetComplianceAutoPosture<TData = Awaited<ReturnType<typeof getComplianceAutoPosture>>, TError = ErrorResponse>(
  tenantId: string,
     params?: GetComplianceAutoPostureParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getComplianceAutoPosture>>, TError, TData>>, request?: SecondParameter<typeof sngRequest>}
  , queryClient?: QueryClient 
@@ -169,7 +169,7 @@ export const collectComplianceAutoEvidence = (
   
 
 
-export const getCollectComplianceAutoEvidenceMutationOptions = <TError = ErrorResponse | ErrorResponse,
+export const getCollectComplianceAutoEvidenceMutationOptions = <TError = ErrorResponse | ErrorResponse | ErrorResponse | ErrorResponse,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof collectComplianceAutoEvidence>>, TError,{tenantId: string}, TContext>, request?: SecondParameter<typeof sngRequest>}
 ): UseMutationOptions<Awaited<ReturnType<typeof collectComplianceAutoEvidence>>, TError,{tenantId: string}, TContext> => {
 
@@ -196,12 +196,12 @@ const {mutation: mutationOptions, request: requestOptions} = options ?
 
     export type CollectComplianceAutoEvidenceMutationResult = NonNullable<Awaited<ReturnType<typeof collectComplianceAutoEvidence>>>
     
-    export type CollectComplianceAutoEvidenceMutationError = ErrorResponse | ErrorResponse
+    export type CollectComplianceAutoEvidenceMutationError = ErrorResponse | ErrorResponse | ErrorResponse | ErrorResponse
 
     /**
  * @summary Trigger an on-demand evidence collection
  */
-export const useCollectComplianceAutoEvidence = <TError = ErrorResponse | ErrorResponse,
+export const useCollectComplianceAutoEvidence = <TError = ErrorResponse | ErrorResponse | ErrorResponse | ErrorResponse,
     TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof collectComplianceAutoEvidence>>, TError,{tenantId: string}, TContext>, request?: SecondParameter<typeof sngRequest>}
  , queryClient?: QueryClient): UseMutationResult<
         Awaited<ReturnType<typeof collectComplianceAutoEvidence>>,

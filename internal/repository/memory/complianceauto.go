@@ -65,6 +65,82 @@ func (r *ComplianceAutoRepository) nextOrder() int64 {
 	return r.seq
 }
 
+// ApplyEvaluation persists an entire sweep under a single lock so a
+// posture read never observes a half-applied sweep, mirroring the
+// Postgres single-transaction guarantee. The run id is assigned here and
+// stamped onto every child row; the upsert keying matches the per-method
+// implementations so repeated sweeps converge to the same state.
+func (r *ComplianceAutoRepository) ApplyEvaluation(_ context.Context, tenantID uuid.UUID, eval repository.ComplianceAutoEvaluation) (repository.ComplianceAutoRunRow, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := time.Now().UTC()
+
+	run := eval.Run
+	run.ID = uuid.New()
+	run.TenantID = tenantID
+	if run.CreatedAt.IsZero() {
+		run.CreatedAt = now
+	}
+	r.runs[run.ID] = run
+
+	for _, row := range eval.Statuses {
+		row.TenantID = tenantID
+		row.RunID = run.ID
+		row.Details = cloneJSON(row.Details)
+		key := controlStatusKey{tenantID: tenantID, framework: row.Framework, controlID: row.ControlID}
+		if existingID, ok := r.statusByKey[key]; ok {
+			prev := r.controlStatus[existingID]
+			row.ID = prev.ID
+			row.CreatedAt = prev.CreatedAt
+			row.UpdatedAt = now
+			r.controlStatus[existingID] = row
+			continue
+		}
+		row.ID = uuid.New()
+		if row.CreatedAt.IsZero() {
+			row.CreatedAt = now
+		}
+		row.UpdatedAt = now
+		r.controlStatus[row.ID] = row
+		r.statusByKey[key] = row.ID
+	}
+
+	for _, row := range eval.Evidence {
+		row.ID = uuid.New()
+		row.TenantID = tenantID
+		row.RunID = run.ID
+		row.Details = cloneJSON(row.Details)
+		if row.CreatedAt.IsZero() {
+			row.CreatedAt = now
+		}
+		r.evidence[row.ID] = row
+		r.evidenceOrder[row.ID] = r.nextOrder()
+	}
+
+	for _, row := range eval.Frameworks {
+		row.TenantID = tenantID
+		row.LastRunID = run.ID
+		key := frameworkStateKey{tenantID: tenantID, framework: row.Framework}
+		if existingID, ok := r.frameworkByKey[key]; ok {
+			prev := r.frameworkState[existingID]
+			row.ID = prev.ID
+			row.CreatedAt = prev.CreatedAt
+			row.UpdatedAt = now
+			r.frameworkState[existingID] = row
+			continue
+		}
+		row.ID = uuid.New()
+		if row.CreatedAt.IsZero() {
+			row.CreatedAt = now
+		}
+		row.UpdatedAt = now
+		r.frameworkState[row.ID] = row
+		r.frameworkByKey[key] = row.ID
+	}
+
+	return run, nil
+}
+
 // --- runs -----------------------------------------------------------------
 
 func (r *ComplianceAutoRepository) RecordRun(_ context.Context, tenantID uuid.UUID, run repository.ComplianceAutoRunRow) (repository.ComplianceAutoRunRow, error) {

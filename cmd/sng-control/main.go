@@ -2221,13 +2221,19 @@ func buildRouter(
 		complianceauto.ManagedDefaults{
 			RLSEnforced:      cfg.Postgres.AppRole != "",
 			EncryptionAtRest: cfg.Policy.KeyWrapMasterB64 != "" || cfg.Policy.KeyWrapMasterFile != "",
-			TLSEnforced:      true,
+			// Derive the encryption-in-transit verdict from the real
+			// control-plane sslmode instead of a hardcoded pass, so the
+			// control genuinely fails in a plaintext deployment.
+			PostgresSSLMode: cfg.Postgres.SSLMode,
 		},
 		nil,
 	)
 	complianceAutoEngine := complianceauto.NewEngine(
 		complianceAutoSource, complianceAutoRepo, complianceauto.Config{Logger: logger})
-	complianceAutoHandler := handler.NewComplianceAutoHandler(complianceAutoEngine)
+	complianceAutoHandler := handler.NewComplianceAutoHandler(
+		complianceAutoEngine,
+		handler.WithComplianceAutoAuthorizer(rbacSvc),
+	)
 	// WS-2: the public mobile native-SSO token / refresh endpoints
 	// bypass the authenticated chain (the agent has no SNG session
 	// yet), so the RecordActivity middleware never sees them. Record a

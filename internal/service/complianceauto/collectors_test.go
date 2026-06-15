@@ -115,6 +115,57 @@ func TestCollectors_RegistryCoversCatalog(t *testing.T) {
 	}
 }
 
+// TestTLSEnforcedFromSSLMode pins the mapping from libpq sslmode to the
+// encryption-in-transit verdict: only the modes that require an encrypted
+// connection count as enforced.
+func TestTLSEnforcedFromSSLMode(t *testing.T) {
+	t.Parallel()
+	cases := map[string]bool{
+		"require":     true,
+		"verify-ca":   true,
+		"verify-full": true,
+		"disable":     false,
+		"allow":       false,
+		"prefer":      false,
+		"":            false,
+		"REQUIRE":     false, // case-sensitive: libpq values are lowercase
+	}
+	for mode, want := range cases {
+		if got := TLSEnforcedFromSSLMode(mode); got != want {
+			t.Errorf("TLSEnforcedFromSSLMode(%q) = %v, want %v", mode, got, want)
+		}
+	}
+}
+
+// TestEncryptionTransit_RecordsMode proves the sslmode flows into the
+// evidence and drives the verdict — a plaintext mode fails and surfaces
+// the mode that caused it.
+func TestEncryptionTransit_RecordsMode(t *testing.T) {
+	t.Parallel()
+
+	enforced := snap()
+	enforced.TLSEnforced = true
+	enforced.TLSMode = "require"
+	obs := run(t, CollectorEncryptionTransit, enforced)
+	if obs.Status != StatusPass {
+		t.Fatalf("require: status = %q, want pass", obs.Status)
+	}
+	if obs.Details["tls_mode"] != "require" {
+		t.Fatalf("require: tls_mode detail = %v, want require", obs.Details["tls_mode"])
+	}
+
+	plaintext := snap()
+	plaintext.TLSEnforced = false
+	plaintext.TLSMode = "disable"
+	obs = run(t, CollectorEncryptionTransit, plaintext)
+	if obs.Status != StatusFail {
+		t.Fatalf("disable: status = %q, want fail", obs.Status)
+	}
+	if obs.Details["tls_mode"] != "disable" {
+		t.Fatalf("disable: tls_mode detail = %v, want disable", obs.Details["tls_mode"])
+	}
+}
+
 // TestKeyRotation_Boundary pins the rotation window boundary: a key
 // exactly at the max age still passes; one second older fails.
 func TestKeyRotation_Boundary(t *testing.T) {

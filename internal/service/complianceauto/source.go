@@ -63,9 +63,32 @@ type ManagedDefaults struct {
 	// EncryptionAtRest is true when a key-wrap master is configured
 	// (config Policy.KeyWrapMasterB64 / KeyWrapMasterFile set).
 	EncryptionAtRest bool
-	// TLSEnforced is true when the platform terminates TLS for all
-	// tenant traffic (always true in managed SaaS).
-	TLSEnforced bool
+	// PostgresSSLMode is the control plane's libpq sslmode (config
+	// PG_SSLMODE). It is the real, config-visible signal for transport
+	// encryption: production validation hard-requires one of
+	// require/verify-ca/verify-full, while a dev/test deployment behind
+	// a plaintext proxy leaves it at the "disable" default. The
+	// encryption-in-transit control derives its verdict from this rather
+	// than a hardcoded pass, so it actually fails when transport is not
+	// encrypted (see TLSEnforcedFromSSLMode).
+	PostgresSSLMode string
+}
+
+// tlsEnforcingSSLModes are the libpq sslmode values that REQUIRE an
+// encrypted connection. "disable"/"allow" permit plaintext and "prefer"
+// silently falls back to it, so none of them enforce TLS.
+var tlsEnforcingSSLModes = map[string]bool{
+	"require":     true,
+	"verify-ca":   true,
+	"verify-full": true,
+}
+
+// TLSEnforcedFromSSLMode reports whether a libpq sslmode guarantees an
+// encrypted transport. It is the single mapping from raw config to the
+// encryption-in-transit evidence, exported so the wiring layer and tests
+// share one definition.
+func TLSEnforcedFromSSLMode(mode string) bool {
+	return tlsEnforcingSSLModes[mode]
 }
 
 // PlatformAdapter is the production PlatformSource. It assembles a
@@ -108,6 +131,12 @@ func NewPlatformAdapter(
 var _ PlatformSource = (*PlatformAdapter)(nil)
 
 // Tenants enumerates tenant ids via the cheap activity projection.
+// ListTenantActivity returns every live tenant (it is a LEFT JOIN over
+// the tenants table: a tenant with no recorded activity is still
+// returned, with a nil last-active timestamp), so a brand-new tenant is
+// swept on the very next cycle without waiting for first activity. The
+// projection is used only because it is the single cheapest indexed read
+// of the full tenant set; the engine needs only the ids.
 func (a *PlatformAdapter) Tenants(ctx context.Context) ([]uuid.UUID, error) {
 	activity, err := a.tenants.ListTenantActivity(ctx)
 	if err != nil {
@@ -143,7 +172,8 @@ func (a *PlatformAdapter) Snapshot(ctx context.Context, tenantID uuid.UUID) (Sna
 		ObservedAt:       now,
 		RLSEnforced:      a.defaults.RLSEnforced,
 		EncryptionAtRest: a.defaults.EncryptionAtRest,
-		TLSEnforced:      a.defaults.TLSEnforced,
+		TLSMode:          a.defaults.PostgresSSLMode,
+		TLSEnforced:      TLSEnforcedFromSSLMode(a.defaults.PostgresSSLMode),
 	}
 
 	tenant, err := a.tenants.Get(ctx, tenantID)
