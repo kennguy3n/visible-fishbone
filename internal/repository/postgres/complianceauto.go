@@ -84,12 +84,20 @@ RETURNING id, tenant_id, started_at, finished_at, controls_total, controls_pass,
 func (r *ComplianceAutoRepository) LatestRun(ctx context.Context, tenantID uuid.UUID) (repository.ComplianceAutoRunRow, error) {
 	var out repository.ComplianceAutoRunRow
 	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		// Defence-in-depth: predicate on tenant_id explicitly in
+		// addition to RLS (withTenantRO). The explicit predicate keeps
+		// the tenant boundary correct even if RLS is bypassed (superuser
+		// / RLS-bypass role / GUC unset) — critical here because the
+		// LIMIT 1 over an unfiltered scan would otherwise silently return
+		// another tenant's latest run. The tenant_id index is used either
+		// way, so there is no cost.
 		const q = `
 SELECT id, tenant_id, started_at, finished_at, controls_total, controls_pass, controls_fail, controls_na, created_at
 FROM compliance_auto_runs
+WHERE tenant_id = $1
 ORDER BY started_at DESC, id DESC
 LIMIT 1`
-		scanned, err := scanRun(tx.QueryRow(ctx, q))
+		scanned, err := scanRun(tx.QueryRow(ctx, q, tenantID))
 		if errors.Is(err, pgx.ErrNoRows) {
 			return repository.ErrNotFound
 		}
@@ -167,12 +175,15 @@ RETURNING id, tenant_id, framework, control_id, status, collector_id, summary, s
 func (r *ComplianceAutoRepository) ListControlStatus(ctx context.Context, tenantID uuid.UUID, framework string) ([]repository.ComplianceAutoControlStatusRow, error) {
 	var out []repository.ComplianceAutoControlStatusRow
 	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		// Defence-in-depth: always predicate on tenant_id in addition to
+		// RLS (withTenantRO), optionally narrowing by framework.
 		q := `
 SELECT id, tenant_id, framework, control_id, status, collector_id, summary, source, details, observed_at, run_id, created_at, updated_at
-FROM compliance_auto_control_status`
-		args := []any{}
+FROM compliance_auto_control_status
+WHERE tenant_id = $1`
+		args := []any{tenantID}
 		if framework != "" {
-			q += ` WHERE framework = $1`
+			q += ` AND framework = $2`
 			args = append(args, framework)
 		}
 		q += ` ORDER BY framework ASC, control_id ASC`
@@ -254,14 +265,17 @@ func (r *ComplianceAutoRepository) ListEvidence(ctx context.Context, tenantID uu
 	}
 	var out []repository.ComplianceAutoEvidenceRow
 	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		// Defence-in-depth: always predicate on tenant_id in addition to
+		// RLS (withTenantRO), optionally narrowing by control_id.
 		q := `
 SELECT id, tenant_id, run_id, framework, control_id, collector_id, status, summary, source, details, observed_at, created_at
-FROM compliance_auto_evidence`
-		args := []any{}
-		argN := 0
+FROM compliance_auto_evidence
+WHERE tenant_id = $1`
+		args := []any{tenantID}
+		argN := 1
 		if controlID != "" {
 			argN++
-			q += fmt.Sprintf(` WHERE control_id = $%d`, argN)
+			q += fmt.Sprintf(` AND control_id = $%d`, argN)
 			args = append(args, controlID)
 		}
 		argN++
@@ -344,11 +358,14 @@ RETURNING id, tenant_id, framework, controls_total, controls_pass, controls_fail
 func (r *ComplianceAutoRepository) ListFrameworkState(ctx context.Context, tenantID uuid.UUID) ([]repository.ComplianceAutoFrameworkStateRow, error) {
 	var out []repository.ComplianceAutoFrameworkStateRow
 	err := r.s.withTenantRO(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		// Defence-in-depth: predicate on tenant_id explicitly in addition
+		// to RLS (withTenantRO).
 		const q = `
 SELECT id, tenant_id, framework, controls_total, controls_pass, controls_fail, controls_na, last_run_id, evaluated_at, created_at, updated_at
 FROM compliance_auto_framework_state
+WHERE tenant_id = $1
 ORDER BY framework ASC`
-		rows, err := tx.Query(ctx, q)
+		rows, err := tx.Query(ctx, q, tenantID)
 		if err != nil {
 			return err
 		}
