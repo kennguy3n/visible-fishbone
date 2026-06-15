@@ -223,6 +223,47 @@ mod tests {
     }
 
     #[test]
+    fn deeply_nested_host_beyond_label_bound_still_matches_short_suffix() {
+        // A pathological host with far more than MAX_HOST_LABELS labels
+        // must still resolve via its short registrable suffix. The
+        // adversarial label bound only drops the longest (most specific)
+        // suffixes from the walk, so a 2-label catalog suffix stays
+        // reachable; the matcher remains bounded and never panics. The
+        // only observable effect of the bound is that such a host can
+        // never earn the exact-match bonus (its full name is skipped).
+        let json = r#"{
+          "schema_version": 1,
+          "apps": [
+            {"app_id":"acme","category":"test","sni_suffixes":["acme.example"],
+             "host_suffixes":[],"ja3":[],"ports":[],"transport":"tcp",
+             "byte_prefixes":[],"confidence":80}
+          ]
+        }"#;
+        let cat = Catalog::from_json(json).expect("parse");
+        let m = Matcher::from_catalog(&cat);
+
+        // 20 leading labels (well beyond MAX_HOST_LABELS = 12) under the
+        // catalog's 2-label suffix.
+        let mut host = String::new();
+        for i in 0..20 {
+            host.push_str(&format!("l{i}."));
+        }
+        host.push_str("acme.example");
+        assert!(
+            host.matches('.').count() + 1 > MAX_HOST_LABELS,
+            "fixture must exceed the label bound"
+        );
+
+        let out = m
+            .identify(&ConnFeatures::from_sni(&host, 443))
+            .expect("deeply nested host still matches the short suffix");
+        assert_eq!(out.app_id, "acme");
+        // Matched via the 2-label suffix, not the (skipped) full name, so
+        // no exact bonus is applied: confidence stays at the base.
+        assert_eq!(out.confidence, 80);
+    }
+
+    #[test]
     fn byte_probe_identifies_ssh() {
         let m = builtin();
         let out = m
