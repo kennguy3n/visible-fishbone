@@ -3319,6 +3319,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sng-appid"
+version = "0.1.0"
+dependencies = [
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "sng-comms"
 version = "0.1.0"
 dependencies = [
@@ -3507,6 +3517,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "sha2",
+ "sng-appid",
  "sng-core",
  "sng-ebpf",
  "sng-policy-eval",
