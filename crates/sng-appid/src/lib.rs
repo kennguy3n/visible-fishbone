@@ -175,6 +175,54 @@ mod tests {
     }
 
     #[test]
+    fn more_specific_suffix_wins_across_apps() {
+        // Two apps overlap on a parent domain; the one that matches the
+        // longer, more specific suffix must win even though both share
+        // the same confidence and neither is an exact match. Without
+        // specificity ranking the alphabetical tie-break would wrongly
+        // pick the generic `acme` over `acme.api`.
+        let json = r#"{
+          "schema_version": 1,
+          "apps": [
+            {"app_id":"acme","category":"test","sni_suffixes":["acme.com"],
+             "host_suffixes":[],"ja3":[],"ports":[443],"transport":"tcp",
+             "byte_prefixes":[],"confidence":90},
+            {"app_id":"acme.api","category":"test","sni_suffixes":["api.acme.com"],
+             "host_suffixes":[],"ja3":[],"ports":[443],"transport":"tcp",
+             "byte_prefixes":[],"confidence":90}
+          ]
+        }"#;
+        let cat = Catalog::from_json(json).expect("parse");
+        let m = Matcher::from_catalog(&cat);
+        // A host under the specific suffix resolves to the specific app.
+        let specific = m
+            .identify(&ConnFeatures::from_sni("edge.api.acme.com", 443))
+            .expect("match");
+        assert_eq!(specific.app_id, "acme.api");
+        // A host that only matches the parent resolves to the generic app.
+        let generic = m
+            .identify(&ConnFeatures::from_sni("www.acme.com", 443))
+            .expect("match");
+        assert_eq!(generic.app_id, "acme");
+    }
+
+    #[test]
+    fn seed_s3_host_resolves_to_s3_not_generic_aws() {
+        // Regression for the aws / aws.s3 overlap: an S3 endpoint must
+        // resolve to the specific `aws.s3`, while a non-S3 amazonaws
+        // host falls back to the generic `aws`.
+        let m = builtin();
+        let s3 = m
+            .identify(&ConnFeatures::from_sni("my-bucket.s3.amazonaws.com", 443))
+            .expect("s3");
+        assert_eq!(s3.app_id, "aws.s3");
+        let generic = m
+            .identify(&ConnFeatures::from_sni("ec2.amazonaws.com", 443))
+            .expect("aws");
+        assert_eq!(generic.app_id, "aws");
+    }
+
+    #[test]
     fn byte_probe_identifies_ssh() {
         let m = builtin();
         let out = m

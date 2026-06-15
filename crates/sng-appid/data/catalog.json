@@ -307,11 +307,9 @@
       "app_id": "aws.s3",
       "category": "storage",
       "sni_suffixes": [
-        "amazonaws.com",
         "s3.amazonaws.com"
       ],
       "host_suffixes": [
-        "amazonaws.com",
         "s3.amazonaws.com"
       ],
       "ja3": [],
@@ -2596,10 +2594,10 @@
       "app_id": "pagerduty.status",
       "category": "support-itsm",
       "sni_suffixes": [
-        "pagerduty.status"
+        "status.pagerduty.com"
       ],
       "host_suffixes": [
-        "pagerduty.status"
+        "status.pagerduty.com"
       ],
       "ja3": [],
       "ports": [

@@ -15,6 +15,12 @@
 //! - one pass over the handful of candidate apps to apply port /
 //!   transport modifiers and pick the best.
 //!
+//! When two apps tie on score, the one that matched the *more specific*
+//! (longer, more-labelled) host suffix wins — so `s3.amazonaws.com`
+//! resolves to `aws.s3` rather than the generic `aws` that only claims
+//! `amazonaws.com`. Specificity is a ranking dimension, not a
+//! confidence input, so the reported confidence stays stable.
+//!
 //! Memory is bounded by the catalog size; nothing is allocated per
 //! connection beyond a single lowercased copy of the host name and a
 //! small candidate map.
@@ -32,6 +38,12 @@ const MAX_HOST_NAME_LEN: usize = 255;
 /// Added when a host suffix matches the *entire* observed name (an
 /// exact host match is more specific than a parent-domain suffix).
 const EXACT_BONUS: i32 = 5;
+
+/// Number of labels in a matched host suffix, used purely to rank
+/// candidates that otherwise tie on score. A suffix is more specific —
+/// and therefore a stronger identity — the more labels it pins down
+/// (`s3.amazonaws.com` is more specific than `amazonaws.com`).
+type Specificity = u32;
 
 /// Added to an app that is already a candidate (via host/SNI/bytes)
 /// when its JA3 fingerprint also matches — corroboration.
@@ -145,13 +157,16 @@ impl Matcher {
     #[must_use]
     pub fn identify(&self, feat: &ConnFeatures<'_>) -> Option<AppMatch> {
         let mut scores: HashMap<usize, i32> = HashMap::new();
+        // Per-candidate length (in labels) of the most specific host
+        // suffix it matched; 0 for non-host signals (JA3, byte probes).
+        let mut spec: HashMap<usize, Specificity> = HashMap::new();
 
         // Strong host signals: longest-suffix match on SNI and Host.
         if let Some(sni) = feat.sni {
-            self.accumulate_host(sni, &mut scores);
+            self.accumulate_host(sni, &mut scores, &mut spec);
         }
         if let Some(host) = feat.host {
-            self.accumulate_host(host, &mut scores);
+            self.accumulate_host(host, &mut scores, &mut spec);
         }
 
         // Byte-probe protocols (SSH, RDP, SMB, BitTorrent, …).
@@ -201,13 +216,18 @@ impl Matcher {
             }
         }
 
-        self.best(&scores)
+        self.best(&scores, &spec)
     }
 
     /// Walks the suffixes of `host` from longest to shortest, recording
     /// each candidate app at its single longest (most specific)
     /// matching suffix. Updates `scores` keeping the max per app.
-    fn accumulate_host(&self, host: &str, scores: &mut HashMap<usize, i32>) {
+    fn accumulate_host(
+        &self,
+        host: &str,
+        scores: &mut HashMap<usize, i32>,
+        spec: &mut HashMap<usize, Specificity>,
+    ) {
         let host = normalise_host(host);
         if host.is_empty() || host.len() > MAX_HOST_NAME_LEN {
             return;
@@ -230,6 +250,8 @@ impl Matcher {
             };
             let is_exact = offset == 0;
             if let Some(bucket) = self.host_suffix_map.get(suffix) {
+                // Labels in this suffix (e.g. `s3.amazonaws.com` -> 3).
+                let labels = label_count(suffix);
                 for &idx in bucket {
                     // First time we see an app is at its longest suffix.
                     if seen.insert(idx) {
@@ -238,24 +260,39 @@ impl Matcher {
                             base += EXACT_BONUS;
                         }
                         upsert_max(scores, idx, base);
+                        upsert_spec_max(spec, idx, labels);
                     }
                 }
             }
         }
     }
 
-    /// Picks the highest-scoring candidate, breaking ties by ascending
-    /// `app_id` for determinism. Returns `None` if the best clamps to
-    /// zero confidence.
-    fn best(&self, scores: &HashMap<usize, i32>) -> Option<AppMatch> {
+    /// Picks the best candidate, ranking by score, then by host-suffix
+    /// specificity (a more specific suffix is a stronger identity), and
+    /// finally by ascending `app_id` for determinism. Returns `None` if
+    /// the best clamps to zero confidence.
+    fn best(
+        &self,
+        scores: &HashMap<usize, i32>,
+        spec: &HashMap<usize, Specificity>,
+    ) -> Option<AppMatch> {
+        let spec_of = |idx: usize| spec.get(&idx).copied().unwrap_or(0);
         let mut best: Option<(usize, i32)> = None;
         for (&idx, &score) in scores {
             match best {
                 None => best = Some((idx, score)),
                 Some((best_idx, best_score)) => {
-                    let better = score > best_score
-                        || (score == best_score
-                            && self.apps[idx].app_id < self.apps[best_idx].app_id);
+                    let better = match score.cmp(&best_score) {
+                        std::cmp::Ordering::Greater => true,
+                        std::cmp::Ordering::Less => false,
+                        std::cmp::Ordering::Equal => match spec_of(idx).cmp(&spec_of(best_idx)) {
+                            std::cmp::Ordering::Greater => true,
+                            std::cmp::Ordering::Less => false,
+                            std::cmp::Ordering::Equal => {
+                                self.apps[idx].app_id < self.apps[best_idx].app_id
+                            }
+                        },
+                    };
                     if better {
                         best = Some((idx, score));
                     }
@@ -288,4 +325,25 @@ fn upsert_max(scores: &mut HashMap<usize, i32>, idx: usize, val: i32) {
             }
         })
         .or_insert(val);
+}
+
+/// Keeps the largest specificity (matched-suffix label count) seen for
+/// an app across the SNI and Host lookups.
+fn upsert_spec_max(spec: &mut HashMap<usize, Specificity>, idx: usize, val: Specificity) {
+    spec.entry(idx)
+        .and_modify(|s| {
+            if val > *s {
+                *s = val;
+            }
+        })
+        .or_insert(val);
+}
+
+/// Counts the dot-separated labels in a (already normalised, non-empty)
+/// host suffix: `amazonaws.com` -> 2, `s3.amazonaws.com` -> 3.
+fn label_count(suffix: &str) -> Specificity {
+    let dots = suffix.bytes().filter(|&b| b == b'.').count();
+    Specificity::try_from(dots)
+        .unwrap_or(Specificity::MAX)
+        .saturating_add(1)
 }
