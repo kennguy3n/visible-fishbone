@@ -3322,6 +3322,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "sng-dem"
+version = "0.1.0"
+dependencies = [
+ "pretty_assertions",
+ "rand 0.8.6",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sng-core",
+ "sng-sdwan",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "sng-dlp"
 version = "0.1.0"
 dependencies = [

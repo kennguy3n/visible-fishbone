@@ -49,6 +49,7 @@ members = [
     "crates/sng-swg",
     "crates/sng-ztna",
     "crates/sng-sdwan",
+    "crates/sng-dem",
     "crates/sng-updater",
     "crates/sng-oidc",
     "crates/sng-ha",
