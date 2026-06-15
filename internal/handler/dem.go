@@ -401,9 +401,10 @@ func (h *DEMHandler) scoreTimeseries(w http.ResponseWriter, r *http.Request) {
 		}
 		filter.Until = ts.UTC()
 	}
-	page := repository.Page{Limit: QueryLimit(r), After: q.Get("cursor")}
-	if q.Get("order") == "asc" {
-		page.Order = repository.SortAsc
+	page := repository.Page{
+		Limit: QueryLimit(r),
+		After: q.Get("cursor"),
+		Order: repository.SortOrder(q.Get("order")),
 	}
 	pg, err := h.svc.ListScores(r.Context(), tenantID, filter, page)
 	if err != nil {
