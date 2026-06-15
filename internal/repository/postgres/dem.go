@@ -457,20 +457,62 @@ WHERE target_key = $1 AND observed_at >= $2::timestamptz`
 	return agg, nil
 }
 
+// demPruneBatch bounds how many rows a single retention DELETE removes.
+// The first sweep after a retention horizon is widened (or after a
+// backlog accumulates across the fleet's 5,000 tenants) could otherwise
+// match millions of rows; an unbounded DELETE would hold a long
+// table-level lock and balloon WAL in one transaction. Batching keeps
+// each statement's lock footprint and WAL generation bounded, and —
+// because every batch commits in its own transaction (see
+// pruneBatched) — locks are released between batches so concurrent
+// ingests are not starved. 5,000 is large enough that a steady-state
+// hourly sweep finishes in one or two iterations, yet small enough to
+// keep any single transaction cheap.
+const demPruneBatch = 5000
+
 // PruneProbeResults deletes raw results created before `before`
-// across all tenants. Runs under the system role.
+// across all tenants, in bounded batches. Runs under the system role.
 func (r *DEMRepository) PruneProbeResults(ctx context.Context, before time.Time) (int64, error) {
-	var removed int64
-	err := r.s.withSystem(ctx, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx,
-			`DELETE FROM dem_probe_results WHERE created_at < $1::timestamptz`, before.UTC())
-		if err != nil {
-			return fmt.Errorf("prune dem_probe_results: %w", err)
+	const q = `
+DELETE FROM dem_probe_results
+WHERE ctid IN (
+    SELECT ctid FROM dem_probe_results
+    WHERE created_at < $1::timestamptz
+    LIMIT $2
+)`
+	return r.pruneBatched(ctx, "dem_probe_results", q, before)
+}
+
+// pruneBatched runs `q` — a DELETE bounded by `LIMIT $2` — under the
+// system role repeatedly until a sweep removes fewer rows than
+// demPruneBatch, i.e. the expired backlog is drained. Each batch is its
+// own transaction so the retention sweep never holds a long lock or
+// generates unbounded WAL regardless of how far behind it has fallen.
+// `table` names the swept relation for error context only. Returns the
+// total rows removed across all batches.
+func (r *DEMRepository) pruneBatched(ctx context.Context, table, q string, before time.Time) (int64, error) {
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return total, err
 		}
-		removed = tag.RowsAffected()
-		return nil
-	})
-	return removed, err
+		var batch int64
+		err := r.s.withSystem(ctx, func(tx pgx.Tx) error {
+			tag, err := tx.Exec(ctx, q, before.UTC(), demPruneBatch)
+			if err != nil {
+				return fmt.Errorf("prune %s: %w", table, err)
+			}
+			batch = tag.RowsAffected()
+			return nil
+		})
+		if err != nil {
+			return total, err
+		}
+		total += batch
+		if batch < demPruneBatch {
+			return total, nil
+		}
+	}
 }
 
 // -----------------------------------------------------------------------
@@ -631,19 +673,16 @@ ORDER BY created_at DESC, id DESC`, demScoreCols, demScoreCols)
 }
 
 // PruneScores deletes score samples created before `before` across
-// all tenants. Runs under the system role.
+// all tenants, in bounded batches. Runs under the system role.
 func (r *DEMRepository) PruneScores(ctx context.Context, before time.Time) (int64, error) {
-	var removed int64
-	err := r.s.withSystem(ctx, func(tx pgx.Tx) error {
-		tag, err := tx.Exec(ctx,
-			`DELETE FROM dem_experience_scores WHERE created_at < $1::timestamptz`, before.UTC())
-		if err != nil {
-			return fmt.Errorf("prune dem_experience_scores: %w", err)
-		}
-		removed = tag.RowsAffected()
-		return nil
-	})
-	return removed, err
+	const q = `
+DELETE FROM dem_experience_scores
+WHERE ctid IN (
+    SELECT ctid FROM dem_experience_scores
+    WHERE created_at < $1::timestamptz
+    LIMIT $2
+)`
+	return r.pruneBatched(ctx, "dem_experience_scores", q, before)
 }
 
 // -----------------------------------------------------------------------

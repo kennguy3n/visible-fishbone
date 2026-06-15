@@ -39,7 +39,7 @@ use tokio::time::Instant;
 use crate::error::DemError;
 use crate::resolver::{Resolver, SystemResolver};
 use crate::result::{ProbeErrorKind, ProbeResult};
-use crate::target::{EngineConfig, ProbeKind, Target};
+use crate::target::{EngineConfig, MAX_TIMEOUT_MS, ProbeKind, Target};
 
 /// Internal per-phase failure carrying the classified kind and a
 /// human-readable detail.
@@ -366,8 +366,16 @@ impl<R: Resolver> ProbeEngine<R> {
         cfg.validate()?;
         let client = reqwest::Client::builder()
             .use_rustls_tls()
-            .timeout(cfg.default_timeout)
-            .connect_timeout(cfg.default_timeout)
+            // The real per-probe budget is enforced by the outer
+            // `with_timeout(remaining(deadline), ...)` wrapping every
+            // phase, so these client-level timeouts are only a hard
+            // backstop. They are pinned to the largest budget a target
+            // may request (`MAX_TIMEOUT_MS`), never the engine default:
+            // a lower value would fire first and silently cap any target
+            // configured with a longer `timeout_ms`, contradicting the
+            // "one slow target costs at most `timeout_ms`" guarantee.
+            .timeout(Duration::from_millis(u64::from(MAX_TIMEOUT_MS)))
+            .connect_timeout(Duration::from_millis(u64::from(MAX_TIMEOUT_MS)))
             // A fresh connection per probe keeps phase timings honest
             // and bounds resident memory (no idle pool to grow).
             .pool_max_idle_per_host(0)

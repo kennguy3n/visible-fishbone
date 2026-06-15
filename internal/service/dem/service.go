@@ -445,6 +445,14 @@ func (s *Service) recomputeTarget(ctx context.Context, tenantID uuid.UUID, key, 
 // the lock; on the rare emit failure the stamp is rolled back so the
 // next window retries rather than being suppressed for a full
 // cooldown.
+//
+// The closure captures emit/decision/baselineMean/baselineN by
+// reference to hand the post-commit emit path what it decided under
+// the lock. This is safe only because MutateTargetState invokes mutate
+// synchronously and exactly once before returning — the closure never
+// escapes, so the captures are fully written before we read them
+// below. Keep mutate synchronous (no goroutine, no retry that re-runs
+// it concurrently) or these reads would race.
 func (s *Service) updateBaseline(ctx context.Context, tenantID uuid.UUID, score repository.DEMExperienceScore, availability float64) error {
 	var (
 		emit         bool

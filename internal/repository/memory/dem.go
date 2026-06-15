@@ -302,7 +302,10 @@ func (r *DEMRepository) PruneProbeResults(ctx context.Context, before time.Time)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	kept := r.results[:0:0]
+	// Filter survivors in place, reusing the backing array rather than
+	// allocating a fresh slice on every sweep. Zero the vacated tail so
+	// the pruned rows' pointer fields are released for GC.
+	kept := r.results[:0]
 	var removed int64
 	for _, res := range r.results {
 		if res.CreatedAt.Before(before) {
@@ -310,6 +313,9 @@ func (r *DEMRepository) PruneProbeResults(ctx context.Context, before time.Time)
 			continue
 		}
 		kept = append(kept, res)
+	}
+	for i := len(kept); i < len(r.results); i++ {
+		r.results[i] = repository.DEMProbeResult{}
 	}
 	r.results = kept
 	return removed, nil
