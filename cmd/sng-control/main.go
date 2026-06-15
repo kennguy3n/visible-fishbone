@@ -550,35 +550,33 @@ func run() error {
 	// never per replica or per tenant, and upstream open feeds are not
 	// fetched N-fold.
 	//
-	// SeedRegistry runs on every leadership acquisition regardless of the
-	// kill switch: it is an idempotent, metadata-only upsert of the
-	// curated source catalog that writes no indicator content and makes
-	// no network calls, so it is cheap to run unconditionally and keeps
-	// the per-tenant posture surface listing the managed feeds even when
-	// the switch is off — an operator can preview which feeds would
-	// activate before flipping it on (the posture's enabled:false already
-	// conveys the off state). Only the expensive ingestion loop is gated
-	// by the kill switch; the engine also re-checks the switch on every
-	// refresh, so a flag flip takes effect without a restart.
+	// The leader callback always seeds the curated source registry
+	// (SeedRegistry is an idempotent, metadata-only upsert that writes no
+	// indicator content and makes no network calls) so the per-tenant
+	// posture surface lists the managed feeds even when the kill switch
+	// is off — an operator can preview which feeds would activate before
+	// turning it on (the posture's enabled:false conveys the off state).
+	// It then runs the bounded refresh loop unconditionally: RefreshOnce
+	// self-gates on the kill switch (returning Skipped without fetching
+	// or publishing while off), so the ticker is a cheap no-op when
+	// disabled. The loop's existence therefore does not depend on the
+	// boot-time switch value, and a runtime toggle (Engine.SetEnabled)
+	// takes effect on the next cycle without a restart.
 	{
 		engine := rc.ManagedThreatContentEngine
 		interval := rc.ManagedThreatContentInterval
-		enabled := rc.ManagedThreatContentEnabled
 		go elector.RunIfLeader(rootCtx, "threatcontent-refresh", func(ctx context.Context) {
 			if err := engine.SeedRegistry(ctx); err != nil {
 				logger.Warn("sng-control: managed threat-content source registry seed failed",
 					slog.String("error", err.Error()))
 			}
-			if !enabled {
-				return
-			}
 			engine.Run(ctx, interval)
 		})
-		if enabled {
+		if rc.ManagedThreatContentEnabled {
 			logger.Info("sng-control: managed threat-content ingestion enabled (runs on leader only)",
 				slog.Duration("refresh_interval", interval))
 		} else {
-			logger.Info("sng-control: managed threat-content ingestion disabled by kill switch; curated source registry still seeded on the leader for posture visibility (MANAGED_THREAT_CONTENT_ENABLED=false)")
+			logger.Info("sng-control: managed threat-content ingestion disabled by kill switch; curated registry still seeded and the leader refresh loop idles (no-op per cycle) until re-enabled (MANAGED_THREAT_CONTENT_ENABLED=false)")
 		}
 	}
 

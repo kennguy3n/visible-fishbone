@@ -19,6 +19,8 @@ export interface ManagedThreatContentRefreshResult {
   skipped: boolean;
   /** True when the assembled content matched the current bundle, so no new version was minted. */
   unchanged: boolean;
+  /** True when the cycle kept serving the last good bundle because it could not produce a complete fresh result (every upstream down). Distinct from unchanged so monitoring can tell a healthy no-change refresh from one silently serving stale content. */
+  degraded: boolean;
   /** Version of the resulting (or current) bundle. */
   serial: number;
   /** Total indicators in the assembled bundle. */

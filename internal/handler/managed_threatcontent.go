@@ -164,8 +164,15 @@ type ManagedThreatContentPostureResponse struct {
 
 // ManagedThreatContentRefreshResponse is the result of a manual refresh.
 type ManagedThreatContentRefreshResponse struct {
-	Skipped    bool                       `json:"skipped"`
-	Unchanged  bool                       `json:"unchanged"`
+	Skipped   bool `json:"skipped"`
+	Unchanged bool `json:"unchanged"`
+	// Degraded is true when the cycle kept serving the last good bundle
+	// because it could not produce a complete fresh result (every
+	// upstream down). It is surfaced distinctly from Unchanged so
+	// monitoring can tell a healthy no-change refresh apart from one that
+	// is silently serving stale content; the per-source stats carry the
+	// underlying failures.
+	Degraded   bool                       `json:"degraded"`
 	Serial     int64                      `json:"serial"`
 	Indicators int                        `json:"indicators"`
 	Published  bool                       `json:"published"`
@@ -303,6 +310,7 @@ func (h *ManagedThreatContentHandler) refresh(w http.ResponseWriter, r *http.Req
 	WriteJSON(w, http.StatusOK, ManagedThreatContentRefreshResponse{
 		Skipped:    res.Skipped,
 		Unchanged:  res.Unchanged,
+		Degraded:   res.Degraded,
 		Serial:     res.Serial,
 		Indicators: res.Indicators,
 		Published:  res.Published,

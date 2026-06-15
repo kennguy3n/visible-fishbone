@@ -131,6 +131,9 @@ func TestEngine_UnchangedViaConditionalGET(t *testing.T) {
 	if !second.Unchanged {
 		t.Fatalf("identical content should be Unchanged: %+v", second)
 	}
+	if second.Degraded {
+		t.Fatalf("healthy identical-content no-change must not be Degraded: %+v", second)
+	}
 	if second.Serial != first.Serial {
 		t.Fatalf("Unchanged should keep serial %d, got %d", first.Serial, second.Serial)
 	}
@@ -221,6 +224,57 @@ func TestEngine_DegradesToLastGoodOnFetchError(t *testing.T) {
 	st := degraded.Sources[0]
 	if st.Err == "" || !st.UsedCache {
 		t.Fatalf("degraded stat should record error + cache use: %+v", st)
+	}
+	// The per-feed cache fallback kept the set non-empty, so this is a
+	// healthy serve, not the empty-set fail-safe: Degraded must stay
+	// false here (it is reserved for the keep-last-good-on-empty path).
+	if degraded.Degraded {
+		t.Fatalf("cache fallback that preserves indicators must not flag Degraded: %+v", degraded)
+	}
+}
+
+func TestEngine_DegradedFlaggedWhenRefreshProducesEmptySet(t *testing.T) {
+	t.Parallel()
+	eng, repo, _ := newTestEngine(t, []Feed{ipFeed("ipfeed", "203.0.113.10\n198.51.100.5\n", "e1")})
+	ctx := context.Background()
+
+	first, err := eng.RefreshOnce(ctx)
+	if err != nil {
+		t.Fatalf("first: %v", err)
+	}
+	if first.Unchanged || first.Degraded {
+		t.Fatalf("healthy mint must be neither unchanged nor degraded: %+v", first)
+	}
+	if first.Indicators != 2 {
+		t.Fatalf("warm-up indicators = %d, want 2", first.Indicators)
+	}
+
+	// Operator disables the only feed, so the next cycle assembles an
+	// empty set. The fail-safe must refuse to overwrite the last good
+	// bundle AND flag the result Degraded so monitoring can tell this
+	// apart from a healthy identical-content no-change (both are
+	// Unchanged, only the degraded one is silently serving stale data).
+	if err := repo.UpsertSources(ctx, []repository.ThreatFeedSource{
+		{Name: "ipfeed", DisplayName: "ipfeed", Kind: "ip", Weight: 0.9, Enabled: false},
+	}); err != nil {
+		t.Fatalf("disable source: %v", err)
+	}
+
+	res, err := eng.RefreshOnce(ctx)
+	if err != nil {
+		t.Fatalf("empty-set refresh returned error instead of degrading: %v", err)
+	}
+	if !res.Degraded {
+		t.Fatalf("empty-set fail-safe must set Degraded: %+v", res)
+	}
+	if !res.Unchanged {
+		t.Fatalf("fail-safe keeps the last good bundle, so Unchanged: %+v", res)
+	}
+	if res.Indicators != 2 {
+		t.Fatalf("fail-safe must report the last good count, got %d want 2", res.Indicators)
+	}
+	if res.Serial != first.Serial {
+		t.Fatalf("fail-safe must keep serial %d, got %d", first.Serial, res.Serial)
 	}
 }
 

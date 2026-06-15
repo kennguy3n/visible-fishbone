@@ -47,6 +47,15 @@ type RefreshResult struct {
 	// Unchanged is true when the produced content matched the last
 	// bundle, so no new version was minted or published.
 	Unchanged bool `json:"unchanged"`
+	// Degraded is true when this cycle could not produce a complete
+	// fresh result and the engine deliberately kept serving the last
+	// good bundle instead (the fail-safe that refuses to overwrite
+	// non-empty content with an empty set when every upstream is down).
+	// It is reported alongside Unchanged precisely so monitoring can
+	// tell a healthy no-change refresh (Unchanged && !Degraded) apart
+	// from one that is silently serving stale content; the per-source
+	// stats carry the underlying failures.
+	Degraded bool `json:"degraded"`
 	// Serial is the current bundle version (the existing one when
 	// Unchanged, the new one otherwise).
 	Serial int64 `json:"serial"`
@@ -294,6 +303,7 @@ func (e *Engine) RefreshOnce(ctx context.Context) (RefreshResult, error) {
 		e.logger.Warn("threatfeed: refresh produced no indicators; keeping last good bundle",
 			"last_indicators", e.lastIndicators)
 		result.Unchanged = true
+		result.Degraded = true
 		result.Indicators = e.lastIndicators
 		return result, nil
 	}

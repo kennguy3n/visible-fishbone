@@ -3981,7 +3981,7 @@ components:
     ManagedThreatContentRefreshResult:
       type: object
       description: Outcome of a manual managed threat-content refresh.
-      required: [skipped, unchanged, serial, indicators, published, sources]
+      required: [skipped, unchanged, degraded, serial, indicators, published, sources]
       properties:
         skipped:
           type: boolean
@@ -3991,6 +3991,13 @@ components:
           description: >-
             True when the assembled content matched the current bundle,
             so no new version was minted.
+        degraded:
+          type: boolean
+          description: >-
+            True when the cycle kept serving the last good bundle because
+            it could not produce a complete fresh result (every upstream
+            down). Distinct from unchanged so monitoring can tell a healthy
+            no-change refresh from one silently serving stale content.
         serial:
           type: integer
           format: int64

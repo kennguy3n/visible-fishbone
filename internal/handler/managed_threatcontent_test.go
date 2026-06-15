@@ -232,6 +232,39 @@ func TestManagedThreatContent_RefreshHappyPath(t *testing.T) {
 	}
 }
 
+// When the engine keeps serving the last good bundle because the cycle
+// produced an empty set (every upstream down), it reports the result as
+// both Unchanged and Degraded. The handler must surface Degraded
+// distinctly so monitoring can tell a silently-stale serve apart from a
+// healthy identical-content no-change (both are unchanged).
+func TestManagedThreatContent_RefreshSurfacesDegraded(t *testing.T) {
+	t.Parallel()
+	ref := &stubRefresher{
+		enabled: true,
+		result: threatfeed.RefreshResult{
+			Unchanged: true, Degraded: true, Serial: 11, Indicators: 5,
+		},
+	}
+	mux := managedMux(&stubThreatContentStore{}, ref, platformAuthz{allow: true})
+
+	rec := httptest.NewRecorder()
+	req := authedReq(httptest.NewRequest(http.MethodPost, "/api/v1/threat-content/refresh", nil))
+	mux.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	var resp handler.ManagedThreatContentRefreshResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !resp.Unchanged || !resp.Degraded {
+		t.Fatalf("degraded serve must report unchanged AND degraded: %+v", resp)
+	}
+	if !strings.Contains(rec.Body.String(), `"degraded":true`) {
+		t.Fatalf("expected \"degraded\":true in JSON body: %s", rec.Body.String())
+	}
+}
+
 // A manual refresh produces fleet-wide content and holds the engine's
 // refresh lock for the whole cycle, so a client disconnect or gateway
 // timeout must not abort it. The handler detaches the ingestion context
