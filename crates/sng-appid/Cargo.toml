@@ -1,0 +1,28 @@
+[package]
+name = "sng-appid"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "ShieldNet Gateway application-identification subsystem: a data-driven, signed, versioned signature catalog plus a bounded-time matcher that maps connection features (SNI, JA3, host, first bytes, port, transport) to an application identity and category"
+
+[dependencies]
+# Signature catalog (de)serialisation. The embedded seed is JSON and
+# the wire format the control plane signs and distributes is the same
+# shape, so one serde model serves both the compile-time baseline and
+# a runtime-loaded bundle.
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Error taxonomy — a catalog that fails to parse / validate returns a
+# typed error rather than panicking, so a downstream loader can fall
+# back to its embedded baseline instead of taking down the data path.
+thiserror = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+
+[lints]
+workspace = true

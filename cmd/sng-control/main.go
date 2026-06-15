@@ -47,6 +47,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/alert"
 	"github.com/kennguy3n/visible-fishbone/internal/service/apikey"
 	"github.com/kennguy3n/visible-fishbone/internal/service/appdb"
+	appidsvc "github.com/kennguy3n/visible-fishbone/internal/service/appid"
 	"github.com/kennguy3n/visible-fishbone/internal/service/audit"
 	"github.com/kennguy3n/visible-fishbone/internal/service/browser"
 	"github.com/kennguy3n/visible-fishbone/internal/service/capacity"
@@ -2333,6 +2334,37 @@ func buildRouter(
 	// never reaches the interface parameter.
 	threatFeedHandler := handler.NewThreatFeedHandler(feedMgr, rbacSvc)
 
+	// --- WP1: Application-ID signature catalog ------------------------
+	// Operator/SaaS-managed, versioned-in-Postgres, Ed25519-signed
+	// application-signature catalog distributed to tenants as a signed
+	// bundle (mirrors the threat-intel bundle distribution). The catalog
+	// is fleet-wide — there is no per-tenant configuration (no-ops) — so
+	// tenants PULL the current signed bundle from the tenant-scoped read
+	// endpoint and no NATS publisher is wired here (pull-only default).
+	appIDSigner, err := appIDCatalogSigner(os.Getenv("APPID_CATALOG_SIGNING_KEY_HEX"), logger)
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("control: appid catalog signer: %w", err)
+	}
+	appIDSvc, err := appidsvc.New(store.NewAppIDCatalogRepository(), appIDSigner, appidsvc.WithLogger(logger))
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("control: appid catalog service: %w", err)
+	}
+	// Publish the embedded seed catalog as signed version 1 on first
+	// boot. This runs in the background with its own timeout so a slow
+	// or briefly-unavailable database never blocks control-plane
+	// startup; the monotonic-serial unique constraint makes concurrent
+	// seeds across replicas safe (losers observe ErrConflict, which
+	// SeedIfEmpty swallows).
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := appIDSvc.SeedIfEmpty(ctx); err != nil {
+			logger.Error("appid: seeding catalog on boot failed",
+				slog.String("error", err.Error()))
+		}
+	}()
+	appIDHandler := handler.NewAppIDHandler(appIDSvc, rbacSvc)
+
 	// --- WORKSTREAM 11: cross-region tenant migration -----------------
 	// The RegionMigrator drives the resumable migration state machine
 	// (migration 059). Two planes are wired from real services here:
@@ -2563,6 +2595,7 @@ func buildRouter(
 		Metering:          meteringHandler,
 		PoP:               popHandler,
 		ThreatFeed:        threatFeedHandler,
+		AppID:             appIDHandler,
 		Sandbox:           handler.NewSandboxHandler(sandboxSvc),
 		RBI:               handler.NewRBIHandler(rbiSvc),
 		DLP:               handler.NewDLPHandler(dlpSvc),
@@ -3867,6 +3900,31 @@ func threatIntelSigner(signingKeyHex string, logger *slog.Logger) (*threatintel.
 		return nil, fmt.Errorf("threatintel signing key: %w", err)
 	}
 	logger.Info("threatintel: signing key loaded from configuration")
+	return signer, nil
+}
+
+// appIDCatalogSigner builds the Ed25519 signer for the Application-ID
+// catalog bundle from configured key material, or falls back to an
+// ephemeral key with a loud warning when unset. Mirrors
+// threatIntelSigner: edges pin the catalog public key, so an ephemeral
+// key only verifies within this process lifetime — acceptable for
+// dev/test boot, never for a real fleet.
+func appIDCatalogSigner(signingKeyHex string, logger *slog.Logger) (*appidsvc.Signer, error) {
+	raw := strings.TrimSpace(signingKeyHex)
+	if raw == "" {
+		logger.Warn("appid: no signing key configured; generating an EPHEMERAL key — published catalog bundles will not verify against a pinned edge key across restarts",
+			slog.String("env", "APPID_CATALOG_SIGNING_KEY_HEX"))
+		return appidsvc.GenerateSigner()
+	}
+	key, err := hex.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode APPID_CATALOG_SIGNING_KEY_HEX: %w", err)
+	}
+	signer, err := appidsvc.NewSigner(key)
+	if err != nil {
+		return nil, fmt.Errorf("appid signing key: %w", err)
+	}
+	logger.Info("appid: signing key loaded from configuration")
 	return signer, nil
 }
 

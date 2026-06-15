@@ -32,6 +32,7 @@
 //! nftables rule set plus the L7 / TLS interception decision
 //! engine the SWG and IPS subsystems consume.
 
+pub mod appid;
 pub mod backend;
 pub mod compile;
 pub mod conntrack;
@@ -44,6 +45,7 @@ pub mod rule;
 pub mod tls_policy;
 pub mod zone;
 
+pub use appid::{AppIdEnricher, L7Enrichment};
 pub use backend::{
     DataPathBackend, DataPathCapabilities, DataPathStats, DpdkDataPath, EbpfDataPath,
     HardwareOffloadDataPath, NftablesDataPath, compile_hot_path,

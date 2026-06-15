@@ -1,0 +1,4015 @@
+{
+  "schema_version": 1,
+  "apps": [
+    {
+      "app_id": "1password",
+      "category": "security-identity",
+      "sni_suffixes": [
+        "1password.com",
+        "1passwordusercontent.com"
+      ],
+      "host_suffixes": [
+        "1password.com",
+        "1passwordusercontent.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "adobe.creativecloud",
+      "category": "productivity",
+      "sni_suffixes": [
+        "adobe.com",
+        "adobe.io",
+        "adobelogin.com",
+        "creativecloud.com"
+      ],
+      "host_suffixes": [
+        "adobe.com",
+        "adobe.io",
+        "adobelogin.com",
+        "creativecloud.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "adp",
+      "category": "hr-finance-ops",
+      "sni_suffixes": [
+        "adp.com"
+      ],
+      "host_suffixes": [
+        "adp.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "airtable",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "airtable.com"
+      ],
+      "host_suffixes": [
+        "airtable.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "akamai",
+      "category": "infrastructure",
+      "sni_suffixes": [
+        "akamai.net",
+        "akamaiedge.net",
+        "akamaihd.net",
+        "akamaized.net"
+      ],
+      "host_suffixes": [
+        "akamai.net",
+        "akamaiedge.net",
+        "akamaihd.net",
+        "akamaized.net"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "alibaba",
+      "category": "ecommerce",
+      "sni_suffixes": [
+        "alibaba.com"
+      ],
+      "host_suffixes": [
+        "alibaba.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "alibaba.cloud",
+      "category": "infrastructure",
+      "sni_suffixes": [
+        "alibabacloud.com",
+        "aliyun.com",
+        "aliyuncs.com"
+      ],
+      "host_suffixes": [
+        "alibabacloud.com",
+        "aliyun.com",
+        "aliyuncs.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "aliexpress",
+      "category": "ecommerce",
+      "sni_suffixes": [
+        "aliexpress.com"
+      ],
+      "host_suffixes": [
+        "aliexpress.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "amazon",
+      "category": "ecommerce",
+      "sni_suffixes": [
+        "amazon.com",
+        "media-amazon.com",
+        "ssl-images-amazon.com"
+      ],
+      "host_suffixes": [
+        "amazon.com",
+        "media-amazon.com",
+        "ssl-images-amazon.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "anthropic",
+      "category": "ai",
+      "sni_suffixes": [
+        "anthropic.com",
+        "claude.ai"
+      ],
+      "host_suffixes": [
+        "anthropic.com",
+        "claude.ai"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "applemusic",
+      "category": "streaming",
+      "sni_suffixes": [
+        "music.apple.com"
+      ],
+      "host_suffixes": [
+        "music.apple.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "asana",
+      "category": "productivity",
+      "sni_suffixes": [
+        "asana.com"
+      ],
+      "host_suffixes": [
+        "asana.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "atlassian.jira",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "jira.com"
+      ],
+      "host_suffixes": [
+        "jira.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "atlassian.statuspage",
+      "category": "support-itsm",
+      "sni_suffixes": [
+        "statuspage.io"
+      ],
+      "host_suffixes": [
+        "statuspage.io"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "auth0",
+      "category": "security-identity",
+      "sni_suffixes": [
+        "auth0.com"
+      ],
+      "host_suffixes": [
+        "auth0.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "aws",
+      "category": "infrastructure",
+      "sni_suffixes": [
+        "amazonaws.com",
+        "aws.amazon.com",
+        "awsstatic.com",
+        "cloudfront.net"
+      ],
+      "host_suffixes": [
+        "amazonaws.com",
+        "aws.amazon.com",
+        "awsstatic.com",
+        "cloudfront.net"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "aws.s3",
+      "category": "storage",
+      "sni_suffixes": [
+        "amazonaws.com",
+        "s3.amazonaws.com"
+      ],
+      "host_suffixes": [
+        "amazonaws.com",
+        "s3.amazonaws.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "azure",
+      "category": "infrastructure",
+      "sni_suffixes": [
+        "azure.com",
+        "azure.net",
+        "azureedge.net",
+        "microsoftonline.com",
+        "windows.net"
+      ],
+      "host_suffixes": [
+        "azure.com",
+        "azure.net",
+        "azureedge.net",
+        "microsoftonline.com",
+        "windows.net"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "backblaze",
+      "category": "storage",
+      "sni_suffixes": [
+        "backblaze.com",
+        "backblazeb2.com"
+      ],
+      "host_suffixes": [
+        "backblaze.com",
+        "backblazeb2.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "bamboohr",
+      "category": "hr-finance-ops",
+      "sni_suffixes": [
+        "bamboohr.com"
+      ],
+      "host_suffixes": [
+        "bamboohr.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "basecamp",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "basecamp.com",
+        "basecampapi.com"
+      ],
+      "host_suffixes": [
+        "basecamp.com",
+        "basecampapi.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "bigcommerce",
+      "category": "ecommerce",
+      "sni_suffixes": [
+        "bigcommerce.com"
+      ],
+      "host_suffixes": [
+        "bigcommerce.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "bill.com",
+      "category": "finance",
+      "sni_suffixes": [
+        "bill.com"
+      ],
+      "host_suffixes": [
+        "bill.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "bitbucket",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "bitbucket.io",
+        "bitbucket.org"
+      ],
+      "host_suffixes": [
+        "bitbucket.io",
+        "bitbucket.org"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "bitwarden",
+      "category": "security-identity",
+      "sni_suffixes": [
+        "bitwarden.com"
+      ],
+      "host_suffixes": [
+        "bitwarden.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "bluejeans",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "bluejeans.com"
+      ],
+      "host_suffixes": [
+        "bluejeans.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "bluesky",
+      "category": "social",
+      "sni_suffixes": [
+        "bsky.app",
+        "bsky.social"
+      ],
+      "host_suffixes": [
+        "bsky.app",
+        "bsky.social"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "box",
+      "category": "storage",
+      "sni_suffixes": [
+        "box.com",
+        "box.net",
+        "boxcloud.com"
+      ],
+      "host_suffixes": [
+        "box.com",
+        "box.net",
+        "boxcloud.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "brex",
+      "category": "finance",
+      "sni_suffixes": [
+        "brex.com"
+      ],
+      "host_suffixes": [
+        "brex.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "calendly",
+      "category": "crm-sales",
+      "sni_suffixes": [
+        "calendly.com"
+      ],
+      "host_suffixes": [
+        "calendly.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "calendly.scheduling",
+      "category": "productivity",
+      "sni_suffixes": [
+        "calendly.io"
+      ],
+      "host_suffixes": [
+        "calendly.io"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "canva",
+      "category": "productivity",
+      "sni_suffixes": [
+        "canva.com"
+      ],
+      "host_suffixes": [
+        "canva.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "character.ai",
+      "category": "ai",
+      "sni_suffixes": [
+        "character.ai"
+      ],
+      "host_suffixes": [
+        "character.ai"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "circleci",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "circleci.com"
+      ],
+      "host_suffixes": [
+        "circleci.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "citrix.sharefile",
+      "category": "storage",
+      "sni_suffixes": [
+        "sharefile.com"
+      ],
+      "host_suffixes": [
+        "sharefile.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "clickup",
+      "category": "productivity",
+      "sni_suffixes": [
+        "clickup.com"
+      ],
+      "host_suffixes": [
+        "clickup.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "cloudflare",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "cloudflare-dns.com",
+        "cloudflare.com"
+      ],
+      "host_suffixes": [
+        "cloudflare-dns.com",
+        "cloudflare.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "cloudflare.access",
+      "category": "security-identity",
+      "sni_suffixes": [
+        "cloudflareaccess.com"
+      ],
+      "host_suffixes": [
+        "cloudflareaccess.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "cloudinary",
+      "category": "infrastructure",
+      "sni_suffixes": [
+        "cloudinary.com"
+      ],
+      "host_suffixes": [
+        "cloudinary.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "coda",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "coda.io"
+      ],
+      "host_suffixes": [
+        "coda.io"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "codesandbox",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "codesandbox.io"
+      ],
+      "host_suffixes": [
+        "codesandbox.io"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "cohere",
+      "category": "ai",
+      "sni_suffixes": [
+        "cohere.ai",
+        "cohere.com"
+      ],
+      "host_suffixes": [
+        "cohere.ai",
+        "cohere.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "coinbase",
+      "category": "finance",
+      "sni_suffixes": [
+        "coinbase.com"
+      ],
+      "host_suffixes": [
+        "coinbase.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "concur",
+      "category": "hr-finance-ops",
+      "sni_suffixes": [
+        "concur.com",
+        "concursolutions.com"
+      ],
+      "host_suffixes": [
+        "concur.com",
+        "concursolutions.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "confluence",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "atlassian.net",
+        "confluence.com"
+      ],
+      "host_suffixes": [
+        "atlassian.net",
+        "confluence.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "crowdstrike",
+      "category": "security-identity",
+      "sni_suffixes": [
+        "crowdstrike.com"
+      ],
+      "host_suffixes": [
+        "crowdstrike.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "dailymotion",
+      "category": "streaming",
+      "sni_suffixes": [
+        "dailymotion.com",
+        "dmcdn.net"
+      ],
+      "host_suffixes": [
+        "dailymotion.com",
+        "dmcdn.net"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "dashlane",
+      "category": "security-identity",
+      "sni_suffixes": [
+        "dashlane.com"
+      ],
+      "host_suffixes": [
+        "dashlane.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "databricks",
+      "category": "infrastructure",
+      "sni_suffixes": [
+        "azuredatabricks.net",
+        "cloud.databricks.com",
+        "databricks.com"
+      ],
+      "host_suffixes": [
+        "azuredatabricks.net",
+        "cloud.databricks.com",
+        "databricks.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "datadog",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "datadoghq.com",
+        "datadoghq.eu"
+      ],
+      "host_suffixes": [
+        "datadoghq.com",
+        "datadoghq.eu"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "digitalocean",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "digitalocean.com"
+      ],
+      "host_suffixes": [
+        "digitalocean.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "discord",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "discord.com",
+        "discord.gg",
+        "discord.media",
+        "discordapp.com"
+      ],
+      "host_suffixes": [
+        "discord.com",
+        "discord.gg",
+        "discord.media",
+        "discordapp.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "disneyplus",
+      "category": "streaming",
+      "sni_suffixes": [
+        "disney-plus.net",
+        "disneyplus.com"
+      ],
+      "host_suffixes": [
+        "disney-plus.net",
+        "disneyplus.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "docker",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "docker.com",
+        "docker.io",
+        "dockerhub.com"
+      ],
+      "host_suffixes": [
+        "docker.com",
+        "docker.io",
+        "dockerhub.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "docsend",
+      "category": "productivity",
+      "sni_suffixes": [
+        "docsend.com"
+      ],
+      "host_suffixes": [
+        "docsend.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "docusign",
+      "category": "crm-sales",
+      "sni_suffixes": [
+        "docusign.com",
+        "docusign.net"
+      ],
+      "host_suffixes": [
+        "docusign.com",
+        "docusign.net"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "drift",
+      "category": "crm-sales",
+      "sni_suffixes": [
+        "drift.com"
+      ],
+      "host_suffixes": [
+        "drift.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "dropbox",
+      "category": "storage",
+      "sni_suffixes": [
+        "dropbox.com",
+        "dropboxapi.com",
+        "dropboxusercontent.com"
+      ],
+      "host_suffixes": [
+        "dropbox.com",
+        "dropboxapi.com",
+        "dropboxusercontent.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "duo",
+      "category": "security-identity",
+      "sni_suffixes": [
+        "duosecurity.com"
+      ],
+      "host_suffixes": [
+        "duosecurity.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "dynamics365",
+      "category": "crm-sales",
+      "sni_suffixes": [
+        "dynamics.com"
+      ],
+      "host_suffixes": [
+        "dynamics.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "ebay",
+      "category": "ecommerce",
+      "sni_suffixes": [
+        "ebay.com",
+        "ebayimg.com"
+      ],
+      "host_suffixes": [
+        "ebay.com",
+        "ebayimg.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "egnyte",
+      "category": "storage",
+      "sni_suffixes": [
+        "egnyte.com"
+      ],
+      "host_suffixes": [
+        "egnyte.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "elevenlabs",
+      "category": "ai",
+      "sni_suffixes": [
+        "elevenlabs.io"
+      ],
+      "host_suffixes": [
+        "elevenlabs.io"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "etsy",
+      "category": "ecommerce",
+      "sni_suffixes": [
+        "etsy.com",
+        "etsystatic.com"
+      ],
+      "host_suffixes": [
+        "etsy.com",
+        "etsystatic.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "evernote",
+      "category": "productivity",
+      "sni_suffixes": [
+        "evernote.com"
+      ],
+      "host_suffixes": [
+        "evernote.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "expensify",
+      "category": "finance",
+      "sni_suffixes": [
+        "expensify.com"
+      ],
+      "host_suffixes": [
+        "expensify.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "facebook",
+      "category": "social",
+      "sni_suffixes": [
+        "facebook.com",
+        "fb.com",
+        "fbcdn.net",
+        "fbsbx.com"
+      ],
+      "host_suffixes": [
+        "facebook.com",
+        "fb.com",
+        "fbcdn.net",
+        "fbsbx.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "fastly",
+      "category": "infrastructure",
+      "sni_suffixes": [
+        "fastly.com",
+        "fastly.net",
+        "fastlylb.net"
+      ],
+      "host_suffixes": [
+        "fastly.com",
+        "fastly.net",
+        "fastlylb.net"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "figma",
+      "category": "productivity",
+      "sni_suffixes": [
+        "figma.com"
+      ],
+      "host_suffixes": [
+        "figma.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "freshservice",
+      "category": "support-itsm",
+      "sni_suffixes": [
+        "freshservice.com"
+      ],
+      "host_suffixes": [
+        "freshservice.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "freshworks",
+      "category": "crm-sales",
+      "sni_suffixes": [
+        "freshdesk.com",
+        "freshworks.com",
+        "myfreshworks.com"
+      ],
+      "host_suffixes": [
+        "freshdesk.com",
+        "freshworks.com",
+        "myfreshworks.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "gcp",
+      "category": "infrastructure",
+      "sni_suffixes": [
+        "appspot.com",
+        "cloud.google.com",
+        "gcr.io",
+        "googleusercontent.com"
+      ],
+      "host_suffixes": [
+        "appspot.com",
+        "cloud.google.com",
+        "gcr.io",
+        "googleusercontent.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "github",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "ghcr.io",
+        "github.com",
+        "github.io",
+        "githubassets.com",
+        "githubusercontent.com"
+      ],
+      "host_suffixes": [
+        "ghcr.io",
+        "github.com",
+        "github.io",
+        "githubassets.com",
+        "githubusercontent.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "github.copilot",
+      "category": "ai",
+      "sni_suffixes": [
+        "copilot-proxy.githubusercontent.com"
+      ],
+      "host_suffixes": [
+        "copilot-proxy.githubusercontent.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "gitlab",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "gitlab.com",
+        "gitlab.io"
+      ],
+      "host_suffixes": [
+        "gitlab.com",
+        "gitlab.io"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "gitpod",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "gitpod.io"
+      ],
+      "host_suffixes": [
+        "gitpod.io"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "gong",
+      "category": "crm-sales",
+      "sni_suffixes": [
+        "gong.io"
+      ],
+      "host_suffixes": [
+        "gong.io"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "google.calendar",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "calendar.google.com"
+      ],
+      "host_suffixes": [
+        "calendar.google.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "google.chat",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "chat.google.com"
+      ],
+      "host_suffixes": [
+        "chat.google.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "google.docs",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "docs.google.com"
+      ],
+      "host_suffixes": [
+        "docs.google.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "google.drive",
+      "category": "storage",
+      "sni_suffixes": [
+        "drive.google.com"
+      ],
+      "host_suffixes": [
+        "drive.google.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "google.gemini",
+      "category": "ai",
+      "sni_suffixes": [
+        "bard.google.com",
+        "gemini.google.com"
+      ],
+      "host_suffixes": [
+        "bard.google.com",
+        "gemini.google.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "google.gmail",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "gmail.com",
+        "googlemail.com",
+        "mail.google.com"
+      ],
+      "host_suffixes": [
+        "gmail.com",
+        "googlemail.com",
+        "mail.google.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "google.meet",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "meet.google.com"
+      ],
+      "host_suffixes": [
+        "meet.google.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "google.workspace",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "googleapis.com",
+        "workspace.google.com"
+      ],
+      "host_suffixes": [
+        "googleapis.com",
+        "workspace.google.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "gotomeeting",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "goto.com",
+        "gotomeeting.com",
+        "logmeininc.com"
+      ],
+      "host_suffixes": [
+        "goto.com",
+        "gotomeeting.com",
+        "logmeininc.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "grammarly",
+      "category": "productivity",
+      "sni_suffixes": [
+        "grammarly.com",
+        "grammarly.io"
+      ],
+      "host_suffixes": [
+        "grammarly.com",
+        "grammarly.io"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "greenhouse",
+      "category": "hr-finance-ops",
+      "sni_suffixes": [
+        "greenhouse.io"
+      ],
+      "host_suffixes": [
+        "greenhouse.io"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "gusto",
+      "category": "hr-finance-ops",
+      "sni_suffixes": [
+        "gusto.com"
+      ],
+      "host_suffixes": [
+        "gusto.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "hashicorp",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "hashicorp.com",
+        "terraform.io",
+        "vagrantup.com"
+      ],
+      "host_suffixes": [
+        "hashicorp.com",
+        "terraform.io",
+        "vagrantup.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "hbomax",
+      "category": "streaming",
+      "sni_suffixes": [
+        "hbomax.com",
+        "max.com"
+      ],
+      "host_suffixes": [
+        "hbomax.com",
+        "max.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "heroku",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "heroku.com",
+        "herokuapp.com"
+      ],
+      "host_suffixes": [
+        "heroku.com",
+        "herokuapp.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "hubspot",
+      "category": "crm-sales",
+      "sni_suffixes": [
+        "hs-sites.com",
+        "hubapi.com",
+        "hubspot.com",
+        "hubspotusercontent.com"
+      ],
+      "host_suffixes": [
+        "hs-sites.com",
+        "hubapi.com",
+        "hubspot.com",
+        "hubspotusercontent.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "huggingface",
+      "category": "ai",
+      "sni_suffixes": [
+        "hf.co",
+        "huggingface.co"
+      ],
+      "host_suffixes": [
+        "hf.co",
+        "huggingface.co"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "hulu",
+      "category": "streaming",
+      "sni_suffixes": [
+        "hulu.com",
+        "hulustream.com"
+      ],
+      "host_suffixes": [
+        "hulu.com",
+        "hulustream.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "ibm.cloud",
+      "category": "infrastructure",
+      "sni_suffixes": [
+        "cloud.ibm.com",
+        "ibm.com"
+      ],
+      "host_suffixes": [
+        "cloud.ibm.com",
+        "ibm.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "icloud",
+      "category": "storage",
+      "sni_suffixes": [
+        "icloud-content.com",
+        "icloud.com"
+      ],
+      "host_suffixes": [
+        "icloud-content.com",
+        "icloud.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "instagram",
+      "category": "social",
+      "sni_suffixes": [
+        "cdninstagram.com",
+        "instagram.com"
+      ],
+      "host_suffixes": [
+        "cdninstagram.com",
+        "instagram.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "intercom",
+      "category": "crm-sales",
+      "sni_suffixes": [
+        "intercom.com",
+        "intercom.io",
+        "intercomcdn.com"
+      ],
+      "host_suffixes": [
+        "intercom.com",
+        "intercom.io",
+        "intercomcdn.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "intune",
+      "category": "support-itsm",
+      "sni_suffixes": [
+        "manage.microsoft.com"
+      ],
+      "host_suffixes": [
+        "manage.microsoft.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "jamf",
+      "category": "support-itsm",
+      "sni_suffixes": [
+        "jamf.com",
+        "jamfcloud.com"
+      ],
+      "host_suffixes": [
+        "jamf.com",
+        "jamfcloud.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "jenkins",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "jenkins.io"
+      ],
+      "host_suffixes": [
+        "jenkins.io"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "jfrog",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "jfrog.com",
+        "jfrog.io"
+      ],
+      "host_suffixes": [
+        "jfrog.com",
+        "jfrog.io"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "kandji",
+      "category": "support-itsm",
+      "sni_suffixes": [
+        "kandji.io"
+      ],
+      "host_suffixes": [
+        "kandji.io"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "lastpass",
+      "category": "security-identity",
+      "sni_suffixes": [
+        "lastpass.com"
+      ],
+      "host_suffixes": [
+        "lastpass.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "lever",
+      "category": "hr-finance-ops",
+      "sni_suffixes": [
+        "lever.co"
+      ],
+      "host_suffixes": [
+        "lever.co"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "line",
+      "category": "social",
+      "sni_suffixes": [
+        "line-apps.com",
+        "line.me"
+      ],
+      "host_suffixes": [
+        "line-apps.com",
+        "line.me"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "linkedin",
+      "category": "social",
+      "sni_suffixes": [
+        "licdn.com",
+        "linkedin.com"
+      ],
+      "host_suffixes": [
+        "licdn.com",
+        "linkedin.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "loom",
+      "category": "productivity",
+      "sni_suffixes": [
+        "loom.com"
+      ],
+      "host_suffixes": [
+        "loom.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "mailchimp",
+      "category": "crm-sales",
+      "sni_suffixes": [
+        "list-manage.com",
+        "mailchi.mp",
+        "mailchimp.com"
+      ],
+      "host_suffixes": [
+        "list-manage.com",
+        "mailchi.mp",
+        "mailchimp.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "marketo",
+      "category": "crm-sales",
+      "sni_suffixes": [
+        "marketo.com",
+        "mktoresp.com"
+      ],
+      "host_suffixes": [
+        "marketo.com",
+        "mktoresp.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "mastodon",
+      "category": "social",
+      "sni_suffixes": [
+        "mastodon.social"
+      ],
+      "host_suffixes": [
+        "mastodon.social"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "mattermost",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "mattermost.com"
+      ],
+      "host_suffixes": [
+        "mattermost.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "mega",
+      "category": "storage",
+      "sni_suffixes": [
+        "mega.co.nz",
+        "mega.io",
+        "mega.nz"
+      ],
+      "host_suffixes": [
+        "mega.co.nz",
+        "mega.io",
+        "mega.nz"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "microsoft.365",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "office.com",
+        "office.net",
+        "office365.com",
+        "officeapps.live.com"
+      ],
+      "host_suffixes": [
+        "office.com",
+        "office.net",
+        "office365.com",
+        "officeapps.live.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "microsoft.copilot",
+      "category": "ai",
+      "sni_suffixes": [
+        "copilot.microsoft.com"
+      ],
+      "host_suffixes": [
+        "copilot.microsoft.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "microsoft.onedrive",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "onedrive.com",
+        "onedrive.live.com"
+      ],
+      "host_suffixes": [
+        "onedrive.com",
+        "onedrive.live.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "microsoft.outlook",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "outlook.com",
+        "outlook.office.com",
+        "outlook.office365.com"
+      ],
+      "host_suffixes": [
+        "outlook.com",
+        "outlook.office.com",
+        "outlook.office365.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "microsoft.sharepoint",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "sharepoint.com"
+      ],
+      "host_suffixes": [
+        "sharepoint.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "microsoft.teams",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "teams.cloud.microsoft",
+        "teams.live.com",
+        "teams.microsoft.com"
+      ],
+      "host_suffixes": [
+        "teams.cloud.microsoft",
+        "teams.live.com",
+        "teams.microsoft.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "microsoft.yammer",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "yammer.com"
+      ],
+      "host_suffixes": [
+        "yammer.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "midjourney",
+      "category": "ai",
+      "sni_suffixes": [
+        "midjourney.com"
+      ],
+      "host_suffixes": [
+        "midjourney.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "miro",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "miro.com"
+      ],
+      "host_suffixes": [
+        "miro.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "mistral",
+      "category": "ai",
+      "sni_suffixes": [
+        "mistral.ai"
+      ],
+      "host_suffixes": [
+        "mistral.ai"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "monday",
+      "category": "productivity",
+      "sni_suffixes": [
+        "monday.com"
+      ],
+      "host_suffixes": [
+        "monday.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "mongodb.atlas",
+      "category": "infrastructure",
+      "sni_suffixes": [
+        "mongodb.com",
+        "mongodb.net"
+      ],
+      "host_suffixes": [
+        "mongodb.com",
+        "mongodb.net"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "mural",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "mural.co"
+      ],
+      "host_suffixes": [
+        "mural.co"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "netflix",
+      "category": "streaming",
+      "sni_suffixes": [
+        "netflix.com",
+        "nflxext.com",
+        "nflximg.net",
+        "nflxvideo.net"
+      ],
+      "host_suffixes": [
+        "netflix.com",
+        "nflxext.com",
+        "nflximg.net",
+        "nflxvideo.net"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "netlify",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "netlify.app",
+        "netlify.com"
+      ],
+      "host_suffixes": [
+        "netlify.app",
+        "netlify.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "netsuite",
+      "category": "hr-finance-ops",
+      "sni_suffixes": [
+        "netsuite.com"
+      ],
+      "host_suffixes": [
+        "netsuite.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "newrelic",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "newrelic.com",
+        "nr-data.net"
+      ],
+      "host_suffixes": [
+        "newrelic.com",
+        "nr-data.net"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "nextcloud",
+      "category": "storage",
+      "sni_suffixes": [
+        "nextcloud.com"
+      ],
+      "host_suffixes": [
+        "nextcloud.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "notion",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "notion.com",
+        "notion.site",
+        "notion.so"
+      ],
+      "host_suffixes": [
+        "notion.com",
+        "notion.site",
+        "notion.so"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "npm",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "npmjs.com",
+        "npmjs.org"
+      ],
+      "host_suffixes": [
+        "npmjs.com",
+        "npmjs.org"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "okta",
+      "category": "security-identity",
+      "sni_suffixes": [
+        "okta-emea.com",
+        "okta.com",
+        "oktacdn.com",
+        "oktapreview.com"
+      ],
+      "host_suffixes": [
+        "okta-emea.com",
+        "okta.com",
+        "oktacdn.com",
+        "oktapreview.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "onelogin",
+      "category": "security-identity",
+      "sni_suffixes": [
+        "onelogin.com"
+      ],
+      "host_suffixes": [
+        "onelogin.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "openai",
+      "category": "ai",
+      "sni_suffixes": [
+        "chatgpt.com",
+        "oaistatic.com",
+        "oaiusercontent.com",
+        "openai.com"
+      ],
+      "host_suffixes": [
+        "chatgpt.com",
+        "oaistatic.com",
+        "oaiusercontent.com",
+        "openai.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "oracle.cloud",
+      "category": "infrastructure",
+      "sni_suffixes": [
+        "oracle.com",
+        "oraclecloud.com"
+      ],
+      "host_suffixes": [
+        "oracle.com",
+        "oraclecloud.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "pagerduty",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "pagerduty.com"
+      ],
+      "host_suffixes": [
+        "pagerduty.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "pagerduty.status",
+      "category": "support-itsm",
+      "sni_suffixes": [
+        "pagerduty.status"
+      ],
+      "host_suffixes": [
+        "pagerduty.status"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "pandora",
+      "category": "streaming",
+      "sni_suffixes": [
+        "pandora.com"
+      ],
+      "host_suffixes": [
+        "pandora.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "paypal",
+      "category": "finance",
+      "sni_suffixes": [
+        "paypal.com",
+        "paypalobjects.com"
+      ],
+      "host_suffixes": [
+        "paypal.com",
+        "paypalobjects.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "pcloud",
+      "category": "storage",
+      "sni_suffixes": [
+        "pcloud.com"
+      ],
+      "host_suffixes": [
+        "pcloud.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "perplexity",
+      "category": "ai",
+      "sni_suffixes": [
+        "perplexity.ai"
+      ],
+      "host_suffixes": [
+        "perplexity.ai"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "pinterest",
+      "category": "social",
+      "sni_suffixes": [
+        "pinimg.com",
+        "pinterest.com"
+      ],
+      "host_suffixes": [
+        "pinimg.com",
+        "pinterest.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "pipedrive",
+      "category": "crm-sales",
+      "sni_suffixes": [
+        "pipedrive.com"
+      ],
+      "host_suffixes": [
+        "pipedrive.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "plaid",
+      "category": "finance",
+      "sni_suffixes": [
+        "plaid.com"
+      ],
+      "host_suffixes": [
+        "plaid.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "postman",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "getpostman.com",
+        "postman.com"
+      ],
+      "host_suffixes": [
+        "getpostman.com",
+        "postman.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "primevideo",
+      "category": "streaming",
+      "sni_suffixes": [
+        "primevideo.com"
+      ],
+      "host_suffixes": [
+        "primevideo.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "protocol.bittorrent",
+      "category": "p2p",
+      "sni_suffixes": [],
+      "host_suffixes": [],
+      "ja3": [],
+      "ports": [
+        6881
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [
+        "13426974546f7272656e74"
+      ],
+      "confidence": 70
+    },
+    {
+      "app_id": "protocol.rdp",
+      "category": "remote-access",
+      "sni_suffixes": [],
+      "host_suffixes": [],
+      "ja3": [],
+      "ports": [
+        3389
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [
+        "0300"
+      ],
+      "confidence": 60
+    },
+    {
+      "app_id": "protocol.smb",
+      "category": "file-sharing",
+      "sni_suffixes": [],
+      "host_suffixes": [],
+      "ja3": [],
+      "ports": [
+        445
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [
+        "fe534d42",
+        "ff534d42"
+      ],
+      "confidence": 70
+    },
+    {
+      "app_id": "protocol.ssh",
+      "category": "remote-access",
+      "sni_suffixes": [],
+      "host_suffixes": [],
+      "ja3": [],
+      "ports": [
+        22
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [
+        "5353482d"
+      ],
+      "confidence": 80
+    },
+    {
+      "app_id": "pypi",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "pypi.org",
+        "pythonhosted.org"
+      ],
+      "host_suffixes": [
+        "pypi.org",
+        "pythonhosted.org"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "quickbooks",
+      "category": "finance",
+      "sni_suffixes": [
+        "intuit.com",
+        "quickbooks.com"
+      ],
+      "host_suffixes": [
+        "intuit.com",
+        "quickbooks.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "ramp",
+      "category": "finance",
+      "sni_suffixes": [
+        "ramp.com"
+      ],
+      "host_suffixes": [
+        "ramp.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "readthedocs",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "readthedocs.io",
+        "readthedocs.org"
+      ],
+      "host_suffixes": [
+        "readthedocs.io",
+        "readthedocs.org"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "reddit",
+      "category": "social",
+      "sni_suffixes": [
+        "redd.it",
+        "reddit.com",
+        "redditmedia.com",
+        "redditstatic.com"
+      ],
+      "host_suffixes": [
+        "redd.it",
+        "reddit.com",
+        "redditmedia.com",
+        "redditstatic.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "replicate",
+      "category": "ai",
+      "sni_suffixes": [
+        "replicate.com"
+      ],
+      "host_suffixes": [
+        "replicate.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "replit",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "repl.co",
+        "replit.com"
+      ],
+      "host_suffixes": [
+        "repl.co",
+        "replit.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "ringcentral",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "ringcentral.com"
+      ],
+      "host_suffixes": [
+        "ringcentral.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "rocketchat",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "rocket.chat"
+      ],
+      "host_suffixes": [
+        "rocket.chat"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "runwayml",
+      "category": "ai",
+      "sni_suffixes": [
+        "runwayml.com"
+      ],
+      "host_suffixes": [
+        "runwayml.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "salesforce",
+      "category": "crm-sales",
+      "sni_suffixes": [
+        "documentforce.com",
+        "force.com",
+        "salesforce.com",
+        "salesforceliveagent.com"
+      ],
+      "host_suffixes": [
+        "documentforce.com",
+        "force.com",
+        "salesforce.com",
+        "salesforceliveagent.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "sap.successfactors",
+      "category": "hr-finance-ops",
+      "sni_suffixes": [
+        "successfactors.com",
+        "successfactors.eu"
+      ],
+      "host_suffixes": [
+        "successfactors.com",
+        "successfactors.eu"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "sendgrid",
+      "category": "infrastructure",
+      "sni_suffixes": [
+        "sendgrid.com",
+        "sendgrid.net"
+      ],
+      "host_suffixes": [
+        "sendgrid.com",
+        "sendgrid.net"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "sentry",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "sentry.io"
+      ],
+      "host_suffixes": [
+        "sentry.io"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "servicenow",
+      "category": "support-itsm",
+      "sni_suffixes": [
+        "service-now.com",
+        "servicenow.com"
+      ],
+      "host_suffixes": [
+        "service-now.com",
+        "servicenow.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "shopify",
+      "category": "ecommerce",
+      "sni_suffixes": [
+        "myshopify.com",
+        "shopify.com",
+        "shopifycdn.com"
+      ],
+      "host_suffixes": [
+        "myshopify.com",
+        "shopify.com",
+        "shopifycdn.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "signal",
+      "category": "social",
+      "sni_suffixes": [
+        "signal.org"
+      ],
+      "host_suffixes": [
+        "signal.org"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "slack",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "slack-edge.com",
+        "slack-msgs.com",
+        "slack.com",
+        "slackb.com"
+      ],
+      "host_suffixes": [
+        "slack-edge.com",
+        "slack-msgs.com",
+        "slack.com",
+        "slackb.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "smartsheet",
+      "category": "productivity",
+      "sni_suffixes": [
+        "smartsheet.com"
+      ],
+      "host_suffixes": [
+        "smartsheet.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "snapchat",
+      "category": "social",
+      "sni_suffixes": [
+        "sc-cdn.net",
+        "snapchat.com"
+      ],
+      "host_suffixes": [
+        "sc-cdn.net",
+        "snapchat.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "snowflake",
+      "category": "infrastructure",
+      "sni_suffixes": [
+        "snowflake.com",
+        "snowflakecomputing.com"
+      ],
+      "host_suffixes": [
+        "snowflake.com",
+        "snowflakecomputing.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "sonarcloud",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "sonarcloud.io",
+        "sonarqube.com"
+      ],
+      "host_suffixes": [
+        "sonarcloud.io",
+        "sonarqube.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "soundcloud",
+      "category": "streaming",
+      "sni_suffixes": [
+        "sndcdn.com",
+        "soundcloud.com"
+      ],
+      "host_suffixes": [
+        "sndcdn.com",
+        "soundcloud.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "spotify",
+      "category": "streaming",
+      "sni_suffixes": [
+        "scdn.co",
+        "spotify.com",
+        "spotifycdn.com"
+      ],
+      "host_suffixes": [
+        "scdn.co",
+        "spotify.com",
+        "spotifycdn.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "square",
+      "category": "finance",
+      "sni_suffixes": [
+        "square.com",
+        "squareup.com"
+      ],
+      "host_suffixes": [
+        "square.com",
+        "squareup.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "squarespace",
+      "category": "ecommerce",
+      "sni_suffixes": [
+        "squarespace.com"
+      ],
+      "host_suffixes": [
+        "squarespace.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "stabilityai",
+      "category": "ai",
+      "sni_suffixes": [
+        "stability.ai"
+      ],
+      "host_suffixes": [
+        "stability.ai"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "stackoverflow",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "stackexchange.com",
+        "stackoverflow.com"
+      ],
+      "host_suffixes": [
+        "stackexchange.com",
+        "stackoverflow.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "stripe",
+      "category": "finance",
+      "sni_suffixes": [
+        "stripe.com",
+        "stripe.network"
+      ],
+      "host_suffixes": [
+        "stripe.com",
+        "stripe.network"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "surveymonkey",
+      "category": "productivity",
+      "sni_suffixes": [
+        "surveymonkey.com"
+      ],
+      "host_suffixes": [
+        "surveymonkey.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "sync",
+      "category": "storage",
+      "sni_suffixes": [
+        "sync.com"
+      ],
+      "host_suffixes": [
+        "sync.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "telegram",
+      "category": "social",
+      "sni_suffixes": [
+        "t.me",
+        "tdesktop.com",
+        "telegram.me",
+        "telegram.org"
+      ],
+      "host_suffixes": [
+        "t.me",
+        "tdesktop.com",
+        "telegram.me",
+        "telegram.org"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "threads",
+      "category": "social",
+      "sni_suffixes": [
+        "threads.net"
+      ],
+      "host_suffixes": [
+        "threads.net"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "tiktok",
+      "category": "social",
+      "sni_suffixes": [
+        "byteoversea.com",
+        "musical.ly",
+        "tiktok.com",
+        "tiktokcdn.com"
+      ],
+      "host_suffixes": [
+        "byteoversea.com",
+        "musical.ly",
+        "tiktok.com",
+        "tiktokcdn.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "todoist",
+      "category": "productivity",
+      "sni_suffixes": [
+        "todoist.com"
+      ],
+      "host_suffixes": [
+        "todoist.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "travisci",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "travis-ci.com",
+        "travis-ci.org"
+      ],
+      "host_suffixes": [
+        "travis-ci.com",
+        "travis-ci.org"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "trello",
+      "category": "productivity",
+      "sni_suffixes": [
+        "trello.com"
+      ],
+      "host_suffixes": [
+        "trello.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "tumblr",
+      "category": "social",
+      "sni_suffixes": [
+        "tumblr.com"
+      ],
+      "host_suffixes": [
+        "tumblr.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "twilio",
+      "category": "infrastructure",
+      "sni_suffixes": [
+        "twil.io",
+        "twilio.com"
+      ],
+      "host_suffixes": [
+        "twil.io",
+        "twilio.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "twitch",
+      "category": "streaming",
+      "sni_suffixes": [
+        "jtvnw.net",
+        "ttvnw.net",
+        "twitch.tv"
+      ],
+      "host_suffixes": [
+        "jtvnw.net",
+        "ttvnw.net",
+        "twitch.tv"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "twitter",
+      "category": "social",
+      "sni_suffixes": [
+        "t.co",
+        "twimg.com",
+        "twitter.com",
+        "x.com"
+      ],
+      "host_suffixes": [
+        "t.co",
+        "twimg.com",
+        "twitter.com",
+        "x.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "typeform",
+      "category": "productivity",
+      "sni_suffixes": [
+        "typeform.com"
+      ],
+      "host_suffixes": [
+        "typeform.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "vercel",
+      "category": "dev-tools",
+      "sni_suffixes": [
+        "vercel.app",
+        "vercel.com"
+      ],
+      "host_suffixes": [
+        "vercel.app",
+        "vercel.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "vimeo",
+      "category": "streaming",
+      "sni_suffixes": [
+        "vimeo.com",
+        "vimeocdn.com"
+      ],
+      "host_suffixes": [
+        "vimeo.com",
+        "vimeocdn.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "vk",
+      "category": "social",
+      "sni_suffixes": [
+        "vk.com"
+      ],
+      "host_suffixes": [
+        "vk.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "walmart",
+      "category": "ecommerce",
+      "sni_suffixes": [
+        "walmart.com"
+      ],
+      "host_suffixes": [
+        "walmart.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "webex",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "ciscospark.com",
+        "webex.com",
+        "webexcontent.com"
+      ],
+      "host_suffixes": [
+        "ciscospark.com",
+        "webex.com",
+        "webexcontent.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "wechat",
+      "category": "social",
+      "sni_suffixes": [
+        "wechat.com",
+        "weixin.qq.com"
+      ],
+      "host_suffixes": [
+        "wechat.com",
+        "weixin.qq.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "wetransfer",
+      "category": "storage",
+      "sni_suffixes": [
+        "wetransfer.com",
+        "wetransfer.net"
+      ],
+      "host_suffixes": [
+        "wetransfer.com",
+        "wetransfer.net"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "whatsapp",
+      "category": "social",
+      "sni_suffixes": [
+        "whatsapp.com",
+        "whatsapp.net"
+      ],
+      "host_suffixes": [
+        "whatsapp.com",
+        "whatsapp.net"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "whereby",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "whereby.com"
+      ],
+      "host_suffixes": [
+        "whereby.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "wise",
+      "category": "finance",
+      "sni_suffixes": [
+        "transferwise.com",
+        "wise.com"
+      ],
+      "host_suffixes": [
+        "transferwise.com",
+        "wise.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "wix",
+      "category": "ecommerce",
+      "sni_suffixes": [
+        "parastorage.com",
+        "wix.com",
+        "wixsite.com"
+      ],
+      "host_suffixes": [
+        "parastorage.com",
+        "wix.com",
+        "wixsite.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "woocommerce",
+      "category": "ecommerce",
+      "sni_suffixes": [
+        "woocommerce.com"
+      ],
+      "host_suffixes": [
+        "woocommerce.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "workday",
+      "category": "hr-finance-ops",
+      "sni_suffixes": [
+        "myworkday.com",
+        "wd5.myworkday.com",
+        "workday.com"
+      ],
+      "host_suffixes": [
+        "myworkday.com",
+        "wd5.myworkday.com",
+        "workday.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "xero",
+      "category": "finance",
+      "sni_suffixes": [
+        "xero.com"
+      ],
+      "host_suffixes": [
+        "xero.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "youtube",
+      "category": "streaming",
+      "sni_suffixes": [
+        "googlevideo.com",
+        "youtu.be",
+        "youtube-nocookie.com",
+        "youtube.com",
+        "ytimg.com"
+      ],
+      "host_suffixes": [
+        "googlevideo.com",
+        "youtu.be",
+        "youtube-nocookie.com",
+        "youtube.com",
+        "ytimg.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "yubico",
+      "category": "security-identity",
+      "sni_suffixes": [
+        "yubico.com"
+      ],
+      "host_suffixes": [
+        "yubico.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "zendesk",
+      "category": "crm-sales",
+      "sni_suffixes": [
+        "zdassets.com",
+        "zendesk.com",
+        "zendesk.io"
+      ],
+      "host_suffixes": [
+        "zdassets.com",
+        "zendesk.com",
+        "zendesk.io"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "zoho",
+      "category": "crm-sales",
+      "sni_suffixes": [
+        "zoho.com",
+        "zoho.eu",
+        "zohopublic.com"
+      ],
+      "host_suffixes": [
+        "zoho.com",
+        "zoho.eu",
+        "zohopublic.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "zoom",
+      "category": "collaboration",
+      "sni_suffixes": [
+        "zoom.com",
+        "zoom.us",
+        "zoomgov.com"
+      ],
+      "host_suffixes": [
+        "zoom.com",
+        "zoom.us",
+        "zoomgov.com"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    },
+    {
+      "app_id": "zscaler",
+      "category": "security-identity",
+      "sni_suffixes": [
+        "zscaler.com",
+        "zscaler.net",
+        "zscalerthree.net"
+      ],
+      "host_suffixes": [
+        "zscaler.com",
+        "zscaler.net",
+        "zscalerthree.net"
+      ],
+      "ja3": [],
+      "ports": [
+        443
+      ],
+      "transport": "tcp",
+      "byte_prefixes": [],
+      "confidence": 90
+    }
+  ]
+}
