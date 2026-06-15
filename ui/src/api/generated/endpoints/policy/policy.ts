@@ -29,11 +29,17 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  ErrorResponse,
+  ListPolicyRecommendationsParams,
   ListPolicySigningKeys200,
   PolicyBundle,
   PolicyCompileResult,
   PolicyGraph,
   PolicyPublicKey,
+  PolicyRecommendation,
+  PolicyRecommendationApplyResult,
+  PolicyRecommendationGenerateRequest,
+  PolicyRecommendationList,
   PolicySigningKey,
   UpdatePolicyGraphBody
 } from '../../model';
@@ -857,3 +863,406 @@ export function useGetPolicySigningKeyPublic<TData = Awaited<ReturnType<typeof g
 
 
 
+/**
+ * @summary List traffic-derived policy recommendations
+ */
+export const listPolicyRecommendations = (
+    tenantId: string,
+    params?: ListPolicyRecommendationsParams,
+ options?: SecondParameter<typeof sngRequest>,signal?: AbortSignal
+) => {
+      
+      
+      return sngRequest<PolicyRecommendationList>(
+      {url: `/tenants/${tenantId}/policy/recommendations`, method: 'GET',
+        params, signal
+    },
+      options);
+    }
+  
+
+
+
+export const getListPolicyRecommendationsQueryKey = (tenantId?: string,
+    params?: ListPolicyRecommendationsParams,) => {
+    return [
+    `/tenants/${tenantId}/policy/recommendations`, ...(params ? [params]: [])
+    ] as const;
+    }
+
+    
+export const getListPolicyRecommendationsQueryOptions = <TData = Awaited<ReturnType<typeof listPolicyRecommendations>>, TError = unknown>(tenantId: string,
+    params?: ListPolicyRecommendationsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listPolicyRecommendations>>, TError, TData>>, request?: SecondParameter<typeof sngRequest>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getListPolicyRecommendationsQueryKey(tenantId,params);
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof listPolicyRecommendations>>> = ({ signal }) => listPolicyRecommendations(tenantId,params, requestOptions, signal);
+
+      
+
+      
+
+   return  { queryKey, queryFn, enabled: !!(tenantId), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof listPolicyRecommendations>>, TError, TData> & { queryKey: DataTag<QueryKey, TData> }
+}
+
+export type ListPolicyRecommendationsQueryResult = NonNullable<Awaited<ReturnType<typeof listPolicyRecommendations>>>
+export type ListPolicyRecommendationsQueryError = unknown
+
+
+export function useListPolicyRecommendations<TData = Awaited<ReturnType<typeof listPolicyRecommendations>>, TError = unknown>(
+ tenantId: string,
+    params: undefined |  ListPolicyRecommendationsParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof listPolicyRecommendations>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof listPolicyRecommendations>>,
+          TError,
+          Awaited<ReturnType<typeof listPolicyRecommendations>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> }
+export function useListPolicyRecommendations<TData = Awaited<ReturnType<typeof listPolicyRecommendations>>, TError = unknown>(
+ tenantId: string,
+    params?: ListPolicyRecommendationsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listPolicyRecommendations>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof listPolicyRecommendations>>,
+          TError,
+          Awaited<ReturnType<typeof listPolicyRecommendations>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> }
+export function useListPolicyRecommendations<TData = Awaited<ReturnType<typeof listPolicyRecommendations>>, TError = unknown>(
+ tenantId: string,
+    params?: ListPolicyRecommendationsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listPolicyRecommendations>>, TError, TData>>, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> }
+/**
+ * @summary List traffic-derived policy recommendations
+ */
+
+export function useListPolicyRecommendations<TData = Awaited<ReturnType<typeof listPolicyRecommendations>>, TError = unknown>(
+ tenantId: string,
+    params?: ListPolicyRecommendationsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof listPolicyRecommendations>>, TError, TData>>, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient 
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> } {
+
+  const queryOptions = getListPolicyRecommendationsQueryOptions(tenantId,params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
+/**
+ * Observes the tenant's recent flow / DNS / HTTP telemetry,
+synthesizes a minimal default-deny least-privilege policy
+graph, compiles it through the deterministic policy compiler,
+and proves both coverage (how much observed permitted traffic
+the candidate still permits) and prev-vs-next impact against
+the tenant's current live policy. The result is persisted as a
+pending recommendation. Requires the telemetry hot tier;
+returns 503 when it is not configured.
+
+ * @summary Synthesize a least-privilege recommendation from observed traffic
+ */
+export const generatePolicyRecommendation = (
+    tenantId: string,
+    policyRecommendationGenerateRequest?: PolicyRecommendationGenerateRequest,
+ options?: SecondParameter<typeof sngRequest>,signal?: AbortSignal
+) => {
+      
+      
+      return sngRequest<PolicyRecommendation>(
+      {url: `/tenants/${tenantId}/policy/recommendations`, method: 'POST',
+      headers: {'Content-Type': 'application/json', },
+      data: policyRecommendationGenerateRequest, signal
+    },
+      options);
+    }
+  
+
+
+export const getGeneratePolicyRecommendationMutationOptions = <TError = ErrorResponse | ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof generatePolicyRecommendation>>, TError,{tenantId: string;data: PolicyRecommendationGenerateRequest}, TContext>, request?: SecondParameter<typeof sngRequest>}
+): UseMutationOptions<Awaited<ReturnType<typeof generatePolicyRecommendation>>, TError,{tenantId: string;data: PolicyRecommendationGenerateRequest}, TContext> => {
+
+const mutationKey = ['generatePolicyRecommendation'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof generatePolicyRecommendation>>, {tenantId: string;data: PolicyRecommendationGenerateRequest}> = (props) => {
+          const {tenantId,data} = props ?? {};
+
+          return  generatePolicyRecommendation(tenantId,data,requestOptions)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type GeneratePolicyRecommendationMutationResult = NonNullable<Awaited<ReturnType<typeof generatePolicyRecommendation>>>
+    export type GeneratePolicyRecommendationMutationBody = PolicyRecommendationGenerateRequest
+    export type GeneratePolicyRecommendationMutationError = ErrorResponse | ErrorResponse
+
+    /**
+ * @summary Synthesize a least-privilege recommendation from observed traffic
+ */
+export const useGeneratePolicyRecommendation = <TError = ErrorResponse | ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof generatePolicyRecommendation>>, TError,{tenantId: string;data: PolicyRecommendationGenerateRequest}, TContext>, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof generatePolicyRecommendation>>,
+        TError,
+        {tenantId: string;data: PolicyRecommendationGenerateRequest},
+        TContext
+      > => {
+
+      const mutationOptions = getGeneratePolicyRecommendationMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    /**
+ * @summary Fetch a single policy recommendation
+ */
+export const getPolicyRecommendation = (
+    tenantId: string,
+    recommendationId: string,
+ options?: SecondParameter<typeof sngRequest>,signal?: AbortSignal
+) => {
+      
+      
+      return sngRequest<PolicyRecommendation>(
+      {url: `/tenants/${tenantId}/policy/recommendations/${recommendationId}`, method: 'GET', signal
+    },
+      options);
+    }
+  
+
+
+
+export const getGetPolicyRecommendationQueryKey = (tenantId?: string,
+    recommendationId?: string,) => {
+    return [
+    `/tenants/${tenantId}/policy/recommendations/${recommendationId}`
+    ] as const;
+    }
+
+    
+export const getGetPolicyRecommendationQueryOptions = <TData = Awaited<ReturnType<typeof getPolicyRecommendation>>, TError = ErrorResponse>(tenantId: string,
+    recommendationId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getPolicyRecommendation>>, TError, TData>>, request?: SecondParameter<typeof sngRequest>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getGetPolicyRecommendationQueryKey(tenantId,recommendationId);
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof getPolicyRecommendation>>> = ({ signal }) => getPolicyRecommendation(tenantId,recommendationId, requestOptions, signal);
+
+      
+
+      
+
+   return  { queryKey, queryFn, enabled: !!(tenantId && recommendationId), ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof getPolicyRecommendation>>, TError, TData> & { queryKey: DataTag<QueryKey, TData> }
+}
+
+export type GetPolicyRecommendationQueryResult = NonNullable<Awaited<ReturnType<typeof getPolicyRecommendation>>>
+export type GetPolicyRecommendationQueryError = ErrorResponse
+
+
+export function useGetPolicyRecommendation<TData = Awaited<ReturnType<typeof getPolicyRecommendation>>, TError = ErrorResponse>(
+ tenantId: string,
+    recommendationId: string, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof getPolicyRecommendation>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getPolicyRecommendation>>,
+          TError,
+          Awaited<ReturnType<typeof getPolicyRecommendation>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> }
+export function useGetPolicyRecommendation<TData = Awaited<ReturnType<typeof getPolicyRecommendation>>, TError = ErrorResponse>(
+ tenantId: string,
+    recommendationId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getPolicyRecommendation>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof getPolicyRecommendation>>,
+          TError,
+          Awaited<ReturnType<typeof getPolicyRecommendation>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> }
+export function useGetPolicyRecommendation<TData = Awaited<ReturnType<typeof getPolicyRecommendation>>, TError = ErrorResponse>(
+ tenantId: string,
+    recommendationId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getPolicyRecommendation>>, TError, TData>>, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> }
+/**
+ * @summary Fetch a single policy recommendation
+ */
+
+export function useGetPolicyRecommendation<TData = Awaited<ReturnType<typeof getPolicyRecommendation>>, TError = ErrorResponse>(
+ tenantId: string,
+    recommendationId: string, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof getPolicyRecommendation>>, TError, TData>>, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient 
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> } {
+
+  const queryOptions = getGetPolicyRecommendationQueryOptions(tenantId,recommendationId,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
+/**
+ * Stages the candidate graph as a policy draft (feeding the
+existing canary-rollout path) and atomically marks the
+recommendation applied. Returns 409 when the recommendation is
+no longer pending.
+
+ * @summary Stage a recommendation's candidate graph as a policy draft
+ */
+export const applyPolicyRecommendation = (
+    tenantId: string,
+    recommendationId: string,
+ options?: SecondParameter<typeof sngRequest>,signal?: AbortSignal
+) => {
+      
+      
+      return sngRequest<PolicyRecommendationApplyResult>(
+      {url: `/tenants/${tenantId}/policy/recommendations/${recommendationId}/apply`, method: 'POST', signal
+    },
+      options);
+    }
+  
+
+
+export const getApplyPolicyRecommendationMutationOptions = <TError = ErrorResponse | ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof applyPolicyRecommendation>>, TError,{tenantId: string;recommendationId: string}, TContext>, request?: SecondParameter<typeof sngRequest>}
+): UseMutationOptions<Awaited<ReturnType<typeof applyPolicyRecommendation>>, TError,{tenantId: string;recommendationId: string}, TContext> => {
+
+const mutationKey = ['applyPolicyRecommendation'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof applyPolicyRecommendation>>, {tenantId: string;recommendationId: string}> = (props) => {
+          const {tenantId,recommendationId} = props ?? {};
+
+          return  applyPolicyRecommendation(tenantId,recommendationId,requestOptions)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type ApplyPolicyRecommendationMutationResult = NonNullable<Awaited<ReturnType<typeof applyPolicyRecommendation>>>
+    
+    export type ApplyPolicyRecommendationMutationError = ErrorResponse | ErrorResponse
+
+    /**
+ * @summary Stage a recommendation's candidate graph as a policy draft
+ */
+export const useApplyPolicyRecommendation = <TError = ErrorResponse | ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof applyPolicyRecommendation>>, TError,{tenantId: string;recommendationId: string}, TContext>, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof applyPolicyRecommendation>>,
+        TError,
+        {tenantId: string;recommendationId: string},
+        TContext
+      > => {
+
+      const mutationOptions = getApplyPolicyRecommendationMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    /**
+ * @summary Dismiss a pending policy recommendation
+ */
+export const dismissPolicyRecommendation = (
+    tenantId: string,
+    recommendationId: string,
+ options?: SecondParameter<typeof sngRequest>,signal?: AbortSignal
+) => {
+      
+      
+      return sngRequest<PolicyRecommendation>(
+      {url: `/tenants/${tenantId}/policy/recommendations/${recommendationId}/dismiss`, method: 'POST', signal
+    },
+      options);
+    }
+  
+
+
+export const getDismissPolicyRecommendationMutationOptions = <TError = ErrorResponse | ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dismissPolicyRecommendation>>, TError,{tenantId: string;recommendationId: string}, TContext>, request?: SecondParameter<typeof sngRequest>}
+): UseMutationOptions<Awaited<ReturnType<typeof dismissPolicyRecommendation>>, TError,{tenantId: string;recommendationId: string}, TContext> => {
+
+const mutationKey = ['dismissPolicyRecommendation'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof dismissPolicyRecommendation>>, {tenantId: string;recommendationId: string}> = (props) => {
+          const {tenantId,recommendationId} = props ?? {};
+
+          return  dismissPolicyRecommendation(tenantId,recommendationId,requestOptions)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type DismissPolicyRecommendationMutationResult = NonNullable<Awaited<ReturnType<typeof dismissPolicyRecommendation>>>
+    
+    export type DismissPolicyRecommendationMutationError = ErrorResponse | ErrorResponse
+
+    /**
+ * @summary Dismiss a pending policy recommendation
+ */
+export const useDismissPolicyRecommendation = <TError = ErrorResponse | ErrorResponse,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof dismissPolicyRecommendation>>, TError,{tenantId: string;recommendationId: string}, TContext>, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof dismissPolicyRecommendation>>,
+        TError,
+        {tenantId: string;recommendationId: string},
+        TContext
+      > => {
+
+      const mutationOptions = getDismissPolicyRecommendationMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    

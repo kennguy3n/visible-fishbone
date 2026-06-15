@@ -125,6 +125,9 @@ type Store struct {
 	// AI suggestion tables — see migration 026.
 	aiSuggestions map[uuid.UUID]repository.AISuggestion
 
+	// Policy recommendation table — see migration 070.
+	policyRecommendations map[uuid.UUID]repository.PolicyRecommendation
+
 	// Troubleshooting tables — see migrations 032-033.
 	kbEntries            map[uuid.UUID]repository.KBEntry
 	troubleshootSessions map[uuid.UUID]repository.TroubleshootSession
@@ -248,6 +251,7 @@ func NewStore() *Store {
 		dlpModels:              map[uuid.UUID]repository.DLPModel{},
 		dlpModelAssign:         map[uuid.UUID]uuid.UUID{},
 		aiSuggestions:          map[uuid.UUID]repository.AISuggestion{},
+		policyRecommendations:  map[uuid.UUID]repository.PolicyRecommendation{},
 		kbEntries:              map[uuid.UUID]repository.KBEntry{},
 		troubleshootSessions:   map[uuid.UUID]repository.TroubleshootSession{},
 		roles:                  map[uuid.UUID]repository.Role{},

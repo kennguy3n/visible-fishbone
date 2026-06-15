@@ -22,6 +22,7 @@ type RouterDeps struct {
 	RBAC             *RBACHandler
 	Policy           *PolicyHandler
 	PolicySimulation *PolicySimulationHandler
+	PolicyRec        *PolicyRecommendationHandler
 	Audit            *AuditHandler
 	Webhooks         *WebhookHandler
 	APIKeys          *APIKeyHandler
@@ -148,6 +149,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.PolicySimulation != nil {
 		deps.PolicySimulation.Register(apiMux)
+	}
+	if deps.PolicyRec != nil {
+		deps.PolicyRec.Register(apiMux)
 	}
 	if deps.Audit != nil {
 		deps.Audit.Register(apiMux)

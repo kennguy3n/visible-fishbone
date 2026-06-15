@@ -55,6 +55,7 @@ plane, policy model, and telemetry fabric.
 | **Compliance reporting** — PCI-DSS / HIPAA / SOC2 / ISO-27001 control mapping with JSON evidence packs | Implemented | Control plane |
 | **Remediation playbook engine** — triggered, approval-gated response playbooks with 7 step executors | Implemented | Control plane |
 | **AI policy tightening** — unused / shadowed / overly-permissive rule detection; verifier-checked suggestions with operator review | Implemented | Control plane |
+| **Policy recommendation engine** — deterministic least-privilege synthesis from observed flow / DNS / HTTP traffic, compiler-verified, with coverage + prev-vs-next impact proof and one-click apply-as-draft into the canary path | Implemented | Control plane |
 | **Autonomous troubleshooting** — RAG assistant over a knowledge base plus a diagnostic engine | Implemented | Control plane |
 | **Enhanced AI** — alert correlation, NL policy query, posture reports, threat-intel enrichment, guardrails | Implemented | Control plane |
 | **Operational automation** — policy-review scheduler, certificate monitor, capacity planning, bulk device ops, ops-health snapshots, automation audit report | Implemented | Control plane |

@@ -561,6 +561,117 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/PolicyPublicKey" }
+  /tenants/{tenant_id}/policy/recommendations:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [policy]
+      operationId: listPolicyRecommendations
+      summary: List traffic-derived policy recommendations
+      parameters:
+        - in: query
+          name: status
+          schema: { type: string, enum: [pending, applied, dismissed] }
+          description: Filter by lifecycle status.
+        - in: query
+          name: limit
+          schema: { type: integer }
+        - in: query
+          name: after
+          schema: { type: string }
+          description: Opaque pagination cursor from a prior response's next_cursor.
+      responses:
+        "200":
+          description: page of recommendations
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyRecommendationList" }
+    post:
+      tags: [policy]
+      operationId: generatePolicyRecommendation
+      summary: Synthesize a least-privilege recommendation from observed traffic
+      description: |
+        Observes the tenant's recent flow / DNS / HTTP telemetry,
+        synthesizes a minimal default-deny least-privilege policy
+        graph, compiles it through the deterministic policy compiler,
+        and proves both coverage (how much observed permitted traffic
+        the candidate still permits) and prev-vs-next impact against
+        the tenant's current live policy. The result is persisted as a
+        pending recommendation. Requires the telemetry hot tier;
+        returns 503 when it is not configured.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/PolicyRecommendationGenerateRequest" }
+      responses:
+        "201":
+          description: synthesized recommendation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyRecommendation" }
+        "400": { $ref: "#/components/responses/Error" }
+        "503": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/policy/recommendations/{recommendation_id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - in: path
+        name: recommendation_id
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [policy]
+      operationId: getPolicyRecommendation
+      summary: Fetch a single policy recommendation
+      responses:
+        "200":
+          description: recommendation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyRecommendation" }
+        "404": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/policy/recommendations/{recommendation_id}/apply:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - in: path
+        name: recommendation_id
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [policy]
+      operationId: applyPolicyRecommendation
+      summary: Stage a recommendation's candidate graph as a policy draft
+      description: |
+        Stages the candidate graph as a policy draft (feeding the
+        existing canary-rollout path) and atomically marks the
+        recommendation applied. Returns 409 when the recommendation is
+        no longer pending.
+      responses:
+        "200":
+          description: applied recommendation + staged draft graph id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyRecommendationApplyResult" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/policy/recommendations/{recommendation_id}/dismiss:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - in: path
+        name: recommendation_id
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [policy]
+      operationId: dismissPolicyRecommendation
+      summary: Dismiss a pending policy recommendation
+      responses:
+        "200":
+          description: dismissed recommendation
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PolicyRecommendation" }
+        "404": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
   /tenants/{tenant_id}/audit-log:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     get:
@@ -3994,6 +4105,50 @@ components:
         bundles:
           type: array
           items: { $ref: "#/components/schemas/PolicyBundle" }
+    PolicyRecommendationGenerateRequest:
+      type: object
+      description: All fields optional; defaults to the last 24h with default synthesis tuning.
+      properties:
+        since: { type: string, format: date-time }
+        until: { type: string, format: date-time }
+        max_events: { type: integer, description: Cap on observed envelopes; 0 uses the server default. }
+        options:
+          type: object
+          properties:
+            ipv4_prefix_len: { type: integer, description: CIDR aggregation prefix for IPv4 flow destinations (default 24). }
+            ipv6_prefix_len: { type: integer, description: CIDR aggregation prefix for IPv6 flow destinations (default 64). }
+            max_rules: { type: integer, description: Cap on synthesized allow rules; highest-frequency groups win. }
+            min_observations: { type: integer, description: Drop traffic groups observed fewer than this many times. }
+    PolicyRecommendation:
+      type: object
+      required: [id, tenant_id, status, window_start, window_end, coverage, rule_count, candidate_graph, summary, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        status: { type: string, enum: [pending, applied, dismissed] }
+        window_start: { type: string, format: date-time }
+        window_end: { type: string, format: date-time }
+        coverage: { type: number, format: double, description: "Fraction (0..1) of observed permitted traffic the candidate still permits." }
+        rule_count: { type: integer }
+        candidate_graph: { type: object, description: "The synthesized least-privilege policy graph (a valid PolicyGraph document)." }
+        summary: { type: object, description: "Typed evidence — synthesis stats, coverage, and prev-vs-next impact." }
+        applied_graph_id: { type: string, format: uuid, nullable: true }
+        created_at: { type: string, format: date-time }
+        applied_at: { type: string, format: date-time, nullable: true }
+    PolicyRecommendationList:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/PolicyRecommendation" }
+        next_cursor: { type: string }
+    PolicyRecommendationApplyResult:
+      type: object
+      required: [recommendation, draft_graph_id]
+      properties:
+        recommendation: { $ref: "#/components/schemas/PolicyRecommendation" }
+        draft_graph_id: { type: string, format: uuid }
     AuditEntry:
       type: object
       required: [id, tenant_id, action, resource_type, created_at]

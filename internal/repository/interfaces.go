@@ -1440,6 +1440,31 @@ type AISuggestionRepository interface {
 	UpdateStatus(ctx context.Context, tenantID, id uuid.UUID, expectedStatus, newStatus string, reviewerID *uuid.UUID, feedback *string) error
 }
 
+// --- Policy Recommendations -----------------------------------------------
+
+// PolicyRecommendationRepository owns the policy_recommendations
+// table. All operations are tenant-isolated via the sng.tenant_id GUC
+// / RLS.
+type PolicyRecommendationRepository interface {
+	// Create inserts a freshly-synthesized recommendation (status
+	// defaults to pending when empty).
+	Create(ctx context.Context, tenantID uuid.UUID, rec PolicyRecommendation) (PolicyRecommendation, error)
+	// Get returns a single recommendation by id. Returns ErrNotFound
+	// when it does not exist within the tenant.
+	Get(ctx context.Context, tenantID, id uuid.UUID) (PolicyRecommendation, error)
+	// List returns recommendations newest first, optionally filtered
+	// by status, cursor-paginated.
+	List(ctx context.Context, tenantID uuid.UUID, status *string, page Page) (PageResult[PolicyRecommendation], error)
+	// MarkApplied atomically transitions a pending recommendation to
+	// applied, recording the draft policy graph it produced and the
+	// acting operator. Returns ErrConflict if the recommendation is
+	// not pending and ErrNotFound if it does not exist.
+	MarkApplied(ctx context.Context, tenantID, id, appliedGraphID uuid.UUID, actorID *uuid.UUID) error
+	// MarkDismissed atomically transitions a pending recommendation to
+	// dismissed. Same error semantics as MarkApplied.
+	MarkDismissed(ctx context.Context, tenantID, id uuid.UUID, actorID *uuid.UUID) error
+}
+
 // --- Troubleshooting ------------------------------------------------------
 
 // KBEntryRepository owns the kb_entries table. Entries with

@@ -2120,6 +2120,55 @@ type AISuggestion struct {
 	Feedback       *string
 }
 
+// --- Policy Recommendations -----------------------------------------------
+
+// PolicyRecommendationStatus tracks a recommendation through its
+// lifecycle: a freshly-synthesized recommendation is pending until an
+// operator either applies it (staging it as a policy draft) or
+// dismisses it.
+type PolicyRecommendationStatus string
+
+const (
+	PolicyRecommendationStatusPending   PolicyRecommendationStatus = "pending"
+	PolicyRecommendationStatusApplied   PolicyRecommendationStatus = "applied"
+	PolicyRecommendationStatusDismissed PolicyRecommendationStatus = "dismissed"
+)
+
+// PolicyRecommendation is a row in the policy_recommendations table: a
+// traffic-derived least-privilege policy graph synthesized from a
+// tenant's observed telemetry, together with the coverage / impact
+// evidence that proves what applying it would change. The synthesizer
+// and the surrounding orchestration live in
+// internal/service/policyrec; this struct is the persisted shape.
+type PolicyRecommendation struct {
+	ID          uuid.UUID
+	TenantID    uuid.UUID
+	Status      PolicyRecommendationStatus
+	WindowStart time.Time
+	WindowEnd   time.Time
+	// CandidateGraph is the synthesized policy graph JSON — a valid
+	// policy.Graph document (default-deny + least-privilege allow
+	// rules) ready to be staged as a draft via PutDraftGraph.
+	CandidateGraph json.RawMessage
+	// Summary is the typed evidence document (observed counts,
+	// synthesized rule counts, coverage, newly-denied samples,
+	// prev-vs-next impact transitions). Opaque JSONB at this layer.
+	Summary json.RawMessage
+	// Coverage is the fraction (0..1) of observed permitted traffic
+	// the candidate still permits. Denormalized out of Summary so the
+	// list view can render / sort without decoding the JSONB.
+	Coverage float64
+	// RuleCount is the number of synthesized allow rules in the
+	// candidate graph.
+	RuleCount int
+	// AppliedGraphID is the draft policy graph created when the
+	// recommendation was applied; nil until then.
+	AppliedGraphID *uuid.UUID
+	CreatedAt      time.Time
+	AppliedAt      *time.Time
+	ActorID        *uuid.UUID
+}
+
 // --- Troubleshooting ------------------------------------------------------
 
 // KBCategory enumerates the allowed categories for knowledge base entries.
