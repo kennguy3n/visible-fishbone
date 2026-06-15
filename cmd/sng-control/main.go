@@ -548,26 +548,38 @@ func run() error {
 	// central ingestion + signed bundle build runs exactly once for the
 	// whole fleet per refresh interval (amortized across all tenants),
 	// never per replica or per tenant, and upstream open feeds are not
-	// fetched N-fold. SeedRegistry upserts the curated source registry
-	// first so the per-tenant posture surface reflects the managed
-	// sources from the first leadership acquisition; Run then does an
-	// immediate warm-up refresh on entry and ticks on the bounded
-	// interval. The engine itself also re-checks the kill switch on every
+	// fetched N-fold.
+	//
+	// SeedRegistry runs on every leadership acquisition regardless of the
+	// kill switch: it is an idempotent, metadata-only upsert of the
+	// curated source catalog that writes no indicator content and makes
+	// no network calls, so it is cheap to run unconditionally and keeps
+	// the per-tenant posture surface listing the managed feeds even when
+	// the switch is off — an operator can preview which feeds would
+	// activate before flipping it on (the posture's enabled:false already
+	// conveys the off state). Only the expensive ingestion loop is gated
+	// by the kill switch; the engine also re-checks the switch on every
 	// refresh, so a flag flip takes effect without a restart.
-	if rc.ManagedThreatContentEnabled {
+	{
 		engine := rc.ManagedThreatContentEngine
 		interval := rc.ManagedThreatContentInterval
+		enabled := rc.ManagedThreatContentEnabled
 		go elector.RunIfLeader(rootCtx, "threatcontent-refresh", func(ctx context.Context) {
 			if err := engine.SeedRegistry(ctx); err != nil {
 				logger.Warn("sng-control: managed threat-content source registry seed failed",
 					slog.String("error", err.Error()))
 			}
+			if !enabled {
+				return
+			}
 			engine.Run(ctx, interval)
 		})
-		logger.Info("sng-control: managed threat-content ingestion enabled (runs on leader only)",
-			slog.Duration("refresh_interval", interval))
-	} else {
-		logger.Info("sng-control: managed threat-content ingestion disabled (MANAGED_THREAT_CONTENT_ENABLED=false)")
+		if enabled {
+			logger.Info("sng-control: managed threat-content ingestion enabled (runs on leader only)",
+				slog.Duration("refresh_interval", interval))
+		} else {
+			logger.Info("sng-control: managed threat-content ingestion disabled by kill switch; curated source registry still seeded on the leader for posture visibility (MANAGED_THREAT_CONTENT_ENABLED=false)")
+		}
 	}
 
 	// Shadow-IT auto-discovery: the telemetry consumer feeds every
