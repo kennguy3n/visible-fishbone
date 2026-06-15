@@ -341,7 +341,7 @@ func (e *Engine) CollectAll(ctx context.Context) error {
 		defer pacer.Stop()
 	}
 	var evaluated, failed int
-	for _, tenantID := range tenants {
+	for i, tenantID := range tenants {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -352,7 +352,11 @@ func (e *Engine) CollectAll(ctx context.Context) error {
 		} else {
 			evaluated++
 		}
-		if pacer != nil {
+		// Pace BETWEEN tenants only. After the final tenant there is no
+		// further work, so the trailing wait would merely delay sweep
+		// completion (and release of the leader lock) by one idle interval
+		// for no benefit.
+		if pacer != nil && i < len(tenants)-1 {
 			// Reset without a manual channel drain is correct under the
 			// module's go directive (1.25): since Go 1.23, Timer.Reset
 			// atomically clears any already-fired-but-unreceived value, so

@@ -166,6 +166,57 @@ func TestEncryptionTransit_RecordsMode(t *testing.T) {
 	}
 }
 
+// TestTenantIsolation_RuntimeEvidence proves the tenant-isolation control
+// records the live probe basis: when RLS is runtime-verified the evidence
+// is attributed to the database role and carries the role facts, and a
+// role that bypasses RLS flips the control to fail.
+func TestTenantIsolation_RuntimeEvidence(t *testing.T) {
+	t.Parallel()
+
+	verified := snap()
+	verified.RLSEnforced = true
+	verified.RLSRuntimeVerified = true
+	verified.RLSRole = "sng_app"
+	verified.RLSRoleBypasses = false
+	obs := run(t, CollectorTenantIsolation, verified)
+	if obs.Status != StatusPass {
+		t.Fatalf("verified: status = %q, want pass", obs.Status)
+	}
+	if obs.Source != "database_role" {
+		t.Fatalf("verified: source = %q, want database_role", obs.Source)
+	}
+	if obs.Details["rls_runtime_verified"] != true {
+		t.Fatalf("verified: rls_runtime_verified = %v, want true", obs.Details["rls_runtime_verified"])
+	}
+	if obs.Details["db_role"] != "sng_app" {
+		t.Fatalf("verified: db_role = %v, want sng_app", obs.Details["db_role"])
+	}
+
+	bypassing := snap()
+	bypassing.RLSEnforced = false
+	bypassing.RLSRuntimeVerified = true
+	bypassing.RLSRole = "postgres"
+	bypassing.RLSRoleBypasses = true
+	obs = run(t, CollectorTenantIsolation, bypassing)
+	if obs.Status != StatusFail {
+		t.Fatalf("bypassing: status = %q, want fail", obs.Status)
+	}
+	if obs.Details["role_bypasses_rls"] != true {
+		t.Fatalf("bypassing: role_bypasses_rls = %v, want true", obs.Details["role_bypasses_rls"])
+	}
+
+	// Fallback (probe not run): no role facts, attributed to config.
+	fallback := snap()
+	fallback.RLSEnforced = true
+	obs = run(t, CollectorTenantIsolation, fallback)
+	if obs.Source != "platform_config" {
+		t.Fatalf("fallback: source = %q, want platform_config", obs.Source)
+	}
+	if _, ok := obs.Details["db_role"]; ok {
+		t.Fatal("fallback: db_role must be absent when not runtime-verified")
+	}
+}
+
 // TestKeyRotation_Boundary pins the rotation window boundary: a key
 // exactly at the max age still passes; one second older fails.
 func TestKeyRotation_Boundary(t *testing.T) {

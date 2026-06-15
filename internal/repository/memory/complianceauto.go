@@ -27,6 +27,7 @@ type ComplianceAutoRepository struct {
 	frameworkState map[uuid.UUID]repository.ComplianceAutoFrameworkStateRow
 	statusByKey    map[controlStatusKey]uuid.UUID
 	frameworkByKey map[frameworkStateKey]uuid.UUID
+	rlsStatus      repository.ComplianceAutoRLSStatus
 	seq            int64
 }
 
@@ -41,7 +42,9 @@ type frameworkStateKey struct {
 	framework string
 }
 
-// NewComplianceAutoRepository returns an empty in-memory repository.
+// NewComplianceAutoRepository returns an empty in-memory repository. The
+// RLS probe defaults to "enforced" because the in-memory backend models a
+// correctly-configured platform; tests flip it via SetRLSStatus.
 func NewComplianceAutoRepository() *ComplianceAutoRepository {
 	return &ComplianceAutoRepository{
 		runs:           make(map[uuid.UUID]repository.ComplianceAutoRunRow),
@@ -51,6 +54,7 @@ func NewComplianceAutoRepository() *ComplianceAutoRepository {
 		frameworkState: make(map[uuid.UUID]repository.ComplianceAutoFrameworkStateRow),
 		statusByKey:    make(map[controlStatusKey]uuid.UUID),
 		frameworkByKey: make(map[frameworkStateKey]uuid.UUID),
+		rlsStatus:      repository.ComplianceAutoRLSStatus{Role: "sng_app", Enforced: true},
 	}
 }
 
@@ -313,4 +317,24 @@ func (r *ComplianceAutoRepository) ListFrameworkState(_ context.Context, tenantI
 		return out[i].Framework < out[j].Framework
 	})
 	return out, nil
+}
+
+// --- runtime RLS probe ----------------------------------------------------
+
+// SetRLSStatus overrides the RLS probe result the repository reports.
+// Tests use it to drive the tenant-isolation collector both ways without
+// a real database role.
+func (r *ComplianceAutoRepository) SetRLSStatus(status repository.ComplianceAutoRLSStatus) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rlsStatus = status
+}
+
+// RLSRuntimeStatus returns the configured in-memory RLS probe result. The
+// in-memory backend has no real Postgres roles, so it reports a settable
+// fixture (RLS enforced by default) rather than querying anything.
+func (r *ComplianceAutoRepository) RLSRuntimeStatus(_ context.Context) (repository.ComplianceAutoRLSStatus, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.rlsStatus, nil
 }

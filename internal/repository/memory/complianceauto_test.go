@@ -311,6 +311,31 @@ func TestComplianceAutoRepository_Evidence(t *testing.T) {
 	}
 }
 
+func TestComplianceAutoRepository_RLSRuntimeStatus(t *testing.T) {
+	t.Parallel()
+	repo := memory.NewComplianceAutoRepository()
+	ctx := context.Background()
+
+	// The in-memory backend models a correctly-configured platform.
+	got, err := repo.RLSRuntimeStatus(ctx)
+	if err != nil {
+		t.Fatalf("default status: %v", err)
+	}
+	if !got.Enforced || got.Role == "" {
+		t.Fatalf("default status = %+v, want enforced with a role", got)
+	}
+
+	// The setter drives the collector both ways.
+	repo.SetRLSStatus(repository.ComplianceAutoRLSStatus{Role: "postgres", Superuser: true, BypassRLS: true, Enforced: false})
+	got, err = repo.RLSRuntimeStatus(ctx)
+	if err != nil {
+		t.Fatalf("after set: %v", err)
+	}
+	if got.Enforced || !got.Superuser || !got.BypassRLS || got.Role != "postgres" {
+		t.Fatalf("after set = %+v, want a non-enforcing superuser role", got)
+	}
+}
+
 func TestComplianceAutoRepository_FrameworkState(t *testing.T) {
 	t.Parallel()
 	repo := memory.NewComplianceAutoRepository()

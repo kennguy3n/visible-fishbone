@@ -2,6 +2,7 @@ package complianceauto
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -213,6 +214,51 @@ func TestEngine_CollectAllSweepsEveryTenant(t *testing.T) {
 		if len(p.Frameworks) == 0 {
 			t.Errorf("tenant %s has no posture after sweep", id)
 		}
+	}
+}
+
+// TestEngine_CollectAllSkipsTrailingPace proves the sweep does NOT wait
+// the per-tenant pace after the final tenant: with a single tenant and a
+// huge pace, CollectAll must still return promptly (it would block for an
+// hour if it paced after the last tenant).
+func TestEngine_CollectAllSkipsTrailingPace(t *testing.T) {
+	t.Parallel()
+	id := uuid.New()
+	eng, _ := newTestEngine(t, &fakeSource{ids: []uuid.UUID{id}, snapFn: healthySnapshot})
+	eng.perTenant = time.Hour
+	done := make(chan error, 1)
+	go func() { done <- eng.CollectAll(context.Background()) }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("collect all: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("CollectAll blocked on a trailing pace after the final tenant")
+	}
+}
+
+// TestEngine_CollectAllPacesBetweenTenants proves the between-tenant pace
+// is still present and context-aware: with two tenants and a huge pace,
+// the sweep blocks in the pause after the first tenant and unwinds with
+// the context error when cancelled.
+func TestEngine_CollectAllPacesBetweenTenants(t *testing.T) {
+	t.Parallel()
+	a, b := uuid.New(), uuid.New()
+	eng, _ := newTestEngine(t, &fakeSource{ids: []uuid.UUID{a, b}, snapFn: healthySnapshot})
+	eng.perTenant = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- eng.CollectAll(ctx) }()
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("want context.Canceled from the between-tenant pace, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("CollectAll did not observe ctx cancellation during the between-tenant pace")
 	}
 }
 

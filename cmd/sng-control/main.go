@@ -2317,7 +2317,14 @@ func buildRouter(
 		policyKeyRepo,
 		idpConfigRepo,
 		auditRepo,
+		// The repository doubles as the live RLS probe: the adapter
+		// confirms tenant isolation by reading the effective query role's
+		// attributes from pg_roles (must be neither superuser nor
+		// BYPASSRLS) rather than trusting the app-role-presence fallback.
+		complianceAutoRepo,
 		complianceauto.ManagedDefaults{
+			// Fallback only — used until the live RLS probe above
+			// succeeds (or if the probe is ever unwired).
 			RLSEnforced:      cfg.Postgres.AppRole != "",
 			EncryptionAtRest: cfg.Policy.KeyWrapMasterB64 != "" || cfg.Policy.KeyWrapMasterFile != "",
 			// Derive the encryption-in-transit verdict from the real

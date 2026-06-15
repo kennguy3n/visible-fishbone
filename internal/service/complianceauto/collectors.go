@@ -30,6 +30,15 @@ type Snapshot struct {
 	// Managed platform defaults derived from control-plane config.
 	RLSEnforced      bool
 	EncryptionAtRest bool
+	// RLS runtime verification. RLSRuntimeVerified is true when a live
+	// pg_roles probe succeeded, in which case RLSEnforced reflects that
+	// probe (the effective query role is neither superuser nor BYPASSRLS)
+	// rather than the config-presence fallback. RLSRole is that effective
+	// role and RLSRoleBypasses is true when it would bypass RLS — recorded
+	// as evidence so the posture shows the real basis for the verdict.
+	RLSRuntimeVerified bool
+	RLSRole            string
+	RLSRoleBypasses    bool
 	// TLSEnforced is the computed verdict for transport encryption;
 	// TLSMode is the raw libpq sslmode it was derived from, recorded as
 	// evidence so the posture shows WHY the control passed or failed.
@@ -136,6 +145,15 @@ func collectTenantIsolation(s Snapshot) Observation {
 		obs.Summary = "row-level security is not enforced"
 	}
 	obs.Details["rls_enforced"] = s.RLSEnforced
+	obs.Details["rls_runtime_verified"] = s.RLSRuntimeVerified
+	// When the verdict comes from a live probe rather than config, record
+	// the role facts and attribute the evidence to the database itself so
+	// the posture shows it is enforcement-based, not configuration-based.
+	if s.RLSRuntimeVerified {
+		obs.Source = "database_role"
+		obs.Details["db_role"] = s.RLSRole
+		obs.Details["role_bypasses_rls"] = s.RLSRoleBypasses
+	}
 	return obs
 }
 

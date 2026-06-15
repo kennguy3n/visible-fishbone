@@ -153,6 +153,35 @@ func (r *ComplianceAutoRepository) ApplyEvaluation(ctx context.Context, tenantID
 	return out, err
 }
 
+// --- runtime RLS probe ----------------------------------------------------
+
+// RLSRuntimeStatus probes pg_roles for the role the control plane
+// actually queries as (current_user, after the SET LOCAL ROLE adoption
+// every transaction performs) and derives whether RLS is genuinely
+// enforced. A superuser or BYPASSRLS role silently disables every policy,
+// so a configured app-role NAME is not sufficient evidence — this
+// confirms the live role attributes. The query runs under the system
+// path because it concerns a platform-wide invariant with no tenant
+// scope; it reads one row from a catalog view, so it is negligibly cheap.
+func (r *ComplianceAutoRepository) RLSRuntimeStatus(ctx context.Context) (repository.ComplianceAutoRLSStatus, error) {
+	var out repository.ComplianceAutoRLSStatus
+	err := r.s.withSystem(ctx, func(tx pgx.Tx) error {
+		const q = `
+SELECT rolname, rolsuper, rolbypassrls
+FROM pg_roles
+WHERE rolname = current_user`
+		if err := tx.QueryRow(ctx, q).Scan(&out.Role, &out.Superuser, &out.BypassRLS); err != nil {
+			return fmt.Errorf("probe rls role attributes: %w", err)
+		}
+		out.Enforced = !out.Superuser && !out.BypassRLS
+		return nil
+	})
+	if err != nil {
+		return repository.ComplianceAutoRLSStatus{}, err
+	}
+	return out, nil
+}
+
 // --- runs -----------------------------------------------------------------
 
 func scanRun(row pgx.Row) (repository.ComplianceAutoRunRow, error) {

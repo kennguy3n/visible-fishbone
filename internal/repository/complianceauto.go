@@ -112,6 +112,25 @@ type ComplianceAutoEvaluation struct {
 	Frameworks []ComplianceAutoFrameworkStateRow
 }
 
+// ComplianceAutoRLSStatus is the result of probing whether row-level
+// security is genuinely enforced for the database role the control plane
+// queries as — not merely whether an application-role NAME is configured.
+// RLS is only effective when the effective role is neither a superuser
+// nor carries the BYPASSRLS attribute; either one silently disables every
+// RLS policy regardless of how the tables are defined.
+type ComplianceAutoRLSStatus struct {
+	// Role is the effective database role (current_user) the probe ran
+	// as — the same role tenant-scoped queries adopt via SET LOCAL ROLE.
+	Role string
+	// Superuser reports rolsuper: a superuser bypasses all RLS.
+	Superuser bool
+	// BypassRLS reports rolbypassrls: this role bypasses all RLS.
+	BypassRLS bool
+	// Enforced is the derived verdict: RLS is enforced iff the role is
+	// neither a superuser nor a BYPASSRLS role.
+	Enforced bool
+}
+
 // ComplianceAutoRepository is the persistence surface for the continuous
 // compliance evidence service. Every method is tenant-scoped: drivers
 // set the RLS GUC for the duration of each call, and the leader-only
@@ -156,4 +175,14 @@ type ComplianceAutoRepository interface {
 	// ListFrameworkState returns every per-framework rollup for a
 	// tenant, ordered by framework.
 	ListFrameworkState(ctx context.Context, tenantID uuid.UUID) ([]ComplianceAutoFrameworkStateRow, error)
+
+	// RLSRuntimeStatus probes the live database to confirm row-level
+	// security is genuinely enforced for the role the control plane
+	// queries as: that role must be neither a superuser nor a BYPASSRLS
+	// role, since either silently disables every policy. It is
+	// platform-wide rather than tenant-scoped — it reads pg_roles for
+	// current_user under the system path — so the tenant-isolation
+	// control can attest real enforcement instead of trusting that an
+	// app-role name happens to be configured.
+	RLSRuntimeStatus(ctx context.Context) (ComplianceAutoRLSStatus, error)
 }

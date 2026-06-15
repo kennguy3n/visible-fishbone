@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -52,13 +53,26 @@ type auditReader interface {
 	List(ctx context.Context, tenantID uuid.UUID, filter repository.AuditFilter, page repository.Page) (repository.PageResult[repository.AuditEntry], error)
 }
 
+// rlsProbe verifies, against the live database, that row-level security
+// is genuinely enforced for the role the control plane queries as. It is
+// a narrow projection of ComplianceAutoRepository so the real repo
+// satisfies it directly while tests can supply a fixture.
+type rlsProbe interface {
+	RLSRuntimeStatus(ctx context.Context) (repository.ComplianceAutoRLSStatus, error)
+}
+
 // ManagedDefaults are the platform-wide security facts the SaaS operator
 // guarantees for every tenant, derived once from control-plane config.
 // They satisfy the zero-tenant-configuration requirement: an SME gets a
 // correct posture for these controls without touching any setting.
 type ManagedDefaults struct {
-	// RLSEnforced is true when the control plane runs under the
-	// RLS-bound application role (config Database.AppRole set).
+	// RLSEnforced is the FALLBACK tenant-isolation signal, true when an
+	// RLS-bound application role NAME is configured (config
+	// Database.AppRole set). The adapter prefers a live pg_roles probe
+	// over this (see rlsProbe / PlatformAdapter.resolveRLS): the probe
+	// confirms the effective role is neither a superuser nor a BYPASSRLS
+	// role, which a config-presence check cannot. This value is used only
+	// until the one-time probe succeeds (or when no probe is wired).
 	RLSEnforced bool
 	// EncryptionAtRest is true when a key-wrap master is configured
 	// (config Policy.KeyWrapMasterB64 / KeyWrapMasterFile set).
@@ -99,18 +113,30 @@ type PlatformAdapter struct {
 	signing  signingKeyReader
 	idp      idpReader
 	audit    auditReader
+	rls      rlsProbe
 	defaults ManagedDefaults
 	clock    func() time.Time
+
+	// The live RLS verdict is an infrastructure invariant (a role's
+	// attributes change only via an operator ALTER ROLE + restart, like
+	// every other managed default), so it is probed once and cached for
+	// the process lifetime rather than re-read per tenant per sweep.
+	rlsMu       sync.Mutex
+	rlsResolved bool
+	rlsStatus   repository.ComplianceAutoRLSStatus
 }
 
 // NewPlatformAdapter wires the adapter. clock may be nil (defaults to
-// time.Now). The reader arguments are the real repositories.
+// time.Now). The reader arguments are the real repositories. rls may be
+// nil, in which case the tenant-isolation control falls back to the
+// config-presence signal in defaults.RLSEnforced.
 func NewPlatformAdapter(
 	tenants tenantReader,
 	policy policyReader,
 	signing signingKeyReader,
 	idp idpReader,
 	audit auditReader,
+	rls rlsProbe,
 	defaults ManagedDefaults,
 	clock func() time.Time,
 ) *PlatformAdapter {
@@ -123,12 +149,42 @@ func NewPlatformAdapter(
 		signing:  signing,
 		idp:      idp,
 		audit:    audit,
+		rls:      rls,
 		defaults: defaults,
 		clock:    clock,
 	}
 }
 
 var _ PlatformSource = (*PlatformAdapter)(nil)
+
+// resolveRLS returns the live RLS-enforcement status of the control
+// plane's query role, probing the database at most once and caching the
+// result. Until the probe succeeds (or when no probe is wired) it returns
+// ok=false so the caller falls back to the config-presence signal; a
+// probe error coincides with a wider DB outage that also fails the
+// snapshot's tenant reads, so retrying on the next sweep is cheap and
+// correct. The cache check and store are mutex-guarded but the probe runs
+// outside the lock, so a rare concurrent first call may probe twice
+// (idempotent) rather than block.
+func (a *PlatformAdapter) resolveRLS(ctx context.Context) (repository.ComplianceAutoRLSStatus, bool) {
+	if a.rls == nil {
+		return repository.ComplianceAutoRLSStatus{}, false
+	}
+	a.rlsMu.Lock()
+	resolved, status := a.rlsResolved, a.rlsStatus
+	a.rlsMu.Unlock()
+	if resolved {
+		return status, true
+	}
+	status, err := a.rls.RLSRuntimeStatus(ctx)
+	if err != nil {
+		return repository.ComplianceAutoRLSStatus{}, false
+	}
+	a.rlsMu.Lock()
+	a.rlsResolved, a.rlsStatus = true, status
+	a.rlsMu.Unlock()
+	return status, true
+}
 
 // Tenants enumerates tenant ids via the cheap activity projection.
 // ListTenantActivity returns every live tenant (it is a LEFT JOIN over
@@ -174,6 +230,16 @@ func (a *PlatformAdapter) Snapshot(ctx context.Context, tenantID uuid.UUID) (Sna
 		EncryptionAtRest: a.defaults.EncryptionAtRest,
 		TLSMode:          a.defaults.PostgresSSLMode,
 		TLSEnforced:      TLSEnforcedFromSSLMode(a.defaults.PostgresSSLMode),
+	}
+	// Prefer the live RLS probe over the config-presence default so the
+	// tenant-isolation control attests real enforcement — the effective
+	// query role is neither a superuser nor a BYPASSRLS role — rather than
+	// trusting that an app-role name happens to be set.
+	if status, ok := a.resolveRLS(ctx); ok {
+		snap.RLSEnforced = status.Enforced
+		snap.RLSRuntimeVerified = true
+		snap.RLSRole = status.Role
+		snap.RLSRoleBypasses = status.Superuser || status.BypassRLS
 	}
 
 	tenant, err := a.tenants.Get(ctx, tenantID)
