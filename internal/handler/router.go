@@ -55,6 +55,7 @@ type RouterDeps struct {
 	Metering     *MeteringHandler
 	PoP          *PoPHandler
 	ThreatFeed   *ThreatFeedHandler
+	AppID        *AppIDHandler
 	Sandbox      *SandboxHandler
 	RBI          *RBIHandler
 	OpenAPISpec  *OpenAPIHandler
@@ -97,6 +98,10 @@ type RouterDeps struct {
 	// middleware degrades to a transparent pass-through), so tests
 	// that don't care about metrics can leave it unset.
 	Metrics *metrics.Metrics
+	// DLPIDM, when set, exposes the WP4 DLP OCR/IDM control-plane
+	// surface: protected-document fingerprint sets (Indexed Document
+	// Matching) and the OCR/IDM configuration + status.
+	DLPIDM *DLPIDMHandler
 }
 
 // NewRouter composes the full API mux + middleware chain.
@@ -240,11 +245,17 @@ func NewRouter(deps RouterDeps) http.Handler {
 	if deps.ThreatFeed != nil {
 		deps.ThreatFeed.Register(apiMux)
 	}
+	if deps.AppID != nil {
+		deps.AppID.Register(apiMux)
+	}
 	if deps.Sandbox != nil {
 		deps.Sandbox.Register(apiMux)
 	}
 	if deps.RBI != nil {
 		deps.RBI.Register(apiMux)
+	}
+	if deps.DLPIDM != nil {
+		deps.DLPIDM.Register(apiMux)
 	}
 
 	authOpts := []middleware.AuthOption{}

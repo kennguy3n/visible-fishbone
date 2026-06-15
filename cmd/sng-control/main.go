@@ -47,6 +47,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/alert"
 	"github.com/kennguy3n/visible-fishbone/internal/service/apikey"
 	"github.com/kennguy3n/visible-fishbone/internal/service/appdb"
+	appidsvc "github.com/kennguy3n/visible-fishbone/internal/service/appid"
 	"github.com/kennguy3n/visible-fishbone/internal/service/audit"
 	"github.com/kennguy3n/visible-fishbone/internal/service/browser"
 	"github.com/kennguy3n/visible-fishbone/internal/service/capacity"
@@ -55,6 +56,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/compliance"
 	"github.com/kennguy3n/visible-fishbone/internal/service/complianceauto"
 	"github.com/kennguy3n/visible-fishbone/internal/service/dlp"
+	"github.com/kennguy3n/visible-fishbone/internal/service/dlpidm"
 	"github.com/kennguy3n/visible-fishbone/internal/service/dlpreview"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
 	"github.com/kennguy3n/visible-fishbone/internal/service/integration"
@@ -85,6 +87,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/troubleshoot"
 	"github.com/kennguy3n/visible-fishbone/internal/service/troubleshoot/checks"
 	"github.com/kennguy3n/visible-fishbone/internal/service/webhook"
+	"github.com/kennguy3n/visible-fishbone/internal/service/workshard"
 )
 
 func main() {
@@ -649,21 +652,55 @@ func run() error {
 			slog.Duration("dwell_window", cfg.RolloutAutopilot.DwellWindow))
 	}
 
-	// Leader-only alert false-positive feedback tuning loop. DEFAULT-OFF
+	// Active/active tenant-shard work distributor (WP2). Every replica
+	// registers in the Postgres-backed worker registry, heartbeats its
+	// liveness, and leases the shards it owns by rendezvous hashing, so
+	// the per-tenant background jobs below can run active/active (each
+	// tenant owned by exactly one live worker) instead of serially on a
+	// single elected leader. Start runs one assignment cycle
+	// synchronously, so ownership is established before any gated job
+	// first consults it; its failure is non-fatal (the loop retries and
+	// ownership stays empty/fail-closed until a cycle succeeds). The
+	// deferred Stop cancels the loop, releasing this worker's leases for
+	// an immediate handoff, and blocks until that completes. It is
+	// registered after the earlier `defer pool.Close()`, so LIFO
+	// ordering runs the release against a live pool; using the
+	// distributor's own context (not rootCtx) keeps Stop safe on early
+	// error-return paths, where rootCtx is never cancelled.
+	if err := rc.WorkShard.Start(rootCtx); err != nil {
+		logger.Warn("sng-control: workshard initial cycle failed; retrying in background",
+			slog.Any("error", err))
+	}
+	defer rc.WorkShard.Stop()
+	logger.Info("sng-control: tenant-shard work distributor enabled (active/active)",
+		slog.String("worker_id", rc.WorkShard.WorkerID().String()),
+		slog.Int("shard_count", rc.WorkShard.ShardCount()))
+
+	// Alert false-positive feedback tuning loop. DEFAULT-OFF
 	// (cfg.AlertFeedback.TuningEnabled): the sweep mutates baseline
 	// Z-thresholds, so it is registered only when an operator opts in.
-	// Leader-gated so only the lock holder tunes, and activity-tiered
-	// (the configured TieredSweep) so dormant trials are re-tuned at a
-	// reduced cadence while active tenants stay on the per-tick cadence.
-	// Own goroutine because RunIfLeader blocks until rootCtx is cancelled.
+	// Re-gated from leader-only onto workshard ownership so it runs
+	// active/active — each tenant tuned by exactly one live worker per
+	// cycle, spreading the work across replicas instead of serializing it
+	// on the lock holder. The activity-tiered TieredSweep path (the prod
+	// configuration) is ownership-filtered at its activity source (wired
+	// in buildRouter); the fallback enumeration below is filtered here too
+	// so both paths agree. A single-replica deployment owns every shard,
+	// so this tunes exactly the tenants the old leader path did.
 	if cfg.AlertFeedback.TuningEnabled && rc.AlertFeedback != nil {
 		feedbackSvc := rc.AlertFeedback
-		tenantsFn := rc.AlertFeedbackTenants
+		allTenantsFn := rc.AlertFeedbackTenants
+		workShard := rc.WorkShard
+		ownedTenantsFn := func(ctx context.Context) ([]uuid.UUID, error) {
+			all, err := allTenantsFn(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return workShard.FilterOwned(all), nil
+		}
 		interval := cfg.AlertFeedback.TuningInterval
-		go elector.RunIfLeader(rootCtx, "alert-feedback-tuning", func(ctx context.Context) {
-			feedbackSvc.Run(ctx, interval, tenantsFn)
-		})
-		logger.Info("sng-control: alert feedback tuning loop enabled (runs on leader only)",
+		go feedbackSvc.Run(rootCtx, interval, ownedTenantsFn)
+		logger.Info("sng-control: alert feedback tuning loop enabled (active/active via workshard ownership)",
 			slog.Duration("interval", interval))
 	}
 
@@ -1139,6 +1176,14 @@ type routerComponents struct {
 	// the sweep is ever unset, so it stays correct (never starves) by
 	// listing every tenant.
 	AlertFeedbackTenants func(context.Context) ([]uuid.UUID, error)
+	// WorkShard is the active/active tenant-shard work distributor (WP2).
+	// Always non-nil. main() Starts it (every replica registers + leases
+	// the shards it owns) and Stops it on shutdown for a clean handoff;
+	// the per-tenant background jobs that used to be leader-gated consult
+	// its ownership instead, so they spread across replicas with exactly
+	// one worker per tenant. A single-replica deployment owns every shard
+	// and behaves identically to the old leader path.
+	WorkShard *workshard.Distributor
 }
 
 // hibernationActivityLister adapts the tenant repository's
@@ -1180,6 +1225,35 @@ func (l retroTenantLister) ListRetroHuntTenants(ctx context.Context) ([]uuid.UUI
 	out := make([]uuid.UUID, 0, len(acts))
 	for _, a := range acts {
 		out = append(out, a.ID)
+	}
+	return out, nil
+}
+
+// workshardActivityFilter gates a TenantActivitySource on shard
+// ownership so a per-tenant background sweep runs active/active: it
+// returns only the (id, last_active_at) rows for tenants this worker
+// currently owns. Wrapping the activity source — rather than only the
+// fallback tenant lister — is what makes the dormancy-swept path
+// (alert.Feedback's prod configuration) ownership-aware, since that path
+// consults the activity source directly. The distributor fails closed
+// (owns nothing until its first assignment cycle completes), so a
+// tenant is never tuned by two workers at once; a single-replica
+// deployment owns every shard, leaving the projection unfiltered.
+type workshardActivityFilter struct {
+	inner alert.TenantActivitySource
+	owner *workshard.Distributor
+}
+
+func (f workshardActivityFilter) ListTenantActivity(ctx context.Context) ([]repository.TenantActivity, error) {
+	acts, err := f.inner.ListTenantActivity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := acts[:0]
+	for _, a := range acts {
+		if f.owner.Owns(a.ID) {
+			out = append(out, a)
+		}
 	}
 	return out, nil
 }
@@ -1300,6 +1374,18 @@ func buildRouter(
 	store := postgres.NewStoreWithPool(pool)
 
 	tenantRepo := store.NewTenantRepository()
+
+	// Active/active tenant-shard work distributor (WP2). Constructed
+	// here so the leader-gated per-tenant jobs below can be re-gated on
+	// shard ownership instead of single-leader election; main() owns its
+	// Start/Stop lifecycle. Defaults (1024 shards, 20s lease, 5s cycle)
+	// keep per-replica cost to a bounded handful of queries per cycle
+	// regardless of tenant count, and a single replica owns every shard
+	// so small deployments behave exactly as before at near-zero cost.
+	workShard := workshard.New(
+		store.NewWorkShardRepository(),
+		workshard.WithLogger(logger.With(slog.String("component", "workshard"))),
+	)
 
 	// Per-tenant activity recorder. This is the writer that makes the
 	// dormancy story real: it advances tenants.last_active_at from the
@@ -1450,6 +1536,11 @@ func buildRouter(
 		dlp.WithBlockedApps(dlpReviewRepo))
 	browserPolicyRepo := store.NewBrowserPolicyRepository()
 	dataClassificationRepo := store.NewDataClassificationRepository()
+	// WP4: DLP OCR/IDM control-plane state (protected-document
+	// fingerprint sets + OCR/IDM config). Stores only fingerprints and
+	// configuration, never raw protected-document contents.
+	dlpIDMRepo := store.NewDLPIDMRepository()
+	dlpIDMSvc := dlpidm.New(dlpIDMRepo, logger)
 
 	tenantSvc := tenant.New(tenantRepo, auditRepo, logger)
 	siteSvc := site.New(siteRepo, auditRepo, logger)
@@ -1948,7 +2039,15 @@ func buildRouter(
 	// sweep_tenants_visited{job="alert_feedback_tuning"}. tenantRepo
 	// supplies the cheap (id, last_active_at) projection.
 	alertFeedbackSweep := tenancy.NewTieredSweep("alert_feedback_tuning", tenancy.DefaultPlanner(), sweepObs)
-	alertFeedback.WithDormancySweep(alertFeedbackSweep, tenantRepo)
+	// Gate the activity-tiered sweep on shard ownership so the tuning
+	// loop runs active/active (each tenant tuned by exactly one live
+	// worker) instead of leader-only. The filter wraps tenantRepo's cheap
+	// (id, last_active_at) projection and drops tenants this worker does
+	// not currently own, so the TieredSweep still buckets by activity but
+	// only over this replica's share. A single replica owns every shard,
+	// so the projection is unfiltered and behaviour is unchanged.
+	alertFeedback.WithDormancySweep(alertFeedbackSweep,
+		workshardActivityFilter{inner: tenantRepo, owner: workShard})
 	// NOTE: baseline.NewService(baselineRepo) is intentionally
 	// NOT constructed here. The Service / Detector pair is
 	// wired by the telemetry consumer (future block) once the
@@ -2383,6 +2482,37 @@ func buildRouter(
 	// never reaches the interface parameter.
 	threatFeedHandler := handler.NewThreatFeedHandler(feedMgr, rbacSvc)
 
+	// --- WP1: Application-ID signature catalog ------------------------
+	// Operator/SaaS-managed, versioned-in-Postgres, Ed25519-signed
+	// application-signature catalog distributed to tenants as a signed
+	// bundle (mirrors the threat-intel bundle distribution). The catalog
+	// is fleet-wide — there is no per-tenant configuration (no-ops) — so
+	// tenants PULL the current signed bundle from the tenant-scoped read
+	// endpoint and no NATS publisher is wired here (pull-only default).
+	appIDSigner, err := appIDCatalogSigner(os.Getenv("APPID_CATALOG_SIGNING_KEY_HEX"), logger)
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("control: appid catalog signer: %w", err)
+	}
+	appIDSvc, err := appidsvc.New(store.NewAppIDCatalogRepository(), appIDSigner, appidsvc.WithLogger(logger))
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("control: appid catalog service: %w", err)
+	}
+	// Publish the embedded seed catalog as signed version 1 on first
+	// boot. This runs in the background with its own timeout so a slow
+	// or briefly-unavailable database never blocks control-plane
+	// startup; the monotonic-serial unique constraint makes concurrent
+	// seeds across replicas safe (losers observe ErrConflict, which
+	// SeedIfEmpty swallows).
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := appIDSvc.SeedIfEmpty(ctx); err != nil {
+			logger.Error("appid: seeding catalog on boot failed",
+				slog.String("error", err.Error()))
+		}
+	}()
+	appIDHandler := handler.NewAppIDHandler(appIDSvc, rbacSvc)
+
 	// --- WORKSTREAM 11: cross-region tenant migration -----------------
 	// The RegionMigrator drives the resumable migration state machine
 	// (migration 059). Two planes are wired from real services here:
@@ -2614,10 +2744,12 @@ func buildRouter(
 		Metering:          meteringHandler,
 		PoP:               popHandler,
 		ThreatFeed:        threatFeedHandler,
+		AppID:             appIDHandler,
 		Sandbox:           handler.NewSandboxHandler(sandboxSvc),
 		RBI:               handler.NewRBIHandler(rbiSvc),
 		DLP:               handler.NewDLPHandler(dlpSvc),
 		DLPReview:         handler.NewDLPReviewHandler(dlpReviewSvc),
+		DLPIDM:            handler.NewDLPIDMHandler(dlpIDMSvc),
 		Rollout:           handler.NewRolloutHandler(rolloutSvc, handler.WithRolloutAuthorizer(rbacSvc)),
 		Browser:           handler.NewBrowserHandler(browserSvc),
 		Terraform:         handler.NewTerraformHandler(terraformProvider),
@@ -2701,6 +2833,7 @@ func buildRouter(
 		TierActivityLister:     tenantRepo,
 		AlertFeedback:          alertFeedback,
 		AlertFeedbackTenants:   idpTenantSource{activity: tenantRepo}.ListTenants,
+		WorkShard:              workShard,
 	}, nil
 }
 
@@ -3919,6 +4052,31 @@ func threatIntelSigner(signingKeyHex string, logger *slog.Logger) (*threatintel.
 		return nil, fmt.Errorf("threatintel signing key: %w", err)
 	}
 	logger.Info("threatintel: signing key loaded from configuration")
+	return signer, nil
+}
+
+// appIDCatalogSigner builds the Ed25519 signer for the Application-ID
+// catalog bundle from configured key material, or falls back to an
+// ephemeral key with a loud warning when unset. Mirrors
+// threatIntelSigner: edges pin the catalog public key, so an ephemeral
+// key only verifies within this process lifetime — acceptable for
+// dev/test boot, never for a real fleet.
+func appIDCatalogSigner(signingKeyHex string, logger *slog.Logger) (*appidsvc.Signer, error) {
+	raw := strings.TrimSpace(signingKeyHex)
+	if raw == "" {
+		logger.Warn("appid: no signing key configured; generating an EPHEMERAL key — published catalog bundles will not verify against a pinned edge key across restarts",
+			slog.String("env", "APPID_CATALOG_SIGNING_KEY_HEX"))
+		return appidsvc.GenerateSigner()
+	}
+	key, err := hex.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode APPID_CATALOG_SIGNING_KEY_HEX: %w", err)
+	}
+	signer, err := appidsvc.NewSigner(key)
+	if err != nil {
+		return nil, fmt.Errorf("appid signing key: %w", err)
+	}
+	logger.Info("appid: signing key loaded from configuration")
 	return signer, nil
 }
 
