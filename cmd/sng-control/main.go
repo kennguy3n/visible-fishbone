@@ -565,6 +565,17 @@ func run() error {
 	{
 		engine := rc.ManagedThreatContentEngine
 		interval := rc.ManagedThreatContentInterval
+		// Export sng_threatcontent_degraded so operators are alerted when
+		// the engine silently serves the last good bundle (every upstream
+		// down) instead of fresh content. Self-registered against the
+		// shared registry (no widening of the central metrics.Metrics
+		// struct); a no-op when metrics are disabled.
+		if mx != nil {
+			if err := threatfeed.RegisterDegradedMetric(mx.Registry(), mx.Namespace(), engine); err != nil {
+				logger.Warn("sng-control: could not register managed threat-content degraded metric",
+					slog.String("error", err.Error()))
+			}
+		}
 		go elector.RunIfLeader(rootCtx, "threatcontent-refresh", func(ctx context.Context) {
 			if err := engine.SeedRegistry(ctx); err != nil {
 				logger.Warn("sng-control: managed threat-content source registry seed failed",

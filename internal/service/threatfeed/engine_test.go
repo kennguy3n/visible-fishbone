@@ -248,6 +248,9 @@ func TestEngine_DegradedFlaggedWhenRefreshProducesEmptySet(t *testing.T) {
 	if first.Indicators != 2 {
 		t.Fatalf("warm-up indicators = %d, want 2", first.Indicators)
 	}
+	if eng.Degraded() {
+		t.Fatalf("Degraded() must be false after a healthy mint")
+	}
 
 	// Operator disables the only feed, so the next cycle assembles an
 	// empty set. The fail-safe must refuse to overwrite the last good
@@ -275,6 +278,9 @@ func TestEngine_DegradedFlaggedWhenRefreshProducesEmptySet(t *testing.T) {
 	}
 	if res.Serial != first.Serial {
 		t.Fatalf("fail-safe must keep serial %d, got %d", first.Serial, res.Serial)
+	}
+	if !eng.Degraded() {
+		t.Fatalf("Degraded() must be true while the fail-safe serves the last good bundle")
 	}
 }
 

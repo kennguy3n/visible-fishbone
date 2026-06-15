@@ -90,6 +90,13 @@ type Engine struct {
 
 	// enabled is the kill switch, read without locking.
 	enabled atomic.Bool
+	// degraded reflects the most recent completed refresh: true when the
+	// engine kept serving the last good bundle because the cycle produced
+	// no indicators (every upstream down), false on a healthy cycle or
+	// while the kill switch is off. It is an atomic so the
+	// sng_threatcontent_degraded gauge can read it at scrape time without
+	// taking refreshMu.
+	degraded atomic.Bool
 	// lastSerial is the highest minted/seen serial (monotonic).
 	lastSerial atomic.Int64
 
@@ -189,6 +196,15 @@ func (e *Engine) Enabled() bool { return e.enabled.Load() }
 // SetEnabled toggles the kill switch at runtime.
 func (e *Engine) SetEnabled(v bool) { e.enabled.Store(v) }
 
+// Degraded reports whether the most recent refresh kept serving the
+// last good bundle because it could not produce a complete fresh result
+// (every upstream down). It feeds the sng_threatcontent_degraded gauge
+// so operators are alerted when the fleet is silently serving stale
+// content. It is false on a healthy cycle and while the kill switch is
+// off, and is only meaningful on the elected leader (the sole replica
+// that runs ingestion).
+func (e *Engine) Degraded() bool { return e.degraded.Load() }
+
 // SeedRegistry idempotently upserts the built-in feed set into the
 // source registry so the operator-visible posture reflects the curated
 // sources even before the first refresh and on every replica.
@@ -243,6 +259,7 @@ func (e *Engine) refreshLogged(ctx context.Context) {
 // calls are serialized.
 func (e *Engine) RefreshOnce(ctx context.Context) (RefreshResult, error) {
 	if !e.enabled.Load() {
+		e.degraded.Store(false)
 		return RefreshResult{Skipped: true}, nil
 	}
 
@@ -288,6 +305,7 @@ func (e *Engine) RefreshOnce(ctx context.Context) (RefreshResult, error) {
 	// Identical content -> keep the existing version, no re-publish.
 	if e.lastContentDigest != "" && e.lastContentDigest == contentDigest {
 		result.Unchanged = true
+		e.degraded.Store(false)
 		return result, nil
 	}
 
@@ -305,6 +323,7 @@ func (e *Engine) RefreshOnce(ctx context.Context) (RefreshResult, error) {
 		result.Unchanged = true
 		result.Degraded = true
 		result.Indicators = e.lastIndicators
+		e.degraded.Store(true)
 		return result, nil
 	}
 
@@ -350,6 +369,7 @@ func (e *Engine) RefreshOnce(ctx context.Context) (RefreshResult, error) {
 
 	e.lastContentDigest = contentDigest
 	e.lastIndicators = total
+	e.degraded.Store(false)
 	return result, nil
 }
 
