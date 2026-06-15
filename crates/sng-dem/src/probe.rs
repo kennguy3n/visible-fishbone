@@ -14,9 +14,12 @@
 //! * **Bounded fan-out.** [`EngineConfig::max_targets`] hard-caps the
 //!   targets evaluated per sweep, so a misconfigured tenant cannot
 //!   enqueue unbounded work.
-//! * **Hard per-probe deadlines.** Every phase is wrapped in
-//!   [`tokio::time::timeout`] using the target's `timeout_ms`; a
-//!   black-holed target costs at most one timeout, never a hang.
+//! * **One hard budget per probe.** The target's `timeout_ms` is a
+//!   single wall-clock budget shared across every phase (DNS, TCP,
+//!   TTFB, body): each phase is wrapped in [`tokio::time::timeout`]
+//!   with only the time *remaining* in that budget, so the whole
+//!   probe — black-holed or merely slow — costs at most one
+//!   `timeout_ms`, never a multiple and never a hang.
 //! * **Startup jitter.** Each probe waits a uniform random fraction
 //!   of its timeout before starting, smearing connection bursts so a
 //!   fleet does not synchronise into a thundering herd.
@@ -88,6 +91,14 @@ fn elapsed_ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
 }
 
+/// Time left until `deadline`, saturating at zero. Each probe phase
+/// draws its timeout from this shared budget so the phases can never
+/// sum past one `timeout_ms` (a phase that arrives with no budget left
+/// times out immediately).
+fn remaining(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
+}
+
 /// Run `fut` under a hard deadline, mapping an elapsed deadline onto a
 /// [`ProbeErrorKind::Timeout`] failure.
 async fn with_timeout<F, T>(deadline: Duration, fut: F) -> Result<T, ProbeFail>
@@ -133,10 +144,10 @@ async fn tcp_connect(peer: SocketAddr, deadline: Duration) -> Result<(), ProbeFa
 async fn http_phase(
     client: &reqwest::Client,
     url: &str,
-    deadline: Duration,
+    deadline: Instant,
 ) -> Result<HttpTiming, ProbeFail> {
     let start = Instant::now();
-    let resp = with_timeout(deadline, async {
+    let resp = with_timeout(remaining(deadline), async {
         client
             .get(url)
             .send()
@@ -147,8 +158,10 @@ async fn http_phase(
     let ttfb_ms = elapsed_ms(start);
     let status = resp.status().as_u16();
     // Drain the body so `total_ms` reflects the full response and the
-    // connection is released promptly (we keep no idle pool).
-    let _body = with_timeout(deadline, async {
+    // connection is released promptly (we keep no idle pool). It draws
+    // from the same shared budget, so a slow body cannot extend the
+    // probe past one `timeout_ms`.
+    let _body = with_timeout(remaining(deadline), async {
         resp.bytes().await.map_err(|e| classify_reqwest(&e))
     })
     .await?;
@@ -202,6 +215,11 @@ fn build_result(
 /// Probe a single target end-to-end. Never returns an error: a failed
 /// probe is a `success == false` result.
 ///
+/// All phases share a single wall-clock budget: an absolute deadline is
+/// fixed once (`now + timeout_ms`) and every phase is bounded by the
+/// time *remaining* until it, so a slow-but-alive target costs at most
+/// one `timeout_ms` end-to-end rather than one per phase.
+///
 /// Note on phase timings: for HTTP(S) targets the `dns_ms`/`tcp_ms`
 /// phases are measured on a manual connect, while `ttfb_ms`/`total_ms`
 /// come from a separate `reqwest` GET (connection pooling is disabled,
@@ -225,7 +243,9 @@ async fn probe_target<R: Resolver>(
             observed_at_ms,
         );
     }
-    let deadline = target.timeout();
+    // One absolute deadline for the whole probe; every phase below
+    // draws from the time remaining until it.
+    let deadline = Instant::now() + target.timeout();
     let mut phases = Phases::default();
 
     // Resolve the host:port for the chosen kind.
@@ -255,7 +275,7 @@ async fn probe_target<R: Resolver>(
 
     // DNS phase (every kind resolves).
     let dns_start = Instant::now();
-    let addresses = match with_timeout(deadline, async {
+    let addresses = match with_timeout(remaining(deadline), async {
         resolver
             .resolve(&host, resolve_port)
             .await
@@ -284,7 +304,7 @@ async fn probe_target<R: Resolver>(
         );
     };
     let tcp_start = Instant::now();
-    if let Err(f) = tcp_connect(peer, deadline).await {
+    if let Err(f) = tcp_connect(peer, remaining(deadline)).await {
         return build_result(target, &phases, Some(f), observed_at_ms);
     }
     phases.tcp_ms = Some(elapsed_ms(tcp_start));
@@ -293,7 +313,8 @@ async fn probe_target<R: Resolver>(
         return build_result(target, &phases, None, observed_at_ms);
     }
 
-    // HTTP(S) phase.
+    // HTTP(S) phase. `deadline` is the shared absolute budget;
+    // `http_phase` bounds its TTFB and body sub-phases by the time left.
     match http_phase(client, &target.address, deadline).await {
         Ok(h) => {
             phases.ttfb_ms = Some(h.ttfb_ms);
@@ -392,7 +413,12 @@ impl<R: Resolver> ProbeEngine<R> {
         let selected: Vec<Target> = targets.iter().take(limit).cloned().collect();
         for target in selected {
             // Acquire before spawning so we never hold more than
-            // `max_concurrency` pending tasks in memory at once.
+            // `max_concurrency` pending tasks in memory at once. The
+            // `Err` arm is unreachable in practice — `acquire_owned`
+            // only fails once the semaphore is closed, which we never
+            // do — but we treat it as a fail-closed stop rather than
+            // unwrapping, so a future change that adds a close cannot
+            // turn into a panic.
             let Ok(permit) = sem.clone().acquire_owned().await else {
                 break;
             };
@@ -627,6 +653,54 @@ mod tests {
         assert_eq!(r.error_kind, Some(ProbeErrorKind::Http));
         // Still reached the server, so the transport phases are timed.
         assert!(r.ttfb_ms.is_some());
+    }
+
+    #[tokio::test]
+    async fn probe_time_is_bounded_by_one_shared_budget() {
+        // Regression for the "N× timeout" bug: every phase used to get
+        // a fresh full timeout, so a slow-but-alive HTTP target could
+        // run for up to 4× `timeout_ms`. The phases now share one
+        // wall-clock budget.
+        //
+        // DNS eats ~300ms of a 500ms budget; the HTTP response is then
+        // held for 400ms. With a shared budget the HTTP phase has only
+        // ~200ms left and must time out. With the old per-phase budget
+        // it would get a fresh 500ms and succeed at 400ms.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_delay(Duration::from_millis(400)))
+            .mount(&server)
+            .await;
+        let url = url::Url::parse(&server.uri()).unwrap();
+        let host = url.host_str().unwrap().to_string();
+        let port = url.port().unwrap();
+        let resolver = MockResolver::slow(
+            SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
+            Duration::from_millis(300),
+        );
+        let engine = ProbeEngine::with_resolver(EngineConfig::default(), resolver).unwrap();
+        let target = Target {
+            key: "http".into(),
+            name: "slow-but-alive http".into(),
+            kind: ProbeKind::Http,
+            address: format!("http://{host}:{port}/"),
+            port: None,
+            timeout_ms: 500,
+        };
+        let started = std::time::Instant::now();
+        let r = engine.probe_one(&target).await;
+        let elapsed = started.elapsed();
+        // The shared budget is exhausted by DNS plus the held HTTP
+        // response, so the probe times out instead of waiting out a
+        // second full timeout for the HTTP phase.
+        assert!(!r.success, "expected a timeout, got {r:?}");
+        assert_eq!(r.error_kind, Some(ProbeErrorKind::Timeout));
+        // End-to-end stays within ~1× the budget (with slack for
+        // scheduling), never the 2×+ the per-phase budget allowed.
+        assert!(
+            elapsed < Duration::from_millis(1_500),
+            "probe ran {elapsed:?}, exceeding one shared budget"
+        );
     }
 
     #[tokio::test]

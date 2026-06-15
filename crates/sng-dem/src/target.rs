@@ -80,7 +80,9 @@ pub struct Target {
     pub address: String,
     /// TCP port. Required for [`ProbeKind::Tcp`]; ignored for HTTP.
     pub port: Option<u16>,
-    /// Hard per-phase deadline in milliseconds.
+    /// Hard wall-clock budget for the whole probe, in milliseconds.
+    /// All phases (DNS, TCP, TTFB, body) draw from this single budget,
+    /// so one slow target costs at most `timeout_ms` end-to-end.
     pub timeout_ms: u32,
 }
 
@@ -132,7 +134,8 @@ impl Target {
         }
     }
 
-    /// The hard per-probe deadline as a [`Duration`].
+    /// The hard per-probe wall-clock budget as a [`Duration`], shared
+    /// across all phases.
     #[must_use]
     pub fn timeout(&self) -> Duration {
         Duration::from_millis(u64::from(self.timeout_ms))
