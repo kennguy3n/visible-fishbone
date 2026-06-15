@@ -54,6 +54,18 @@ tags:
       code-defined; preview renders the composed graph without
       persisting, and apply idempotently stores it as the tenant's
       active baseline (one row per tenant).
+  - name: appid
+    description: |
+      Application-ID signature catalog. A fleet-wide, versioned,
+      Ed25519-signed catalog of L7 application signatures (TLS SNI /
+      HTTP host suffixes, JA3 hints, bounded byte-probes, port /
+      transport modifiers) that the data plane loads to identify
+      applications beyond the hard-coded protocol set. The catalog is
+      centrally managed (no per-tenant configuration — no-ops):
+      tenants PULL the current signed bundle from a tenant-scoped read
+      endpoint and verify it against the pinned public key, while
+      platform operators publish new versions and inspect history via
+      the platform-scoped admin routes.
   - name: pops
     description: |
       Cloud PoP (Point-of-Presence) service. A PoP is a shared,
@@ -3559,6 +3571,102 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/AppliedPolicyTemplate" }
         "404": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/appid/catalog/current:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [appid]
+      operationId: getTenantAppIDCatalogCurrent
+      summary: Current App-ID catalog version metadata
+      description: |
+        Returns metadata for the current (highest-serial) published
+        App-ID catalog version — serial, app count, schema version,
+        and the SHA-256 checksum of the signed payload — so an edge
+        can decide whether its cached bundle is stale without
+        downloading the full bundle. The catalog is fleet-wide; the
+        route is bound to the authenticated tenant only to keep the
+        pull path on the same isolation rails as other tenant APIs.
+      responses:
+        "200":
+          description: current catalog version metadata
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppIDCatalogVersion" }
+        "503":
+          description: |
+            catalog_unavailable — the catalog has not been published
+            yet (transient boot condition); a `Retry-After` header is
+            set and the edge should keep its last-good bundle and retry
+  /tenants/{tenant_id}/appid/catalog/bundle:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [appid]
+      operationId: getTenantAppIDCatalogBundle
+      summary: Current signed App-ID catalog bundle
+      description: |
+        Returns the current version metadata together with the
+        Ed25519-signed catalog bundle the edge verifies against the
+        pinned public key and loads into the data-plane matcher. The
+        signed payload is itself a self-contained catalog document, so
+        an edge can verify and load it without any further calls.
+      responses:
+        "200":
+          description: current version metadata + signed bundle envelope
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppIDCatalogBundle" }
+        "503":
+          description: |
+            catalog_unavailable — the catalog has not been published
+            yet (transient boot condition); a `Retry-After` header is
+            set and the edge should keep its last-good bundle and retry
+  /admin/appid/catalog/versions:
+    get:
+      tags: [admin, appid]
+      operationId: adminListAppIDCatalogVersions
+      summary: List App-ID catalog version history
+      description: |
+        Returns published catalog versions newest-first. Platform
+        admin only: the caller must present a platform-scoped
+        credential holding `appid:read` (or the platform wildcard); an
+        MSP- or tenant-scoped grant is rejected with 403.
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: page of catalog version metadata, newest-first
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppIDCatalogVersions" }
+        "401":
+          description: missing or unauthenticated credential
+        "403":
+          description: credential lacks the platform-scoped appid:read grant
+    post:
+      tags: [admin, appid]
+      operationId: adminPublishAppIDCatalog
+      summary: Publish (re-sign) the App-ID catalog as a new version
+      description: |
+        Signs and stores the current catalog content as a new
+        monotonic version (operator-triggered redistribution or key
+        rotation). The body is optional; an `{"note": "..."}` annotates
+        the version. Platform admin only: the caller must hold
+        `appid:publish` (or the platform wildcard); an MSP- or
+        tenant-scoped grant is rejected with 403.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppIDPublishRequest" }
+      responses:
+        "201":
+          description: the newly published catalog version metadata
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppIDCatalogVersion" }
+        "401":
+          description: missing or unauthenticated credential
+        "403":
+          description: credential lacks the platform-scoped appid:publish grant
 
   /tenants/{tenant_id}/threat-content/posture:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
@@ -3830,6 +3938,55 @@ components:
             skipped this cycle (distinguishes a disabled feed from one that
             ran but produced no indicators).
         error: { type: string }
+    AppIDCatalogVersion:
+      type: object
+      description: |
+        Metadata for one published App-ID catalog version. `serial` is
+        the monotonic version number (higher = newer); `checksum` is the
+        SHA-256 (hex) of the canonical signed payload.
+      properties:
+        serial: { type: integer, format: int64 }
+        schema_version: { type: integer }
+        app_count: { type: integer }
+        checksum: { type: string }
+        note: { type: string }
+        generated_at: { type: string, format: date-time }
+      required: [serial, schema_version, app_count, checksum]
+    AppIDSignedBundle:
+      type: object
+      description: |
+        An Ed25519-signed catalog envelope. `public_key`, `payload`,
+        and `signature` are base64-encoded; the payload is a canonical,
+        self-contained catalog document. A verifier checks `signature`
+        over `payload` with `public_key` (pinned at the edge) before
+        loading the catalog — fail-closed.
+      properties:
+        alg: { type: string, description: "signature algorithm (ed25519)" }
+        key_id: { type: string, description: "optional key identifier for rotation/pinning" }
+        public_key: { type: string, description: "base64-encoded Ed25519 public key (32 bytes)" }
+        payload: { type: string, description: "base64-encoded canonical catalog payload" }
+        signature: { type: string, description: "base64-encoded Ed25519 signature (64 bytes)" }
+      required: [alg, public_key, payload, signature]
+    AppIDCatalogBundle:
+      type: object
+      description: Current version metadata plus the signed bundle envelope.
+      properties:
+        version: { $ref: "#/components/schemas/AppIDCatalogVersion" }
+        bundle: { $ref: "#/components/schemas/AppIDSignedBundle" }
+      required: [version, bundle]
+    AppIDCatalogVersions:
+      type: object
+      description: A newest-first page of catalog version metadata.
+      properties:
+        versions:
+          type: array
+          items: { $ref: "#/components/schemas/AppIDCatalogVersion" }
+      required: [versions]
+    AppIDPublishRequest:
+      type: object
+      description: Optional annotation for a catalog publish request.
+      properties:
+        note: { type: string }
     PolicyTemplate:
       type: object
       description: |
