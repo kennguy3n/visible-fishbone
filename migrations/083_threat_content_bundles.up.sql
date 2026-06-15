@@ -53,8 +53,14 @@ CREATE TABLE IF NOT EXISTS threat_content_bundles (
     -- Marshalled envelope size in bytes (telemetry).
     size_bytes      BIGINT NOT NULL DEFAULT 0
                     CHECK (size_bytes >= 0),
-    -- Lowercase-hex SHA-256 of the envelope, to detect an unchanged
-    -- bundle (skip re-publish) and for integrity.
+    -- Lowercase-hex SHA-256 of the bundle's CONTENT IDENTITY (each
+    -- indicator's type/value/hash + sorted contributing sources),
+    -- deliberately excluding serial, generated_at, the recency-decayed
+    -- score, and observation timestamps. Lets the producer detect that a
+    -- refresh reproduced the same indicator set and skip minting /
+    -- re-publishing a new version. Envelope integrity comes from the
+    -- Ed25519 signature, not this digest. See ContentDigest in the
+    -- threatfeed service.
     digest          TEXT NOT NULL DEFAULT '',
     -- Per-type indicator cardinality (domain/ip/cidr/url/hash).
     counts_by_type  JSONB NOT NULL DEFAULT '{}'::jsonb,
