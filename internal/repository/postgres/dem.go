@@ -737,3 +737,92 @@ RETURNING ` + demStateCols
 	})
 	return out, err
 }
+
+// MutateTargetState performs the baseline read-modify-write inside a
+// single transaction, holding a row-level lock for the whole cycle so
+// concurrent ingests for the same (tenant, target_key) cannot lose
+// each other's EWMA update.
+//
+// It first INSERTs a zero-baseline row ON CONFLICT DO NOTHING so the
+// subsequent SELECT ... FOR UPDATE always has a row to lock (a bare
+// FOR UPDATE locks nothing when the row is absent, which would leave
+// the first concurrent observation unserialized). The locked row is
+// then handed to mutate and the returned state is written back via
+// the same transaction.
+func (r *DEMRepository) MutateTargetState(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	targetKey, targetName string,
+	mutate func(prev repository.DEMTargetState) (repository.DEMTargetState, error),
+) (repository.DEMTargetState, error) {
+	if tenantID == uuid.Nil || targetKey == "" || targetName == "" {
+		return repository.DEMTargetState{}, repository.ErrInvalidArgument
+	}
+	if mutate == nil {
+		return repository.DEMTargetState{}, repository.ErrInvalidArgument
+	}
+	var out repository.DEMTargetState
+	err := r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
+		// Ensure a baseline row exists so FOR UPDATE has a row to
+		// lock. A freshly created row carries a zero baseline
+		// (sample_count 0, NULL ewma) the caller reads as a first
+		// observation.
+		if _, err := tx.Exec(ctx, `
+INSERT INTO dem_target_state (id, tenant_id, target_key, target_name)
+VALUES ($1::uuid, $2::uuid, $3, $4)
+ON CONFLICT (tenant_id, target_key) DO NOTHING`,
+			uuid.New(), tenantID, targetKey, targetName,
+		); err != nil {
+			if isForeignKeyViolation(err) {
+				return repository.ErrNotFound
+			}
+			return fmt.Errorf("ensure dem_target_state: %w", err)
+		}
+
+		// Lock the row for the read-modify-write cycle.
+		row := tx.QueryRow(ctx,
+			`SELECT `+demStateCols+` FROM dem_target_state WHERE target_key = $1 FOR UPDATE`,
+			targetKey)
+		prev, err := scanDEMState(row)
+		if err != nil {
+			return fmt.Errorf("lock dem_target_state: %w", err)
+		}
+
+		next, err := mutate(prev)
+		if err != nil {
+			return err
+		}
+
+		// Persist the computed state on the locked row. target_key is
+		// the lock/identity key and is never rewritten here.
+		const q = `
+UPDATE dem_target_state SET
+    target_name      = $2,
+    ewma_score       = $3,
+    ewma_variance    = $4,
+    last_score       = $5,
+    sample_count     = $6,
+    degraded         = $7,
+    last_alert_at    = $8::timestamptz,
+    last_observed_at = $9::timestamptz,
+    updated_at       = NOW()
+WHERE target_key = $1
+RETURNING ` + demStateCols
+		upd := tx.QueryRow(ctx, q,
+			targetKey, targetName,
+			floatOrNil(next.EWMAScore), floatOrNil(next.EWMAVariance), floatOrNil(next.LastScore),
+			next.SampleCount, next.Degraded,
+			optionalTime(next.LastAlertAt), optionalTime(next.LastObservedAt),
+		)
+		scanned, err := scanDEMState(upd)
+		if err != nil {
+			if isCheckViolation(err) {
+				return repository.ErrInvalidArgument
+			}
+			return fmt.Errorf("update dem_target_state: %w", err)
+		}
+		out = scanned
+		return nil
+	})
+	return out, err
+}

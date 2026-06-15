@@ -431,60 +431,102 @@ func (s *Service) recomputeTarget(ctx context.Context, tenantID uuid.UUID, key, 
 // updateBaseline folds the new score into the per-target EWMA baseline
 // and raises a degradation alert (respecting the cooldown) when the
 // score is degraded relative to the pre-update baseline.
+//
+// The read-compute-write is done atomically through
+// MutateTargetState, which holds a row-level lock for the whole cycle.
+// This prevents concurrent ingests for the same (tenant, target_key)
+// from each reading the same baseline and clobbering one another's
+// EWMA contribution. The lock also serializes the cooldown gate so a
+// burst of degraded samples raises at most one alert per cooldown.
+//
+// mutate runs under the lock and must stay pure, so the actual alert
+// emission (a separate aggregate write) is deferred until after the
+// transaction commits. We optimistically stamp last_alert_at inside
+// the lock; on the rare emit failure the stamp is rolled back so the
+// next window retries rather than being suppressed for a full
+// cooldown.
 func (s *Service) updateBaseline(ctx context.Context, tenantID uuid.UUID, score repository.DEMExperienceScore, availability float64) error {
-	prev, found, err := s.repo.GetTargetState(ctx, tenantID, score.TargetKey)
-	if err != nil {
-		return fmt.Errorf("get target state: %w", err)
-	}
 	var (
-		n           int64
-		prevMean    float64
-		prevVar     float64
-		lastAlertAt *time.Time
+		emit         bool
+		decision     degradeDecision
+		baselineMean float64
+		baselineN    int64
 	)
-	if found {
-		n = prev.SampleCount
-		if prev.EWMAScore != nil {
-			prevMean = *prev.EWMAScore
-		}
-		if prev.EWMAVariance != nil {
-			prevVar = *prev.EWMAVariance
-		}
-		lastAlertAt = prev.LastAlertAt
-	}
 
-	decision := s.cfg.assessDegradation(n, prevMean, prevVar, score.Score)
-	newMean, newVar := s.cfg.ewmaUpdate(n, prevMean, prevVar, score.Score)
-	now := s.now()
-	lastScore := score.Score
-
-	next := repository.DEMTargetState{
-		TargetKey:      score.TargetKey,
-		TargetName:     score.TargetName,
-		EWMAScore:      &newMean,
-		EWMAVariance:   &newVar,
-		LastScore:      &lastScore,
-		SampleCount:    n + 1,
-		Degraded:       decision.degraded,
-		LastAlertAt:    lastAlertAt,
-		LastObservedAt: &now,
-	}
-
-	if decision.degraded {
-		cooldownOK := lastAlertAt == nil || now.Sub(*lastAlertAt) >= s.cfg.AlertCooldown
-		if cooldownOK {
-			if err := s.emitDegradation(ctx, tenantID, score, availability, decision, prevMean, n); err != nil {
-				return fmt.Errorf("emit degradation alert: %w", err)
+	saved, err := s.repo.MutateTargetState(ctx, tenantID, score.TargetKey, score.TargetName,
+		func(prev repository.DEMTargetState) (repository.DEMTargetState, error) {
+			n := prev.SampleCount
+			var prevMean, prevVar float64
+			if prev.EWMAScore != nil {
+				prevMean = *prev.EWMAScore
 			}
-			alertAt := now
-			next.LastAlertAt = &alertAt
-		}
+			if prev.EWMAVariance != nil {
+				prevVar = *prev.EWMAVariance
+			}
+
+			decision = s.cfg.assessDegradation(n, prevMean, prevVar, score.Score)
+			newMean, newVar := s.cfg.ewmaUpdate(n, prevMean, prevVar, score.Score)
+			now := s.now()
+			lastScore := score.Score
+
+			next := repository.DEMTargetState{
+				EWMAScore:      &newMean,
+				EWMAVariance:   &newVar,
+				LastScore:      &lastScore,
+				SampleCount:    n + 1,
+				Degraded:       decision.degraded,
+				LastAlertAt:    prev.LastAlertAt,
+				LastObservedAt: &now,
+			}
+
+			if decision.degraded {
+				cooldownOK := prev.LastAlertAt == nil || now.Sub(*prev.LastAlertAt) >= s.cfg.AlertCooldown
+				if cooldownOK {
+					alertAt := now
+					next.LastAlertAt = &alertAt
+					emit = true
+					baselineMean = prevMean
+					baselineN = n
+				}
+			}
+			return next, nil
+		})
+	if err != nil {
+		return fmt.Errorf("mutate target state: %w", err)
 	}
 
-	if _, err := s.repo.UpsertTargetState(ctx, tenantID, next); err != nil {
-		return fmt.Errorf("upsert target state: %w", err)
+	if !emit {
+		return nil
+	}
+	if err := s.emitDegradation(ctx, tenantID, score, availability, decision, baselineMean, baselineN); err != nil {
+		// The cooldown stamp committed above but no alert went out;
+		// clear it best-effort so the next window can retry instead of
+		// staying silent for the full cooldown.
+		s.clearAlertStamp(ctx, tenantID, saved)
+		return fmt.Errorf("emit degradation alert: %w", err)
 	}
 	return nil
+}
+
+// clearAlertStamp rolls back an optimistic last_alert_at stamp after a
+// failed alert emission so the degradation can re-alert on the next
+// window rather than being suppressed for the whole cooldown. It is
+// best-effort: a failure here only delays the retry, so it is logged
+// and swallowed.
+func (s *Service) clearAlertStamp(ctx context.Context, tenantID uuid.UUID, st repository.DEMTargetState) {
+	_, err := s.repo.MutateTargetState(ctx, tenantID, st.TargetKey, st.TargetName,
+		func(cur repository.DEMTargetState) (repository.DEMTargetState, error) {
+			// Only clear the stamp we set; if another ingest already
+			// advanced it, leave it alone.
+			if cur.LastAlertAt != nil && st.LastAlertAt != nil && cur.LastAlertAt.Equal(*st.LastAlertAt) {
+				cur.LastAlertAt = nil
+			}
+			return cur, nil
+		})
+	if err != nil {
+		s.logger.WarnContext(ctx, "dem: failed to roll back alert cooldown stamp",
+			slog.String("target_key", st.TargetKey), slog.Any("error", err))
+	}
 }
 
 // emitDegradation raises a degradation alert via the alert router. The

@@ -195,4 +195,25 @@ type DEMRepository interface {
 	// UpsertTargetState inserts or updates the baseline row,
 	// keyed by (tenant, target_key).
 	UpsertTargetState(ctx context.Context, tenantID uuid.UUID, st DEMTargetState) (DEMTargetState, error)
+	// MutateTargetState applies an atomic read-modify-write to the
+	// baseline row for (tenant, target_key). It reads the current
+	// state under a row-level lock — creating a zero baseline row
+	// first when none exists, so the lock always has a row to hold —
+	// invokes mutate to compute the next state from the previous one,
+	// and persists the result, all within a single transaction.
+	//
+	// This serializes concurrent baseline updates for the same target
+	// so that interleaved ingests cannot lose each other's EWMA
+	// contribution (the read+compute+write is no longer split across
+	// independent transactions). On the first observation mutate sees
+	// a zero-valued DEMTargetState (SampleCount 0, nil EWMA), which the
+	// caller's EWMA math treats as the seed sample. mutate must be a
+	// pure computation: it runs while the row lock is held, so it must
+	// not perform I/O or block.
+	MutateTargetState(
+		ctx context.Context,
+		tenantID uuid.UUID,
+		targetKey, targetName string,
+		mutate func(prev DEMTargetState) (DEMTargetState, error),
+	) (DEMTargetState, error)
 }

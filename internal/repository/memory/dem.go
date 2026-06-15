@@ -491,6 +491,56 @@ func (r *DEMRepository) UpsertTargetState(
 	return cloneDEMState(st), nil
 }
 
+// MutateTargetState applies an atomic read-modify-write to the
+// baseline row. The write lock is held across the read, the mutate
+// computation, and the write, so concurrent callers for the same
+// (tenant, target_key) are serialized — matching the Postgres
+// row-lock guarantee. On the first observation mutate sees a
+// zero-valued state (no row yet).
+func (r *DEMRepository) MutateTargetState(
+	ctx context.Context,
+	tenantID uuid.UUID,
+	targetKey, targetName string,
+	mutate func(prev repository.DEMTargetState) (repository.DEMTargetState, error),
+) (repository.DEMTargetState, error) {
+	if err := errCtxIfNeeded(ctx); err != nil {
+		return repository.DEMTargetState{}, err
+	}
+	if tenantID == uuid.Nil || targetKey == "" || targetName == "" || mutate == nil {
+		return repository.DEMTargetState{}, repository.ErrInvalidArgument
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	key := demStateKey{TenantID: tenantID, TargetKey: targetKey}
+	existing, ok := r.states[key]
+
+	var prev repository.DEMTargetState
+	if ok {
+		prev = cloneDEMState(existing)
+	}
+	next, err := mutate(prev)
+	if err != nil {
+		return repository.DEMTargetState{}, err
+	}
+
+	now := r.s.clock()
+	next.TenantID = tenantID
+	next.TargetKey = targetKey
+	next.TargetName = targetName
+	if ok {
+		next.ID = existing.ID
+		next.CreatedAt = existing.CreatedAt
+	} else {
+		if next.ID == uuid.Nil {
+			next.ID = uuid.New()
+		}
+		next.CreatedAt = now
+	}
+	next.UpdatedAt = now
+	r.states[key] = cloneDEMState(next)
+	return cloneDEMState(next), nil
+}
+
 // -----------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------

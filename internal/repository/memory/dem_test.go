@@ -2,6 +2,7 @@ package memory_test
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -344,5 +345,79 @@ func TestDEM_TargetState_Upsert(t *testing.T) {
 	}
 	if got.SampleCount != 2 {
 		t.Fatalf("persisted sample_count = %d, want 2", got.SampleCount)
+	}
+}
+
+// TestDEM_MutateTargetState_FirstObservation verifies that the very
+// first mutate sees a zero-valued baseline (no row yet) and that the
+// returned state is persisted with a stamped id and timestamps.
+func TestDEM_MutateTargetState_FirstObservation(t *testing.T) {
+	s := newStore(t)
+	repo := memory.NewDEMRepository(s)
+	tenant := uuid.New()
+
+	var sawPrev repository.DEMTargetState
+	out, err := repo.MutateTargetState(ctx(), tenant, "zoom", "Zoom",
+		func(prev repository.DEMTargetState) (repository.DEMTargetState, error) {
+			sawPrev = prev
+			prev.EWMAScore = f64(90)
+			prev.SampleCount++
+			return prev, nil
+		})
+	if err != nil {
+		t.Fatalf("mutate: %v", err)
+	}
+	if sawPrev.SampleCount != 0 || sawPrev.EWMAScore != nil {
+		t.Fatalf("first mutate saw non-zero prev: %+v", sawPrev)
+	}
+	if out.ID == uuid.Nil || out.CreatedAt.IsZero() || out.SampleCount != 1 {
+		t.Fatalf("first mutate persisted wrong row: %+v", out)
+	}
+}
+
+// TestDEM_MutateTargetState_Concurrent is the regression test for the
+// non-atomic read-modify-write race (Devin Review BUG_0001). N
+// goroutines concurrently fold a sample into the same target's
+// baseline; because MutateTargetState serializes the read-compute
+// -write, every increment must land — the final sample_count equals N
+// with no lost updates. Run under -race.
+func TestDEM_MutateTargetState_Concurrent(t *testing.T) {
+	s := newStore(t)
+	repo := memory.NewDEMRepository(s)
+	tenant := uuid.New()
+
+	const goroutines = 64
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			_, err := repo.MutateTargetState(ctx(), tenant, "zoom", "Zoom",
+				func(prev repository.DEMTargetState) (repository.DEMTargetState, error) {
+					prev.SampleCount++
+					sum := float64(0)
+					if prev.EWMAScore != nil {
+						sum = *prev.EWMAScore
+					}
+					sum++
+					prev.EWMAScore = &sum
+					return prev, nil
+				})
+			if err != nil {
+				t.Errorf("mutate: %v", err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	got, found, err := repo.GetTargetState(ctx(), tenant, "zoom")
+	if err != nil || !found {
+		t.Fatalf("get after concurrent mutate: found=%v err=%v", found, err)
+	}
+	if got.SampleCount != goroutines {
+		t.Fatalf("lost updates: sample_count = %d, want %d", got.SampleCount, goroutines)
+	}
+	if got.EWMAScore == nil || *got.EWMAScore != float64(goroutines) {
+		t.Fatalf("lost updates: ewma accumulator = %v, want %d", got.EWMAScore, goroutines)
 	}
 }
