@@ -214,6 +214,11 @@ func (s *Store) NewAISuggestionRepository() *AISuggestionRepository {
 	return &AISuggestionRepository{s: s}
 }
 
+// NewPolicyRecommendationRepository binds the Store to repository.PolicyRecommendationRepository.
+func (s *Store) NewPolicyRecommendationRepository() *PolicyRecommendationRepository {
+	return &PolicyRecommendationRepository{s: s}
+}
+
 // NewKBEntryRepository binds the Store to repository.KBEntryRepository.
 func (s *Store) NewKBEntryRepository() *KBEntryRepository {
 	return &KBEntryRepository{s: s}
