@@ -381,7 +381,12 @@ func normalizeResult(r *repository.DEMProbeResult) error {
 	if !validProbeKind(r.ProbeKind) {
 		return fmt.Errorf("%w: invalid probe_kind %q", repository.ErrInvalidArgument, r.ProbeKind)
 	}
-	if r.ObservedAt.IsZero() {
+	// A missing observed_at_ms reaches us as uint64 0, which the handler
+	// maps to the Unix epoch (time.UnixMilli(0)) — not Go's zero time —
+	// so IsZero() would not catch it. Guard on a non-positive Unix
+	// timestamp instead: this rejects both an unset time.Time and an
+	// absent/zero wire value while accepting any real probe time.
+	if r.ObservedAt.Unix() <= 0 {
 		return fmt.Errorf("%w: observed_at required", repository.ErrInvalidArgument)
 	}
 	if r.Success {

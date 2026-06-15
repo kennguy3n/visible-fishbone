@@ -215,6 +215,30 @@ func TestService_Ingest_RejectsBadResult(t *testing.T) {
 	}
 }
 
+// TestService_Ingest_RejectsMissingObservedAt verifies the observed_at
+// contract is actually enforced. An absent observed_at_ms arrives as the
+// Unix epoch (time.UnixMilli(0)) from the handler, and an unset domain
+// value is Go's zero time; both must be rejected as invalid argument.
+func TestService_Ingest_RejectsMissingObservedAt(t *testing.T) {
+	h := newHarness(t, dem.DefaultConfig())
+	tenant := uuid.New()
+
+	cases := map[string]time.Time{
+		"epoch (absent observed_at_ms)": time.UnixMilli(0).UTC(),
+		"go zero time":                  {},
+	}
+	for name, observedAt := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := okResult(h.now, 20)
+			r.ObservedAt = observedAt
+			_, err := h.svc.Ingest(context.Background(), tenant, []repository.DEMProbeResult{r})
+			if !errors.Is(err, repository.ErrInvalidArgument) {
+				t.Fatalf("expected ErrInvalidArgument for %s, got %v", name, err)
+			}
+		})
+	}
+}
+
 func TestService_DegradationRaisesAlert(t *testing.T) {
 	cfg := dem.DefaultConfig()
 	h := newHarness(t, cfg)
