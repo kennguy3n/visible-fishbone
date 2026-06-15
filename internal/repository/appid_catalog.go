@@ -124,11 +124,16 @@ type AppIDCatalogRepository interface {
 	// version, ordered by app_id for deterministic output. It returns
 	// ErrNotFound when the catalog has never been published.
 	CurrentEntries(ctx context.Context) ([]AppIDCatalogEntry, error)
-	// CurrentBundle returns the signed bundle of the highest-serial
-	// version, or ErrNotFound when the catalog has never been
-	// published. This is the artifact the tenant read endpoint serves
-	// and the edge verifies.
-	CurrentBundle(ctx context.Context) (AppIDCatalogBundle, error)
+	// CurrentBundleWithVersion returns the highest-serial version's
+	// signed bundle together with its own version metadata, read in a
+	// single transaction so the two can never disagree. It returns
+	// ErrNotFound when the catalog has never been published. This is
+	// the artifact the tenant read endpoint serves and the edge
+	// verifies: the bundle and the metadata (serial, app_count,
+	// checksum) are guaranteed to describe the same published version
+	// even under a concurrent publish, so an edge never sees a checksum
+	// that does not match the payload it received.
+	CurrentBundleWithVersion(ctx context.Context) (AppIDCatalogBundle, AppIDCatalogVersion, error)
 	// ListVersions returns published version metadata newest-first,
 	// capped at limit (a non-positive or oversized limit is clamped to
 	// a sane default). It is the catalog's change history.

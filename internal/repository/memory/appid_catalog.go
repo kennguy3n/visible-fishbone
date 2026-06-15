@@ -110,15 +110,24 @@ func (r *AppIDCatalogRepository) CurrentEntries(_ context.Context) ([]repository
 	return out, nil
 }
 
-// CurrentBundle returns the highest-serial version's signed bundle.
-func (r *AppIDCatalogRepository) CurrentBundle(_ context.Context) (repository.AppIDCatalogBundle, error) {
+// CurrentBundleWithVersion returns the highest-serial version's signed
+// bundle and its matching version metadata. Both are read under a
+// single read-lock hold, so they always describe the same serial even
+// if a publish is racing — the memory analogue of the Postgres
+// single-statement join.
+func (r *AppIDCatalogRepository) CurrentBundleWithVersion(_ context.Context) (repository.AppIDCatalogBundle, repository.AppIDCatalogVersion, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	serial, ok := r.maxSerialLocked()
 	if !ok {
-		return repository.AppIDCatalogBundle{}, repository.ErrNotFound
+		return repository.AppIDCatalogBundle{}, repository.AppIDCatalogVersion{}, repository.ErrNotFound
 	}
-	return cloneAppIDBundle(r.bundles[serial]), nil
+	for _, v := range r.versions {
+		if v.Serial == serial {
+			return cloneAppIDBundle(r.bundles[serial]), v, nil
+		}
+	}
+	return repository.AppIDCatalogBundle{}, repository.AppIDCatalogVersion{}, repository.ErrNotFound
 }
 
 // ListVersions returns version metadata newest-first, capped at limit.

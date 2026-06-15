@@ -3,6 +3,8 @@ package memory
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -58,8 +60,8 @@ func TestAppIDCatalog_EmptyIsNotFound(t *testing.T) {
 	if _, err := r.CurrentEntries(ctx); !errors.Is(err, repository.ErrNotFound) {
 		t.Fatalf("CurrentEntries on empty: want ErrNotFound, got %v", err)
 	}
-	if _, err := r.CurrentBundle(ctx); !errors.Is(err, repository.ErrNotFound) {
-		t.Fatalf("CurrentBundle on empty: want ErrNotFound, got %v", err)
+	if _, _, err := r.CurrentBundleWithVersion(ctx); !errors.Is(err, repository.ErrNotFound) {
+		t.Fatalf("CurrentBundleWithVersion on empty: want ErrNotFound, got %v", err)
 	}
 	vs, err := r.ListVersions(ctx, 0)
 	if err != nil {
@@ -105,12 +107,17 @@ func TestAppIDCatalog_PublishAndRead(t *testing.T) {
 		t.Fatalf("entry serial: want 1, got %d", entries[1].Serial)
 	}
 
-	b, err := r.CurrentBundle(ctx)
+	b, bv, err := r.CurrentBundleWithVersion(ctx)
 	if err != nil {
-		t.Fatalf("CurrentBundle: %v", err)
+		t.Fatalf("CurrentBundleWithVersion: %v", err)
 	}
 	if b.Serial != 1 || b.Algorithm != "ed25519" || string(b.Payload) != `{"schema_version":1}` {
-		t.Fatalf("CurrentBundle mismatch: %+v", b)
+		t.Fatalf("CurrentBundleWithVersion bundle mismatch: %+v", b)
+	}
+	// The version metadata returned alongside the bundle must describe
+	// the very same serial as the bundle (no TOCTOU skew).
+	if bv.Serial != b.Serial || bv.AppCount != 2 || bv.Checksum != "abc" {
+		t.Fatalf("CurrentBundleWithVersion version mismatch: %+v", bv)
 	}
 }
 
@@ -181,6 +188,87 @@ func TestAppIDCatalog_DefensiveCopy(t *testing.T) {
 				t.Fatalf("stored entry SNI suffix was mutated through caller slice")
 			}
 		}
+	}
+}
+
+// TestAppIDCatalog_BundleWithVersionConsistentUnderConcurrentPublish is
+// the regression guard for the TOCTOU race that the old two-read
+// CurrentBundle + CurrentVersion sequence allowed: a publish landing
+// between the two reads could pair a serial-N payload with serial-N+1
+// metadata. Here the payload, serial, and checksum are all tied to the
+// same serial, so any skew between the bundle and the version returned
+// by CurrentBundleWithVersion is detectable. Run under -race, a reader
+// races a stream of publishes and must always observe a self-consistent
+// (payload, serial, checksum) triple.
+func TestAppIDCatalog_BundleWithVersionConsistentUnderConcurrentPublish(t *testing.T) {
+	r := NewAppIDCatalogRepository(nil)
+	ctx := context.Background()
+
+	mkVersion := func(s int64) repository.AppIDCatalogVersion {
+		return repository.AppIDCatalogVersion{
+			Serial: s, SchemaVersion: 1, AppCount: 2,
+			Checksum:  fmt.Sprintf("sum-%d", s),
+			CreatedAt: time.Unix(s, 0).UTC(),
+		}
+	}
+	mkBundle := func(s int64) repository.AppIDCatalogBundle {
+		b := sampleBundle(s)
+		b.Payload = []byte(fmt.Sprintf("payload-%d", s))
+		return b
+	}
+
+	// Seed an initial version so reads never hit ErrNotFound.
+	if err := r.PublishVersion(ctx, mkVersion(1), sampleEntries(), mkBundle(1)); err != nil {
+		t.Fatalf("seed publish: %v", err)
+	}
+
+	const lastSerial = 200
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		for s := int64(2); s <= lastSerial; s++ {
+			if err := r.PublishVersion(ctx, mkVersion(s), sampleEntries(), mkBundle(s)); err != nil {
+				t.Errorf("publish serial %d: %v", s, err)
+				return
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 5000; i++ {
+			b, v, err := r.CurrentBundleWithVersion(ctx)
+			if err != nil {
+				t.Errorf("CurrentBundleWithVersion: %v", err)
+				return
+			}
+			// Bundle and version must be the same serial, and the
+			// payload + checksum must both belong to that serial.
+			if b.Serial != v.Serial {
+				t.Errorf("serial skew: bundle %d != version %d", b.Serial, v.Serial)
+				return
+			}
+			if string(b.Payload) != fmt.Sprintf("payload-%d", b.Serial) {
+				t.Errorf("payload %q does not match serial %d", b.Payload, b.Serial)
+				return
+			}
+			if v.Checksum != fmt.Sprintf("sum-%d", v.Serial) {
+				t.Errorf("checksum %q does not match serial %d", v.Checksum, v.Serial)
+				return
+			}
+		}
+	}()
+
+	wg.Wait()
+
+	b, v, err := r.CurrentBundleWithVersion(ctx)
+	if err != nil {
+		t.Fatalf("final read: %v", err)
+	}
+	if b.Serial != lastSerial || v.Serial != lastSerial {
+		t.Fatalf("final serial: want %d, got bundle %d / version %d", lastSerial, b.Serial, v.Serial)
 	}
 }
 

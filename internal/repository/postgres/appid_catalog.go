@@ -153,27 +153,43 @@ func (r *AppIDCatalogRepository) CurrentEntries(ctx context.Context) ([]reposito
 	return out, err
 }
 
-// CurrentBundle returns the signed bundle of the highest-serial
-// version, or ErrNotFound when nothing has been published. Because a
-// bundle is written atomically with its version, the highest-serial
-// bundle is always the current one.
-func (r *AppIDCatalogRepository) CurrentBundle(ctx context.Context) (repository.AppIDCatalogBundle, error) {
-	var b repository.AppIDCatalogBundle
+// CurrentBundleWithVersion returns the highest-serial version's signed
+// bundle together with its matching version metadata, or ErrNotFound
+// when nothing has been published. Both rows are read in one SQL
+// statement (an inner join on serial), so the bundle payload and the
+// metadata that describes it — serial, app_count, checksum — always
+// belong to the same published version. A separate two-read sequence
+// could interleave with a publish and return a payload and a checksum
+// from different serials; the join makes that mismatch impossible
+// regardless of transaction isolation level. The join is total because
+// PublishVersion writes the version row and its bundle row in the same
+// transaction, so every bundle has exactly one matching version.
+func (r *AppIDCatalogRepository) CurrentBundleWithVersion(ctx context.Context) (repository.AppIDCatalogBundle, repository.AppIDCatalogVersion, error) {
+	var (
+		b repository.AppIDCatalogBundle
+		v repository.AppIDCatalogVersion
+	)
 	err := r.s.withSystem(ctx, func(tx pgx.Tx) error {
 		row := tx.QueryRow(ctx,
-			`SELECT serial, algorithm, key_id, public_key, payload, signature, created_at
-			   FROM appid_catalog_bundles
-			  ORDER BY serial DESC
+			`SELECT b.serial, b.algorithm, b.key_id, b.public_key, b.payload, b.signature, b.created_at,
+			        v.schema_version, v.app_count, v.checksum, v.note, v.created_at
+			   FROM appid_catalog_bundles b
+			   JOIN appid_catalog_versions v ON v.serial = b.serial
+			  ORDER BY b.serial DESC
 			  LIMIT 1`)
-		if err := row.Scan(&b.Serial, &b.Algorithm, &b.KeyID, &b.PublicKey, &b.Payload, &b.Signature, &b.CreatedAt); err != nil {
+		if err := row.Scan(
+			&b.Serial, &b.Algorithm, &b.KeyID, &b.PublicKey, &b.Payload, &b.Signature, &b.CreatedAt,
+			&v.SchemaVersion, &v.AppCount, &v.Checksum, &v.Note, &v.CreatedAt,
+		); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return repository.ErrNotFound
 			}
 			return fmt.Errorf("query current appid bundle: %w", err)
 		}
+		v.Serial = b.Serial
 		return nil
 	})
-	return b, err
+	return b, v, err
 }
 
 // ListVersions returns published version metadata newest-first,

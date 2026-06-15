@@ -193,14 +193,14 @@ func (s *Service) ListVersions(ctx context.Context, limit int) ([]repository.App
 }
 
 // CurrentBundle returns the current signed envelope together with its
-// version metadata. The envelope is reconstructed from the stored raw
-// bytes; the edge verifies Signature against its pinned key before use.
+// version metadata. Both are read in a single repository call so the
+// envelope and the metadata (serial, app_count, checksum) always
+// describe the same published version — a concurrent publish can never
+// hand a tenant a payload whose checksum belongs to a different serial.
+// The envelope is reconstructed from the stored raw bytes; the edge
+// verifies Signature against its pinned key before use.
 func (s *Service) CurrentBundle(ctx context.Context) (SignedBundle, repository.AppIDCatalogVersion, error) {
-	row, err := s.repo.CurrentBundle(ctx)
-	if err != nil {
-		return SignedBundle{}, repository.AppIDCatalogVersion{}, err
-	}
-	ver, err := s.repo.CurrentVersion(ctx)
+	row, ver, err := s.repo.CurrentBundleWithVersion(ctx)
 	if err != nil {
 		return SignedBundle{}, repository.AppIDCatalogVersion{}, err
 	}
