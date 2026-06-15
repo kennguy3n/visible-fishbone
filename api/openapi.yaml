@@ -87,6 +87,15 @@ tags:
       alerts. Every tenant gets a managed default target catalog so an
       SME configures nothing; a tenant may add custom targets or
       disable a default by reusing its `target_key`.
+  - name: compliance-auto
+    description: |
+      Continuous compliance evidence (WP6). Maps real platform state
+      (policy-graph default-deny, RLS tenant isolation, identity
+      federation, policy bundle signing + key rotation, audit trail,
+      data residency / retention) to SOC 2 / ISO 27001 controls. A
+      leader-gated, bounded background sweep evaluates each control to
+      pass / fail / not-applicable with an evidence reference; packs are
+      exported framework-mapped (JSON or CSV) on demand.
 paths:
   /tenants:
     post:
@@ -3776,6 +3785,83 @@ paths:
                     type: array
                     items: { $ref: "#/components/schemas/Alert" }
                   next_cursor: { type: string }
+  /tenants/{tenant_id}/compliance-auto/posture:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [compliance-auto]
+      operationId: getComplianceAutoPosture
+      summary: View continuous compliance posture
+      description: |
+        Returns the tenant's latest evaluated posture across all mapped
+        frameworks (or a single framework when `framework` is supplied):
+        per-control pass / fail / not-applicable with the evidence
+        reference that backs each verdict.
+      parameters:
+        - name: framework
+          in: query
+          required: false
+          schema: { type: string, enum: [SOC2, ISO_27001] }
+          description: Restrict the posture to a single framework.
+      responses:
+        "200":
+          description: The tenant's current compliance posture.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ComplianceAutoPosture" }
+        "400": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/compliance-auto/collect:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [compliance-auto]
+      operationId: collectComplianceAutoEvidence
+      summary: Trigger an on-demand evidence collection
+      description: |
+        Runs an immediate evaluation sweep for the tenant — the same
+        work the scheduled background loop performs fleet-wide — and
+        returns the freshly computed posture. Read-only against platform
+        state; persists the resulting control status and evidence.
+      responses:
+        "201":
+          description: The freshly evaluated compliance posture.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ComplianceAutoPosture" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/compliance-auto/evidence-pack:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [compliance-auto]
+      operationId: exportComplianceAutoEvidencePack
+      summary: Export a framework-mapped evidence pack
+      description: |
+        Builds an on-demand, framework-mapped evidence pack from the
+        tenant's stored posture, as JSON (default) or CSV. Every control
+        row carries its verdict, evidence summary, source subsystem,
+        observation time, and structured evidence detail.
+      parameters:
+        - name: framework
+          in: query
+          required: true
+          schema: { type: string, enum: [SOC2, ISO_27001] }
+          description: The framework to export.
+        - name: format
+          in: query
+          required: false
+          schema: { type: string, enum: [json, csv], default: json }
+          description: The export encoding.
+      responses:
+        "200":
+          description: The evidence pack.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ComplianceAutoEvidencePack" }
+            text/csv:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
   /tenants/{tenant_id}/appid/catalog/current:
     parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
     get:
@@ -3968,6 +4054,82 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/TenantMigration" }
   schemas:
+    ComplianceAutoControl:
+      type: object
+      description: One control's evaluated status with its evidence reference.
+      properties:
+        control_id: { type: string, example: "CC6.1" }
+        framework: { type: string, enum: [SOC2, ISO_27001] }
+        title: { type: string }
+        statement: { type: string }
+        category: { type: string }
+        collector_id: { type: string, example: "policy_default_deny" }
+        status: { type: string, enum: [pass, fail, not_applicable] }
+        summary: { type: string }
+        source: { type: string, example: "policy_graph" }
+        observed_at: { type: string, format: date-time }
+        evidence:
+          type: object
+          additionalProperties: true
+          description: Structured facts backing the verdict (collector-specific).
+    ComplianceAutoFramework:
+      type: object
+      description: A tenant's posture for a single framework.
+      properties:
+        framework: { type: string, enum: [SOC2, ISO_27001] }
+        total: { type: integer }
+        pass: { type: integer }
+        fail: { type: integer }
+        not_applicable: { type: integer }
+        score_percent:
+          type: integer
+          description: Pass rate over in-scope (non-not-applicable) controls, 0-100.
+        controls:
+          type: array
+          items: { $ref: "#/components/schemas/ComplianceAutoControl" }
+    ComplianceAutoPosture:
+      type: object
+      description: A tenant's compliance posture across all mapped frameworks.
+      properties:
+        tenant_id: { type: string, format: uuid }
+        generated_at: { type: string, format: date-time }
+        frameworks:
+          type: array
+          items: { $ref: "#/components/schemas/ComplianceAutoFramework" }
+    ComplianceAutoEvidencePackControl:
+      type: object
+      description: One control row in an exported evidence pack.
+      properties:
+        control_id: { type: string }
+        framework: { type: string, enum: [SOC2, ISO_27001] }
+        title: { type: string }
+        statement: { type: string }
+        category: { type: string }
+        collector_id: { type: string }
+        status: { type: string, enum: [pass, fail, not_applicable] }
+        summary: { type: string }
+        source: { type: string }
+        observed_at: { type: string, format: date-time }
+        evidence:
+          type: object
+          additionalProperties: true
+    ComplianceAutoEvidencePack:
+      type: object
+      description: A framework-mapped, exportable evidence pack for a tenant.
+      properties:
+        tenant_id: { type: string, format: uuid }
+        framework: { type: string, enum: [SOC2, ISO_27001] }
+        generated_at: { type: string, format: date-time }
+        summary:
+          type: object
+          properties:
+            total: { type: integer }
+            pass: { type: integer }
+            fail: { type: integer }
+            not_applicable: { type: integer }
+        controls:
+          type: array
+          items: { $ref: "#/components/schemas/ComplianceAutoEvidencePackControl" }
     AppIDCatalogVersion:
       type: object
       description: |
