@@ -470,6 +470,16 @@ WHERE target_key = $1 AND observed_at >= $2::timestamptz`
 // keep any single transaction cheap.
 const demPruneBatch = 5000
 
+// demPruneBatchInterval is the brief pause inserted between retention
+// DELETE batches when more expired rows remain. It caps the sustained
+// delete rate (~demPruneBatch/demPruneBatchInterval rows/sec) so that
+// draining a large first-time backlog trickles steadily instead of
+// firing back-to-back DELETE transactions that could spike WAL and
+// replication lag across the 5,000-tenant fleet. It is short enough that
+// even a multi-million-row backlog clears well within the hourly sweep
+// cadence, and is never applied after the final (short) batch.
+const demPruneBatchInterval = 50 * time.Millisecond
+
 // PruneProbeResults deletes raw results created before `before`
 // across all tenants, in bounded batches. Runs under the system role.
 func (r *DEMRepository) PruneProbeResults(ctx context.Context, before time.Time) (int64, error) {
@@ -511,6 +521,15 @@ func (r *DEMRepository) pruneBatched(ctx context.Context, table, q string, befor
 		total += batch
 		if batch < demPruneBatch {
 			return total, nil
+		}
+		// A full batch means more expired rows remain. Yield briefly
+		// before the next DELETE so the drain stays a smooth trickle
+		// rather than a rapid-fire burst. Cancellation-aware so shutdown
+		// (or the sweep's own deadline) preempts the pause immediately.
+		select {
+		case <-ctx.Done():
+			return total, ctx.Err()
+		case <-time.After(demPruneBatchInterval):
 		}
 	}
 }
