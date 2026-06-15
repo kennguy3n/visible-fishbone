@@ -353,6 +353,13 @@ func (e *Engine) CollectAll(ctx context.Context) error {
 			evaluated++
 		}
 		if pacer != nil {
+			// Reset without a manual channel drain is correct under the
+			// module's go directive (1.25): since Go 1.23, Timer.Reset
+			// atomically clears any already-fired-but-unreceived value, so
+			// the first iteration cannot observe a stale tick from the
+			// initial NewTimer. A manual drain here would be wrong on 1.23+
+			// (it can block). If the go directive were ever downgraded
+			// below 1.23 this pacing would need the legacy stop-drain dance.
 			pacer.Reset(e.perTenant)
 			select {
 			case <-ctx.Done():
