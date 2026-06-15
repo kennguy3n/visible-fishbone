@@ -41,10 +41,14 @@ type RouterDeps struct {
 	Rollout          *RolloutHandler
 	SCIM             *SCIMHandler
 	Compliance       *ComplianceHandler
-	Playbook         *PlaybookHandler
-	Troubleshoot     *TroubleshootHandler
-	OIDC             *OIDCHandler
-	Mobile           *MobileHandler
+	// ComplianceAuto, when set, exposes the continuous compliance
+	// evidence surface (WP6): live SOC2/ISO27001 posture + evidence
+	// pack export. Distinct from Compliance (point-in-time reports).
+	ComplianceAuto *ComplianceAutoHandler
+	Playbook       *PlaybookHandler
+	Troubleshoot   *TroubleshootHandler
+	OIDC           *OIDCHandler
+	Mobile         *MobileHandler
 	// AdminSSO, when set, exposes the public iam-core OAuth2 admin
 	// login + callback endpoints (Session 2A, Task 3).
 	AdminSSO     *AdminSSOHandler
@@ -216,6 +220,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.Compliance != nil {
 		deps.Compliance.Register(apiMux)
+	}
+	if deps.ComplianceAuto != nil {
+		deps.ComplianceAuto.Register(apiMux)
 	}
 	if deps.Playbook != nil {
 		deps.Playbook.Register(apiMux)

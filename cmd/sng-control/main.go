@@ -54,6 +54,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/casb"
 	casbconnectors "github.com/kennguy3n/visible-fishbone/internal/service/casb/connectors"
 	"github.com/kennguy3n/visible-fishbone/internal/service/compliance"
+	"github.com/kennguy3n/visible-fishbone/internal/service/complianceauto"
 	"github.com/kennguy3n/visible-fishbone/internal/service/dlp"
 	"github.com/kennguy3n/visible-fishbone/internal/service/dlpidm"
 	"github.com/kennguy3n/visible-fishbone/internal/service/dlpreview"
@@ -459,6 +460,17 @@ func run() error {
 	if evidenceScheduler != nil {
 		go elector.RunIfLeader(rootCtx, "compliance-evidence", evidenceScheduler.Run)
 		logger.Info("sng-control: compliance evidence scheduler registered (runs on leader only)")
+	}
+
+	// WP6 continuous compliance evidence: the per-tenant control
+	// evaluation sweep is a singleton background workload — only the
+	// leader sweeps the fleet on a bounded schedule, so a multi-replica
+	// deployment evaluates each tenant once per cycle rather than once
+	// per replica. RunIfLeader blocks until rootCtx is cancelled, so it
+	// runs in its own goroutine.
+	if rc.ComplianceAutoEngine != nil {
+		go elector.RunIfLeader(rootCtx, "compliance-auto", rc.ComplianceAutoEngine.Run)
+		logger.Info("sng-control: continuous compliance evidence sweep registered (runs on leader only)")
 	}
 
 	// Managed DNS threat-intel feed pipeline. DEFAULT-OFF: only wired
@@ -1093,7 +1105,10 @@ type routerComponents struct {
 	// machine; the serve loop resumes any in-flight migration on boot.
 	RegionMigrator    *tenant.RegionMigrator
 	EvidenceScheduler *compliance.Scheduler
-	FeedManager       *aisvc.FeedManager
+	// ComplianceAutoEngine drives the WP6 continuous compliance
+	// evidence sweep; run() launches its leader-gated scheduler loop.
+	ComplianceAutoEngine *complianceauto.Engine
+	FeedManager          *aisvc.FeedManager
 	// AppNoOpsEngine is the per-tenant shadow-IT NoOps pipeline. main()
 	// sets it as the shadow-IT discoverer's discovery hook and runs its
 	// leader-only Reconcile/digest sweep when cfg.CASB.NoOpsEnabled.
@@ -2323,6 +2338,48 @@ func buildRouter(
 		logger,
 	)
 	oidcHandler := handler.NewOIDCHandler(idpConfigRepo, oidcSvc, cfg.MobileAuth.MaxProvidersPerTenant)
+
+	// --- Continuous compliance evidence wiring (WP6) -----------------
+	// complianceauto runs ALONGSIDE the point-in-time compliance
+	// reports above. It continuously evaluates a SOC2 / ISO 27001
+	// control catalog against REAL platform state (policy-graph
+	// default-deny, RLS tenant isolation, identity federation, policy
+	// bundle signing + key rotation, audit trail, data residency /
+	// retention), persisting per-control pass/fail with evidence
+	// references and serving on-demand framework-mapped evidence packs.
+	// The managed defaults below mean an SME tenant gets a correct
+	// posture with zero configuration. The collection sweep is bounded,
+	// read-mostly, leader-gated, and launched by run().
+	complianceAutoRepo := store.NewComplianceAutoRepository()
+	complianceAutoSource := complianceauto.NewPlatformAdapter(
+		tenantRepo,
+		policyRepo,
+		policyKeyRepo,
+		idpConfigRepo,
+		auditRepo,
+		// The repository doubles as the live RLS probe: the adapter
+		// confirms tenant isolation by reading the effective query role's
+		// attributes from pg_roles (must be neither superuser nor
+		// BYPASSRLS) rather than trusting the app-role-presence fallback.
+		complianceAutoRepo,
+		complianceauto.ManagedDefaults{
+			// Fallback only — used until the live RLS probe above
+			// succeeds (or if the probe is ever unwired).
+			RLSEnforced:      cfg.Postgres.AppRole != "",
+			EncryptionAtRest: cfg.Policy.KeyWrapMasterB64 != "" || cfg.Policy.KeyWrapMasterFile != "",
+			// Derive the encryption-in-transit verdict from the real
+			// control-plane sslmode instead of a hardcoded pass, so the
+			// control genuinely fails in a plaintext deployment.
+			PostgresSSLMode: cfg.Postgres.SSLMode,
+		},
+		nil,
+	)
+	complianceAutoEngine := complianceauto.NewEngine(
+		complianceAutoSource, complianceAutoRepo, complianceauto.Config{Logger: logger})
+	complianceAutoHandler := handler.NewComplianceAutoHandler(
+		complianceAutoEngine,
+		handler.WithComplianceAutoAuthorizer(rbacSvc),
+	)
 	// WS-2: the public mobile native-SSO token / refresh endpoints
 	// bypass the authenticated chain (the agent has no SNG session
 	// yet), so the RecordActivity middleware never sees them. Record a
@@ -2746,6 +2803,7 @@ func buildRouter(
 		AI:                   aiHandler,
 		SCIM:                 handler.NewSCIMHandler(scimSvc),
 		Compliance:           complianceHandler,
+		ComplianceAuto:       complianceAutoHandler,
 		Playbook:             playbookHandler,
 		Troubleshoot:         troubleshootHandler,
 		OIDC:                 oidcHandler,
@@ -2827,6 +2885,7 @@ func buildRouter(
 		PoP:                          popSvc,
 		RegionMigrator:               tenantMigrator,
 		EvidenceScheduler:            evidenceScheduler,
+		ComplianceAutoEngine:         complianceAutoEngine,
 		FeedManager:                  feedMgr,
 		AppNoOpsEngine:               appNoOpsEngine,
 		Recompiler:                   recompiler,
