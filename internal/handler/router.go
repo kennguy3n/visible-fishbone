@@ -99,6 +99,10 @@ type RouterDeps struct {
 	// manual refresh trigger. Distinct from ThreatFeed, which serves
 	// the operator-configured ai feed-coverage view.
 	ManagedThreatContent *ManagedThreatContentHandler
+	// DLPIDM, when set, exposes the WP4 DLP OCR/IDM control-plane
+	// surface: protected-document fingerprint sets (Indexed Document
+	// Matching) and the OCR/IDM configuration + status.
+	DLPIDM *DLPIDMHandler
 }
 
 // NewRouter composes the full API mux + middleware chain.
@@ -247,6 +251,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.ManagedThreatContent != nil {
 		deps.ManagedThreatContent.Register(apiMux)
+	}
+	if deps.DLPIDM != nil {
+		deps.DLPIDM.Register(apiMux)
 	}
 
 	authOpts := []middleware.AuthOption{}

@@ -516,7 +516,7 @@ impl DlpEngine {
         // enabled. A disabled channel simply skips the channel classifier
         // (its rules, severity, and action floor) while the AI-app signal
         // is still evaluated below.
-        let (channel_action, channel_severity, mut matches) = if config.enabled {
+        let (mut channel_action, mut channel_severity, mut matches) = if config.enabled {
             let result: ClassificationResult =
                 state.classifier.classify(channel, content, metadata);
             // Channel-rule action, escalated to the channel floor when a
@@ -531,6 +531,31 @@ impl DlpEngine {
         } else {
             (None, None, Vec::new())
         };
+
+        // OCR hook (additive): when the channel is enabled and the payload is a
+        // supported image, recover its text and run the SAME classifier over it
+        // so secrets embedded in screenshots/scans are caught. The decoder
+        // cheaply sniffs the header and returns `None` for non-image (text)
+        // payloads, so the existing text path is untouched. OCR is strictly
+        // bounded (size/dimension/glyph/time caps) and skips — never blocks or
+        // panics — on oversized, unsupported, or unreadable input. Findings
+        // only ever escalate the verdict (folded via `max`); they can never
+        // weaken an action or severity the raw pass already established.
+        if config.enabled
+            && let Some(text) = crate::ocr::extract_text_for_detection(content)
+        {
+            let ocr_result: ClassificationResult =
+                state.classifier.classify(channel, text.as_bytes(), metadata);
+            let ocr_action = ocr_result
+                .strictest_action()
+                .map(|a| match config.action_override {
+                    Some(floor) => a.max(floor),
+                    None => a,
+                });
+            channel_action = channel_action.max(ocr_action);
+            channel_severity = channel_severity.max(ocr_result.max_severity());
+            matches.extend(ocr_result.matches);
+        }
 
         // AI-app exfil signal: consulted only on the upload channel,
         // only when a destination is recorded, and only when a detector
