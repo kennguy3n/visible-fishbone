@@ -1,0 +1,36 @@
+[package]
+name = "sng-dem"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+description = "ShieldNet Gateway Digital Experience Monitoring: bounded edge synthetic probes (DNS / TCP / HTTP(S)) to critical SaaS targets, emitting structured experience-probe results"
+
+[dependencies]
+sng-core = { workspace = true }
+sng-sdwan = { workspace = true }
+
+# `net` (TcpStream + lookup_host) is layered on top of the workspace
+# feature set; the workspace keeps the global Tokio feature surface
+# narrow so the resource-constrained `sng-agent` build stays small.
+tokio = { workspace = true, features = ["net"] }
+reqwest = { workspace = true }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+rand = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "rt", "rt-multi-thread", "macros", "net", "io-util"] }
+pretty_assertions = { workspace = true }
+wiremock = { workspace = true }
+
+[lints]
+workspace = true

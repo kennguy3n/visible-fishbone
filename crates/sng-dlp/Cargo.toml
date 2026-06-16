@@ -57,6 +57,16 @@ aho-corasick = { workspace = true }
 # control plane's `norm.NFC`.
 unicode-normalization = { workspace = true }
 
+# Image decoding for the OCR module (`ocr`). PNG is the only decoder we
+# delegate to a third party — it is the dominant screenshot/clipboard
+# format and hand-rolling a spec-complete inflate is not worth the risk.
+# BMP and the Netpbm family (PGM/PPM) are decoded by small in-crate
+# parsers (`ocr::decode`) so the dependency surface stays minimal. `png`
+# is pure-Rust (no C toolchain), MIT/Apache-2.0, and pulls only the
+# `miniz_oxide`/`fdeflate` inflate stack already present in the offline
+# build cache — keeping the no-ops, on-box deployment story intact.
+png = "0.17"
+
 # Exact-Data-Match (`edm`) keeps only salted HMAC-SHA256 digests of a
 # tenant's sensitive records — never the plaintext. `zeroize` wipes the
 # transient normalized-plaintext buffers as soon as they are hashed at

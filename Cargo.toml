@@ -49,6 +49,7 @@ members = [
     "crates/sng-swg",
     "crates/sng-ztna",
     "crates/sng-sdwan",
+    "crates/sng-dem",
     "crates/sng-updater",
     "crates/sng-oidc",
     "crates/sng-ha",
@@ -59,6 +60,7 @@ members = [
     "crates/sng-mobile-pal-android",
     "crates/sng-mobile-sdk",
     "crates/sng-uniffi-bindgen",
+    "crates/sng-appid",
 ]
 # The kernel-space BPF object is a standalone `no_std` crate cross-compiled
 # for a BPF target by the appliance image pipeline; it is never built by the
@@ -404,6 +406,7 @@ sng-mobile-core = { path = "crates/sng-mobile-core" }
 sng-mobile-pal-ios = { path = "crates/sng-mobile-pal-ios" }
 sng-mobile-pal-android = { path = "crates/sng-mobile-pal-android" }
 sng-mobile-sdk = { path = "crates/sng-mobile-sdk" }
+sng-appid = { path = "crates/sng-appid" }
 
 # Workspace-wide lints. Set at the workspace level so a new crate
 # added in a later phase automatically inherits the same posture

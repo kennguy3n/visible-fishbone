@@ -47,13 +47,17 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/alert"
 	"github.com/kennguy3n/visible-fishbone/internal/service/apikey"
 	"github.com/kennguy3n/visible-fishbone/internal/service/appdb"
+	appidsvc "github.com/kennguy3n/visible-fishbone/internal/service/appid"
 	"github.com/kennguy3n/visible-fishbone/internal/service/audit"
 	"github.com/kennguy3n/visible-fishbone/internal/service/browser"
 	"github.com/kennguy3n/visible-fishbone/internal/service/capacity"
 	"github.com/kennguy3n/visible-fishbone/internal/service/casb"
 	casbconnectors "github.com/kennguy3n/visible-fishbone/internal/service/casb/connectors"
 	"github.com/kennguy3n/visible-fishbone/internal/service/compliance"
+	"github.com/kennguy3n/visible-fishbone/internal/service/complianceauto"
+	"github.com/kennguy3n/visible-fishbone/internal/service/dem"
 	"github.com/kennguy3n/visible-fishbone/internal/service/dlp"
+	"github.com/kennguy3n/visible-fishbone/internal/service/dlpidm"
 	"github.com/kennguy3n/visible-fishbone/internal/service/dlpreview"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
 	"github.com/kennguy3n/visible-fishbone/internal/service/integration"
@@ -81,10 +85,12 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy/hibernation"
 	"github.com/kennguy3n/visible-fishbone/internal/service/tenant"
 	"github.com/kennguy3n/visible-fishbone/internal/service/terraform"
+	"github.com/kennguy3n/visible-fishbone/internal/service/threatfeed"
 	"github.com/kennguy3n/visible-fishbone/internal/service/threatintel"
 	"github.com/kennguy3n/visible-fishbone/internal/service/troubleshoot"
 	"github.com/kennguy3n/visible-fishbone/internal/service/troubleshoot/checks"
 	"github.com/kennguy3n/visible-fishbone/internal/service/webhook"
+	"github.com/kennguy3n/visible-fishbone/internal/service/workshard"
 )
 
 func main() {
@@ -459,6 +465,27 @@ func run() error {
 		logger.Info("sng-control: compliance evidence scheduler registered (runs on leader only)")
 	}
 
+	// WP5 DEM retention sweep. Singleton background workload: only the
+	// leader prunes expired raw probe results / score samples, so a
+	// multi-replica deployment runs exactly one sweep per interval.
+	// RunIfLeader blocks until rootCtx is cancelled, so it runs in its
+	// own goroutine.
+	if rc.DEMScheduler != nil {
+		go elector.RunIfLeader(rootCtx, "dem-retention", rc.DEMScheduler.Run)
+		logger.Info("sng-control: DEM retention sweep registered (runs on leader only)")
+	}
+
+	// WP6 continuous compliance evidence: the per-tenant control
+	// evaluation sweep is a singleton background workload — only the
+	// leader sweeps the fleet on a bounded schedule, so a multi-replica
+	// deployment evaluates each tenant once per cycle rather than once
+	// per replica. RunIfLeader blocks until rootCtx is cancelled, so it
+	// runs in its own goroutine.
+	if rc.ComplianceAutoEngine != nil {
+		go elector.RunIfLeader(rootCtx, "compliance-auto", rc.ComplianceAutoEngine.Run)
+		logger.Info("sng-control: continuous compliance evidence sweep registered (runs on leader only)")
+	}
+
 	// Managed DNS threat-intel feed pipeline. DEFAULT-OFF: only wired
 	// when THREAT_INTEL_ENABLED=true. It is a singleton background
 	// workload — only the leader fetches the upstream feeds, signs the
@@ -526,6 +553,54 @@ func run() error {
 			logger.Info("sng-control: threat-intel IPS rule producer enabled (runs on leader only)",
 				slog.Duration("refresh_interval", interval),
 				slog.Float64("min_confidence", cfg.ManagedDNSFeeds.IPSRulesMinConfidence))
+		}
+	}
+
+	// WP3 managed (curated) threat-content ingestion. DEFAULT-ON with a
+	// kill switch (MANAGED_THREAT_CONTENT_ENABLED). Leader-gated so the
+	// central ingestion + signed bundle build runs exactly once for the
+	// whole fleet per refresh interval (amortized across all tenants),
+	// never per replica or per tenant, and upstream open feeds are not
+	// fetched N-fold.
+	//
+	// The leader callback always seeds the curated source registry
+	// (SeedRegistry is an idempotent, metadata-only upsert that writes no
+	// indicator content and makes no network calls) so the per-tenant
+	// posture surface lists the managed feeds even when the kill switch
+	// is off — an operator can preview which feeds would activate before
+	// turning it on (the posture's enabled:false conveys the off state).
+	// It then runs the bounded refresh loop unconditionally: RefreshOnce
+	// self-gates on the kill switch (returning Skipped without fetching
+	// or publishing while off), so the ticker is a cheap no-op when
+	// disabled. The loop's existence therefore does not depend on the
+	// boot-time switch value, and a runtime toggle (Engine.SetEnabled)
+	// takes effect on the next cycle without a restart.
+	{
+		engine := rc.ManagedThreatContentEngine
+		interval := rc.ManagedThreatContentInterval
+		// Export sng_threatcontent_degraded so operators are alerted when
+		// the engine silently serves the last good bundle (every upstream
+		// down) instead of fresh content. Self-registered against the
+		// shared registry (no widening of the central metrics.Metrics
+		// struct); a no-op when metrics are disabled.
+		if mx != nil {
+			if err := threatfeed.RegisterDegradedMetric(mx.Registry(), mx.Namespace(), engine); err != nil {
+				logger.Warn("sng-control: could not register managed threat-content degraded metric",
+					slog.String("error", err.Error()))
+			}
+		}
+		go elector.RunIfLeader(rootCtx, "threatcontent-refresh", func(ctx context.Context) {
+			if err := engine.SeedRegistry(ctx); err != nil {
+				logger.Warn("sng-control: managed threat-content source registry seed failed",
+					slog.String("error", err.Error()))
+			}
+			engine.Run(ctx, interval)
+		})
+		if rc.ManagedThreatContentEnabled {
+			logger.Info("sng-control: managed threat-content ingestion enabled (runs on leader only)",
+				slog.Duration("refresh_interval", interval))
+		} else {
+			logger.Info("sng-control: managed threat-content ingestion disabled by kill switch; curated registry still seeded and the leader refresh loop idles (no-op per cycle) until re-enabled (MANAGED_THREAT_CONTENT_ENABLED=false)")
 		}
 	}
 
@@ -639,21 +714,55 @@ func run() error {
 			slog.Duration("dwell_window", cfg.RolloutAutopilot.DwellWindow))
 	}
 
-	// Leader-only alert false-positive feedback tuning loop. DEFAULT-OFF
+	// Active/active tenant-shard work distributor (WP2). Every replica
+	// registers in the Postgres-backed worker registry, heartbeats its
+	// liveness, and leases the shards it owns by rendezvous hashing, so
+	// the per-tenant background jobs below can run active/active (each
+	// tenant owned by exactly one live worker) instead of serially on a
+	// single elected leader. Start runs one assignment cycle
+	// synchronously, so ownership is established before any gated job
+	// first consults it; its failure is non-fatal (the loop retries and
+	// ownership stays empty/fail-closed until a cycle succeeds). The
+	// deferred Stop cancels the loop, releasing this worker's leases for
+	// an immediate handoff, and blocks until that completes. It is
+	// registered after the earlier `defer pool.Close()`, so LIFO
+	// ordering runs the release against a live pool; using the
+	// distributor's own context (not rootCtx) keeps Stop safe on early
+	// error-return paths, where rootCtx is never cancelled.
+	if err := rc.WorkShard.Start(rootCtx); err != nil {
+		logger.Warn("sng-control: workshard initial cycle failed; retrying in background",
+			slog.Any("error", err))
+	}
+	defer rc.WorkShard.Stop()
+	logger.Info("sng-control: tenant-shard work distributor enabled (active/active)",
+		slog.String("worker_id", rc.WorkShard.WorkerID().String()),
+		slog.Int("shard_count", rc.WorkShard.ShardCount()))
+
+	// Alert false-positive feedback tuning loop. DEFAULT-OFF
 	// (cfg.AlertFeedback.TuningEnabled): the sweep mutates baseline
 	// Z-thresholds, so it is registered only when an operator opts in.
-	// Leader-gated so only the lock holder tunes, and activity-tiered
-	// (the configured TieredSweep) so dormant trials are re-tuned at a
-	// reduced cadence while active tenants stay on the per-tick cadence.
-	// Own goroutine because RunIfLeader blocks until rootCtx is cancelled.
+	// Re-gated from leader-only onto workshard ownership so it runs
+	// active/active — each tenant tuned by exactly one live worker per
+	// cycle, spreading the work across replicas instead of serializing it
+	// on the lock holder. The activity-tiered TieredSweep path (the prod
+	// configuration) is ownership-filtered at its activity source (wired
+	// in buildRouter); the fallback enumeration below is filtered here too
+	// so both paths agree. A single-replica deployment owns every shard,
+	// so this tunes exactly the tenants the old leader path did.
 	if cfg.AlertFeedback.TuningEnabled && rc.AlertFeedback != nil {
 		feedbackSvc := rc.AlertFeedback
-		tenantsFn := rc.AlertFeedbackTenants
+		allTenantsFn := rc.AlertFeedbackTenants
+		workShard := rc.WorkShard
+		ownedTenantsFn := func(ctx context.Context) ([]uuid.UUID, error) {
+			all, err := allTenantsFn(ctx)
+			if err != nil {
+				return nil, err
+			}
+			return workShard.FilterOwned(all), nil
+		}
 		interval := cfg.AlertFeedback.TuningInterval
-		go elector.RunIfLeader(rootCtx, "alert-feedback-tuning", func(ctx context.Context) {
-			feedbackSvc.Run(ctx, interval, tenantsFn)
-		})
-		logger.Info("sng-control: alert feedback tuning loop enabled (runs on leader only)",
+		go feedbackSvc.Run(rootCtx, interval, ownedTenantsFn)
+		logger.Info("sng-control: alert feedback tuning loop enabled (active/active via workshard ownership)",
 			slog.Duration("interval", interval))
 	}
 
@@ -1052,7 +1161,15 @@ type routerComponents struct {
 	// machine; the serve loop resumes any in-flight migration on boot.
 	RegionMigrator    *tenant.RegionMigrator
 	EvidenceScheduler *compliance.Scheduler
-	FeedManager       *aisvc.FeedManager
+	// DEMScheduler is the WP5 Digital Experience Monitoring retention
+	// sweep. Always non-nil; main() runs it leader-only so a
+	// multi-replica deployment prunes raw probe results / score
+	// samples exactly once per interval.
+	DEMScheduler *dem.Scheduler
+	// ComplianceAutoEngine drives the WP6 continuous compliance
+	// evidence sweep; run() launches its leader-gated scheduler loop.
+	ComplianceAutoEngine *complianceauto.Engine
+	FeedManager          *aisvc.FeedManager
 	// AppNoOpsEngine is the per-tenant shadow-IT NoOps pipeline. main()
 	// sets it as the shadow-IT discoverer's discovery hook and runs its
 	// leader-only Reconcile/digest sweep when cfg.CASB.NoOpsEnabled.
@@ -1148,6 +1265,26 @@ type routerComponents struct {
 	// the sweep is ever unset, so it stays correct (never starves) by
 	// listing every tenant.
 	AlertFeedbackTenants func(context.Context) ([]uuid.UUID, error)
+	// ManagedThreatContentEngine is the WP3 managed (curated)
+	// threat-content producer. main() runs its bounded refresh on the
+	// leader only (elector.RunIfLeader) so ingestion + signed-bundle
+	// build happen once centrally for the whole fleet (amortized across
+	// all tenants), never per replica or per tenant. Always non-nil.
+	ManagedThreatContentEngine *threatfeed.Engine
+	// ManagedThreatContentInterval is the resolved bounded refresh
+	// cadence (MANAGED_THREAT_CONTENT_REFRESH_INTERVAL).
+	ManagedThreatContentInterval time.Duration
+	// ManagedThreatContentEnabled mirrors the kill switch
+	// (MANAGED_THREAT_CONTENT_ENABLED) for the leader-loop boot decision.
+	ManagedThreatContentEnabled bool
+	// WorkShard is the active/active tenant-shard work distributor (WP2).
+	// Always non-nil. main() Starts it (every replica registers + leases
+	// the shards it owns) and Stops it on shutdown for a clean handoff;
+	// the per-tenant background jobs that used to be leader-gated consult
+	// its ownership instead, so they spread across replicas with exactly
+	// one worker per tenant. A single-replica deployment owns every shard
+	// and behaves identically to the old leader path.
+	WorkShard *workshard.Distributor
 }
 
 // hibernationActivityLister adapts the tenant repository's
@@ -1189,6 +1326,35 @@ func (l retroTenantLister) ListRetroHuntTenants(ctx context.Context) ([]uuid.UUI
 	out := make([]uuid.UUID, 0, len(acts))
 	for _, a := range acts {
 		out = append(out, a.ID)
+	}
+	return out, nil
+}
+
+// workshardActivityFilter gates a TenantActivitySource on shard
+// ownership so a per-tenant background sweep runs active/active: it
+// returns only the (id, last_active_at) rows for tenants this worker
+// currently owns. Wrapping the activity source — rather than only the
+// fallback tenant lister — is what makes the dormancy-swept path
+// (alert.Feedback's prod configuration) ownership-aware, since that path
+// consults the activity source directly. The distributor fails closed
+// (owns nothing until its first assignment cycle completes), so a
+// tenant is never tuned by two workers at once; a single-replica
+// deployment owns every shard, leaving the projection unfiltered.
+type workshardActivityFilter struct {
+	inner alert.TenantActivitySource
+	owner *workshard.Distributor
+}
+
+func (f workshardActivityFilter) ListTenantActivity(ctx context.Context) ([]repository.TenantActivity, error) {
+	acts, err := f.inner.ListTenantActivity(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := acts[:0]
+	for _, a := range acts {
+		if f.owner.Owns(a.ID) {
+			out = append(out, a)
+		}
 	}
 	return out, nil
 }
@@ -1309,6 +1475,18 @@ func buildRouter(
 	store := postgres.NewStoreWithPool(pool)
 
 	tenantRepo := store.NewTenantRepository()
+
+	// Active/active tenant-shard work distributor (WP2). Constructed
+	// here so the leader-gated per-tenant jobs below can be re-gated on
+	// shard ownership instead of single-leader election; main() owns its
+	// Start/Stop lifecycle. Defaults (1024 shards, 20s lease, 5s cycle)
+	// keep per-replica cost to a bounded handful of queries per cycle
+	// regardless of tenant count, and a single replica owns every shard
+	// so small deployments behave exactly as before at near-zero cost.
+	workShard := workshard.New(
+		store.NewWorkShardRepository(),
+		workshard.WithLogger(logger.With(slog.String("component", "workshard"))),
+	)
 
 	// Per-tenant activity recorder. This is the writer that makes the
 	// dormancy story real: it advances tenants.last_active_at from the
@@ -1460,6 +1638,11 @@ func buildRouter(
 		dlp.WithBlockedApps(dlpReviewRepo))
 	browserPolicyRepo := store.NewBrowserPolicyRepository()
 	dataClassificationRepo := store.NewDataClassificationRepository()
+	// WP4: DLP OCR/IDM control-plane state (protected-document
+	// fingerprint sets + OCR/IDM config). Stores only fingerprints and
+	// configuration, never raw protected-document contents.
+	dlpIDMRepo := store.NewDLPIDMRepository()
+	dlpIDMSvc := dlpidm.New(dlpIDMRepo, logger)
 
 	tenantSvc := tenant.New(tenantRepo, auditRepo, logger)
 	siteSvc := site.New(siteRepo, auditRepo, logger)
@@ -1967,7 +2150,15 @@ func buildRouter(
 	// sweep_tenants_visited{job="alert_feedback_tuning"}. tenantRepo
 	// supplies the cheap (id, last_active_at) projection.
 	alertFeedbackSweep := tenancy.NewTieredSweep("alert_feedback_tuning", tenancy.DefaultPlanner(), sweepObs)
-	alertFeedback.WithDormancySweep(alertFeedbackSweep, tenantRepo)
+	// Gate the activity-tiered sweep on shard ownership so the tuning
+	// loop runs active/active (each tenant tuned by exactly one live
+	// worker) instead of leader-only. The filter wraps tenantRepo's cheap
+	// (id, last_active_at) projection and drops tenants this worker does
+	// not currently own, so the TieredSweep still buckets by activity but
+	// only over this replica's share. A single replica owns every shard,
+	// so the projection is unfiltered and behaviour is unchanged.
+	alertFeedback.WithDormancySweep(alertFeedbackSweep,
+		workshardActivityFilter{inner: tenantRepo, owner: workShard})
 	// NOTE: baseline.NewService(baselineRepo) is intentionally
 	// NOT constructed here. The Service / Detector pair is
 	// wired by the telemetry consumer (future block) once the
@@ -2165,6 +2356,22 @@ func buildRouter(
 	complianceHandler := handler.NewComplianceHandler(
 		compliance.NewReportService(store.NewComplianceReportRepository(), logger),
 		handler.WithEvidenceAutomation(evidenceSvc, evidenceScheduler, rbacSvc))
+	// WP5 Digital Experience Monitoring: edge probe ingest + per-tenant
+	// experience scoring + degradation alerting (reuses alertRouter for
+	// emit/list). The retention sweep is leader-gated in run() so a
+	// multi-replica deployment prunes raw results / score samples exactly
+	// once per interval instead of once per replica.
+	demService, err := dem.NewService(
+		postgres.NewDEMRepository(store), alertRouter, dem.DefaultConfig(),
+		dem.WithLogger(logger))
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("dem service: %w", err)
+	}
+	demHandler := handler.NewDEMHandler(demService, logger)
+	demScheduler, err := dem.NewScheduler(demService, dem.WithSchedulerLogger(logger))
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("dem scheduler: %w", err)
+	}
 	playbookEngine := playbook.NewEngine(
 		store.NewPlaybookRepository(),
 		store.NewPlaybookExecutionRepository(),
@@ -2218,6 +2425,48 @@ func buildRouter(
 		logger,
 	)
 	oidcHandler := handler.NewOIDCHandler(idpConfigRepo, oidcSvc, cfg.MobileAuth.MaxProvidersPerTenant)
+
+	// --- Continuous compliance evidence wiring (WP6) -----------------
+	// complianceauto runs ALONGSIDE the point-in-time compliance
+	// reports above. It continuously evaluates a SOC2 / ISO 27001
+	// control catalog against REAL platform state (policy-graph
+	// default-deny, RLS tenant isolation, identity federation, policy
+	// bundle signing + key rotation, audit trail, data residency /
+	// retention), persisting per-control pass/fail with evidence
+	// references and serving on-demand framework-mapped evidence packs.
+	// The managed defaults below mean an SME tenant gets a correct
+	// posture with zero configuration. The collection sweep is bounded,
+	// read-mostly, leader-gated, and launched by run().
+	complianceAutoRepo := store.NewComplianceAutoRepository()
+	complianceAutoSource := complianceauto.NewPlatformAdapter(
+		tenantRepo,
+		policyRepo,
+		policyKeyRepo,
+		idpConfigRepo,
+		auditRepo,
+		// The repository doubles as the live RLS probe: the adapter
+		// confirms tenant isolation by reading the effective query role's
+		// attributes from pg_roles (must be neither superuser nor
+		// BYPASSRLS) rather than trusting the app-role-presence fallback.
+		complianceAutoRepo,
+		complianceauto.ManagedDefaults{
+			// Fallback only — used until the live RLS probe above
+			// succeeds (or if the probe is ever unwired).
+			RLSEnforced:      cfg.Postgres.AppRole != "",
+			EncryptionAtRest: cfg.Policy.KeyWrapMasterB64 != "" || cfg.Policy.KeyWrapMasterFile != "",
+			// Derive the encryption-in-transit verdict from the real
+			// control-plane sslmode instead of a hardcoded pass, so the
+			// control genuinely fails in a plaintext deployment.
+			PostgresSSLMode: cfg.Postgres.SSLMode,
+		},
+		nil,
+	)
+	complianceAutoEngine := complianceauto.NewEngine(
+		complianceAutoSource, complianceAutoRepo, complianceauto.Config{Logger: logger})
+	complianceAutoHandler := handler.NewComplianceAutoHandler(
+		complianceAutoEngine,
+		handler.WithComplianceAutoAuthorizer(rbacSvc),
+	)
 	// WS-2: the public mobile native-SSO token / refresh endpoints
 	// bypass the authenticated chain (the agent has no SNG session
 	// yet), so the RecordActivity middleware never sees them. Record a
@@ -2366,6 +2615,63 @@ func buildRouter(
 	// conditional, gate this construction on feedMgr != nil so a typed-nil
 	// never reaches the interface parameter.
 	threatFeedHandler := handler.NewThreatFeedHandler(feedMgr, rbacSvc)
+
+	// --- WP3: managed threat-content ingestion -----------------------
+	// A NEW managed (curated) threat-content producer that runs ALONGSIDE
+	// the operator-configured threatintel pipeline. It ingests built-in
+	// reputable open feeds (domain/IP/URL/hash), normalizes + deduplicates
+	// + scores + expires indicators, and persists a signed, versioned
+	// bundle distributed to ALL tenants by default with zero per-tenant
+	// config (no-ops). Default-ON with a kill switch
+	// (MANAGED_THREAT_CONTENT_ENABLED). Ingestion + bundle build run
+	// centrally on the leader only (scheduled in main, leader-gated), so
+	// the per-tenant cost is zero and upstreams are not hammered N-fold.
+	// The posture API reads the persisted bundle + ingest state from the
+	// repository, so it is correct on every replica (not just the leader).
+	tfCfg := threatfeed.LoadConfig(os.Getenv)
+	tfRepo := store.NewThreatFeedRepository()
+	tfSigner, err := managedThreatContentSigner(tfCfg.SigningKeyHex, logger)
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("managed threat-content signer: %w", err)
+	}
+	tfFeeds := threatfeed.DefaultFeeds(&http.Client{Timeout: tfCfg.HTTPTimeout}, tfCfg.MaxFeedBytes)
+	managedThreatContentEngine, err := threatfeed.NewEngine(tfCfg, tfFeeds, tfSigner, tfRepo,
+		threatfeed.WithLogger(logger))
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("build managed threat-content engine: %w", err)
+	}
+	managedThreatContentHandler := handler.NewManagedThreatContentHandler(tfRepo, managedThreatContentEngine, rbacSvc)
+
+	// --- WP1: Application-ID signature catalog ------------------------
+	// Operator/SaaS-managed, versioned-in-Postgres, Ed25519-signed
+	// application-signature catalog distributed to tenants as a signed
+	// bundle (mirrors the threat-intel bundle distribution). The catalog
+	// is fleet-wide — there is no per-tenant configuration (no-ops) — so
+	// tenants PULL the current signed bundle from the tenant-scoped read
+	// endpoint and no NATS publisher is wired here (pull-only default).
+	appIDSigner, err := appIDCatalogSigner(os.Getenv("APPID_CATALOG_SIGNING_KEY_HEX"), logger)
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("control: appid catalog signer: %w", err)
+	}
+	appIDSvc, err := appidsvc.New(store.NewAppIDCatalogRepository(), appIDSigner, appidsvc.WithLogger(logger))
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("control: appid catalog service: %w", err)
+	}
+	// Publish the embedded seed catalog as signed version 1 on first
+	// boot. This runs in the background with its own timeout so a slow
+	// or briefly-unavailable database never blocks control-plane
+	// startup; the monotonic-serial unique constraint makes concurrent
+	// seeds across replicas safe (losers observe ErrConflict, which
+	// SeedIfEmpty swallows).
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := appIDSvc.SeedIfEmpty(ctx); err != nil {
+			logger.Error("appid: seeding catalog on boot failed",
+				slog.String("error", err.Error()))
+		}
+	}()
+	appIDHandler := handler.NewAppIDHandler(appIDSvc, rbacSvc)
 
 	// --- WORKSTREAM 11: cross-region tenant migration -----------------
 	// The RegionMigrator drives the resumable migration state machine
@@ -2580,32 +2886,37 @@ func buildRouter(
 			}
 			return h
 		}(),
-		PolicyTemplates:   handler.NewPolicyTemplateHandler(policyTemplateSvc, handler.WithPolicyTemplateAuthorizer(rbacSvc)),
-		MSP:               handler.NewMSPHandler(mspRepo, bulkSvc, brandingResolver, rbacSvc),
-		AI:                aiHandler,
-		SCIM:              handler.NewSCIMHandler(scimSvc),
-		Compliance:        complianceHandler,
-		Playbook:          playbookHandler,
-		Troubleshoot:      troubleshootHandler,
-		OIDC:              oidcHandler,
-		AdminSSO:          adminSSOHandler,
-		IAMCore:           iamCoreValidator,
-		IAMCoreTenant:     iamCoreTenantResolver,
-		TenantRateLimiter: tenantRateLimiter,
-		AuthBruteForce:    authBruteForce,
-		ActivityRecorder:  activityObs,
-		Mobile:            handler.NewMobileHandler(identitySvc),
-		Metering:          meteringHandler,
-		PoP:               popHandler,
-		ThreatFeed:        threatFeedHandler,
-		Sandbox:           handler.NewSandboxHandler(sandboxSvc),
-		RBI:               handler.NewRBIHandler(rbiSvc),
-		DLP:               handler.NewDLPHandler(dlpSvc),
-		DLPReview:         handler.NewDLPReviewHandler(dlpReviewSvc),
-		Rollout:           handler.NewRolloutHandler(rolloutSvc, handler.WithRolloutAuthorizer(rbacSvc)),
-		Browser:           handler.NewBrowserHandler(browserSvc),
-		Terraform:         handler.NewTerraformHandler(terraformProvider),
-		APIKeyLookup:      apiKeySvc,
+		PolicyTemplates:      handler.NewPolicyTemplateHandler(policyTemplateSvc, handler.WithPolicyTemplateAuthorizer(rbacSvc)),
+		MSP:                  handler.NewMSPHandler(mspRepo, bulkSvc, brandingResolver, rbacSvc),
+		AI:                   aiHandler,
+		SCIM:                 handler.NewSCIMHandler(scimSvc),
+		Compliance:           complianceHandler,
+		ComplianceAuto:       complianceAutoHandler,
+		Playbook:             playbookHandler,
+		Troubleshoot:         troubleshootHandler,
+		OIDC:                 oidcHandler,
+		AdminSSO:             adminSSOHandler,
+		IAMCore:              iamCoreValidator,
+		IAMCoreTenant:        iamCoreTenantResolver,
+		TenantRateLimiter:    tenantRateLimiter,
+		AuthBruteForce:       authBruteForce,
+		ActivityRecorder:     activityObs,
+		Mobile:               handler.NewMobileHandler(identitySvc),
+		Metering:             meteringHandler,
+		PoP:                  popHandler,
+		ThreatFeed:           threatFeedHandler,
+		ManagedThreatContent: managedThreatContentHandler,
+		AppID:                appIDHandler,
+		Sandbox:              handler.NewSandboxHandler(sandboxSvc),
+		RBI:                  handler.NewRBIHandler(rbiSvc),
+		DEM:                  demHandler,
+		DLP:                  handler.NewDLPHandler(dlpSvc),
+		DLPReview:            handler.NewDLPReviewHandler(dlpReviewSvc),
+		DLPIDM:               handler.NewDLPIDMHandler(dlpIDMSvc),
+		Rollout:              handler.NewRolloutHandler(rolloutSvc, handler.WithRolloutAuthorizer(rbacSvc)),
+		Browser:              handler.NewBrowserHandler(browserSvc),
+		Terraform:            handler.NewTerraformHandler(terraformProvider),
+		APIKeyLookup:         apiKeySvc,
 		// Device kill-switch for stateless mobile session JWTs: a
 		// token bound to a suspended/deleted device is refused by the
 		// auth middleware on every endpoint, not just self-service.
@@ -2652,40 +2963,46 @@ func buildRouter(
 	}
 
 	return routerComponents{
-		Router:                 router,
-		WebhookWorker:          webhookWorker,
-		IntegrationWorker:      integrationWorker,
-		AppRegistry:            appRegHandler,
-		AppSyncer:              appSyncer,
-		PolicySim:              policySimHandler,
-		PolicyRec:              policyRecHandler,
-		PolicyRecEngine:        policyRecEngine,
-		AI:                     aiSvc,
-		Metering:               meteringSvc,
-		PoP:                    popSvc,
-		RegionMigrator:         tenantMigrator,
-		EvidenceScheduler:      evidenceScheduler,
-		FeedManager:            feedMgr,
-		AppNoOpsEngine:         appNoOpsEngine,
-		Recompiler:             recompiler,
-		DLPReviewRecompiler:    dlpReviewRecompiler,
-		SampleRateResolver:     sampleRateResolver,
-		IDPSyncService:         idpSyncSvc,
-		DLPReviewService:       dlpReviewSvc,
-		ActivityRecorder:       activityRecorder,
-		TenantRepo:             tenantRepo,
-		RolloutAutopilot:       rolloutAutopilot,
-		RolloutMonitorMetrics:  rolloutMonitorMetrics,
-		MarginAutopilot:        marginAutopilot,
-		AIInferencePool:        aiInferencePool,
-		HibernationRegistry:    hibRegistry,
-		HibernationSyncer:      hibSyncer,
-		HibernationCoordinator: hibCoordinator,
-		HibernationController:  hibController,
-		HibernationMetrics:     hibMetrics,
-		TierActivityLister:     tenantRepo,
-		AlertFeedback:          alertFeedback,
-		AlertFeedbackTenants:   idpTenantSource{activity: tenantRepo}.ListTenants,
+		Router:                       router,
+		WebhookWorker:                webhookWorker,
+		IntegrationWorker:            integrationWorker,
+		AppRegistry:                  appRegHandler,
+		AppSyncer:                    appSyncer,
+		PolicySim:                    policySimHandler,
+		PolicyRec:                    policyRecHandler,
+		PolicyRecEngine:              policyRecEngine,
+		AI:                           aiSvc,
+		Metering:                     meteringSvc,
+		PoP:                          popSvc,
+		RegionMigrator:               tenantMigrator,
+		EvidenceScheduler:            evidenceScheduler,
+		DEMScheduler:                 demScheduler,
+		ComplianceAutoEngine:         complianceAutoEngine,
+		FeedManager:                  feedMgr,
+		AppNoOpsEngine:               appNoOpsEngine,
+		Recompiler:                   recompiler,
+		DLPReviewRecompiler:          dlpReviewRecompiler,
+		SampleRateResolver:           sampleRateResolver,
+		IDPSyncService:               idpSyncSvc,
+		DLPReviewService:             dlpReviewSvc,
+		ActivityRecorder:             activityRecorder,
+		TenantRepo:                   tenantRepo,
+		RolloutAutopilot:             rolloutAutopilot,
+		RolloutMonitorMetrics:        rolloutMonitorMetrics,
+		MarginAutopilot:              marginAutopilot,
+		AIInferencePool:              aiInferencePool,
+		HibernationRegistry:          hibRegistry,
+		HibernationSyncer:            hibSyncer,
+		HibernationCoordinator:       hibCoordinator,
+		HibernationController:        hibController,
+		HibernationMetrics:           hibMetrics,
+		TierActivityLister:           tenantRepo,
+		AlertFeedback:                alertFeedback,
+		AlertFeedbackTenants:         idpTenantSource{activity: tenantRepo}.ListTenants,
+		ManagedThreatContentEngine:   managedThreatContentEngine,
+		ManagedThreatContentInterval: tfCfg.RefreshInterval,
+		ManagedThreatContentEnabled:  tfCfg.Enabled,
+		WorkShard:                    workShard,
 	}, nil
 }
 
@@ -3904,6 +4221,56 @@ func threatIntelSigner(signingKeyHex string, logger *slog.Logger) (*threatintel.
 		return nil, fmt.Errorf("threatintel signing key: %w", err)
 	}
 	logger.Info("threatintel: signing key loaded from configuration")
+	return signer, nil
+}
+
+// managedThreatContentSigner builds the Ed25519 signer for the WP3
+// managed threat-content bundle from configured key material, or falls
+// back to an ephemeral key with a loud warning when unset. An ephemeral
+// key only verifies within this process lifetime, which is acceptable
+// for dev/test boot but must be set in production so a freshly-elected
+// leader's bundle verifies against the pinned edge key across restarts.
+func managedThreatContentSigner(signingKeyHex string, logger *slog.Logger) (*threatfeed.Signer, error) {
+	raw := strings.TrimSpace(signingKeyHex)
+	if raw == "" {
+		logger.Warn("threatfeed: no signing key configured; generating an EPHEMERAL key — published bundles will not verify against a pinned edge key across restarts",
+			slog.String("env", threatfeed.EnvSigningKeyHex))
+		return threatfeed.GenerateSigner()
+	}
+	key, err := hex.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode %s: %w", threatfeed.EnvSigningKeyHex, err)
+	}
+	signer, err := threatfeed.NewSigner(key)
+	if err != nil {
+		return nil, fmt.Errorf("threatfeed signing key: %w", err)
+	}
+	logger.Info("threatfeed: signing key loaded from configuration")
+	return signer, nil
+}
+
+// appIDCatalogSigner builds the Ed25519 signer for the Application-ID
+// catalog bundle from configured key material, or falls back to an
+// ephemeral key with a loud warning when unset. Mirrors
+// threatIntelSigner: edges pin the catalog public key, so an ephemeral
+// key only verifies within this process lifetime — acceptable for
+// dev/test boot, never for a real fleet.
+func appIDCatalogSigner(signingKeyHex string, logger *slog.Logger) (*appidsvc.Signer, error) {
+	raw := strings.TrimSpace(signingKeyHex)
+	if raw == "" {
+		logger.Warn("appid: no signing key configured; generating an EPHEMERAL key — published catalog bundles will not verify against a pinned edge key across restarts",
+			slog.String("env", "APPID_CATALOG_SIGNING_KEY_HEX"))
+		return appidsvc.GenerateSigner()
+	}
+	key, err := hex.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode APPID_CATALOG_SIGNING_KEY_HEX: %w", err)
+	}
+	signer, err := appidsvc.NewSigner(key)
+	if err != nil {
+		return nil, fmt.Errorf("appid signing key: %w", err)
+	}
+	logger.Info("appid: signing key loaded from configuration")
 	return signer, nil
 }
 

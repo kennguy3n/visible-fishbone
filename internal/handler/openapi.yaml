@@ -54,6 +54,18 @@ tags:
       code-defined; preview renders the composed graph without
       persisting, and apply idempotently stores it as the tenant's
       active baseline (one row per tenant).
+  - name: appid
+    description: |
+      Application-ID signature catalog. A fleet-wide, versioned,
+      Ed25519-signed catalog of L7 application signatures (TLS SNI /
+      HTTP host suffixes, JA3 hints, bounded byte-probes, port /
+      transport modifiers) that the data plane loads to identify
+      applications beyond the hard-coded protocol set. The catalog is
+      centrally managed (no per-tenant configuration — no-ops):
+      tenants PULL the current signed bundle from a tenant-scoped read
+      endpoint and verify it against the pinned public key, while
+      platform operators publish new versions and inspect history via
+      the platform-scoped admin routes.
   - name: pops
     description: |
       Cloud PoP (Point-of-Presence) service. A PoP is a shared,
@@ -64,6 +76,38 @@ tags:
       (`pops:write` / `pops:read`), and `GET /pops` is public so a
       not-yet-enrolled client can bootstrap. The per-tenant override
       route is tenant-scoped (RLS on `tenant_pop_assignments`).
+  - name: dem
+    description: |
+      Digital Experience Monitoring (DEM). Edge/agent runs cheap,
+      bounded synthetic probes (DNS / TCP / HTTP(S)) against a small
+      set of critical SaaS targets and uploads structured results; the
+      control plane rolls them into per-tenant, per-target experience
+      scores (availability + latency composite, 0–100) over rolling
+      windows, detects degradation against an EWMA baseline, and raises
+      alerts. Every tenant gets a managed default target catalog so an
+      SME configures nothing; a tenant may add custom targets or
+      disable a default by reusing its `target_key`.
+  - name: threat-content
+    description: |
+      Managed (curated) threat content. A NEW producer alongside the
+      operator-configured threat-intel feeds: SNG ingests a built-in
+      set of reputable open feeds (domain/IP/URL/hash), then
+      normalizes, deduplicates, scores, and expires the indicators
+      centrally before signing and versioning a single content bundle
+      distributed to ALL tenants by default with zero per-tenant
+      configuration (no-ops). The per-tenant posture route is a
+      read-only view of the fleet-wide bundle a tenant receives; the
+      system-scoped refresh trigger is platform-gated
+      (`threatcontent:write`).
+  - name: compliance-auto
+    description: |
+      Continuous compliance evidence (WP6). Maps real platform state
+      (policy-graph default-deny, RLS tenant isolation, identity
+      federation, policy bundle signing + key rotation, audit trail,
+      data residency / retention) to SOC 2 / ISO 27001 controls. A
+      leader-gated, bounded background sweep evaluates each control to
+      pass / fail / not-applicable with an evidence reference; packs are
+      exported framework-mapped (JSON or CSV) on demand.
 paths:
   /tenants:
     post:
@@ -3658,6 +3702,431 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/AppliedPolicyTemplate" }
         "404": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/dem/targets:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+    get:
+      tags: [dem]
+      operationId: listDEMTargets
+      summary: List the tenant's effective DEM probe targets
+      description: |
+        The effective set is the managed default catalog overlaid with
+        the tenant's custom targets (an enabled custom row overrides or
+        adds by `target_key`; a disabled row removes a default). This is
+        what an edge agent should probe. Managed defaults carry
+        `managed: true` and have no `id`.
+      responses:
+        "200":
+          description: effective target list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/DEMTarget" }
+    post:
+      tags: [dem]
+      operationId: createDEMTarget
+      summary: Create a custom DEM probe target
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DEMTargetRequest" }
+      responses:
+        "201":
+          description: created target
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DEMTarget" }
+        "400": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/dem/targets/{target_id}:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+      - name: target_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    get:
+      tags: [dem]
+      operationId: getDEMTarget
+      summary: Fetch a single custom DEM target
+      responses:
+        "200":
+          description: target
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DEMTarget" }
+        "404": { $ref: "#/components/responses/Error" }
+    put:
+      tags: [dem]
+      operationId: updateDEMTarget
+      summary: Update a custom DEM target
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DEMTargetRequest" }
+      responses:
+        "200":
+          description: updated target
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DEMTarget" }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+    delete:
+      tags: [dem]
+      operationId: deleteDEMTarget
+      summary: Delete a custom DEM target
+      responses:
+        "204": { description: deleted }
+        "404": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/dem/results:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+    post:
+      tags: [dem]
+      operationId: ingestDEMResults
+      summary: Ingest a batch of edge probe results
+      description: |
+        Edge/agent uploads a batch of synthetic probe results. The
+        service stores the raw results durably and synchronously
+        recomputes the rolling experience score for each distinct
+        target in the batch, returning the freshly computed scores.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/DEMProbeResultBatch" }
+      responses:
+        "202":
+          description: results accepted, scores recomputed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/DEMIngestResult" }
+        "400": { $ref: "#/components/responses/Error" }
+        "429": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/dem/scores:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+    get:
+      tags: [dem]
+      operationId: listLatestDEMScores
+      summary: Latest experience score per target
+      responses:
+        "200":
+          description: latest score per target
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/DEMExperienceScore" }
+  /tenants/{tenant_id}/dem/scores/timeseries:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+    get:
+      tags: [dem]
+      operationId: listDEMScoreTimeseries
+      summary: Experience score timeseries
+      parameters:
+        - name: target_key
+          in: query
+          description: Filter by target key (repeatable).
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string }
+        - name: since
+          in: query
+          description: Only scores with created_at at/after this RFC3339 time.
+          schema: { type: string, format: date-time }
+        - name: until
+          in: query
+          description: Only scores with created_at at/before this RFC3339 time.
+          schema: { type: string, format: date-time }
+        - name: order
+          in: query
+          description: Sort order by created_at; defaults to desc.
+          schema: { type: string, enum: [asc, desc] }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: page of score samples
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/DEMExperienceScore" }
+                  next_cursor: { type: string }
+  /tenants/{tenant_id}/dem/alerts:
+    parameters:
+      - $ref: "#/components/parameters/TenantPathID"
+    get:
+      tags: [dem]
+      operationId: listDEMAlerts
+      summary: List DEM degradation alerts for the tenant
+      parameters:
+        - name: state
+          in: query
+          description: Filter by alert state (repeatable).
+          style: form
+          explode: true
+          schema:
+            type: array
+            items: { type: string, enum: [open, acknowledged, resolved, suppressed] }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200 }
+        - name: cursor
+          in: query
+          schema: { type: string }
+      responses:
+        "200":
+          description: page of DEM alerts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: "#/components/schemas/Alert" }
+                  next_cursor: { type: string }
+  /tenants/{tenant_id}/compliance-auto/posture:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [compliance-auto]
+      operationId: getComplianceAutoPosture
+      summary: View continuous compliance posture
+      description: |
+        Returns the tenant's latest evaluated posture across all mapped
+        frameworks (or a single framework when `framework` is supplied):
+        per-control pass / fail / not-applicable with the evidence
+        reference that backs each verdict.
+      parameters:
+        - name: framework
+          in: query
+          required: false
+          schema: { type: string, enum: [SOC2, ISO_27001] }
+          description: Restrict the posture to a single framework.
+      responses:
+        "200":
+          description: The tenant's current compliance posture.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ComplianceAutoPosture" }
+        "400": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/compliance-auto/collect:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    post:
+      tags: [compliance-auto]
+      operationId: collectComplianceAutoEvidence
+      summary: Trigger an on-demand evidence collection
+      description: |
+        Runs an immediate evaluation sweep for the tenant — the same
+        work the scheduled background loop performs fleet-wide — and
+        returns the freshly computed posture. Read-only against platform
+        state; persists the resulting control status and evidence.
+      responses:
+        "201":
+          description: The freshly evaluated compliance posture.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ComplianceAutoPosture" }
+        "400": { $ref: "#/components/responses/Error" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/compliance-auto/evidence-pack:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [compliance-auto]
+      operationId: exportComplianceAutoEvidencePack
+      summary: Export a framework-mapped evidence pack
+      description: |
+        Builds an on-demand, framework-mapped evidence pack from the
+        tenant's stored posture, as JSON (default) or CSV. Every control
+        row carries its verdict, evidence summary, source subsystem,
+        observation time, and structured evidence detail.
+      parameters:
+        - name: framework
+          in: query
+          required: true
+          schema: { type: string, enum: [SOC2, ISO_27001] }
+          description: The framework to export.
+        - name: format
+          in: query
+          required: false
+          schema: { type: string, enum: [json, csv], default: json }
+          description: The export encoding.
+      responses:
+        "200":
+          description: The evidence pack.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ComplianceAutoEvidencePack" }
+            text/csv:
+              schema: { type: string }
+        "400": { $ref: "#/components/responses/Error" }
+        "404": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/appid/catalog/current:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [appid]
+      operationId: getTenantAppIDCatalogCurrent
+      summary: Current App-ID catalog version metadata
+      description: |
+        Returns metadata for the current (highest-serial) published
+        App-ID catalog version — serial, app count, schema version,
+        and the SHA-256 checksum of the signed payload — so an edge
+        can decide whether its cached bundle is stale without
+        downloading the full bundle. The catalog is fleet-wide; the
+        route is bound to the authenticated tenant only to keep the
+        pull path on the same isolation rails as other tenant APIs.
+      responses:
+        "200":
+          description: current catalog version metadata
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppIDCatalogVersion" }
+        "503":
+          description: |
+            catalog_unavailable — the catalog has not been published
+            yet (transient boot condition); a `Retry-After` header is
+            set and the edge should keep its last-good bundle and retry
+  /tenants/{tenant_id}/appid/catalog/bundle:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [appid]
+      operationId: getTenantAppIDCatalogBundle
+      summary: Current signed App-ID catalog bundle
+      description: |
+        Returns the current version metadata together with the
+        Ed25519-signed catalog bundle the edge verifies against the
+        pinned public key and loads into the data-plane matcher. The
+        signed payload is itself a self-contained catalog document, so
+        an edge can verify and load it without any further calls.
+      responses:
+        "200":
+          description: current version metadata + signed bundle envelope
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppIDCatalogBundle" }
+        "503":
+          description: |
+            catalog_unavailable — the catalog has not been published
+            yet (transient boot condition); a `Retry-After` header is
+            set and the edge should keep its last-good bundle and retry
+  /admin/appid/catalog/versions:
+    get:
+      tags: [admin, appid]
+      operationId: adminListAppIDCatalogVersions
+      summary: List App-ID catalog version history
+      description: |
+        Returns published catalog versions newest-first. Platform
+        admin only: the caller must present a platform-scoped
+        credential holding `appid:read` (or the platform wildcard); an
+        MSP- or tenant-scoped grant is rejected with 403.
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: page of catalog version metadata, newest-first
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppIDCatalogVersions" }
+        "401":
+          description: missing or unauthenticated credential
+        "403":
+          description: credential lacks the platform-scoped appid:read grant
+    post:
+      tags: [admin, appid]
+      operationId: adminPublishAppIDCatalog
+      summary: Publish (re-sign) the App-ID catalog as a new version
+      description: |
+        Signs and stores the current catalog content as a new
+        monotonic version (operator-triggered redistribution or key
+        rotation). The body is optional; an `{"note": "..."}` annotates
+        the version. Platform admin only: the caller must hold
+        `appid:publish` (or the platform wildcard); an MSP- or
+        tenant-scoped grant is rejected with 403.
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AppIDPublishRequest" }
+      responses:
+        "201":
+          description: the newly published catalog version metadata
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppIDCatalogVersion" }
+        "401":
+          description: missing or unauthenticated credential
+        "403":
+          description: credential lacks the platform-scoped appid:publish grant
+
+  /tenants/{tenant_id}/threat-content/posture:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [threat-content]
+      operationId: getManagedThreatContentPosture
+      summary: Get the managed threat-content posture for a tenant
+      description: >-
+        Returns the managed (curated) threat content the tenant
+        receives. The content is fleet-wide — identical for every
+        tenant by design (the no-ops managed model) — so the route is
+        tenant-scoped only for access control, not because the content
+        differs per tenant. Read from the persisted bundle + ingest
+        state, so it is correct on every replica (ingestion runs only
+        on the elected leader).
+      responses:
+        "200":
+          description: managed threat-content posture
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManagedThreatContentPosture" }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /threat-content/refresh:
+    post:
+      tags: [threat-content]
+      operationId: refreshManagedThreatContent
+      summary: Trigger a managed threat-content ingestion cycle
+      description: >-
+        System-scoped manual refresh of the managed threat-content
+        bundle. It produces fleet-wide content, so it requires the
+        platform-level `threatcontent:write` permission. Returns 409
+        when the kill switch (MANAGED_THREAT_CONTENT_ENABLED) is off.
+        Ingestion is idempotent and bounded; when the assembled content
+        is identical to the current bundle no new version is minted
+        (`unchanged: true`).
+      responses:
+        "200":
+          description: refresh result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManagedThreatContentRefreshResult" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
 
 components:
   securitySchemes:
@@ -3754,6 +4223,267 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/TenantMigration" }
   schemas:
+    ManagedThreatContentPosture:
+      type: object
+      description: >-
+        Read-only managed threat-content posture a tenant receives. The
+        bundle is fleet-wide (identical for every tenant by design).
+      required: [enabled, generated_at, bundle, sources]
+      properties:
+        enabled:
+          type: boolean
+          description: Kill-switch state; true when managed content is active.
+        generated_at:
+          type: string
+          format: date-time
+          description: When this posture view was assembled.
+        bundle:
+          nullable: true
+          description: Latest distributed bundle metadata, or null if none yet.
+          allOf:
+            - $ref: "#/components/schemas/ManagedThreatContentBundleSummary"
+        sources:
+          type: array
+          description: Per-feed ingestion health, sorted by name.
+          items: { $ref: "#/components/schemas/ManagedThreatContentSourceStatus" }
+    ManagedThreatContentBundleSummary:
+      type: object
+      description: Metadata for the latest signed, versioned content bundle.
+      required:
+        [serial, schema_version, generated_at, key_id, algorithm,
+         indicator_count, size_bytes, digest, counts_by_type]
+      properties:
+        serial:
+          type: integer
+          format: int64
+          description: Monotonic bundle version.
+        schema_version: { type: integer }
+        generated_at: { type: string, format: date-time }
+        key_id:
+          type: string
+          description: Identifier of the Ed25519 key the bundle is signed with.
+        algorithm:
+          type: string
+          description: Signature algorithm (ed25519).
+        indicator_count: { type: integer, format: int64 }
+        size_bytes:
+          type: integer
+          format: int64
+          description: Size of the signed envelope in bytes.
+        digest:
+          type: string
+          description: SHA-256 over the indicator set (stable content identity).
+        counts_by_type:
+          type: object
+          additionalProperties: { type: integer }
+          description: Indicator counts keyed by type (domain/ip/url/hash).
+    ManagedThreatContentSourceStatus:
+      type: object
+      description: Per-feed ingestion health row.
+      required:
+        [name, display_name, kind, weight, enabled, indicator_count,
+         consecutive_failures, stale]
+      properties:
+        name: { type: string }
+        display_name: { type: string }
+        kind:
+          type: string
+          description: Indicator kind the feed contributes.
+          enum: [domain, ip, url, hash, mixed]
+        weight:
+          type: number
+          format: double
+          description: Source trust weight used in corroboration scoring.
+        enabled: { type: boolean }
+        indicator_count: { type: integer, format: int64 }
+        last_success_at: { type: string, format: date-time }
+        last_attempt_at: { type: string, format: date-time }
+        last_error: { type: string }
+        consecutive_failures: { type: integer, format: int64 }
+        stale:
+          type: boolean
+          description: >-
+            True when the feed has never succeeded, is currently
+            failing, or its last success is older than the staleness
+            window.
+    ManagedThreatContentRefreshResult:
+      type: object
+      description: Outcome of a manual managed threat-content refresh.
+      required: [skipped, unchanged, degraded, serial, indicators, published, sources]
+      properties:
+        skipped:
+          type: boolean
+          description: True when the refresh was skipped (kill switch off).
+        unchanged:
+          type: boolean
+          description: >-
+            True when the assembled content matched the current bundle,
+            so no new version was minted.
+        degraded:
+          type: boolean
+          description: >-
+            True when the cycle kept serving the last good bundle because
+            it could not produce a complete fresh result (every upstream
+            down). Distinct from unchanged so monitoring can tell a healthy
+            no-change refresh from one silently serving stale content.
+        serial:
+          type: integer
+          format: int64
+          description: Version of the resulting (or current) bundle.
+        indicators:
+          type: integer
+          description: Total indicators in the assembled bundle.
+        published:
+          type: boolean
+          description: True when the bundle was distributed this cycle.
+        sources:
+          type: array
+          items: { $ref: "#/components/schemas/ManagedThreatContentRefreshSourceStat" }
+    ManagedThreatContentRefreshSourceStat:
+      type: object
+      description: Per-feed outcome of a manual refresh.
+      required: [source, indicators]
+      properties:
+        source: { type: string }
+        indicators: { type: integer }
+        not_modified:
+          type: boolean
+          description: True when the upstream returned 304 Not Modified.
+        used_cache:
+          type: boolean
+          description: True when last-known-good was reused (fetch/parse failed).
+        disabled:
+          type: boolean
+          description: >
+            True when the source is switched off in the registry and was
+            skipped this cycle (distinguishes a disabled feed from one that
+            ran but produced no indicators).
+        error: { type: string }
+    ComplianceAutoControl:
+      type: object
+      description: One control's evaluated status with its evidence reference.
+      properties:
+        control_id: { type: string, example: "CC6.1" }
+        framework: { type: string, enum: [SOC2, ISO_27001] }
+        title: { type: string }
+        statement: { type: string }
+        category: { type: string }
+        collector_id: { type: string, example: "policy_default_deny" }
+        status: { type: string, enum: [pass, fail, not_applicable] }
+        summary: { type: string }
+        source: { type: string, example: "policy_graph" }
+        observed_at: { type: string, format: date-time }
+        evidence:
+          type: object
+          additionalProperties: true
+          description: Structured facts backing the verdict (collector-specific).
+    ComplianceAutoFramework:
+      type: object
+      description: A tenant's posture for a single framework.
+      properties:
+        framework: { type: string, enum: [SOC2, ISO_27001] }
+        total: { type: integer }
+        pass: { type: integer }
+        fail: { type: integer }
+        not_applicable: { type: integer }
+        score_percent:
+          type: integer
+          description: Pass rate over in-scope (non-not-applicable) controls, 0-100.
+        controls:
+          type: array
+          items: { $ref: "#/components/schemas/ComplianceAutoControl" }
+    ComplianceAutoPosture:
+      type: object
+      description: A tenant's compliance posture across all mapped frameworks.
+      properties:
+        tenant_id: { type: string, format: uuid }
+        generated_at: { type: string, format: date-time }
+        frameworks:
+          type: array
+          items: { $ref: "#/components/schemas/ComplianceAutoFramework" }
+    ComplianceAutoEvidencePackControl:
+      type: object
+      description: One control row in an exported evidence pack.
+      properties:
+        control_id: { type: string }
+        framework: { type: string, enum: [SOC2, ISO_27001] }
+        title: { type: string }
+        statement: { type: string }
+        category: { type: string }
+        collector_id: { type: string }
+        status: { type: string, enum: [pass, fail, not_applicable] }
+        summary: { type: string }
+        source: { type: string }
+        observed_at: { type: string, format: date-time }
+        evidence:
+          type: object
+          additionalProperties: true
+    ComplianceAutoEvidencePack:
+      type: object
+      description: A framework-mapped, exportable evidence pack for a tenant.
+      properties:
+        tenant_id: { type: string, format: uuid }
+        framework: { type: string, enum: [SOC2, ISO_27001] }
+        generated_at: { type: string, format: date-time }
+        summary:
+          type: object
+          properties:
+            total: { type: integer }
+            pass: { type: integer }
+            fail: { type: integer }
+            not_applicable: { type: integer }
+        controls:
+          type: array
+          items: { $ref: "#/components/schemas/ComplianceAutoEvidencePackControl" }
+    AppIDCatalogVersion:
+      type: object
+      description: |
+        Metadata for one published App-ID catalog version. `serial` is
+        the monotonic version number (higher = newer); `checksum` is the
+        SHA-256 (hex) of the canonical signed payload.
+      properties:
+        serial: { type: integer, format: int64 }
+        schema_version: { type: integer }
+        app_count: { type: integer }
+        checksum: { type: string }
+        note: { type: string }
+        generated_at: { type: string, format: date-time }
+      required: [serial, schema_version, app_count, checksum]
+    AppIDSignedBundle:
+      type: object
+      description: |
+        An Ed25519-signed catalog envelope. `public_key`, `payload`,
+        and `signature` are base64-encoded; the payload is a canonical,
+        self-contained catalog document. A verifier checks `signature`
+        over `payload` with `public_key` (pinned at the edge) before
+        loading the catalog — fail-closed.
+      properties:
+        alg: { type: string, description: "signature algorithm (ed25519)" }
+        key_id: { type: string, description: "optional key identifier for rotation/pinning" }
+        public_key: { type: string, description: "base64-encoded Ed25519 public key (32 bytes)" }
+        payload: { type: string, description: "base64-encoded canonical catalog payload" }
+        signature: { type: string, description: "base64-encoded Ed25519 signature (64 bytes)" }
+      required: [alg, public_key, payload, signature]
+    AppIDCatalogBundle:
+      type: object
+      description: Current version metadata plus the signed bundle envelope.
+      properties:
+        version: { $ref: "#/components/schemas/AppIDCatalogVersion" }
+        bundle: { $ref: "#/components/schemas/AppIDSignedBundle" }
+      required: [version, bundle]
+    AppIDCatalogVersions:
+      type: object
+      description: A newest-first page of catalog version metadata.
+      properties:
+        versions:
+          type: array
+          items: { $ref: "#/components/schemas/AppIDCatalogVersion" }
+      required: [versions]
+    AppIDPublishRequest:
+      type: object
+      description: Optional annotation for a catalog publish request.
+      properties:
+        note: { type: string }
     PolicyTemplate:
       type: object
       description: |
@@ -5590,3 +6320,105 @@ components:
         override:
           type: boolean
           description: True for operator-pinned assignments the auto-rebalancer must not move.
+    DEMTarget:
+      type: object
+      description: |
+        An effective DEM probe target. Managed defaults carry
+        `managed: true` and have no `id`/`tenant_id`; custom targets
+        carry both and a tenant can override or disable a default by
+        reusing its `target_key`.
+      required: [target_key, name, probe_kind, address, enabled, interval_seconds, timeout_ms, managed]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        target_key: { type: string }
+        name: { type: string }
+        probe_kind: { type: string, enum: [dns, tcp, http, https] }
+        address: { type: string }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        enabled: { type: boolean }
+        interval_seconds: { type: integer, minimum: 10, maximum: 3600 }
+        timeout_ms: { type: integer, minimum: 100, maximum: 30000 }
+        managed: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+    DEMTargetRequest:
+      type: object
+      required: [target_key, name, probe_kind, address]
+      properties:
+        target_key: { type: string }
+        name: { type: string }
+        probe_kind: { type: string, enum: [dns, tcp, http, https] }
+        address: { type: string }
+        port: { type: integer, minimum: 1, maximum: 65535 }
+        enabled:
+          type: boolean
+          description: Defaults to true when omitted; send false to disable a managed default by reusing its target_key.
+        interval_seconds:
+          type: integer
+          minimum: 10
+          maximum: 3600
+          description: Probe cadence; defaults to 60 when omitted.
+        timeout_ms:
+          type: integer
+          minimum: 100
+          maximum: 30000
+          description: Per-probe timeout; defaults to 5000 when omitted.
+    DEMProbeResult:
+      type: object
+      description: |
+        A single synthetic probe observation from the edge. Timings are
+        milliseconds and populated only for the legs the probe ran.
+        `error_detail` is accepted but never persisted (privacy);
+        `observed_at_ms` is Unix epoch milliseconds.
+      required: [target_key, target_name, probe_kind, success, observed_at_ms]
+      properties:
+        target_key: { type: string }
+        target_name: { type: string }
+        probe_kind: { type: string, enum: [dns, tcp, http, https] }
+        success: { type: boolean }
+        dns_ms: { type: number, format: double }
+        tcp_ms: { type: number, format: double }
+        tls_ms: { type: number, format: double }
+        ttfb_ms: { type: number, format: double }
+        total_ms: { type: number, format: double }
+        http_status: { type: integer }
+        error_kind: { type: string, enum: [timeout, dns, connect, tls, http, config, internal] }
+        error_detail: { type: string }
+        observed_at_ms: { type: integer, format: int64 }
+    DEMProbeResultBatch:
+      type: object
+      required: [results]
+      properties:
+        results:
+          type: array
+          minItems: 1
+          items: { $ref: "#/components/schemas/DEMProbeResult" }
+    DEMExperienceScore:
+      type: object
+      description: |
+        A rolling-window experience score (0–100, higher is better)
+        composed from availability + latency for one target.
+      required: [id, tenant_id, target_key, target_name, score, availability, sample_count, window_seconds, window_start, window_end, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        tenant_id: { type: string, format: uuid }
+        target_key: { type: string }
+        target_name: { type: string }
+        score: { type: number, format: double }
+        availability: { type: number, format: double }
+        latency_p50_ms: { type: number, format: double }
+        latency_p95_ms: { type: number, format: double }
+        sample_count: { type: integer }
+        window_seconds: { type: integer }
+        window_start: { type: string, format: date-time }
+        window_end: { type: string, format: date-time }
+        created_at: { type: string, format: date-time }
+    DEMIngestResult:
+      type: object
+      required: [accepted, scores]
+      properties:
+        accepted: { type: integer, description: Number of raw results stored. }
+        scores:
+          type: array
+          items: { $ref: "#/components/schemas/DEMExperienceScore" }

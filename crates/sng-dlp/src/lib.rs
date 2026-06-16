@@ -72,8 +72,10 @@ pub mod edm;
 pub mod engine;
 pub mod error;
 pub mod fingerprint;
+pub mod idm;
 pub mod keccak;
 pub mod ml_classifier;
+pub mod ocr;
 pub mod policy;
 pub mod rules;
 pub mod validators;
@@ -97,9 +99,11 @@ pub use doc_classifier::{
 };
 pub use engine::{DlpEngine, DlpVerdict, VerdictDetails};
 pub use error::{DlpError, DlpErrorCode, DlpResult};
+pub use idm::{FingerprintParams, IdmIndex, IdmMatch, IndexedDocument, fingerprint_document};
 pub use ml_classifier::{
     DetectedEntity, EntityClass, MlNerDetector, ModelVerifier, NerModel, RegexNerFallback,
     SignedModel,
 };
+pub use ocr::{OcrLimits, OcrOutcome, OcrSkip, extract_image_text, extract_text_for_detection};
 pub use policy::{DlpPolicy, MAX_SUPPORTED_SCHEMA_VERSION};
 pub use rules::{DlpRule, PatternType, RuleAction, Severity};

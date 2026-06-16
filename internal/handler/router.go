@@ -42,16 +42,21 @@ type RouterDeps struct {
 	Rollout          *RolloutHandler
 	SCIM             *SCIMHandler
 	Compliance       *ComplianceHandler
-	Playbook         *PlaybookHandler
-	Troubleshoot     *TroubleshootHandler
-	OIDC             *OIDCHandler
-	Mobile           *MobileHandler
+	// ComplianceAuto, when set, exposes the continuous compliance
+	// evidence surface (WP6): live SOC2/ISO27001 posture + evidence
+	// pack export. Distinct from Compliance (point-in-time reports).
+	ComplianceAuto *ComplianceAutoHandler
+	Playbook       *PlaybookHandler
+	Troubleshoot   *TroubleshootHandler
+	OIDC           *OIDCHandler
+	Mobile         *MobileHandler
 	// AdminSSO, when set, exposes the public iam-core OAuth2 admin
 	// login + callback endpoints (Session 2A, Task 3).
 	AdminSSO     *AdminSSOHandler
 	Metering     *MeteringHandler
 	PoP          *PoPHandler
 	ThreatFeed   *ThreatFeedHandler
+	AppID        *AppIDHandler
 	Sandbox      *SandboxHandler
 	RBI          *RBIHandler
 	OpenAPISpec  *OpenAPIHandler
@@ -88,12 +93,25 @@ type RouterDeps struct {
 	Health           *Health
 	OpsHealth        *OpsHealthHandler
 	BulkDevice       *BulkDeviceHandler
+	// DEM exposes the Digital Experience Monitoring surface
+	// (probe ingest, experience scores, degradation alerts).
+	DEM *DEMHandler
 	// Metrics, when non-nil, installs the Prometheus HTTP
 	// instrumentation middleware (request count / duration /
 	// in-flight) at the top of the chain. Nil disables it (the
 	// middleware degrades to a transparent pass-through), so tests
 	// that don't care about metrics can leave it unset.
 	Metrics *metrics.Metrics
+	// ManagedThreatContent, when set, exposes the managed (curated)
+	// threat-content surface (WP3): a tenant-scoped read of the
+	// fleet-wide curated bundle a tenant receives and a system-scoped
+	// manual refresh trigger. Distinct from ThreatFeed, which serves
+	// the operator-configured ai feed-coverage view.
+	ManagedThreatContent *ManagedThreatContentHandler
+	// DLPIDM, when set, exposes the WP4 DLP OCR/IDM control-plane
+	// surface: protected-document fingerprint sets (Indexed Document
+	// Matching) and the OCR/IDM configuration + status.
+	DLPIDM *DLPIDMHandler
 }
 
 // NewRouter composes the full API mux + middleware chain.
@@ -210,6 +228,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	if deps.Compliance != nil {
 		deps.Compliance.Register(apiMux)
 	}
+	if deps.ComplianceAuto != nil {
+		deps.ComplianceAuto.Register(apiMux)
+	}
 	if deps.Playbook != nil {
 		deps.Playbook.Register(apiMux)
 	}
@@ -237,11 +258,23 @@ func NewRouter(deps RouterDeps) http.Handler {
 	if deps.ThreatFeed != nil {
 		deps.ThreatFeed.Register(apiMux)
 	}
+	if deps.AppID != nil {
+		deps.AppID.Register(apiMux)
+	}
 	if deps.Sandbox != nil {
 		deps.Sandbox.Register(apiMux)
 	}
 	if deps.RBI != nil {
 		deps.RBI.Register(apiMux)
+	}
+	if deps.DEM != nil {
+		deps.DEM.Register(apiMux)
+	}
+	if deps.ManagedThreatContent != nil {
+		deps.ManagedThreatContent.Register(apiMux)
+	}
+	if deps.DLPIDM != nil {
+		deps.DLPIDM.Register(apiMux)
 	}
 
 	authOpts := []middleware.AuthOption{}

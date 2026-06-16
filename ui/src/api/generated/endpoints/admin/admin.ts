@@ -29,10 +29,14 @@ import type {
 } from '@tanstack/react-query';
 
 import type {
+  AdminListAppIDCatalogVersionsParams,
   AdminListAppRegistry200,
   AdminListGlobalAuditLog200,
   AdminListGlobalAuditLogParams,
   AdminSyncAppRegistry200,
+  AppIDCatalogVersion,
+  AppIDCatalogVersions,
+  AppIDPublishRequest,
   AppRegistry,
   AppRegistryRequest
 } from '../../model';
@@ -479,6 +483,174 @@ export const useAdminSyncAppRegistry = <TError = void,
       > => {
 
       const mutationOptions = getAdminSyncAppRegistryMutationOptions(options);
+
+      return useMutation(mutationOptions, queryClient);
+    }
+    /**
+ * Returns published catalog versions newest-first. Platform
+admin only: the caller must present a platform-scoped
+credential holding `appid:read` (or the platform wildcard); an
+MSP- or tenant-scoped grant is rejected with 403.
+
+ * @summary List App-ID catalog version history
+ */
+export const adminListAppIDCatalogVersions = (
+    params?: AdminListAppIDCatalogVersionsParams,
+ options?: SecondParameter<typeof sngRequest>,signal?: AbortSignal
+) => {
+      
+      
+      return sngRequest<AppIDCatalogVersions>(
+      {url: `/admin/appid/catalog/versions`, method: 'GET',
+        params, signal
+    },
+      options);
+    }
+  
+
+
+
+export const getAdminListAppIDCatalogVersionsQueryKey = (params?: AdminListAppIDCatalogVersionsParams,) => {
+    return [
+    `/admin/appid/catalog/versions`, ...(params ? [params]: [])
+    ] as const;
+    }
+
+    
+export const getAdminListAppIDCatalogVersionsQueryOptions = <TData = Awaited<ReturnType<typeof adminListAppIDCatalogVersions>>, TError = void | void>(params?: AdminListAppIDCatalogVersionsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof adminListAppIDCatalogVersions>>, TError, TData>>, request?: SecondParameter<typeof sngRequest>}
+) => {
+
+const {query: queryOptions, request: requestOptions} = options ?? {};
+
+  const queryKey =  queryOptions?.queryKey ?? getAdminListAppIDCatalogVersionsQueryKey(params);
+
+  
+
+    const queryFn: QueryFunction<Awaited<ReturnType<typeof adminListAppIDCatalogVersions>>> = ({ signal }) => adminListAppIDCatalogVersions(params, requestOptions, signal);
+
+      
+
+      
+
+   return  { queryKey, queryFn, ...queryOptions} as UseQueryOptions<Awaited<ReturnType<typeof adminListAppIDCatalogVersions>>, TError, TData> & { queryKey: DataTag<QueryKey, TData> }
+}
+
+export type AdminListAppIDCatalogVersionsQueryResult = NonNullable<Awaited<ReturnType<typeof adminListAppIDCatalogVersions>>>
+export type AdminListAppIDCatalogVersionsQueryError = void | void
+
+
+export function useAdminListAppIDCatalogVersions<TData = Awaited<ReturnType<typeof adminListAppIDCatalogVersions>>, TError = void | void>(
+ params: undefined |  AdminListAppIDCatalogVersionsParams, options: { query:Partial<UseQueryOptions<Awaited<ReturnType<typeof adminListAppIDCatalogVersions>>, TError, TData>> & Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof adminListAppIDCatalogVersions>>,
+          TError,
+          Awaited<ReturnType<typeof adminListAppIDCatalogVersions>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient
+  ):  DefinedUseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> }
+export function useAdminListAppIDCatalogVersions<TData = Awaited<ReturnType<typeof adminListAppIDCatalogVersions>>, TError = void | void>(
+ params?: AdminListAppIDCatalogVersionsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof adminListAppIDCatalogVersions>>, TError, TData>> & Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof adminListAppIDCatalogVersions>>,
+          TError,
+          Awaited<ReturnType<typeof adminListAppIDCatalogVersions>>
+        > , 'initialData'
+      >, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> }
+export function useAdminListAppIDCatalogVersions<TData = Awaited<ReturnType<typeof adminListAppIDCatalogVersions>>, TError = void | void>(
+ params?: AdminListAppIDCatalogVersionsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof adminListAppIDCatalogVersions>>, TError, TData>>, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient
+  ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> }
+/**
+ * @summary List App-ID catalog version history
+ */
+
+export function useAdminListAppIDCatalogVersions<TData = Awaited<ReturnType<typeof adminListAppIDCatalogVersions>>, TError = void | void>(
+ params?: AdminListAppIDCatalogVersionsParams, options?: { query?:Partial<UseQueryOptions<Awaited<ReturnType<typeof adminListAppIDCatalogVersions>>, TError, TData>>, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient 
+ ):  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> } {
+
+  const queryOptions = getAdminListAppIDCatalogVersionsQueryOptions(params,options)
+
+  const query = useQuery(queryOptions, queryClient) as  UseQueryResult<TData, TError> & { queryKey: DataTag<QueryKey, TData> };
+
+  query.queryKey = queryOptions.queryKey ;
+
+  return query;
+}
+
+
+
+/**
+ * Signs and stores the current catalog content as a new
+monotonic version (operator-triggered redistribution or key
+rotation). The body is optional; an `{"note": "..."}` annotates
+the version. Platform admin only: the caller must hold
+`appid:publish` (or the platform wildcard); an MSP- or
+tenant-scoped grant is rejected with 403.
+
+ * @summary Publish (re-sign) the App-ID catalog as a new version
+ */
+export const adminPublishAppIDCatalog = (
+    appIDPublishRequest?: AppIDPublishRequest,
+ options?: SecondParameter<typeof sngRequest>,signal?: AbortSignal
+) => {
+      
+      
+      return sngRequest<AppIDCatalogVersion>(
+      {url: `/admin/appid/catalog/versions`, method: 'POST',
+      headers: {'Content-Type': 'application/json', },
+      data: appIDPublishRequest, signal
+    },
+      options);
+    }
+  
+
+
+export const getAdminPublishAppIDCatalogMutationOptions = <TError = void | void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof adminPublishAppIDCatalog>>, TError,{data: AppIDPublishRequest}, TContext>, request?: SecondParameter<typeof sngRequest>}
+): UseMutationOptions<Awaited<ReturnType<typeof adminPublishAppIDCatalog>>, TError,{data: AppIDPublishRequest}, TContext> => {
+
+const mutationKey = ['adminPublishAppIDCatalog'];
+const {mutation: mutationOptions, request: requestOptions} = options ?
+      options.mutation && 'mutationKey' in options.mutation && options.mutation.mutationKey ?
+      options
+      : {...options, mutation: {...options.mutation, mutationKey}}
+      : {mutation: { mutationKey, }, request: undefined};
+
+      
+
+
+      const mutationFn: MutationFunction<Awaited<ReturnType<typeof adminPublishAppIDCatalog>>, {data: AppIDPublishRequest}> = (props) => {
+          const {data} = props ?? {};
+
+          return  adminPublishAppIDCatalog(data,requestOptions)
+        }
+
+        
+
+
+  return  { mutationFn, ...mutationOptions }}
+
+    export type AdminPublishAppIDCatalogMutationResult = NonNullable<Awaited<ReturnType<typeof adminPublishAppIDCatalog>>>
+    export type AdminPublishAppIDCatalogMutationBody = AppIDPublishRequest
+    export type AdminPublishAppIDCatalogMutationError = void | void
+
+    /**
+ * @summary Publish (re-sign) the App-ID catalog as a new version
+ */
+export const useAdminPublishAppIDCatalog = <TError = void | void,
+    TContext = unknown>(options?: { mutation?:UseMutationOptions<Awaited<ReturnType<typeof adminPublishAppIDCatalog>>, TError,{data: AppIDPublishRequest}, TContext>, request?: SecondParameter<typeof sngRequest>}
+ , queryClient?: QueryClient): UseMutationResult<
+        Awaited<ReturnType<typeof adminPublishAppIDCatalog>>,
+        TError,
+        {data: AppIDPublishRequest},
+        TContext
+      > => {
+
+      const mutationOptions = getAdminPublishAppIDCatalogMutationOptions(options);
 
       return useMutation(mutationOptions, queryClient);
     }
