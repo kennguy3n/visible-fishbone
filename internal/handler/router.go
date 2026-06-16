@@ -101,6 +101,12 @@ type RouterDeps struct {
 	// middleware degrades to a transparent pass-through), so tests
 	// that don't care about metrics can leave it unset.
 	Metrics *metrics.Metrics
+	// ManagedThreatContent, when set, exposes the managed (curated)
+	// threat-content surface (WP3): a tenant-scoped read of the
+	// fleet-wide curated bundle a tenant receives and a system-scoped
+	// manual refresh trigger. Distinct from ThreatFeed, which serves
+	// the operator-configured ai feed-coverage view.
+	ManagedThreatContent *ManagedThreatContentHandler
 	// DLPIDM, when set, exposes the WP4 DLP OCR/IDM control-plane
 	// surface: protected-document fingerprint sets (Indexed Document
 	// Matching) and the OCR/IDM configuration + status.
@@ -259,6 +265,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.DEM != nil {
 		deps.DEM.Register(apiMux)
+	}
+	if deps.ManagedThreatContent != nil {
+		deps.ManagedThreatContent.Register(apiMux)
 	}
 	if deps.DLPIDM != nil {
 		deps.DLPIDM.Register(apiMux)
