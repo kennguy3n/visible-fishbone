@@ -1,11 +1,8 @@
 # Hibernation: a dormant trial that costs almost nothing, and wakes in seconds
 
-> **Post 3 of 11 — scale-to-zero (WS-3 + WS-4).** Persona: Maya, MSP platform
+> **Post 3 of 11 — scale-to-zero.** Persona: Maya, MSP platform
 > lead; Tom, CFO. Evidence: [`capacity-plan-5000/report.md`](../artifacts/capacity-plan-5000/report.md),
-> [`noops-metrics-snapshot.txt`](../artifacts/noops-metrics-snapshot.txt); migration
-> `068_tenant_hibernation`, PR [#222](https://github.com/kennguy3n/visible-fishbone/pull/222)
-> (hibernation), PR [#220](https://github.com/kennguy3n/visible-fishbone/pull/220)
-> (tier-aware sampling).
+> [`noops-metrics-snapshot.txt`](../artifacts/noops-metrics-snapshot.txt).
 
 Post 2 made dormant tenants *cheaper* by visiting them less. This post makes them
 nearly *free* by turning them off — and, just as important, turning them back on
@@ -14,13 +11,12 @@ out 4,000 free trials without the platform's cost following them.
 
 ## The lifecycle
 
-A tenant moves through activity tiers driven by WS-2's `last_active_at` signal:
-**active → idle → dormant → hibernated**. Hibernation (WS-3, migration
-`068_tenant_hibernation`) is the terminal cost state, and it does three things to
-a tenant that's gone quiet:
+A tenant moves through activity tiers driven by the `last_active_at` signal:
+**active → idle → dormant → hibernated**. Hibernation is the terminal cost
+state, and it does three things to a tenant that's gone quiet:
 
 1. **Pauses telemetry ingest.** A hibernated tenant writes near-zero rows. The
-   tier-aware sampler (WS-4) already throttles by tier — active tenants get full
+   tier-aware sampler already throttles by tier — active tenants get full
    fidelity, idle reduced, dormant *security-events-only* — and hibernation takes
    it to the floor.
 2. **Applies aggressive ClickHouse TTL.** Hot telemetry for a hibernated tenant

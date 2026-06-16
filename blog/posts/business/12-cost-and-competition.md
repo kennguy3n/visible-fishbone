@@ -3,7 +3,7 @@
 > **Business series, Post 5 of 5.** Buyer: **Tom**, the CFO signing off on the
 > security spend. Job-to-be-done: *"show me the cost is predictable, the
 > protection is real, and the comparison to the incumbents is honest."*
-> Capability: shared AI (WS-9) + metering/margin + the consolidated critique.
+> Capability: shared AI + metering/margin + the consolidated critique.
 > Evidence: [`s7-admin-cost-report.json`](../../artifacts/payloads/s7-admin-cost-report.json),
 > [`capacity-plan-5000/report.md`](../../artifacts/capacity-plan-5000/report.md),
 > [`efficacy-report.json`](../../artifacts/efficacy-report.json),
@@ -45,7 +45,7 @@ which is what makes a trial-heavy fleet profitable.
 
 ## The protection is real (and honestly caveated)
 
-Measured on the merged code ([`efficacy-report.json`](../../artifacts/efficacy-report.json)):
+Measured on the live stack ([`efficacy-report.json`](../../artifacts/efficacy-report.json)):
 100% catch / 0% false-positives across the gating set (firewall, web gateway,
 ZTNA, structured DLP, malware, DNS, IPS), with the unstructured ML classifier at
 97.4%. And the honest caveat Tom should hear from any vendor: on *wild,* noisy

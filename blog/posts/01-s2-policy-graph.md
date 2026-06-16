@@ -3,7 +3,9 @@
 > **Post 1 of 11 — the design centerpiece (Scenario S2).** Persona: Devraj, the
 > one-person SME IT team. Evidence: [`s2-acme-policy-graph.json`](../artifacts/payloads/s2-acme-policy-graph.json),
 > [`s2-acme-sites.json`](../artifacts/payloads/s2-acme-sites.json),
-> [`s2-acme-devices.json`](../artifacts/payloads/s2-acme-devices.json); screenshots
+> [`s2-acme-devices.json`](../artifacts/payloads/s2-acme-devices.json),
+> [`appid-acme-catalog-current.json`](../artifacts/payloads/appid-acme-catalog-current.json),
+> [`policyrec-acme-generate-response.json`](../artifacts/payloads/policyrec-acme-generate-response.json); screenshots
 > [`s2-policy-graph.png`](../artifacts/screenshots/s2-policy-graph.png),
 > [`s2-sites.png`](../artifacts/screenshots/s2-sites.png).
 
@@ -62,6 +64,34 @@ posture, tier, and location, and a policy scoped to "retail-pos devices in the
 US" resolves against the graph, not a hand-maintained address group.
 
 ![Sites as typed nodes](../artifacts/screenshots/s2-sites.png)
+
+## The `app` node is identified, not guessed
+
+An `app` node is only as good as the engine that recognizes the traffic behind
+it. A lot of products bake application recognition into a closed set of
+hand-coded protocol parsers — useful until the app you care about isn't one of
+the handful someone compiled in. SNG resolves `app` against a **signed,
+versioned application-identification catalog**: **215 applications across 17
+categories** in the captured payload
+([`appid-acme-catalog-current.json`](../artifacts/payloads/appid-acme-catalog-current.json)),
+each with a monotonic serial so the edge can tell when its copy is stale. The
+matcher walks host suffixes most-specific-first and only awards an exact-match
+bonus when the catalog entry equals the whole observed host, so
+`api.internal.example.com` and `example.com` don't collide. Adding an app is a
+catalog update, not a recompile of the data plane.
+
+## The graph can propose its own edges
+
+The same typed model that makes contradictions into compile errors also makes
+the graph *suggestible*. The policy-recommendation engine reads observed traffic
+and proposes graph deltas — "these identities keep reaching this app; here is
+the `allow` edge that would codify it" — and every proposal is run through the
+same compiler/verifier before it can be applied, so a recommendation can never
+introduce a contradiction a hand-drawn edge couldn't. It is honest about its
+inputs: on a deployment without the telemetry hot tier configured it returns
+`503 unavailable`
+([`policyrec-acme-generate-response.json`](../artifacts/payloads/policyrec-acme-generate-response.json))
+rather than inventing suggestions from no data.
 
 ## What the typing buys you
 

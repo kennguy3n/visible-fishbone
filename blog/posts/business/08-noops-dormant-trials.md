@@ -3,7 +3,7 @@
 > **Business series, Post 1 of 5.** Buyer: **Mara**, who runs a 30-person MSP and
 > hands out free SNG trials to win deals. Job-to-be-done: *"trials shouldn't
 > bleed money or eat my engineers' time."* Capability: universal dormancy tiering
-> (WS-1) + hibernation/scale-to-zero (WS-3). Evidence:
+> + hibernation/scale-to-zero. Evidence:
 > [`capacity-plan-5000/report.md`](../../artifacts/capacity-plan-5000/report.md),
 > [`noops-metrics-snapshot.txt`](../../artifacts/noops-metrics-snapshot.txt);
 > screenshot [`refresh-dashboard-fleet.png`](../../artifacts/screenshots/refresh-dashboard-fleet.png).
@@ -39,7 +39,7 @@ job.** Mara isn't paying for work on trials nobody is using.
 
 ## Truly dormant? It hibernates to near-zero
 
-Below "dormant" is **hibernation** (WS-3): a trial nobody has touched in weeks
+Below "dormant" is **hibernation**: a trial nobody has touched in weeks
 pauses its telemetry ingest, ages out its hot storage, and drops its live
 subscriptions — its running cost collapses toward zero. The tenant's
 configuration is never lost (it's safe in the database the whole time), so when a

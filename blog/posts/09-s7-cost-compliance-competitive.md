@@ -6,13 +6,15 @@
 > [`efficacy-report.json`](../artifacts/efficacy-report.json),
 > [`multiqueue-micro.json`](../artifacts/multiqueue-micro.json),
 > [`capacity-plan-5000/report.md`](../artifacts/capacity-plan-5000/report.md),
-> [`bench/business-report/competitors.json`](../../bench/business-report/competitors.json);
+> [`bench/business-report/competitors.json`](../../bench/business-report/competitors.json),
+> [`complianceauto-acme-posture.json`](../artifacts/payloads/complianceauto-acme-posture.json),
+> [`complianceauto-acme-evidence-pack-soc2.csv`](../artifacts/payloads/complianceauto-acme-evidence-pack-soc2.csv);
 > screenshots [`new-metering-fleet-top.png`](../artifacts/screenshots/new-metering-fleet-top.png),
 > [`new-metering-fleet-table.png`](../artifacts/screenshots/new-metering-fleet-table.png).
 
 A CFO buying security consolidation wants three things proven: the spend is
 predictable, the posture is real, and the competitive claim is honest. This post
-does all three against the merged code, and ends with the consolidated critique.
+does all three against the live stack, and ends with the consolidated critique.
 
 ## The spend, fleet-wide
 
@@ -53,6 +55,29 @@ with the wild-malware WARN published rather than hidden. The honest one-line
 posture statement: **strong on structured detection and policy enforcement,
 monitor-first on wild malware.**
 
+### Continuous compliance evidence, not a once-a-year scramble
+
+Where most SME-grade tools stop at "here are some policy templates," SNG
+**continuously collects audit evidence** and scores the tenant against named
+controls. The captured posture for Acme
+([`complianceauto-acme-posture.json`](../artifacts/payloads/complianceauto-acme-posture.json))
+tracks **16 controls — 10 SOC 2 and 6 ISO 27001 — fed by 3 automated
+collectors**, and it is honest about a half-built dev stack rather than printing
+a green wall:
+
+- **SOC 2: 6 of 10 controls passing (60%).** The failing four are named, not
+  hidden — data retention, federated authentication (SSO), encryption at rest,
+  and encryption in transit.
+- **ISO 27001: 4 of 6 controls passing (66%).** Failing: identity management and
+  use of cryptography.
+
+The evidence is exportable as an auditor-ready pack
+([`complianceauto-acme-evidence-pack-soc2.csv`](../artifacts/payloads/complianceauto-acme-evidence-pack-soc2.csv)),
+so the artifact a buyer hands their auditor is generated from live system state,
+not assembled by hand the week before the audit. The scores above are exactly
+what this dev stack earns; a production deployment with SSO and disk encryption
+turned on would clear the controls it currently fails.
+
 ## The competitive read (honest)
 
 Every competitor number lives in
@@ -88,5 +113,9 @@ per-tenant cost structures handle worst.
   measured on this VM; competitor numbers are published datasheets with caveats.
   We never present a fabricated head-to-head bench.
 - **Breadth is the standing gap.** On raw CASB app coverage and threat-intel feed
-  count, SNG is closing the distance (WS-10), not ahead. The win is economics and
+  count, SNG is closing the distance, not ahead. The win is economics and
   self-operation, and we don't pretend otherwise.
+- **Compliance scoring reflects the deployment, not a certification.** A passing
+  control means the platform collected evidence that the control holds on this
+  stack; it is not a substitute for an audited SOC 2 Type II or ISO 27001
+  certificate, and we don't claim it is.

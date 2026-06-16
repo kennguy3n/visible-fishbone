@@ -1,0 +1,82 @@
+{
+  "enabled": true,
+  "generated_at": "2026-06-16T03:22:48.304270416Z",
+  "bundle": {
+    "serial": 1781580155,
+    "schema_version": 1,
+    "generated_at": "2026-06-16T03:22:35.651577000Z",
+    "key_id": "sng-managed-threat-content",
+    "algorithm": "ed25519",
+    "indicator_count": 77056,
+    "size_bytes": 26666015,
+    "digest": "e55319ce6dd57611abc2dba3cb5b952a379f2aa0d8f6c49094ba37385b076f0b",
+    "counts_by_type": {
+      "domain": 580,
+      "hash": 767,
+      "ip": 5,
+      "url": 75704
+    }
+  },
+  "sources": [
+    {
+      "name": "abuse.ch:feodo",
+      "display_name": "Feodo Tracker (abuse.ch) botnet C2 IP blocklist",
+      "kind": "ip",
+      "weight": 0.9,
+      "enabled": true,
+      "indicator_count": 5,
+      "last_success_at": "2026-06-16T03:22:35.651577000Z",
+      "last_attempt_at": "2026-06-16T03:22:35.651577000Z",
+      "consecutive_failures": 0,
+      "stale": false
+    },
+    {
+      "name": "abuse.ch:malwarebazaar",
+      "display_name": "MalwareBazaar (abuse.ch) recent SHA-256 sample hashes",
+      "kind": "hash",
+      "weight": 0.8,
+      "enabled": true,
+      "indicator_count": 767,
+      "last_success_at": "2026-06-16T03:22:35.651577000Z",
+      "last_attempt_at": "2026-06-16T03:22:35.651577000Z",
+      "consecutive_failures": 0,
+      "stale": false
+    },
+    {
+      "name": "abuse.ch:urlhaus",
+      "display_name": "URLhaus (abuse.ch) malware distribution URL feed",
+      "kind": "url",
+      "weight": 0.85,
+      "enabled": true,
+      "indicator_count": 75404,
+      "last_success_at": "2026-06-16T03:22:35.651577000Z",
+      "last_attempt_at": "2026-06-16T03:22:35.651577000Z",
+      "consecutive_failures": 0,
+      "stale": false
+    },
+    {
+      "name": "abuse.ch:urlhaus-hostfile",
+      "display_name": "URLhaus (abuse.ch) malware host file",
+      "kind": "domain",
+      "weight": 0.8,
+      "enabled": true,
+      "indicator_count": 580,
+      "last_success_at": "2026-06-16T03:22:35.651577000Z",
+      "last_attempt_at": "2026-06-16T03:22:35.651577000Z",
+      "consecutive_failures": 0,
+      "stale": false
+    },
+    {
+      "name": "openphish",
+      "display_name": "OpenPhish community phishing URL feed",
+      "kind": "url",
+      "weight": 0.7,
+      "enabled": true,
+      "indicator_count": 300,
+      "last_success_at": "2026-06-16T03:22:35.651577000Z",
+      "last_attempt_at": "2026-06-16T03:22:35.651577000Z",
+      "consecutive_failures": 0,
+      "stale": false
+    }
+  ]
+}

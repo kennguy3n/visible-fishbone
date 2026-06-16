@@ -1,29 +1,29 @@
 # ShieldNet Gateway — the business series
 
-A five-post, buyer-facing companion to the [engineering series](../README.md).
-Where the engineering series proves the product to a technical reader, this
-series answers one buyer question per post — *"what job does this do for me, and
-can you prove it?"* — using the same live, seeded control plane, console, and
-audit trail.
+A five-post, buyer-facing companion to the [engineering series](../README.md)
+and the technical-product [build series](../../build/README.md). Where the
+engineering series proves the product to a technical reader and the build series
+shows how you would build one, this series answers one buyer question per
+post — *"what job does this do for me, and can you prove it?"* — using the same
+live, seeded control plane, console, and audit trail.
 
-This cycle's headline is **economics at scale**: a twelve-workstream push merged
-into `main` (`65824c75`) to run 5,000 SME tenants — most of them dormant trials —
-at near-zero marginal cost and near-zero operations. Every figure is re-measured
-on the merged code and grounded in real console screenshots and captured
-API/DB evidence (no fabricated screenshots).
+The headline is **economics at scale**: SNG runs 5,000 SME tenants — most of them
+dormant trials — at near-zero marginal cost and near-zero operations. Every
+figure is measured on the current codebase and grounded in real console
+screenshots and captured API/DB evidence (no fabricated screenshots).
 
 ## The posts
 
 | # | Post | Persona | Job-to-be-done | Capability |
 | --- | --- | --- | --- | --- |
 | 0 | [Business series intro + evidence contract](00-business-series-intro.md) | — | — | — |
-| 1 | [The NoOps trial that costs almost nothing](08-noops-dormant-trials.md) | Mara (MSP) | Trials that don't bleed money | Dormancy tiering + hibernation (WS-1/3) |
-| 2 | [Shadow-IT discovery without the noise](09-shadow-it-noops.md) | Sam (IT lead) | See + act on unknown apps | CASB NoOps (WS-10c) |
+| 1 | [The NoOps trial that costs almost nothing](08-noops-dormant-trials.md) | Mara (MSP) | Trials that don't bleed money | Dormancy tiering + hibernation |
+| 2 | [Shadow-IT discovery without the noise](09-shadow-it-noops.md) | Sam (IT lead) | See + act on unknown apps | CASB NoOps |
 | 3 | [PII at the AI edge: coach, don't block](10-ai-dlp-coaching.md) | Lena (analyst) | Stop AI leaks, keep staff happy | AI-app DLP + HITL |
-| 4 | [Compliance baselines in minutes](11-compliance-templates.md) | Mara (MSP) | Onboard to a safe default fast | Smart-default templates |
-| 5 | [Prove the spend, prove the posture](12-cost-and-competition.md) | Tom (CFO) | Sign-off + honest comparison | Shared AI (WS-9) + metering + critique |
+| 4 | [Compliance baselines in minutes](11-compliance-templates.md) | Mara (MSP) | Onboard to a safe default fast | Smart-default templates + continuous evidence |
+| 5 | [Prove the spend, prove the posture](12-cost-and-competition.md) | Tom (CFO) | Sign-off + honest comparison | Shared AI + metering + critique |
 
-## Evidence sources (all in-repo, refreshed this cycle)
+## Evidence sources (all in-repo)
 
 - **Screenshots:** [`../../artifacts/screenshots/`](../../artifacts/screenshots/)
   — live console captures via CDP against the seeded fleet (fleet dashboard,

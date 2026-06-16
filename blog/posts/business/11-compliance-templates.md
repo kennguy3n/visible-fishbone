@@ -3,8 +3,11 @@
 > **Business series, Post 4 of 5.** Buyer: **Mara**, the MSP owner onboarding a
 > new tenant. Job-to-be-done: *"stand up a new client on a compliant, sensible
 > default — without a security consultant and without two weeks of config."*
-> Capability: smart-default policy templates. Evidence:
-> [`policy-templates-catalog.json`](../../artifacts/payloads/policy-templates-catalog.json);
+> Capability: smart-default policy templates + continuous compliance evidence.
+> Evidence:
+> [`policy-templates-catalog.json`](../../artifacts/payloads/policy-templates-catalog.json),
+> [`complianceauto-acme-posture.json`](../../artifacts/payloads/complianceauto-acme-posture.json),
+> [`complianceauto-acme-evidence-pack-soc2.csv`](../../artifacts/payloads/complianceauto-acme-evidence-pack-soc2.csv);
 > screenshots [`new-guided-onboarding-wizard.png`](../../artifacts/screenshots/new-guided-onboarding-wizard.png),
 > [`s2-policy-graph.png`](../../artifacts/screenshots/s2-policy-graph.png).
 
@@ -39,6 +42,24 @@ So "compliant baseline" means *enforced* baseline from minute one, with every
 node and edge auditable. Mara can hand the client a working, compliant posture on
 the kickoff call, then refine specifics later — instead of shipping nothing until
 everything is perfect.
+
+## The baseline keeps proving itself
+
+A starting policy is only half the job; Mara's client also needs to *show* an
+auditor that controls stay in place. SNG collects a **continuous compliance
+posture** on a schedule and turns it into a downloadable evidence pack — no
+manual screenshot-gathering before an audit. For the walkthrough tenant the
+live posture
+([`complianceauto-acme-posture.json`](../../artifacts/payloads/complianceauto-acme-posture.json))
+tracks **16 controls — 10 SOC 2 and 6 ISO 27001** — gathered by three automated
+collectors, and the evidence pack exports as CSV or JSON straight from the API.
+
+The number we *don't* hide: on a bare dev stack this tenant scores **6/10 SOC 2
+and 4/6 ISO 27001** — the failing controls (encryption at rest/in transit,
+federated SSO, data retention, identity management, use of cryptography) are
+real gaps a fresh deployment has until those services are wired. That is the
+point: the posture reports what is *actually* true, so Mara sees exactly which
+boxes still need attention rather than a green checkmark that means nothing.
 
 ## One MSP, many jurisdictions, one motion
 

@@ -1,11 +1,13 @@
 # Retire the VPN: zero-trust access, now with directory breadth
 
-> **Post 5 of 11 — zero-trust access + identity (Scenario S4 + WS-10a).**
+> **Post 5 of 11 — zero-trust access + identity (Scenario S4).**
 > Persona: Devraj, SME IT. Evidence: [`efficacy-report.json`](../artifacts/efficacy-report.json)
-> (`ztna` row), screenshots [`ws10a-idp-directory.png`](../artifacts/screenshots/ws10a-idp-directory.png),
+> (`ztna` row), [`dem-acme-targets.json`](../artifacts/payloads/dem-acme-targets.json),
+> [`dem-acme-scores.json`](../artifacts/payloads/dem-acme-scores.json),
+> [`dem-acme-alerts.json`](../artifacts/payloads/dem-acme-alerts.json); screenshots
+> [`ws10a-idp-directory.png`](../artifacts/screenshots/ws10a-idp-directory.png),
 > [`ws10a-app-registry.png`](../artifacts/screenshots/ws10a-app-registry.png),
 > [`new-guided-onboarding-wizard.png`](../artifacts/screenshots/new-guided-onboarding-wizard.png).
-> PR [#212](https://github.com/kennguy3n/visible-fishbone/pull/212).
 
 A VPN grants network access; zero-trust grants *application* access to an
 *identity* on a *posture-checked device*, re-evaluated continuously. SNG's ZTNA
@@ -22,7 +24,7 @@ access corpus and scores it in [`efficacy-report.json`](../artifacts/efficacy-re
 
 > **ztna — block-rate, 13 bad / 7 good, 100.0% catch, 0.0% fp, PASS.**
 
-The bad set (13 cases this cycle, up from earlier corpora) is the access requests
+The bad set (13 cases) is the access requests
 that *should* be denied — wrong identity, failed posture, revoked session — and
 the broker denies all of them while admitting the 7 legitimate ones. Evaluation
 is cheap: the same crate clocks **1,812,307 decisions/s (552 ns/op)** on this VM
@@ -39,9 +41,9 @@ in-flight sessions, not at the next login.
 That is where identity breadth matters. A revocation is only as fast as the
 signal that the user is gone.
 
-## Identity / IGA breadth (WS-10a)
+## Identity / IGA breadth
 
-WS-10a broadens how SNG learns about identities and their lifecycle:
+SNG broadens how it learns about identities and their lifecycle on several axes:
 
 - **IdP directory sync** (`IDP_DIRECTORY_SYNC_ENABLED`, default-OFF) — pull users
   and groups from the directory so policy can be written against real groups
@@ -62,8 +64,43 @@ The directory surface in the console:
 
 Directory sync is, notably, one of the capabilities the **auto-promotion
 autopilot** (Post 8) manages: it's a default-OFF gate that can escalate
-off→monitor→enforce on its own once monitor-phase guardrails hold. An MSP
+off→monitor→enforce on its own once monitor-mode guardrails hold. An MSP
 doesn't flip it per tenant; the platform does, when it's safe.
+
+## Is the app actually fast? Digital-experience monitoring
+
+Granting access is half the promise; the other half is the app being *usable*
+once you're in. When a SaaS app feels slow, the SME's first instinct is to blame
+the network — and without data, nobody can say otherwise. SNG ships a
+lightweight, ZDX-style **digital-experience monitor** that answers the question
+with numbers. Every tenant gets **six experience targets auto-provisioned** —
+GitHub, Google Workspace, Microsoft 365, Salesforce, Slack, and Zoom
+([`dem-acme-targets.json`](../artifacts/payloads/dem-acme-targets.json)) — and
+the engine turns probe samples into a 0–100 experience score per target.
+
+The scoring is deliberately simple and explainable: a blended
+**availability (60%) + latency (40%)** score, smoothed with an EWMA, where
+latency maps linearly from "good" (100 ms) to "bad" (2,000 ms). A score below
+the **degrade floor of 70** — or a statistically significant drop against the
+tenant's own rolling baseline — raises an alert. On the seeded stack, five
+targets score a clean **100** while Zoom is deliberately driven into the floor
+([`dem-acme-scores.json`](../artifacts/payloads/dem-acme-scores.json)):
+
+> **zoom — score 30**, availability 50%, latency p50/p95 3,100 ms over 12
+> samples, `below_floor: true`.
+
+That one degraded target produces exactly one alert
+([`dem-acme-alerts.json`](../artifacts/payloads/dem-acme-alerts.json)):
+
+> **`dem.experience_degraded`**, severity **critical**, dimension `zoom`,
+> observed value 30 — *"Experience degraded for Zoom: score 30,
+> availability 50%."*
+
+This is the real end-to-end path: probe samples ingested over the API, scored by
+the engine, and an alert emitted with a cooldown so a flapping target doesn't
+spam the analyst. It gives the one-person IT team the one sentence they need on
+the call — "it's not your laptop, the path to Zoom is degraded" — without
+standing up a separate monitoring product.
 
 ## Onboarding the SME
 
@@ -82,6 +119,11 @@ him draw a graph:
 - **Continuous re-evaluation costs connection state.** Re-evaluating live
   sessions means tracking them; at very high session counts that state is real
   memory, and the honest knob is the re-eval interval, not "free."
-- **Breadth ≠ every connector.** WS-10a covers the standards-based path (SCIM +
+- **Breadth ≠ every connector.** SNG covers the standards-based path (SCIM +
   generic directory sync); a long tail of vendor-specific IGA integrations is
   still backlog, and we don't claim parity with a dedicated IGA suite.
+- **DEM is synthetic, not real-user, monitoring.** The scores below come from
+  active probes to reference targets, not from instrumenting every user's actual
+  session. It tells you "the path to Zoom is degraded," not "this specific
+  user's call dropped." Real-user monitoring is a deeper integration we don't
+  claim yet.

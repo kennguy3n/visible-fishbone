@@ -1,6 +1,6 @@
 # Keep regulated data from leaving: DLP + CASB + browser isolation
 
-> **Post 6 of 11 — data protection (Scenario S5 + WS-10c).** Personas: Lena
+> **Post 6 of 11 — data protection (Scenario S5).** Personas: Lena
 > (analyst), Tom (CFO). Evidence: [`s5-acme-dlp-policies.json`](../artifacts/payloads/s5-acme-dlp-policies.json),
 > [`s5-acme-casb-connectors.json`](../artifacts/payloads/s5-acme-casb-connectors.json),
 > [`s5-acme-casb-inline-rules.json`](../artifacts/payloads/s5-acme-casb-inline-rules.json),
@@ -9,34 +9,52 @@
 > screenshots [`s5-dlp-policies.png`](../artifacts/screenshots/s5-dlp-policies.png),
 > [`new-dlp-review-queue.png`](../artifacts/screenshots/new-dlp-review-queue.png),
 > [`new-casb-noops-shadow-it.png`](../artifacts/screenshots/new-casb-noops-shadow-it.png),
-> [`s5-browser-isolation.png`](../artifacts/screenshots/s5-browser-isolation.png). PRs
-> [#223](https://github.com/kennguy3n/visible-fishbone/pull/223),
-> [#227](https://github.com/kennguy3n/visible-fishbone/pull/227),
-> [#230](https://github.com/kennguy3n/visible-fishbone/pull/230),
-> [#231](https://github.com/kennguy3n/visible-fishbone/pull/231).
+> [`s5-browser-isolation.png`](../artifacts/screenshots/s5-browser-isolation.png).
 
 Three surfaces keep regulated data where it belongs: **DLP** (what's in the
 content), **CASB** (which SaaS apps it's flowing to), and **browser isolation**
 (rendering risky web content away from the endpoint). All three are policy-graph
-nodes; this cycle (WS-10c) broadened the detector and SaaS-API catalogs.
+nodes, backed by a broad detector and SaaS-API catalog.
 
 ## DLP: structured detection + an on-device ML classifier
 
 DLP runs two complementary engines. A **structured detector** matches the things
 that have shape — PANs (PCI), national IDs, IBANs — across a broad jurisdiction
 catalog, and an **on-device ML-NER classifier** (`sng-dlp`, ONNX) catches the
-unstructured stuff. The efficacy report (Post 4) scores both on the merged code:
+unstructured stuff. The efficacy report (Post 4) scores both on the live stack:
 
-- **`dlp` — 3,800 bad / 3,800 good, 100% catch, 0% FP.** The corpus grew to 3,800
-  each this cycle, reflecting the broader detector catalog.
+- **`dlp` — 3,800 bad / 3,800 good, 100% catch, 0% FP.** A 3,800-each corpus,
+  reflecting the broad detector catalog.
 - **`dlp_ml_ner` — 39 bad / 8 good, 97.4% catch, 97.9% accuracy, 0% FP.**
 
-WS-10c broadens the catalog: **more jurisdictions, exact-data-match (EDM)** for
-"this specific customer database," and **document fingerprinting** for "this
-specific file and its derivatives." Acme's DLP policy set is captured verbatim
+The catalog is broad on purpose: **many jurisdictions, exact-data-match (EDM)**
+for "this specific customer database," and **document fingerprinting (IDM)** for
+"this specific file and its derivatives." Acme's DLP policy set is captured
+verbatim
 ([`s5-acme-dlp-policies.json`](../artifacts/payloads/s5-acme-dlp-policies.json)):
 
 ![Acme DLP policies](../artifacts/screenshots/s5-dlp-policies.png)
+
+### Data hides in images and in documents, too
+
+Regulated data doesn't only travel as text in a form field. Someone pastes a
+screenshot of a customer record into a chat; someone re-saves a registered
+contract under a new name. Two engines in the `sng-dlp` crate close those gaps:
+
+- **OCR** decodes the common image formats in-process (PNG, BMP, Netpbm),
+  binarizes (Otsu), segments, and matches glyphs so the *text inside an image*
+  is run through the same detectors as typed text. By design OCR can only
+  *escalate* a verdict — a finding in an image can raise the action or severity
+  the text pass already set, never weaken it.
+- **IDM (document fingerprinting)** registers a sensitive document, computes
+  k-shingle fingerprints with winnowing, and indexes them, so a *derivative* of
+  a registered file — a renamed copy, an excerpt, a lightly edited version —
+  still matches. This is the "this specific file and its derivatives" half of
+  the catalog above.
+
+Both run on-device (no content leaves the tenant boundary) and are covered by
+the crate's unit suite of **272 tests**, so the OCR decode paths and the IDM
+index are exercised, not assumed.
 
 Nordic (the starter tenant) shows the honest **empty state** — a tenant that
 hasn't configured DLP genuinely has none, and we screenshot that rather than
@@ -69,7 +87,7 @@ Read across a row: Microsoft 365 → risk 10 → *Sanctioned* → recommend **Mo
 ChatGPT → risk 60 → recommend **Inspect (SWG)** (35%); Pastebin → risk 75 →
 recommend **Block** (30%). The recommendation carries a confidence so an operator
 (or the auto-enforce gate, Post 8) can act on the high-confidence ones and review
-the rest. WS-10c adds **SaaS-API connectors** (the inline connectors at the
+the rest. SNG adds **SaaS-API connectors** (the inline connectors at the
 bottom of that page — Slack, M365) so CASB sees API-side activity, not just
 inline traffic. Acme's connectors and inline rules are captured in
 [`s5-acme-casb-connectors.json`](../artifacts/payloads/s5-acme-casb-connectors.json)

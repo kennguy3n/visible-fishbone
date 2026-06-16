@@ -14,9 +14,9 @@
 
 Most SASE platforms are priced and built for busy enterprises. SNG is built for
 the messy reality of an MSP or SME: **a fleet of mostly-dormant trials, run by a
-tiny team, that still has to be compliant and secure.** This cycle's merged work
-(twelve workstreams on `main` `65824c75`) makes that concrete — dormant trials
-cost almost nothing, the platform operates itself, and the bill is predictable.
+tiny team, that still has to be compliant and secure.** The platform makes that
+concrete — dormant trials cost almost nothing, the platform operates itself, and
+the bill is predictable.
 
 ## The five buyer jobs
 

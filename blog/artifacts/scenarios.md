@@ -8,7 +8,7 @@ prove it. Every figure quoted in the posts traces back to one of these
 files, the [efficacy report](./efficacy-report.json), or the
 [edge datasheet](./edge-performance-datasheet.md).
 
-Fleet seeded for this cycle: **9 tenants across 5 compliance regimes**
+Fleet seeded: **9 tenants across 5 compliance regimes**
 (us-baseline · uk-dpa · eu-gdpr · ca-pipeda · au-privacy), **35 sites**,
 **27 devices** — see [seed-summary.json](./seed-summary.json). Canonical
 tenant UUIDs are pinned in `blog/harness/seed/bootstrap.go` so every

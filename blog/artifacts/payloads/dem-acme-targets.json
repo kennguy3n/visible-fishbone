@@ -1,0 +1,64 @@
+{
+  "items": [
+    {
+      "target_key": "github",
+      "name": "GitHub",
+      "probe_kind": "https",
+      "address": "https://github.com",
+      "enabled": true,
+      "interval_seconds": 60,
+      "timeout_ms": 5000,
+      "managed": true
+    },
+    {
+      "target_key": "google_workspace",
+      "name": "Google Workspace",
+      "probe_kind": "https",
+      "address": "https://workspace.google.com",
+      "enabled": true,
+      "interval_seconds": 60,
+      "timeout_ms": 5000,
+      "managed": true
+    },
+    {
+      "target_key": "m365",
+      "name": "Microsoft 365",
+      "probe_kind": "https",
+      "address": "https://outlook.office365.com",
+      "enabled": true,
+      "interval_seconds": 60,
+      "timeout_ms": 5000,
+      "managed": true
+    },
+    {
+      "target_key": "salesforce",
+      "name": "Salesforce",
+      "probe_kind": "https",
+      "address": "https://login.salesforce.com",
+      "enabled": true,
+      "interval_seconds": 60,
+      "timeout_ms": 5000,
+      "managed": true
+    },
+    {
+      "target_key": "slack",
+      "name": "Slack",
+      "probe_kind": "https",
+      "address": "https://slack.com",
+      "enabled": true,
+      "interval_seconds": 60,
+      "timeout_ms": 5000,
+      "managed": true
+    },
+    {
+      "target_key": "zoom",
+      "name": "Zoom",
+      "probe_kind": "https",
+      "address": "https://zoom.us",
+      "enabled": true,
+      "interval_seconds": 60,
+      "timeout_ms": 5000,
+      "managed": true
+    }
+  ]
+}

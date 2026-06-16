@@ -1,6 +1,6 @@
 # ShieldNet Gateway — Executive Scenario Catalog
 
-> Phase 1 deliverable for the blog series. Defines the executive business
+> The contract for the blog series. Defines the executive business
 > scenarios the series is built around, the personas and outcomes behind
 > each, the product capabilities each exercises, the UI surfaces involved,
 > and — critically — **where each blog's evidence actually comes from** and
@@ -27,10 +27,9 @@
    ASIC-accelerated appliances; SNG is software-only on a generic x86 VM, so
    every comparison row carries that caveat. Cloud-native (Zscaler) rows are
    the more directly comparable ones.
-3. **Screenshots are of real, seeded, error-free pages.** Phase 0 audited
-   all 31 console routes for load/console errors and the UI design-system
-   pass (PR #117) re-toned the console. No screenshots of loading/error/
-   empty-by-accident states.
+3. **Screenshots are of real, seeded, error-free pages.** Every console route
+   is checked for load/console errors before capture. No screenshots of
+   loading/error/empty-by-accident states.
 4. **Critique is honest.** Each post ends with a "where we fall short"
    section. The series is an evidence-based critique, not marketing.
 
@@ -59,8 +58,11 @@ the persona, the business outcome, the UI surfaces, and the evidence source.
 - **UI surfaces:** MSP portal, Tenants, Branding, RBAC, SCIM, IdP, Templates, Audit.
 - **Evidence:** console screenshots of the onboarding path; control-plane API
   latency + Postgres-scale numbers from [`bench/controlplane`](../../bench/controlplane);
-  the tenant-isolation RLS guarantee (migration + integration test from PR #116);
-  audit-log rows for the provisioning actions.
+  the tenant-isolation RLS guarantee (migration + integration test);
+  audit-log rows for the provisioning actions. Per-tenant periodic work is spread
+  across replicas by a lease-fenced active/active work distributor
+  (`internal/service/workshard`), so onboarding the 5,000th tenant does not pile
+  onto a single leader.
 - **Measurable here?** Yes — control-plane runs locally; API-latency + policy-compile
   + postgres-scale benches are Go and run unprivileged.
 
@@ -69,7 +71,12 @@ the persona, the business outcome, the UI surfaces, and the evidence source.
 - **Capabilities:** unified policy graph + compiler, NGFW (`sng-fw`), IPS (`sng-ips`),
   SWG (`sng-swg`), DNS security, SD-WAN six-class steering, optional in-kernel
   eBPF/XDP fast path (tail-call split pipeline, LRU verdict cache, bounded IPv6
-  extension-header walk; PR #129) with WS3 forwarding throughput benchmarks (PR #136).
+  extension-header walk) with multi-queue forwarding throughput benchmarks.
+  Policy predicates are application-aware: a signed, versioned
+  application-identification catalog (`crates/sng-appid`, 215 apps / 17
+  categories) replaces a closed set of hand-coded protocols. A
+  policy-recommendation engine (`internal/service/policyrec`) proposes
+  traffic-derived, verifier-checked graph deltas.
 - **UI surfaces:** Policy editor (React-Flow graph), Network policies, Sites, Devices.
 - **Evidence:** policy-graph screenshots; policy-compile latency from
   [`bench/controlplane`](../../bench/controlplane); edge throughput/latency datasheet
@@ -82,7 +89,10 @@ the persona, the business outcome, the UI surfaces, and the evidence source.
 ### S3 — "Stop a malware drop and a phishing campaign at the edge"
 - **Persona:** Lena (SOC). **Outcome:** high catch-rate, low false-positive load.
 - **Capabilities:** SWG deny-list/categorize, IPS (Suricata), malware (`sng-swg` yara-x),
-  DNS threat-intel, anomaly detection (z-score).
+  DNS threat-intel, anomaly detection (z-score), and **managed threat content** — a
+  curated, ed25519-signed indicator bundle (`internal/service/threatfeed`,
+  ≈77,000 indicators across five built-in feeds) delivered with no per-tenant
+  config.
 - **UI surfaces:** Alerts (scatter + table), Troubleshoot, Threat-intel.
 - **Evidence:** **confusion matrix + catch-rate/FPR from
   [`bench/efficacy`](../../bench/efficacy)** over known-bad/known-good corpora —
@@ -94,7 +104,9 @@ the persona, the business outcome, the UI surfaces, and the evidence source.
 ### S4 — "Retire the VPN: zero-trust access to private apps"
 - **Persona:** Devraj (SME). **Outcome:** least-privilege access, no flat VPN.
 - **Capabilities:** ZTNA brokering (`sng-ztna`: device + identity + app + posture),
-  IdP federation, posture checks.
+  IdP federation, posture checks, and **lightweight digital-experience monitoring**
+  (`crates/sng-dem` + `internal/service/dem`) — ZDX-style per-target availability +
+  latency scores with degradation alerts.
 - **UI surfaces:** Policy (ZTNA rules), Devices (posture), IdP, RBAC.
 - **Evidence:** ZTNA block-rate from [`bench/efficacy`](../../bench/efficacy)
   (real `ZtnaService::evaluate`); access-decision payloads (allow/deny + reason);
@@ -104,11 +116,11 @@ the persona, the business outcome, the UI surfaces, and the evidence source.
 ### S5 — "Keep regulated data from leaving: DLP + CASB + browser isolation"
 - **Persona:** Lena (SOC) / Tom (compliance). **Outcome:** prevent exfiltration.
 - **Capabilities:** on-device DLP (ML classifier), data classification, CASB,
-  remote browser isolation (RBI action, migration 054), edge-driven DLP wake
+  remote browser isolation (RBI action), edge-driven DLP wake
   (inotify file-write + X11 clipboard monitors classify on-write rather than
-  polling; PR #135).
-- **UI surfaces:** DLP, CASB, Browser protection. (These were the 3 dead routes
-  fixed in PR #116 — now fully wired to Postgres repos.)
+  polling). The on-device classifier also reads **image-borne data via OCR** and
+  matches **document identity via fingerprinting** (`crates/sng-dlp/{ocr,idm}`).
+- **UI surfaces:** DLP, CASB, Browser protection — all wired to Postgres repos.
 - **Evidence:** DLP policy + match-event screenshots; classifier input→label
   examples; the repo-wiring fix narrative (why they 404'd, the proper fix).
 - **Measurable here?** UI + policy/match flows: yes. ML classifier inference needs
@@ -116,9 +128,10 @@ the persona, the business outcome, the UI surfaces, and the evidence source.
 
 ### S6 — "AI-assisted policy and anomaly response — with a verifier, not a vibe"
 - **Persona:** Lena (SOC) / Devraj (SME). **Outcome:** faster, *safe* operations.
-- **Capabilities:** AI assistant (self-hosted **Ternary-Bonsai-8B**, PR #102/#35),
+- **Capabilities:** AI assistant (self-hosted **Ternary-Bonsai-8B**),
   policy recommendation + **verifier-checked** deltas, deterministic fallback,
-  anomaly detection (z-score scatter).
+  anomaly detection (z-score scatter), and a shared fleet-wide inference pool so
+  one model serves every tenant.
 - **UI surfaces:** Assistant, Policy (proposed deltas), Alerts (anomaly scatter), Playbooks.
 - **Evidence:** assistant request→response payloads; the verifier rejecting an
   unsafe delta; the deterministic-fallback path when the model is unavailable;
@@ -129,12 +142,13 @@ the persona, the business outcome, the UI surfaces, and the evidence source.
 
 ### S7 — "Prove the spend and the compliance posture to the board"
 - **Persona:** Tom (CFO). **Outcome:** predictable cost + consolidation savings + audit.
-- **Capabilities:** metering, cost model, compliance, audit, integrations (SIEM/PSA/RMM).
-- **UI surfaces:** Metering / cost metering dashboard (WS8 cost metering UI, PR #130),
-  Compliance, Audit, Integrations.
+- **Capabilities:** metering, cost model, continuous compliance evidence, audit,
+  integrations (SIEM/PSA/RMM).
+- **UI surfaces:** Metering / cost metering dashboard, Compliance, Audit, Integrations.
 - **Evidence:** metering dashboard screenshots; **cost analysis + consolidation math
-  from [`bench/business-report`](../../bench/business-report)**; compliance posture UI;
-  audit completeness (global-audit fix from PR #116).
+  from [`bench/business-report`](../../bench/business-report)**; the live
+  continuous-compliance posture + downloadable SOC 2 / ISO 27001 evidence packs
+  (`internal/service/complianceauto`); audit completeness.
 - **Measurable here?** Metering UI + cost model + business-report: yes (dry-run sweep
   feeds the cost section; the cost math itself is real).
 
@@ -147,27 +161,33 @@ the persona, the business outcome, the UI surfaces, and the evidence source.
 | Multi-tenant + MSP portal | S1 |
 | RBAC / SCIM / IdP / Branding / Templates / Bulk | S1 |
 | Policy graph + compiler | S2, S6 |
+| Application identification (`sng-appid`) | S2, S3 |
+| Policy recommendation engine | S2, S6 |
 | NGFW (`sng-fw`) | S2, S3 |
 | IPS (`sng-ips`) | S2, S3 |
 | SWG (`sng-swg`) + malware (yara-x) | S2, S3 |
 | DNS security + threat intel | S2, S3 |
+| Managed threat content (signed bundle) | S3 |
 | SD-WAN six-class steering | S2 |
 | ZTNA (`sng-ztna`) | S4 |
-| DLP + data classification | S5 |
+| DLP + data classification (incl. OCR + IDM) | S5 |
 | CASB | S5 |
 | Browser isolation (RBI) | S5 |
 | AI assistant + verifier (Ternary-Bonsai-8B) | S6 |
 | Anomaly detection | S3, S6 |
+| Digital-experience monitoring (`sng-dem`) | S4 |
+| Active/active work distributor | S1 |
+| Shared AI inference pool | S6 |
 | Playbooks | S6 |
 | Metering + cost model | S7 |
-| Compliance | S7 |
+| Continuous compliance evidence | S7 |
 | Audit | S1, S7 |
 | Integrations (SIEM/XDR/IAM/PSA/RMM) | S7 |
 | Terraform / IaC | S2 (policy-as-code sidebar) |
 
 ---
 
-## Blog series outline (Phase 4)
+## Blog series outline
 
 0. **Series intro + the honesty contract** — what SNG is, the three forms, and the
    evidence rules above (why dry-run ≠ measured, why competitor rows are caveated).
