@@ -105,7 +105,12 @@ fn decode_png(
     // Bound the decoder's own scratch allocations as defence-in-depth against a
     // decompression bomb, in addition to the dimension caps below.
     let alloc_budget = max_pixels.saturating_mul(4).saturating_add(1 << 20);
-    let mut decoder = png::Decoder::new_with_limits(bytes, png::Limits { bytes: alloc_budget });
+    let mut decoder = png::Decoder::new_with_limits(
+        bytes,
+        png::Limits {
+            bytes: alloc_budget,
+        },
+    );
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     let mut reader = decoder.read_info().map_err(|_| DecodeError::Malformed)?;
 
@@ -120,7 +125,9 @@ fn decode_png(
     };
 
     let mut buf = vec![0u8; reader.output_buffer_size()];
-    let frame = reader.next_frame(&mut buf).map_err(|_| DecodeError::Malformed)?;
+    let frame = reader
+        .next_frame(&mut buf)
+        .map_err(|_| DecodeError::Malformed)?;
     let channels = match frame.color_type {
         png::ColorType::Grayscale => 1usize,
         png::ColorType::GrayscaleAlpha => 2,
@@ -131,16 +138,26 @@ fn decode_png(
         png::ColorType::Indexed => return Err(DecodeError::Malformed),
     };
 
-    let data = buf.get(..frame.line_size * height).ok_or(DecodeError::Malformed)?;
+    let data = buf
+        .get(..frame.line_size * height)
+        .ok_or(DecodeError::Malformed)?;
     let mut luma = Vec::with_capacity(width * height);
     for row in data.chunks_exact(frame.line_size) {
         let pixels = row.get(..width * channels).ok_or(DecodeError::Malformed)?;
         for px in pixels.chunks_exact(channels) {
-            let value = if channels >= 3 { rgb_to_luma(px[0], px[1], px[2]) } else { px[0] };
+            let value = if channels >= 3 {
+                rgb_to_luma(px[0], px[1], px[2])
+            } else {
+                px[0]
+            };
             luma.push(value);
         }
     }
-    Ok(GrayImage { width, height, luma })
+    Ok(GrayImage {
+        width,
+        height,
+        luma,
+    })
 }
 
 fn read_u16_le(bytes: &[u8], at: usize) -> Option<u16> {
@@ -209,13 +226,23 @@ fn decode_bmp(
     let bytes_per_pixel = (bpp / 8) as usize;
     let row_stride = (width * bytes_per_pixel).div_ceil(4) * 4; // padded to 4 bytes
     let pixels_end = pixel_offset
-        .checked_add(row_stride.checked_mul(height).ok_or(DecodeError::Malformed)?)
+        .checked_add(
+            row_stride
+                .checked_mul(height)
+                .ok_or(DecodeError::Malformed)?,
+        )
         .ok_or(DecodeError::Malformed)?;
-    let raster = bytes.get(pixel_offset..pixels_end).ok_or(DecodeError::Malformed)?;
+    let raster = bytes
+        .get(pixel_offset..pixels_end)
+        .ok_or(DecodeError::Malformed)?;
 
     let mut luma = vec![0u8; width * height];
     for src_row in 0..height {
-        let dst_row = if top_down { src_row } else { height - 1 - src_row };
+        let dst_row = if top_down {
+            src_row
+        } else {
+            height - 1 - src_row
+        };
         let row = raster
             .get(src_row * row_stride..src_row * row_stride + width * bytes_per_pixel)
             .ok_or(DecodeError::Malformed)?;
@@ -230,7 +257,11 @@ fn decode_bmp(
             }
         }
     }
-    Ok(GrayImage { width, height, luma })
+    Ok(GrayImage {
+        width,
+        height,
+        luma,
+    })
 }
 
 /// Minimal Netpbm reader covering P2/P3 (ASCII) and P5/P6 (binary) with a
@@ -256,8 +287,12 @@ fn decode_netpbm(
     if maxval == 0 || maxval > 255 {
         return Err(DecodeError::Unsupported);
     }
-    let (width, height) =
-        check_dims(u64::from(width), u64::from(height), max_dimension, max_pixels)?;
+    let (width, height) = check_dims(
+        u64::from(width),
+        u64::from(height),
+        max_dimension,
+        max_pixels,
+    )?;
 
     let mut luma = Vec::with_capacity(width * height);
     if ascii {
@@ -279,11 +314,19 @@ fn decode_netpbm(
         let needed = width * height * channels;
         let data = data.get(..needed).ok_or(DecodeError::Malformed)?;
         for px in data.chunks_exact(channels) {
-            let value = if channels == 1 { px[0] } else { rgb_to_luma(px[0], px[1], px[2]) };
+            let value = if channels == 1 {
+                px[0]
+            } else {
+                rgb_to_luma(px[0], px[1], px[2])
+            };
             luma.push(value);
         }
     }
-    Ok(GrayImage { width, height, luma })
+    Ok(GrayImage {
+        width,
+        height,
+        luma,
+    })
 }
 
 fn clamp_u8(value: u32) -> u8 {
@@ -313,9 +356,7 @@ fn next_header_uint(bytes: &[u8], cursor: &mut usize) -> Result<u32, DecodeError
     let mut seen = false;
     while let Some(&c) = bytes.get(*cursor) {
         if c.is_ascii_digit() {
-            value = value
-                .saturating_mul(10)
-                .saturating_add(u32::from(c - b'0'));
+            value = value.saturating_mul(10).saturating_add(u32::from(c - b'0'));
             seen = true;
             *cursor += 1;
         } else {

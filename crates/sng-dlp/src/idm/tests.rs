@@ -30,7 +30,10 @@ fn fingerprint_document_is_sorted_unique_and_deterministic() {
     let b = fingerprint_document(LOREM, &params);
     assert_eq!(a, b, "fingerprinting must be deterministic");
     assert!(!a.is_empty());
-    assert!(a.windows(2).all(|w| w[0] < w[1]), "sorted ascending + unique");
+    assert!(
+        a.windows(2).all(|w| w[0] < w[1]),
+        "sorted ascending + unique"
+    );
 }
 
 #[test]
@@ -42,7 +45,11 @@ fn fingerprint_document_respects_cap() {
         ..FingerprintParams::default()
     };
     let fps = fingerprint_document(LOREM, &params);
-    assert!(fps.len() <= 5, "cap must bound fingerprint count, got {}", fps.len());
+    assert!(
+        fps.len() <= 5,
+        "cap must bound fingerprint count, got {}",
+        fps.len()
+    );
 }
 
 #[test]
@@ -81,7 +88,11 @@ fn partial_copy_detected_above_threshold() {
     assert_eq!(matches.len(), 1, "expected the partial copy to be flagged");
     let m = &matches[0];
     assert_eq!(m.document_id, "protected-doc");
-    assert!(m.containment >= 0.3, "containment {} below threshold", m.containment);
+    assert!(
+        m.containment >= 0.3,
+        "containment {} below threshold",
+        m.containment
+    );
     assert_eq!(m.document_fingerprints, protected_fps.len());
     assert!(m.matched_fingerprints > 0);
 }
@@ -100,7 +111,10 @@ fn unrelated_content_does_not_false_positive() {
         formation of galaxies stellar nucleosynthesis and the cosmic \
         microwave background radiation across deep time and space";
     let matches = index.query(unrelated, &FingerprintParams::default());
-    assert!(matches.is_empty(), "unrelated text must not match: {matches:?}");
+    assert!(
+        matches.is_empty(),
+        "unrelated text must not match: {matches:?}"
+    );
 }
 
 #[test]
@@ -115,8 +129,14 @@ fn index_counts_reflect_registered_documents() {
     let fps = fingerprint_document(LOREM, &FingerprintParams::default());
     let index = IdmIndex::build(
         [
-            IndexedDocument { id: "a".into(), fingerprints: fps.clone() },
-            IndexedDocument { id: "b".into(), fingerprints: fps.clone() },
+            IndexedDocument {
+                id: "a".into(),
+                fingerprints: fps.clone(),
+            },
+            IndexedDocument {
+                id: "b".into(),
+                fingerprints: fps.clone(),
+            },
         ],
         0.5,
     );
@@ -130,12 +150,18 @@ fn index_counts_reflect_registered_documents() {
 fn exact_copy_is_full_containment() {
     let fps = fingerprint_document(LOREM, &FingerprintParams::default());
     let index = IdmIndex::build(
-        [IndexedDocument { id: "doc".into(), fingerprints: fps }],
+        [IndexedDocument {
+            id: "doc".into(),
+            fingerprints: fps,
+        }],
         0.9,
     );
     let matches = index.query(LOREM, &FingerprintParams::default());
     assert_eq!(matches.len(), 1);
-    assert!((matches[0].containment - 1.0).abs() < 1e-9, "exact copy => containment 1.0");
+    assert!(
+        (matches[0].containment - 1.0).abs() < 1e-9,
+        "exact copy => containment 1.0"
+    );
 }
 
 #[test]
@@ -145,7 +171,13 @@ fn cjk_text_fingerprints_via_bigrams() {
     let cjk = "机密文件内容需要受到保护防止数据泄露和未经授权的访问与传播";
     let fps = fingerprint_document(cjk, &FingerprintParams::default());
     assert!(!fps.is_empty(), "CJK document must fingerprint");
-    let index = IdmIndex::build([IndexedDocument { id: "cjk".into(), fingerprints: fps }], 0.9);
+    let index = IdmIndex::build(
+        [IndexedDocument {
+            id: "cjk".into(),
+            fingerprints: fps,
+        }],
+        0.9,
+    );
     assert_eq!(index.query(cjk, &FingerprintParams::default()).len(), 1);
 }
 

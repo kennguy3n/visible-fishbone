@@ -545,7 +545,9 @@ impl DlpEngine {
             && let Some(text) = crate::ocr::extract_text_for_detection(content)
         {
             let ocr_result: ClassificationResult =
-                state.classifier.classify(channel, text.as_bytes(), metadata);
+                state
+                    .classifier
+                    .classify(channel, text.as_bytes(), metadata);
             let ocr_action = ocr_result
                 .strictest_action()
                 .map(|a| match config.action_override {

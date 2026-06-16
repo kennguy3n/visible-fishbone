@@ -65,23 +65,44 @@ fn font_templates_are_pairwise_distinct() {
 
 #[test]
 fn unsupported_format_is_skipped_cheaply() {
-    assert_eq!(extract(b"%PDF-1.7\n%..."), OcrOutcome::Skipped(OcrSkip::UnsupportedFormat));
-    assert_eq!(extract(b"not an image at all"), OcrOutcome::Skipped(OcrSkip::UnsupportedFormat));
-    assert_eq!(extract(&[]), OcrOutcome::Skipped(OcrSkip::UnsupportedFormat));
+    assert_eq!(
+        extract(b"%PDF-1.7\n%..."),
+        OcrOutcome::Skipped(OcrSkip::UnsupportedFormat)
+    );
+    assert_eq!(
+        extract(b"not an image at all"),
+        OcrOutcome::Skipped(OcrSkip::UnsupportedFormat)
+    );
+    assert_eq!(
+        extract(&[]),
+        OcrOutcome::Skipped(OcrSkip::UnsupportedFormat)
+    );
 }
 
 #[test]
 fn oversized_input_bytes_are_skipped() {
     let png = render_line_png("12345", 2);
-    let limits = OcrLimits { max_input_bytes: 8, ..OcrLimits::default() };
-    assert_eq!(extract_image_text(&png, &limits), OcrOutcome::Skipped(OcrSkip::TooLarge));
+    let limits = OcrLimits {
+        max_input_bytes: 8,
+        ..OcrLimits::default()
+    };
+    assert_eq!(
+        extract_image_text(&png, &limits),
+        OcrOutcome::Skipped(OcrSkip::TooLarge)
+    );
 }
 
 #[test]
 fn oversized_dimensions_are_skipped() {
     let png = render_line_png("12345", 4);
-    let limits = OcrLimits { max_pixels: 16, ..OcrLimits::default() };
-    assert_eq!(extract_image_text(&png, &limits), OcrOutcome::Skipped(OcrSkip::TooLarge));
+    let limits = OcrLimits {
+        max_pixels: 16,
+        ..OcrLimits::default()
+    };
+    assert_eq!(
+        extract_image_text(&png, &limits),
+        OcrOutcome::Skipped(OcrSkip::TooLarge)
+    );
 }
 
 #[test]
@@ -131,7 +152,10 @@ fn secret_in_screenshot_is_detected_by_existing_classifier() {
     // image is recovered by OCR and then flagged by the unchanged detector.
     let png = render_line_png("Card 4111 1111 1111 1111", 3);
     let text = text_of(extract(&png));
-    assert!(text.contains("4111 1111 1111 1111"), "ocr text was {text:?}");
+    assert!(
+        text.contains("4111 1111 1111 1111"),
+        "ocr text was {text:?}"
+    );
 
     let rule = DlpRule {
         id: "cc".into(),
@@ -143,9 +167,15 @@ fn secret_in_screenshot_is_detected_by_existing_classifier() {
         channels: Vec::new(),
     };
     let classifier = ContentClassifier::compile(&[rule]).expect("compile");
-    let result =
-        classifier.classify(DlpChannel::BrowserUpload, text.as_bytes(), &ContentMetadata::default());
-    assert!(result.is_match(), "classifier did not flag the OCR'd card number");
+    let result = classifier.classify(
+        DlpChannel::BrowserUpload,
+        text.as_bytes(),
+        &ContentMetadata::default(),
+    );
+    assert!(
+        result.is_match(),
+        "classifier did not flag the OCR'd card number"
+    );
     assert_eq!(result.strictest_action(), Some(RuleAction::Block));
 }
 
@@ -166,12 +196,18 @@ fn engine_blocks_secret_embedded_in_image_via_ocr_hook() {
         action: RuleAction::Block,
         channels: Vec::new(),
     };
-    let engine = DlpEngine::new(DlpPolicy { rules: vec![cc_rule], ..DlpPolicy::default() })
-        .expect("engine");
+    let engine = DlpEngine::new(DlpPolicy {
+        rules: vec![cc_rule],
+        ..DlpPolicy::default()
+    })
+    .expect("engine");
 
     let png = render_line_png("Card 4111 1111 1111 1111", 3);
     let verdict = engine.evaluate(DlpChannel::BrowserUpload, &png, &ContentMetadata::default());
-    assert!(verdict.is_blocking(), "engine did not block the OCR'd card: {verdict:?}");
+    assert!(
+        verdict.is_blocking(),
+        "engine did not block the OCR'd card: {verdict:?}"
+    );
     let details = verdict.details().expect("verdict details");
     assert_eq!(details.action, RuleAction::Block);
     assert_eq!(details.severity, Severity::Critical);
@@ -183,7 +219,10 @@ fn engine_blocks_secret_embedded_in_image_via_ocr_hook() {
         b"just an ordinary sentence with no secrets",
         &ContentMetadata::default(),
     );
-    assert!(!allow.is_blocking(), "unexpected block on benign text: {allow:?}");
+    assert!(
+        !allow.is_blocking(),
+        "unexpected block on benign text: {allow:?}"
+    );
 }
 
 /// Build a minimal 2x2 24-bit uncompressed BMP, rows bottom-up:

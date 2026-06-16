@@ -159,7 +159,10 @@ pub fn extract_image_text(content: &[u8], limits: &OcrLimits) -> OcrOutcome {
     if trimmed.is_empty() {
         OcrOutcome::Skipped(OcrSkip::NoText)
     } else {
-        OcrOutcome::Extracted { text: trimmed.to_owned(), glyphs }
+        OcrOutcome::Extracted {
+            text: trimmed.to_owned(),
+            glyphs,
+        }
     }
 }
 

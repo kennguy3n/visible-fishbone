@@ -477,7 +477,12 @@ fn char_shingles(text: &str, n: usize) -> Vec<String> {
         return vec![chars.into_iter().collect()];
     }
     (0..=chars.len() - n)
-        .map(|i| chars.get(i..i + n).map(|s| s.iter().collect()).unwrap_or_default())
+        .map(|i| {
+            chars
+                .get(i..i + n)
+                .map(|s| s.iter().collect())
+                .unwrap_or_default()
+        })
         .collect()
 }
 

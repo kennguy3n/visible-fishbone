@@ -65,6 +65,7 @@ pub use signature::{AppSignature, RawApp, RawCatalog, SCHEMA_VERSION, normalise_
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    use std::fmt::Write as _;
 
     fn builtin() -> &'static Matcher {
         Matcher::builtin()
@@ -246,7 +247,7 @@ mod tests {
         // catalog's 2-label suffix.
         let mut host = String::new();
         for i in 0..20 {
-            host.push_str(&format!("l{i}."));
+            let _ = write!(host, "l{i}.");
         }
         host.push_str("acme.example");
         assert!(
