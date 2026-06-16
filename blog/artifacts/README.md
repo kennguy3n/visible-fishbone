@@ -3,10 +3,10 @@
 Every figure in the blog series traces back to one of these files. This README
 records exactly how each was produced and what it does (and does not) prove.
 
-**Provenance:** all artifacts in this directory were regenerated at commit
-`6c6406bdfa8c394d9aad18e7c496d9148f519026` (generated 2026-06-10). The
-`git_sha` / `generated_at` fields embedded in `efficacy-report.json` and
-`edge-performance-datasheet.json` are the authoritative per-file stamps.
+**Provenance:** all artifacts in this directory were regenerated against the
+current codebase. The `git_sha` / `generated_at` fields embedded in
+`efficacy-report.json` and `edge-performance-datasheet.json` are the
+authoritative per-file stamps.
 
 ## `efficacy-report.json` — security efficacy (REAL, measured)
 
@@ -21,18 +21,14 @@ records exactly how each was produced and what it does (and does not) prove.
 - **Dependencies provisioned exactly as the repo blueprint specifies:**
   Suricata (`apt install suricata`) for the IPS tier, and ONNX Runtime v1.22.0
   (`ORT_DYLIB_PATH`) for the DLP ML-NER tier.
-- **Result (all PASS):**
-
-  | function | kind | bad | good | catch% | fp% | acc% | throughput |
-  | --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
-  | firewall | block-rate | 7 | 5 | 100.0 | 0.0 | 100.0 | — |
-  | swg | block-rate | 6 | 5 | 100.0 | 0.0 | 100.0 | — |
-  | ztna | block-rate | 8 | 4 | 100.0 | 0.0 | 100.0 | 1.56M decisions/s · 643 ns/op |
-  | dlp | detect-rate | 550 | 550 | 100.0 | 0.0 | 100.0 | 3,914 scans/s · 2.05 MiB/s |
-  | dlp_ml_ner | detect-rate | 23 | 8 | 100.0 | 0.0 | 100.0 | 30,524 scans/s · 4.83 MiB/s |
-  | malware (YARA) | detect-rate | 8 | 6 | 100.0 | 0.0 | 100.0 | — |
-  | dns | detect-rate | 10 | 13 | 100.0 | 0.0 | 100.0 | — |
-  | ips (Suricata) | detect-rate | 7 | 6 | 100.0 | 0.0 | 100.0 | — |
+- **Result:** overall verdict **PASS** across **16 functions**. The gating tiers
+  (firewall, firewall_kernel, swg, ztna, dlp, malware, dns, ips, and the
+  malware/ips adversarial legs) all score 100% catch / 0% FPR; `dlp_ml_ner`
+  scores 97.4% catch / 97.9% accuracy / 0% FPR. The informational *wild* legs
+  never gate and report honest misses (`malware_wild` 90.1% catch / 9.6% FPR).
+  The per-function corpus sizes, throughput, and verdicts live in
+  `efficacy-report.json` and are summarized in
+  [`EVIDENCE_MANIFEST.md`](EVIDENCE_MANIFEST.md) §1.1.
 
 - **What it proves:** the enforcement code correctly blocks the known-bad set and
   passes the known-good set, at the measured hot-path op rates.
@@ -88,5 +84,5 @@ records exactly how each was produced and what it does (and does not) prove.
 1. **Measured** = real crate/code execution (efficacy matrix, hot-path op/s).
    **Dry-run** = in-process harness pipeline (edge Gbps) — labeled as such.
 2. Competitor numbers are cited published figures, never head-to-head runs.
-3. Screenshots are of real, seeded, error-free pages (Phase 0 audit + PR #117).
+3. Screenshots are of real, seeded, error-free pages.
 4. Each post ends with an honest "where we fall short" section.

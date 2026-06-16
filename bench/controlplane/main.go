@@ -62,7 +62,7 @@ capacity-plan / full-suite flags:
   --tenants N              Fleet size to model (default: 5000)
   --ch-shards N            ClickHouse shard count to model (default: 2)
   --nats-partitions N      NATS_PARTITIONS fan-out to model (default: 16)
-  --tier-sampling          Model WS-4 activity-tier telemetry sampling (default: off)
+  --tier-sampling          Model activity-tier telemetry sampling (default: off)
   --active-fraction F      Active-tenant share of the fleet (default: 0.10)
   --idle-fraction F        Idle-tenant share of the fleet (default: 0.15)
   --idle-multiplier F      Idle-tenant keep fraction (default: 0.25)
@@ -159,10 +159,10 @@ func parseFlags(mode string, args []string) *options {
 	fs.IntVar(&opts.natsParts, "nats-partitions", 0, "NATS_PARTITIONS to model (capacity-plan; 0 = default)")
 	fs.Float64Var(&opts.dormantFrac, "dormant-fraction", 0, "fraction of the fleet (0..1) modelled as dormant/hibernated (capacity-plan; 0 = pre-hibernation baseline)")
 	fs.Float64Var(&opts.hibSampleRate, "hibernated-sample-rate", 0, "near-zero telemetry keep-probability for hibernated tenants (capacity-plan; 0 = default 1-in-10000)")
-	// WS-4 activity-tier sampling knobs (capacity-plan). Default-OFF so
+	// Activity-tier sampling knobs (capacity-plan). Default-OFF so
 	// the baseline projection is unchanged; the fractions/multiplier
 	// default to the NoOps-fleet model when --tier-sampling is set.
-	fs.BoolVar(&opts.tierSampling, "tier-sampling", false, "model WS-4 activity-tier telemetry sampling (capacity-plan; default off)")
+	fs.BoolVar(&opts.tierSampling, "tier-sampling", false, "model activity-tier telemetry sampling (capacity-plan; default off)")
 	fs.Float64Var(&opts.activeFraction, "active-fraction", 0, "active-tenant share of the fleet (tier-sampling; 0 = default 0.10)")
 	fs.Float64Var(&opts.idleFraction, "idle-fraction", 0, "idle-tenant share of the fleet (tier-sampling; 0 = default 0.15)")
 	fs.Float64Var(&opts.idleMultiplier, "idle-multiplier", 0, "idle-tenant keep fraction (tier-sampling; 0 = default 0.25)")

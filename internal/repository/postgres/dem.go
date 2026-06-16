@@ -13,6 +13,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -47,13 +48,19 @@ last_score, sample_count, degraded, last_alert_at, last_observed_at,
 created_at, updated_at
 `
 
-// demProbeCopyColumns is the column order InsertProbeResults streams
-// via COPY; id and created_at take their column defaults.
-var demProbeCopyColumns = []string{
+// demProbeInsertColumns is the column order InsertProbeResults binds;
+// id and created_at take their column defaults.
+var demProbeInsertColumns = []string{
 	"tenant_id", "target_key", "target_name", "probe_kind", "success",
 	"dns_ms", "tcp_ms", "tls_ms", "ttfb_ms", "total_ms",
 	"http_status", "error_kind", "observed_at",
 }
+
+// demProbeInsertChunk is the maximum number of rows bound into a single
+// multi-row INSERT. With 13 columns per row this is far under Postgres's
+// 65535 bind-parameter ceiling, so an oversized ingest batch is split
+// across statements rather than rejected.
+const demProbeInsertChunk = 1000
 
 // floatOrNil / intOrNil / textOrNil coerce optional Go values into
 // the `any` a NULLable column expects: a typed nil becomes SQL NULL.
@@ -360,10 +367,12 @@ LIMIT $3
 // Raw probe results
 // -----------------------------------------------------------------------
 
-// InsertProbeResults bulk-loads ingested samples via COPY inside one
-// tenant-scoped transaction. COPY sidesteps the multi-row INSERT
-// parameter ceiling and keeps the ingest hot path cheap; RLS WITH
-// CHECK on the tenant policy still applies to every copied row.
+// InsertProbeResults bulk-loads ingested samples via chunked multi-row
+// INSERT inside one tenant-scoped transaction. A plain INSERT (rather
+// than COPY) is required because dem_probe_results has row-level
+// security enabled, and Postgres rejects COPY FROM on RLS-enabled
+// tables. The RLS WITH CHECK tenant policy applies to every bound row,
+// and chunking keeps each statement under the 65535-parameter ceiling.
 func (r *DEMRepository) InsertProbeResults(
 	ctx context.Context,
 	tenantID uuid.UUID,
@@ -376,29 +385,57 @@ func (r *DEMRepository) InsertProbeResults(
 		return nil
 	}
 	return r.s.withTenant(ctx, tenantID.String(), func(tx pgx.Tx) error {
-		rows := make([][]any, 0, len(results))
-		for _, res := range results {
-			rows = append(rows, []any{
-				tenantID, res.TargetKey, res.TargetName, res.ProbeKind, res.Success,
-				floatOrNil(res.DNSMs), floatOrNil(res.TCPMs), floatOrNil(res.TLSMs),
-				floatOrNil(res.TTFBMs), floatOrNil(res.TotalMs),
-				intOrNil(res.HTTPStatus), textOrNil(res.ErrorKind), res.ObservedAt.UTC(),
-			})
-		}
-		if _, err := tx.CopyFrom(ctx,
-			pgx.Identifier{"dem_probe_results"}, demProbeCopyColumns,
-			pgx.CopyFromRows(rows),
-		); err != nil {
-			if isCheckViolation(err) {
-				return repository.ErrInvalidArgument
+		for start := 0; start < len(results); start += demProbeInsertChunk {
+			end := start + demProbeInsertChunk
+			if end > len(results) {
+				end = len(results)
 			}
-			if isForeignKeyViolation(err) {
-				return repository.ErrNotFound
+			sql, args := buildProbeInsert(tenantID, results[start:end])
+			if _, err := tx.Exec(ctx, sql, args...); err != nil {
+				if isCheckViolation(err) {
+					return repository.ErrInvalidArgument
+				}
+				if isForeignKeyViolation(err) {
+					return repository.ErrNotFound
+				}
+				return fmt.Errorf("insert dem_probe_results: %w", err)
 			}
-			return fmt.Errorf("copy dem_probe_results: %w", err)
 		}
 		return nil
 	})
+}
+
+// buildProbeInsert renders a single multi-row INSERT for one chunk of
+// probe results and returns the SQL plus its positional args, in
+// demProbeInsertColumns order.
+func buildProbeInsert(tenantID uuid.UUID, results []repository.DEMProbeResult) (string, []any) {
+	const cols = 13
+	args := make([]any, 0, len(results)*cols)
+	var b strings.Builder
+	b.WriteString("INSERT INTO dem_probe_results (")
+	b.WriteString(strings.Join(demProbeInsertColumns, ", "))
+	b.WriteString(") VALUES ")
+	for i, res := range results {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		base := i * cols
+		b.WriteByte('(')
+		for j := 0; j < cols; j++ {
+			if j > 0 {
+				b.WriteByte(',')
+			}
+			fmt.Fprintf(&b, "$%d", base+j+1)
+		}
+		b.WriteByte(')')
+		args = append(args,
+			tenantID, res.TargetKey, res.TargetName, res.ProbeKind, res.Success,
+			floatOrNil(res.DNSMs), floatOrNil(res.TCPMs), floatOrNil(res.TLSMs),
+			floatOrNil(res.TTFBMs), floatOrNil(res.TotalMs),
+			intOrNil(res.HTTPStatus), textOrNil(res.ErrorKind), res.ObservedAt.UTC(),
+		)
+	}
+	return b.String(), args
 }
 
 // WindowAggregate rolls up one target's results observed at/after

@@ -15,12 +15,12 @@ package main
 //
 // The first three sub-models mirror the three horizontal-scaling axes
 // the platform exposes (Postgres pool, ClickHouse write throughput,
-// NATS subject cardinality). A fourth sub-model captures the WS-4
+// NATS subject cardinality). A fourth sub-model captures the
 // activity-tier telemetry sampling policy (fleet rows/s decomposed by
 // active / idle / dormant cohort), and a fifth captures the control-
 // plane (not data-plane) cost the dormancy work targets: how many
 // tenants the periodic per-tenant sweeps visit per cycle, before vs
-// after the activity-tiered SweepPlanner gating (the WS-1 dormancy
+// after the activity-tiered SweepPlanner gating (the dormancy
 // dividend).
 
 import (
@@ -98,14 +98,14 @@ func (r *BusinessBenchmarkReport) writeCapacityPlanMarkdown(b *strings.Builder) 
 	fmt.Fprintf(b, "- recommended NATS_PARTITIONS: %d — %s\n\n", n.RecommendedPartitions, n.Note)
 
 	ai := cp.AIInference
-	b.WriteString("**AI inference footprint (WS-9 shared pool)**\n\n")
+	b.WriteString("**AI inference footprint (shared pool)**\n\n")
 	fmt.Fprintf(b, "- %d active tenants → %.2f avg calls/s, %.2f peak calls/s (burst)\n", ai.ActiveTenants, ai.AvgCallsPerSec, ai.PeakCallsPerSec)
 	fmt.Fprintf(b, "- offered concurrency (Little's law): %.2f vs pool slots %d → %.0f%% utilization (recommended slots %d)\n", ai.OfferedConcurrency, ai.PoolConcurrency, ai.PoolUtilization*100, ai.RecommendedPoolConcurrency)
 	fmt.Fprintf(b, "- shared pool %.1f GB vs per-tenant residency %.1f GB → ~%.0f× less memory\n", ai.SharedPoolGB, ai.PerTenantResidencyGB, ai.MemorySavingsFactor)
 	fmt.Fprintf(b, "- %s\n\n", ai.Note)
 
 	if ts := cp.TierSampling; ts != nil {
-		b.WriteString("**WS-4 activity-tier telemetry sampling** (ClickHouse rows/s)\n\n")
+		b.WriteString("**Activity-tier telemetry sampling** (ClickHouse rows/s)\n\n")
 		fmt.Fprintf(b, "- active: %d tenants → %.1f rows/s (full fidelity)\n", ts.ActiveTenants, ts.ActiveRowsPerSec)
 		fmt.Fprintf(b, "- idle: %d tenants → %.1f rows/s (sampled @ %.2f×)\n", ts.IdleTenants, ts.IdleRowsPerSec, ts.IdleSampleMultiplier)
 		fmt.Fprintf(b, "- dormant: %d tenants → %.1f rows/s (security-events-only)\n", ts.DormantTenants, ts.DormantRowsPerSec)
@@ -114,7 +114,7 @@ func (r *BusinessBenchmarkReport) writeCapacityPlanMarkdown(b *strings.Builder) 
 	}
 
 	sw := cp.PeriodicSweep
-	b.WriteString("**Periodic per-tenant sweep cost (dormancy dividend, WS-1)**\n\n")
+	b.WriteString("**Periodic per-tenant sweep cost (dormancy dividend)**\n\n")
 	fmt.Fprintf(b, "- activity mix: %d active / %d idle / %d dormant (idle every %d cycles, dormant every %d)\n",
 		sw.ActiveTenants, sw.IdleTenants, sw.DormantTenants, sw.IdleEvery, sw.DormantEvery)
 	fmt.Fprintf(b, "- tiered jobs (`%s`)\n", strings.Join(sw.Jobs, "`, `"))

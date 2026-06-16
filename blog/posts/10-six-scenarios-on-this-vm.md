@@ -38,7 +38,7 @@ because they're edges in one graph — not two tabs that silently disagree.
 
 ## The benchmarks, re-measured together on this VM
 
-The series' load-bearing numbers, all re-run on `main` `65824c75`:
+The series' load-bearing numbers, all measured on this VM:
 
 **Detection** ([`efficacy-report.json`](../artifacts/efficacy-report.json)):
 overall **PASS** — firewall/firewall_kernel/swg/ztna 100% block, dlp 100%
@@ -66,7 +66,7 @@ margin, one deliberate loss-maker the margin autopilot surfaces.
 
 SNG compiles one typed policy graph per tenant into a signed bundle a software
 edge enforces at 5–28 Gbps; it detects at 100% on curated corpora and tells you
-the honest 90% when traffic is wild; and — this cycle's point — it runs 5,000
+the honest 90% when traffic is wild; and — the load-bearing point — it runs 5,000
 mostly-dormant SME tenants by tiering background work 10×, hibernating the truly
 idle to near-zero, pooling one AI model 3,696× more efficiently than per-tenant,
 and operating itself through three guardrailed autopilots. Every number here
@@ -80,6 +80,6 @@ came from this VM.
   staging fleet that publishes real wake-latency and promotion/throttle events.
 - **Software edge, not silicon.** The throughput ceiling is a multi-core software
   curve, not an ASIC line-rate; a buyer should demand a real-NIC bake-off.
-- **Breadth is still catching up.** WS-10 narrowed the CASB/threat-intel/identity
+- **Breadth is still catching up.** SNG has narrowed the CASB/threat-intel/identity
   gap; it didn't erase it. The defensible claim remains *economics and
   self-operation*, proven here end to end.

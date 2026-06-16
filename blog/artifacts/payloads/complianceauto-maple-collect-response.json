@@ -1,0 +1,284 @@
+{
+  "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0",
+  "generated_at": "2026-06-16T03:22:48.198178626Z",
+  "frameworks": [
+    {
+      "framework": "SOC2",
+      "total": 10,
+      "pass": 6,
+      "fail": 4,
+      "not_applicable": 0,
+      "score_percent": 60,
+      "controls": [
+        {
+          "control_id": "CC6.1",
+          "framework": "SOC2",
+          "title": "Logical access — default-deny policy",
+          "statement": "Logical access is restricted by a deny-by-default authorization policy.",
+          "category": "Logical Access",
+          "collector_id": "policy_default_deny",
+          "status": "pass",
+          "summary": "active policy graph enforces default-deny",
+          "source": "policy_graph",
+          "observed_at": "2026-06-16T03:22:48.193348978Z",
+          "evidence": {
+            "default_deny": true,
+            "graph_version": 1,
+            "has_policy_graph": true
+          }
+        },
+        {
+          "control_id": "CC6.1-ISO",
+          "framework": "SOC2",
+          "title": "Tenant isolation (row-level security)",
+          "statement": "Tenant data is isolated by enforced row-level security.",
+          "category": "Logical Access",
+          "collector_id": "tenant_isolation_rls",
+          "status": "pass",
+          "summary": "row-level security is enforced for tenant data isolation",
+          "source": "database_role",
+          "observed_at": "2026-06-16T03:22:48.193348978Z",
+          "evidence": {
+            "db_role": "sng_app",
+            "rls_enforced": true,
+            "rls_runtime_verified": true,
+            "role_bypasses_rls": false
+          }
+        },
+        {
+          "control_id": "CC6.6",
+          "framework": "SOC2",
+          "title": "Federated authentication (SSO)",
+          "statement": "External access is authenticated through a configured identity provider.",
+          "category": "Logical Access",
+          "collector_id": "sso_enforcement",
+          "status": "fail",
+          "summary": "no identity provider is configured for federated access",
+          "source": "idp_configs",
+          "observed_at": "2026-06-16T03:22:48.193348978Z",
+          "evidence": {
+            "idp_configured": 0,
+            "idp_enabled": 0
+          }
+        },
+        {
+          "control_id": "CC6.7",
+          "framework": "SOC2",
+          "title": "Encryption at rest",
+          "statement": "Data at rest is protected with managed envelope encryption.",
+          "category": "Cryptography",
+          "collector_id": "encryption_at_rest",
+          "status": "fail",
+          "summary": "no key-wrap master is configured; data-at-rest encryption is disabled",
+          "source": "platform_config",
+          "observed_at": "2026-06-16T03:22:48.193348978Z",
+          "evidence": {
+            "encryption_at_rest": false
+          }
+        },
+        {
+          "control_id": "CC6.8",
+          "framework": "SOC2",
+          "title": "Encryption in transit",
+          "statement": "Data in transit is protected with enforced TLS.",
+          "category": "Cryptography",
+          "collector_id": "encryption_in_transit",
+          "status": "fail",
+          "summary": "TLS is not enforced for data in transit",
+          "source": "platform_config",
+          "observed_at": "2026-06-16T03:22:48.193348978Z",
+          "evidence": {
+            "tls_enforced": false,
+            "tls_mode": "disable"
+          }
+        },
+        {
+          "control_id": "CC7.1",
+          "framework": "SOC2",
+          "title": "Policy bundle integrity",
+          "statement": "Distributed policy bundles are signed by an active signing key.",
+          "category": "System Integrity",
+          "collector_id": "policy_bundle_signing",
+          "status": "pass",
+          "summary": "an active policy bundle signing key is present",
+          "source": "policy_signing_keys",
+          "observed_at": "2026-06-16T03:22:48.193348978Z",
+          "evidence": {
+            "has_active_signing_key": true
+          }
+        },
+        {
+          "control_id": "CC7.2",
+          "framework": "SOC2",
+          "title": "Audit logging",
+          "statement": "Security-relevant actions are recorded in an append-only audit trail.",
+          "category": "Monitoring",
+          "collector_id": "audit_trail",
+          "status": "pass",
+          "summary": "append-only audit trail has recorded activity",
+          "source": "audit_log",
+          "observed_at": "2026-06-16T03:22:48.193348978Z",
+          "evidence": {
+            "has_audit_activity": true,
+            "last_audit_at": "2026-06-16T02:52:41Z"
+          }
+        },
+        {
+          "control_id": "C1.1",
+          "framework": "SOC2",
+          "title": "Cryptographic key rotation",
+          "statement": "Signing keys are rotated within the managed rotation window.",
+          "category": "Cryptography",
+          "collector_id": "key_rotation",
+          "status": "pass",
+          "summary": "active signing key is within the managed rotation window",
+          "source": "policy_signing_keys",
+          "observed_at": "2026-06-16T03:22:48.193348978Z",
+          "evidence": {
+            "activated_at": "2026-06-16T02:52:40Z",
+            "has_active_signing_key": true,
+            "key_age_days": 0,
+            "max_age_days": 365
+          }
+        },
+        {
+          "control_id": "C1.2",
+          "framework": "SOC2",
+          "title": "Data retention",
+          "statement": "A data-retention period is configured for tenant data.",
+          "category": "Confidentiality",
+          "collector_id": "data_retention",
+          "status": "fail",
+          "summary": "no data-retention period is configured",
+          "source": "tenant_settings",
+          "observed_at": "2026-06-16T03:22:48.193348978Z",
+          "evidence": {
+            "retention_days": 0
+          }
+        },
+        {
+          "control_id": "P1.1",
+          "framework": "SOC2",
+          "title": "Data residency",
+          "statement": "Tenant data is pinned to a declared residency region.",
+          "category": "Privacy",
+          "collector_id": "data_residency",
+          "status": "pass",
+          "summary": "tenant data is pinned to a declared residency region",
+          "source": "tenant_record",
+          "observed_at": "2026-06-16T03:22:48.193348978Z",
+          "evidence": {
+            "region": "ca-central-1"
+          }
+        }
+      ]
+    },
+    {
+      "framework": "ISO_27001",
+      "total": 6,
+      "pass": 4,
+      "fail": 2,
+      "not_applicable": 0,
+      "score_percent": 66,
+      "controls": [
+        {
+          "control_id": "A.8.2",
+          "framework": "ISO_27001",
+          "title": "Privileged access rights",
+          "statement": "Access is governed by a deny-by-default authorization policy.",
+          "category": "Access Control",
+          "collector_id": "policy_default_deny",
+          "status": "pass",
+          "summary": "active policy graph enforces default-deny",
+          "source": "policy_graph",
+          "observed_at": "2026-06-16T03:22:48.193348978Z",
+          "evidence": {
+            "default_deny": true,
+            "graph_version": 1,
+            "has_policy_graph": true
+          }
+        },
+        {
+          "control_id": "A.5.16",
+          "framework": "ISO_27001",
+          "title": "Identity management",
+          "statement": "Identities are federated through a configured identity provider.",
+          "category": "Identity",
+          "collector_id": "sso_enforcement",
+          "status": "fail",
+          "summary": "no identity provider is configured for federated access",
+          "source": "idp_configs",
+          "observed_at": "2026-06-16T03:22:48.193348978Z",
+          "evidence": {
+            "idp_configured": 0,
+            "idp_enabled": 0
+          }
+        },
+        {
+          "control_id": "A.8.24",
+          "framework": "ISO_27001",
+          "title": "Use of cryptography",
+          "statement": "Data at rest is protected with managed envelope encryption.",
+          "category": "Cryptography",
+          "collector_id": "encryption_at_rest",
+          "status": "fail",
+          "summary": "no key-wrap master is configured; data-at-rest encryption is disabled",
+          "source": "platform_config",
+          "observed_at": "2026-06-16T03:22:48.193348978Z",
+          "evidence": {
+            "encryption_at_rest": false
+          }
+        },
+        {
+          "control_id": "A.8.24-KR",
+          "framework": "ISO_27001",
+          "title": "Key management",
+          "statement": "Cryptographic keys are rotated within the managed rotation window.",
+          "category": "Cryptography",
+          "collector_id": "key_rotation",
+          "status": "pass",
+          "summary": "active signing key is within the managed rotation window",
+          "source": "policy_signing_keys",
+          "observed_at": "2026-06-16T03:22:48.193348978Z",
+          "evidence": {
+            "activated_at": "2026-06-16T02:52:40Z",
+            "has_active_signing_key": true,
+            "key_age_days": 0,
+            "max_age_days": 365
+          }
+        },
+        {
+          "control_id": "A.8.15",
+          "framework": "ISO_27001",
+          "title": "Logging",
+          "statement": "Security events are recorded in an append-only audit trail.",
+          "category": "Operations",
+          "collector_id": "audit_trail",
+          "status": "pass",
+          "summary": "append-only audit trail has recorded activity",
+          "source": "audit_log",
+          "observed_at": "2026-06-16T03:22:48.193348978Z",
+          "evidence": {
+            "has_audit_activity": true,
+            "last_audit_at": "2026-06-16T02:52:41Z"
+          }
+        },
+        {
+          "control_id": "A.5.31",
+          "framework": "ISO_27001",
+          "title": "Legal and residency requirements",
+          "statement": "Tenant data is pinned to a declared residency region.",
+          "category": "Compliance",
+          "collector_id": "data_residency",
+          "status": "pass",
+          "summary": "tenant data is pinned to a declared residency region",
+          "source": "tenant_record",
+          "observed_at": "2026-06-16T03:22:48.193348978Z",
+          "evidence": {
+            "region": "ca-central-1"
+          }
+        }
+      ]
+    }
+  ]
+}

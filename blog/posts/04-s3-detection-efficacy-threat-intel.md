@@ -1,11 +1,10 @@
 # Detection efficacy: the catch-rate matrix, plus threat-intel depth
 
-> **Post 4 of 11 — efficacy + threat-intel (Scenario S3 + WS-10b).** Persona:
+> **Post 4 of 11 — efficacy + threat-intel (Scenario S3).** Persona:
 > Lena, MSP SOC analyst. Evidence: [`efficacy-report.json`](../artifacts/efficacy-report.json)
-> (re-run on `main` `65824c75`, `git`-stamped), [`s3-acme-alerts.json`](../artifacts/payloads/s3-acme-alerts.json);
-> screenshot [`s3-alerts.png`](../artifacts/screenshots/s3-alerts.png). PRs
-> [#213](https://github.com/kennguy3n/visible-fishbone/pull/213),
-> [#224](https://github.com/kennguy3n/visible-fishbone/pull/224)–[#236](https://github.com/kennguy3n/visible-fishbone/pull/236).
+> (`git`-stamped, verbatim verdicts), [`s3-acme-alerts.json`](../artifacts/payloads/s3-acme-alerts.json),
+> [`threatcontent-acme-posture.json`](../artifacts/payloads/threatcontent-acme-posture.json);
+> screenshot [`s3-alerts.png`](../artifacts/screenshots/s3-alerts.png).
 
 A catch-rate number is only worth printing if it comes from running the real
 enforcement code over real corpora, and if the false-positive rate is printed
@@ -14,12 +13,12 @@ crates — `sng-fw`, `sng-ips` (real Suricata), `sng-swg` (real yara-x),
 `sng-dlp` (real ONNX ML-NER), `sng-dns` — over known-bad/known-good, adversarial,
 and noisy "wild" corpora, and emits one signed report.
 
-## The matrix (re-run on the merged code)
+## The matrix
 
 This is the verbatim verdict table from
-[`efficacy-report.json`](../artifacts/efficacy-report.json), re-run on `main`
-`65824c75` with `--firewall --firewall-kernel --swg --ztna --ips --dlp --malware
---dns --adversarial --wild`, ONNX Runtime 1.22 for the ML-NER leg, Suricata for
+[`efficacy-report.json`](../artifacts/efficacy-report.json), produced with
+`--firewall --firewall-kernel --swg --ztna --ips --dlp --malware --dns
+--adversarial --wild`, ONNX Runtime 1.22 for the ML-NER leg, Suricata for
 IPS, and nftables for the kernel leg:
 
 | Function | Kind | bad | good | catch % | fp % | verdict |
@@ -37,11 +36,11 @@ IPS, and nftables for the kernel leg:
 | ips_adversarial | detect-rate | 8 | 6 | 100.0 | 0.0 | PASS |
 | **overall** | | | | | | **PASS** |
 
-The DLP corpus is the one that grew most this cycle — **3,800 known-bad /
-3,800 known-good**, reflecting the broader detector catalog (Post 6) — and it
-holds 100% catch at 0% FP. The kernel firewall leg (`firewall_kernel`) is real:
-the compiled nftables ruleset is accepted by `nft -c` before it's scored, so the
-"the kernel path is unverified" caveat from earlier cycles is closed.
+The DLP corpus is the largest — **3,800 known-bad / 3,800 known-good**,
+reflecting the broad detector catalog (Post 6) — and it holds 100% catch at 0%
+FP. The kernel firewall leg (`firewall_kernel`) is real: the compiled nftables
+ruleset is accepted by `nft -c` before it's scored, so the kernel path is
+verified, not assumed.
 
 ## The honest part: wild traffic
 
@@ -75,10 +74,10 @@ These are per-decision rates, deliberately reported separately from the headline
 forwarding Gbps (Post 2) so nobody conflates "how fast can the policy engine
 decide" with "how fast can the box forward."
 
-## Threat-intel depth (WS-10b)
+## Threat-intel depth
 
-Catch-rate is a function of *what you know about*. WS-10b broadened the
-threat-intel surface to close the gap with appliance vendors:
+Catch-rate is a function of *what you know about*. SNG's threat-intel surface
+closes the gap with appliance vendors on several axes:
 
 - **JA3 / JA3S TLS fingerprinting** — fingerprint-based detection of known-bad
   client/server TLS stacks, not just IP/domain reputation.
@@ -89,6 +88,37 @@ threat-intel surface to close the gap with appliance vendors:
   exposure, rather than only catching the *next* occurrence. This is the feature
   that turns "we just learned domain X is bad" into "and here are the three
   tenants that talked to it last week."
+
+## Managed threat content: signed, curated, no-config
+
+The axes above are *capabilities*; on their own they still leave the operator
+holding the hardest part — sourcing and curating the indicator feeds. The
+appliance-vendor answer is a paid subscription you wire up and babysit. SNG's
+answer is **managed threat content**: a built-in, curated indicator set the
+platform fetches, de-duplicates, signs, and ships to every tenant with no
+configuration. The captured posture
+([`threatcontent-acme-posture.json`](../artifacts/payloads/threatcontent-acme-posture.json))
+is verbatim from the control plane for the seeded tenant:
+
+- **5 curated built-in feeds, enabled by default** — abuse.ch Feodo Tracker,
+  MalwareBazaar, URLhaus, the URLhaus host file, and OpenPhish.
+- **≈77,000 indicators** in the published bundle (domains, file hashes, IPs,
+  and URLs), assembled and counted by type so the data plane knows exactly what
+  it loaded.
+- **Signed with Ed25519** (`key_id: sng-managed-threat-content`) so the edge
+  verifies authenticity before loading — the same fail-closed discipline the
+  policy bundle uses.
+- **Churn-avoidant by design.** The content digest hashes only the indicator
+  *membership and corroboration*, deliberately excluding recency-decay scores
+  and re-stamped timestamps. A hourly refresh that changes nothing material does
+  **not** mint a new version, so the platform doesn't re-sign and re-publish to
+  5,000 tenants over content that didn't actually change. A new version is
+  minted exactly when the indicator set or its sourcing changes.
+
+The operator does nothing to get this; it is the no-config baseline, and a
+tenant can still layer its own feeds on top.
+
+## Where the analyst sees it
 
 The alerts surface ([`s3-acme-alerts.json`](../artifacts/payloads/s3-acme-alerts.json))
 is where these land for the analyst, with severity and the evidence that fired

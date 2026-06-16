@@ -1,0 +1,6 @@
+{
+  "error": {
+    "code": "unavailable",
+    "message": "policy recommendation engine requires the telemetry hot tier, which is not configured on this deployment"
+  }
+}

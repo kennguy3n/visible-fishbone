@@ -1,19 +1,20 @@
 # AI-assisted operations — with a verifier, and one model for the whole fleet
 
-> **Post 7 of 11 — AI ops + shared inference (Scenario S6 + WS-9).** Personas:
+> **Post 7 of 11 — AI ops + shared inference (Scenario S6).** Personas:
 > Lena (analyst), Devraj (SME IT). Evidence: [`s6-acme-posture-report.json`](../artifacts/payloads/s6-acme-posture-report.json),
 > [`s6-acme-playbooks.json`](../artifacts/payloads/s6-acme-playbooks.json),
 > [`s6-acme-nl-policy-query-response.json`](../artifacts/payloads/s6-acme-nl-policy-query-response.json),
+> [`policyrec-acme-generate-response.json`](../artifacts/payloads/policyrec-acme-generate-response.json),
+> [`policyrec-acme-list.json`](../artifacts/payloads/policyrec-acme-list.json),
 > [`llm_validation/quality_report.md`](../artifacts/llm_validation/quality_report.md),
 > [`capacity-plan-5000/report.md`](../artifacts/capacity-plan-5000/report.md),
 > [`noops-metrics-snapshot.txt`](../artifacts/noops-metrics-snapshot.txt); screenshots
 > [`s6-assistant.png`](../artifacts/screenshots/s6-assistant.png),
-> [`s6-playbooks.png`](../artifacts/screenshots/s6-playbooks.png). PR
-> [#217](https://github.com/kennguy3n/visible-fishbone/pull/217).
+> [`s6-playbooks.png`](../artifacts/screenshots/s6-playbooks.png).
 
 AI in a security product is dangerous if it's a vibe. SNG's posture is: the model
 *proposes*, a deterministic verifier *checks*, and only checked output reaches an
-operator. This cycle (WS-9) also changes *how* the model runs — from a per-tenant
+operator. SNG also changes *how* the model runs — from a per-tenant
 fantasy that doesn't scale to one pooled model serving the whole fleet.
 
 ## The model proposes, the verifier disposes
@@ -35,6 +36,23 @@ are the same pattern: AI-drafted, verifier-checked, operator-approved.
 
 ![Remediation playbooks](../artifacts/screenshots/s6-playbooks.png)
 
+## Suggestions that compile before you ever see them
+
+The same "propose → verify" contract powers the **policy-recommendation
+engine**: it reads observed traffic and synthesizes candidate policy edges —
+"these identities keep reaching this app; here's the `allow` rule that would
+codify it" — and every candidate is run through the real policy compiler and
+verifier *before* it is ever offered, so a suggestion can never introduce a
+contradiction. It is also honest about its inputs: a deployment without the
+telemetry hot tier configured returns `503 unavailable`
+([`policyrec-acme-generate-response.json`](../artifacts/payloads/policyrec-acme-generate-response.json)),
+and the recommendations list is simply empty
+([`policyrec-acme-list.json`](../artifacts/payloads/policyrec-acme-list.json))
+rather than fabricating advice from no data. When the hot tier *is* present, the
+same verifier-checked pipeline turns real traffic into reviewable graph deltas
+the operator approves — the data-plane analogue of the natural-language
+assistant above.
+
 ## The model is real, and measured
 
 The self-hosted model is **Ternary-Bonsai-8B Q2_0** (custom AVX2-repack kernels),
@@ -47,15 +65,15 @@ The verifier is what makes a multi-second, sometimes-wrong model *safe* to put i
 front of an operator: a wrong translation fails the check and falls back to the
 deterministic path rather than misleading anyone.
 
-## WS-9: one pooled model for 5,000 tenants
+## One pooled model for 5,000 tenants
 
 Here's the scaling problem the per-tenant mental model hides. If every tenant
 "has a model," 5,000 tenants implies 5,000 model residencies. That is absurd on
-cost. WS-9 replaces it with a **single shared inference pool** with fair
+cost. SNG uses a **single shared inference pool** with fair
 per-tenant scheduling, and the [capacity plan](../artifacts/capacity-plan-5000/report.md)
 quantifies why that's the only sane design:
 
-> **AI inference footprint (WS-9 shared pool):** 250 active tenants → 0.42 avg
+> **AI inference footprint (shared pool):** 250 active tenants → 0.42 avg
 > calls/s, 1.25 peak (burst). Offered concurrency (Little's law) 4.38 vs pool
 > slots 4 → 109% utilization (recommended slots 7). **Shared pool 4.6 GB vs
 > per-tenant residency 17,000 GB → ~3,696× less memory.**

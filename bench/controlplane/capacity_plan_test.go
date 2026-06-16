@@ -237,7 +237,7 @@ func TestCapacityPlanTierSamplingRendersAndRoundTrips(t *testing.T) {
 	}
 	r.Grade()
 	md := r.ToMarkdown()
-	if !strings.Contains(md, "WS-4 activity-tier telemetry sampling") {
+	if !strings.Contains(md, "Activity-tier telemetry sampling") {
 		t.Errorf("markdown missing tier-sampling section")
 	}
 	js, err := r.ToJSON()
@@ -272,7 +272,7 @@ func TestCapacityPlanRendersInMarkdown(t *testing.T) {
 	}
 	r.Grade()
 	md := r.ToMarkdown()
-	for _, want := range []string{"Capacity plan @ 5000 tenants", "Postgres connection-pool pressure", "ClickHouse write throughput", "NATS subject cardinality", "AI inference footprint (WS-9 shared pool)", "Periodic per-tenant sweep cost"} {
+	for _, want := range []string{"Capacity plan @ 5000 tenants", "Postgres connection-pool pressure", "ClickHouse write throughput", "NATS subject cardinality", "AI inference footprint (shared pool)", "Periodic per-tenant sweep cost"} {
 		if !strings.Contains(md, want) {
 			t.Errorf("markdown missing %q", want)
 		}

@@ -33,14 +33,14 @@ Telemetry classes: `agent`, `dns`, `flow`, `http`, `ips`, `sdwan`, `ztna`
 - 26500.0 msgs/s, 24h retention → ~732672000000 bytes hot JetStream storage
 - recommended NATS_PARTITIONS: 16 — subject cardinality per partition within the healthy envelope.
 
-**AI inference footprint (WS-9 shared pool)**
+**AI inference footprint (shared pool)**
 
 - 250 active tenants → 0.42 avg calls/s, 1.25 peak calls/s (burst)
 - offered concurrency (Little's law): 4.38 vs pool slots 4 → 109% utilization (recommended slots 7)
 - shared pool 4.6 GB vs per-tenant residency 17000.0 GB → ~3696× less memory
 - peak demand needs ~4.38 parallel slots; raise AI_INFERENCE_POOL_MAX_CONCURRENT to 7 (bursts above the cap queue fairly up to MaxWait, then degrade to the template path).
 
-**Periodic per-tenant sweep cost (dormancy dividend, WS-1)**
+**Periodic per-tenant sweep cost (dormancy dividend)**
 
 - activity mix: 400 active / 600 idle / 4000 dormant (idle every 10 cycles, dormant every 100)
 - tiered jobs (`idp_directory_sync`, `casb_noops_reconcile`, `alert_feedback_tuning`)

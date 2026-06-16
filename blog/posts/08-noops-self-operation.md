@@ -1,6 +1,6 @@
 # NoOps self-operation: the control plane that operates itself
 
-> **Post 8 of 11 — self-operation (WS-5 + WS-6 + WS-7).** Personas: Maya (MSP),
+> **Post 8 of 11 — self-operation.** Personas: Maya (MSP),
 > Tom (CFO). Evidence: [`ws5-acme-rollout-capabilities.json`](../artifacts/payloads/ws5-acme-rollout-capabilities.json),
 > [`ws5-acme-rollout-margin-autopilot.json`](../artifacts/payloads/ws5-acme-rollout-margin-autopilot.json),
 > [`ws7-acme-cost.json`](../artifacts/payloads/ws7-acme-cost.json),
@@ -10,26 +10,22 @@
 > screenshots [`new-cross-tenant-rollout.png`](../artifacts/screenshots/new-cross-tenant-rollout.png),
 > [`new-metering-fleet-top.png`](../artifacts/screenshots/new-metering-fleet-top.png),
 > [`new-metering-fleet-table.png`](../artifacts/screenshots/new-metering-fleet-table.png).
-> Migrations `069_capability_rollout_monitor_evidence`. PRs
-> [#214](https://github.com/kennguy3n/visible-fishbone/pull/214),
-> [#216](https://github.com/kennguy3n/visible-fishbone/pull/216),
-> [#218](https://github.com/kennguy3n/visible-fishbone/pull/218).
 
 "NoOps" is an easy word to abuse. What we mean by it is concrete: the work an SRE
 team would otherwise do for 5,000 tenants — turning capabilities on safely,
 right-sizing infrastructure, and acting on tenants that lose money — is done by
 three guardrailed autopilots, each default-OFF, each leaving an audit trail, each
-with a kill switch. This is the post that ties the cycle together.
+with a kill switch. This is the post that ties the operations story together.
 
-## Autopilot 1 — auto-promotion of default-OFF capabilities (WS-5)
+## Autopilot 1 — auto-promotion of default-OFF capabilities
 
 Every new enforcement surface ships **default-OFF** so upgrades are inert (the
 honesty contract, Post 0). The cost of that safety is toil: someone has to decide
-*when* each tenant is ready to move a capability off→monitor→enforce. WS-5
+*when* each tenant is ready to move a capability off→monitor→enforce. SNG
 automates that decision with guardrails.
 
 Each capability is a state machine — `off → monitor → enforce` — and the
-auto-promotion controller escalates a tenant **only when monitor-phase guardrails
+auto-promotion controller escalates a tenant **only when monitor-mode guardrails
 hold for a dwell window** (24h default). The per-tenant ladder is a real
 RLS-scoped read ([`ws5-acme-rollout-capabilities.json`](../artifacts/payloads/ws5-acme-rollout-capabilities.json)):
 
@@ -39,9 +35,9 @@ RLS-scoped read ([`ws5-acme-rollout-capabilities.json`](../artifacts/payloads/ws
   { "capability": "idp_directory_sync", "state": "off", ... } ]
 ```
 
-Migration `069_capability_rollout_monitor_evidence` adds the evidence table the
-promotion gate reads: a capability can't be promoted on a hunch, it's promoted
-because the monitor phase *recorded* that it would have been safe (no
+A dedicated evidence table backs the promotion gate: a capability can't be
+promoted on a hunch, it's promoted because the monitor mode *recorded* that it
+would have been safe (no
 false-positive storm, no enforcement that would have broken legitimate traffic)
 for the full dwell window. The cross-tenant view:
 
@@ -49,12 +45,12 @@ for the full dwell window. The cross-tenant view:
 
 This is why the efficacy honesty (Post 4) matters: a capability like malware
 enforcement that WARNs at 90.1%/9.6% on wild traffic *won't* auto-promote to
-enforce, because the monitor-phase false-positive guardrail won't clear. The
+enforce, because the monitor-mode false-positive guardrail won't clear. The
 autopilot is structurally conservative.
 
-## Autopilot 2 — capacity autopilot (WS-6)
+## Autopilot 2 — capacity autopilot
 
-A human capacity planner reads dashboards and edits config. WS-6's capacity
+A human capacity planner reads dashboards and edits config. SNG's capacity
 autopilot reads the *live fleet metrics* and reconciles infrastructure sizing
 toward what the load actually needs. It's running on the seeded stack
 ([`noops-metrics-snapshot.txt`](../artifacts/noops-metrics-snapshot.txt)):
@@ -84,11 +80,11 @@ at 5,000 tenants, and its recommendations are exactly what the autopilot acts on
 A human would compute those from dashboards once a quarter; the autopilot
 computes them continuously from live metrics.
 
-## Autopilot 3 — margin autopilot (WS-7)
+## Autopilot 3 — margin autopilot
 
 The third toil sink is *money*. On a 5,000-tenant fleet of mostly trials, some
 tenants lose money — and finding them by hand is a monthly spreadsheet exercise.
-WS-7's margin autopilot consumes the metering/cost signal and acts on
+The margin autopilot consumes the metering/cost signal and acts on
 underwater tenants. The fleet metering view leads with the blended number:
 
 ![Fleet metering — top](../artifacts/screenshots/new-metering-fleet-top.png)
@@ -112,9 +108,9 @@ healthy at ≈+47% ([`ws7-acme-cost.json`](../artifacts/payloads/ws7-acme-cost.j
 
 | Autopilot | Replaces the toil of | Guardrail | Default |
 | --- | --- | --- | --- |
-| Auto-promotion (WS-5) | deciding when each tenant is ready to enforce | monitor-phase evidence + 24h dwell | OFF |
-| Capacity (WS-6) | quarterly infra right-sizing | current-vs-recommended, reconcile loop | OFF |
-| Margin (WS-7) | the monthly money spreadsheet | off→monitor→enforce ladder | OFF |
+| Auto-promotion | deciding when each tenant is ready to enforce | monitor-mode evidence + 24h dwell | OFF |
+| Capacity | quarterly infra right-sizing | current-vs-recommended, reconcile loop | OFF |
+| Margin | the monthly money spreadsheet | off→monitor→enforce ladder | OFF |
 
 That is what "NoOps for 5,000 tenants" actually means here: not "no operators
 ever," but "the repetitive, fleet-scale operator decisions are automated,

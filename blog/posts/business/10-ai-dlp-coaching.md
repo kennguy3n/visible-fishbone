@@ -19,7 +19,7 @@ makes Lena the enemy. SNG's DLP is built around a softer, more effective default
 
 SNG's DLP runs two engines: a structured detector for the things with shape
 (card numbers, national IDs, IBANs) and an on-device ML classifier for
-unstructured PII. Measured on the merged code
+unstructured PII. Measured on the live stack
 ([`efficacy-report.json`](../../artifacts/efficacy-report.json)):
 
 - **Structured DLP: 100% catch, 0% false positives** on a 3,800/3,800 corpus.

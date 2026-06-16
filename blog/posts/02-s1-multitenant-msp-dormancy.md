@@ -1,6 +1,6 @@
 # Stand up a tenant before the call ends — then run 5,000 of them cheaply
 
-> **Post 2 of 11 — operations at scale (Scenario S1 + WS-1/2/8).** Persona: Maya,
+> **Post 2 of 11 — operations at scale (Scenario S1).** Persona: Maya,
 > MSP platform lead. Evidence: [`s1-tenants.json`](../artifacts/payloads/s1-tenants.json),
 > [`s1-msps.json`](../artifacts/payloads/s1-msps.json),
 > [`s1-acme-audit-log.json`](../artifacts/payloads/s1-acme-audit-log.json),
@@ -27,7 +27,7 @@ impossible, not merely filtered in application code. The tenants list
 ([`s1-tenants.json`](../artifacts/payloads/s1-tenants.json)) is the same data the
 fleet dashboard renders.
 
-![The fleet dashboard — 10 tenants under one MSP](../artifacts/screenshots/refresh-dashboard-fleet.png)
+![The fleet dashboard — the seeded fleet (nine customer tenants plus the platform tenant) under one MSP](../artifacts/screenshots/refresh-dashboard-fleet.png)
 
 Standing up a tenant is one API call (or one wizard, Post 5's guided onboarding)
 that seeds a jurisdiction-correct baseline graph. Every change is an audit event
@@ -42,7 +42,7 @@ cross-tenant roll-out surface previews a per-tenant diff before applying:
 
 ![Cross-tenant roll-out](../artifacts/screenshots/new-cross-tenant-rollout.png)
 
-## The cost lever: universal dormancy tiering (WS-1)
+## The cost lever: universal dormancy tiering
 
 Here is the problem with 5,000 tenants. The control plane runs *periodic
 per-tenant jobs* — IdP directory sync, CASB shadow-IT reconcile, compliance
@@ -50,9 +50,9 @@ evidence scheduling, threat-intel recompile, metering roll-ups. Naïvely, each j
 visits every tenant every cycle: 5,000 tenants × N jobs of pointless work for the
 4,000 that are dormant trials nobody has logged into in weeks.
 
-WS-1 makes the `SweepPlanner` — previously wired into just one consumer — the
-**shared middleware every periodic job tiers through**. It reads the activity
-signal (WS-2's hardened `last_active_at`) and assigns each tenant a cadence:
+SNG makes the `SweepPlanner` the **shared middleware every periodic job tiers
+through**. It reads a hardened `last_active_at` activity signal and assigns each
+tenant a cadence:
 
 - **active** tenants visited every cycle (1×),
 - **idle** tenants every 10th cycle (10× fewer visits),
@@ -73,12 +73,28 @@ every job that opts into the planner, not one special-cased consumer. Post 3
 takes this further: dormant tenants don't just get visited less, they
 *hibernate*.
 
-## The edge keeps up too (WS-8)
+## Spreading the work that does run: the active/active distributor
+
+Tiering decides *how often* a tenant is visited; something still has to decide
+*which replica* does the visiting. A naïve design elects one leader and runs
+every tenant's periodic work on it serially — which is exactly the bottleneck
+that caps a fleet at the size one box can sweep. SNG instead spreads tenants
+across replicas with a lease-fenced **active/active work distributor**
+(`internal/service/workshard`): the tenant keyspace is hashed into **1,024
+shards**, and each replica leases a disjoint subset. Leases use a 20-second TTL
+with a 7-second safety margin, so a replica stops processing a shard
+(at cycle-start + 13 s) well before any successor can acquire the expired lease
+(at + 20 s) — no two replicas ever own the same shard at once, and adding a
+replica simply re-balances shards rather than reshuffling a single leader's
+queue. Onboarding the 5,000th tenant adds shards to the pool; it doesn't pile
+onto one machine.
+
+## The edge keeps up too
 
 Background cost is one half; data-path throughput is the other. The firewall fast
 path was historically quoted as a conservative **single-stream floor** (~5.5
-Gbps) because that's the honest number for one stream through one core. WS-8 adds
-a multi-queue rig that fans the XDP fast path across NIC RSS queues and reports
+Gbps) because that's the honest number for one stream through one core. A
+multi-queue rig fans the XDP fast path across NIC RSS queues and reports
 the floor *and* the ceiling on the same run:
 
 | Profile | Single-stream floor | Multi-queue ceiling | Lift |

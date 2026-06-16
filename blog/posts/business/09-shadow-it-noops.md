@@ -3,7 +3,7 @@
 > **Business series, Post 2 of 5.** Buyer: **Sam**, the one-person IT lead at a
 > 120-person company. Job-to-be-done: *"show me the SaaS apps my staff use that I
 > don't know about — and tell me what to do, not just dump a list."* Capability:
-> CASB NoOps (WS-10c). Evidence:
+> CASB NoOps. Evidence:
 > [`casb-classifications-acme.json`](../../artifacts/payloads/casb-classifications-acme.json),
 > [`casb-noops-actions-acme.json`](../../artifacts/payloads/casb-noops-actions-acme.json);
 > screenshot [`new-casb-noops-shadow-it.png`](../../artifacts/screenshots/new-casb-noops-shadow-it.png).
@@ -56,7 +56,7 @@ nobody uses.
   are deliberately *not* auto-actioned. That's the safe default, but it means the
   long tail of ambiguous apps still needs a human glance.
 - **Discovery is as good as the traffic it sees.** Inline discovery sees what
-  flows through the gateway; the SaaS-API connectors (WS-10c) add API-side
+  flows through the gateway; the SaaS-API connectors add API-side
   visibility for the apps that support it, but a fully off-network app is still
   invisible.
 - **Catalog breadth is still catching up** to a dedicated CASB like Netskope. The
