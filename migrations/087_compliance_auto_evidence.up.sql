@@ -1,7 +1,7 @@
--- Migration 098: Continuous compliance evidence — evidence history (WP6).
+-- Migration 087: Continuous compliance evidence — evidence history (WP6).
 --
 -- Append-only log of every evidence observation the collector produces.
--- Where compliance_auto_control_status (097) holds only the *latest*
+-- Where compliance_auto_control_status (086) holds only the *latest*
 -- status per control, this table retains the full time series: one row
 -- per (control, sweep) so an auditor can see how a control's posture
 -- evolved and when a failing control was remediated. Evidence packs are

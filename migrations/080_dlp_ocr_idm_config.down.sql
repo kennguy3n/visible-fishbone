@@ -1,4 +1,4 @@
--- 087_dlp_ocr_idm_config (down)
+-- 080_dlp_ocr_idm_config (down)
 --
 -- Drop the per-tenant OCR/IDM configuration. Dropping it is fail-safe:
 -- the edge falls back to its compiled-in defaults (OcrLimits::default

@@ -1,4 +1,4 @@
--- Migration 093: Per-tenant, per-target DEM experience-score samples.
+-- Migration 083: Per-tenant, per-target DEM experience-score samples.
 -- One row per scoring window: a composite 0..100 experience score
 -- (availability + latency) computed over a rolling window of raw
 -- probe results, plus the supporting aggregates (availability ratio,

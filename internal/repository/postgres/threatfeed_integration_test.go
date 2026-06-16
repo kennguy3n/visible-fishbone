@@ -11,7 +11,7 @@ import (
 )
 
 // TestThreatFeed_Integration exercises the managed threat-content
-// repository (migrations 081-083) against a real Postgres. The tables
+// repository (migrations 076-078) against a real Postgres. The tables
 // are platform-global (no tenant_id, no RLS), so every operation runs
 // via the system-role transaction; there is no per-tenant isolation to
 // assert, only the CRUD / upsert / ordering / pruning contract.

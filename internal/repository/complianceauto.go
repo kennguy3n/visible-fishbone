@@ -17,7 +17,7 @@ import (
 // Control enums); the service maps between these rows and its domain
 // types at the composition root, mirroring ThreatIOC.
 //
-// Three append/upsert tables back this surface (migrations 096–099):
+// Three append/upsert tables back this surface (migrations 085–088):
 //
 //   - compliance_auto_runs            one row per (tenant, sweep)
 //   - compliance_auto_control_status  latest status per (tenant, fw, control)

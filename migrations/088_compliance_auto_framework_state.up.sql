@@ -1,4 +1,4 @@
--- Migration 099: Continuous compliance evidence — per-framework rollup (WP6).
+-- Migration 088: Continuous compliance evidence — per-framework rollup (WP6).
 --
 -- One row per (tenant, framework): a cheap, pre-aggregated posture
 -- summary the collector upserts at the end of each sweep. It exists so

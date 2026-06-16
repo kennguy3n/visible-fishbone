@@ -1,4 +1,4 @@
--- Reverse migration for the workshard worker registry (076).
+-- Reverse migration for the workshard worker registry (074).
 --
 -- Dropping the registry is fail-safe: the workshard distributor falls
 -- back to single-owner ("own all shards") behaviour when it cannot read

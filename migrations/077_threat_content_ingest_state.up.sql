@@ -8,7 +8,7 @@
 -- sees, with zero per-tenant work, whether each curated feed is fresh
 -- or failing and for how long.
 --
--- Kept separate from the source registry (081) so a transient ingestion
+-- Kept separate from the source registry (076) so a transient ingestion
 -- failure never rewrites the registry row, and so the cursor can be
 -- updated on the hot refresh path without locking the registry. There
 -- is intentionally no foreign key to threat_content_sources: the engine

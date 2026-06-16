@@ -1,4 +1,4 @@
--- 086_dlp_idm_fingerprint_sets
+-- 079_dlp_idm_fingerprint_sets
 --
 -- Durable backing for WP4 IDM (Indexed Document Matching). A tenant
 -- registers a *protected document* (a contract template, a price book,

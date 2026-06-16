@@ -1,4 +1,4 @@
--- Migration 091: Per-tenant Digital Experience Monitoring (DEM)
+-- Migration 081: Per-tenant Digital Experience Monitoring (DEM)
 -- target configuration. Each row is a critical SaaS endpoint a tenant
 -- wants the edge to probe, on top of the code-defined managed default
 -- set (so a no-ops SME configures nothing and still gets coverage).

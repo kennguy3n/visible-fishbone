@@ -28,7 +28,7 @@
 //
 // The engine is a NEW PRODUCER that runs alongside threatintel; it does
 // not modify that package and keeps its own tables (migrations
-// 081-083) rather than clobbering the ai-owned threat_intel_iocs store.
+// 076-078) rather than clobbering the ai-owned threat_intel_iocs store.
 package threatfeed
 
 import (

@@ -18,7 +18,7 @@ import (
 // data layer deliberately does not import the service package.
 // Every row is keyed by a stable `target_key` rather than a
 // foreign key to dem_targets, because the managed default targets
-// are code-defined (they have no config row) — see migration 091.
+// are code-defined (they have no config row) — see migration 081.
 
 // DEMProbeKind is the probe transport, mirroring the edge
 // `sng-dem` crate's ProbeKind tokens. Kept as a string-typed

@@ -1,4 +1,4 @@
--- Migration 096: Continuous compliance evidence — collection runs (WP6).
+-- Migration 085: Continuous compliance evidence — collection runs (WP6).
 --
 -- The `complianceauto` service (internal/service/complianceauto) maps
 -- real platform state to SOC 2 / ISO 27001 controls on a bounded,

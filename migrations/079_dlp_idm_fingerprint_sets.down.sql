@@ -1,4 +1,4 @@
--- 086_dlp_idm_fingerprint_sets (down)
+-- 079_dlp_idm_fingerprint_sets (down)
 --
 -- Drop the IDM protected-document fingerprint store. The data is
 -- derived (winnowed shingle fingerprints), not raw documents, so

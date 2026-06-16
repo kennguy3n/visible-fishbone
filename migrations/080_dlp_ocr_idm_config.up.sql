@@ -1,4 +1,4 @@
--- 087_dlp_ocr_idm_config
+-- 080_dlp_ocr_idm_config
 --
 -- Per-tenant configuration + status surface for the WP4 OCR and IDM
 -- capabilities in crates/sng-dlp. One row per tenant holds the bounded

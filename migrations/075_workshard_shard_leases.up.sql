@@ -1,6 +1,6 @@
 -- ShieldNet Gateway (SNG) — tenant-shard work distributor: shard leases.
 --
--- WP2, paired with the worker registry (migration 076). Tenants are
+-- WP2, paired with the worker registry (migration 074). Tenants are
 -- mapped to a fixed set of shards by the same FNV-1a hash the telemetry
 -- store already shards on (internal/service/telemetry/clickhouse), and
 -- each shard is owned by exactly one live worker. This table is the

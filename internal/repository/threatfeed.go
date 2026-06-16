@@ -14,7 +14,7 @@ import (
 // which is owned by the internal/service/ai feed manager: that store is
 // a whole-table ReplaceAll snapshot the ai persister clobbers on every
 // flush, so the managed engine keeps its own tables (migrations
-// 081-083) and never writes there. Like ThreatIOC, every row here is a
+// 076-078) and never writes there. Like ThreatIOC, every row here is a
 // neutral, primitive-typed projection (the data layer does not import
 // the service packages) and the backing tables are platform-GLOBAL, not
 // tenant-scoped — managed threat content is a fleet-wide signal pushed
@@ -23,7 +23,7 @@ import (
 // per-tenant table.
 
 // ThreatFeedSource is one row of the managed-feed source registry
-// (migration 081). The registry is the operator-visible record of which
+// (migration 076). The registry is the operator-visible record of which
 // curated feeds the platform ingests; it is seeded from the engine's
 // built-in defaults at boot and is the join target for the per-source
 // health surface. Tenants never configure these — the set is centrally
@@ -61,7 +61,7 @@ type ThreatFeedSource struct {
 }
 
 // ThreatFeedIngestState is the per-source ingestion cursor + last
-// outcome (migration 082). It makes the refresh incremental — the HTTP
+// outcome (migration 077). It makes the refresh incremental — the HTTP
 // validators (ETag / Last-Modified) let an unchanged feed be skipped
 // with a conditional GET — and powers the per-source health view so an
 // operator can see, with zero per-tenant work, whether each curated
@@ -91,7 +91,7 @@ type ThreatFeedIngestState struct {
 }
 
 // ThreatFeedBundle is one signed, versioned managed-content bundle
-// (migration 083). It is the distributable artifact: Envelope is the
+// (migration 078). It is the distributable artifact: Envelope is the
 // self-describing signed envelope (the same Ed25519 trust model as the
 // policy / IPS / threat-intel DNS bundles) that a consumer verifies
 // against the pinned platform key before applying. Persisting it makes

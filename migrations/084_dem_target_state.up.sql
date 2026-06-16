@@ -1,4 +1,4 @@
--- Migration 094: Per-tenant, per-target rolling DEM baseline + alert
+-- Migration 084: Per-tenant, per-target rolling DEM baseline + alert
 -- bookkeeping. Exactly one row per (tenant, target_key): the
 -- exponentially-weighted moving average of the experience score and
 -- its variance form the adaptive baseline degradation detection

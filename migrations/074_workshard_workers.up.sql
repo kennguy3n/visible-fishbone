@@ -8,7 +8,7 @@
 -- every replica registers here and heartbeats its liveness, and a
 -- consistent hash (rendezvous/HRW) of tenant -> shard -> owning worker
 -- spreads the work across all live replicas while a Postgres lease
--- (migration 077) guarantees exactly one worker owns a tenant at a time.
+-- (migration 075) guarantees exactly one worker owns a tenant at a time.
 --
 -- This table is the worker registry: one row per running replica, with a
 -- heartbeat-extended liveness window. A worker is "live" while

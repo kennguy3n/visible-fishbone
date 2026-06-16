@@ -1,6 +1,6 @@
 // Package postgres — dem.go is the postgres implementation of the
 // Digital Experience Monitoring repository (WP5). It owns the four
-// dem_* tables from migrations 091-094.
+// dem_* tables from migrations 081-084.
 //
 // Target CRUD, the rolling-window aggregate, and score listing are
 // tenant-scoped (RLS via sng.tenant_id). The two retention prunes

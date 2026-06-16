@@ -1,4 +1,4 @@
--- Migration 092: Raw DEM probe results ingested from the edge. One
+-- Migration 082: Raw DEM probe results ingested from the edge. One
 -- row per probe of one target: a DNS / TCP / HTTP(S) sample with the
 -- per-phase timings the `sng-dem` crate emits. A failed probe is a
 -- first-class signal (`success = false` with an `error_kind`), never

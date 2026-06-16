@@ -1,4 +1,4 @@
--- Reverse migration for the workshard shard-lease ledger (077).
+-- Reverse migration for the workshard shard-lease ledger (075).
 --
 -- Dropping the ledger is fail-safe: with no lease table the workshard
 -- distributor falls back to single-owner ("own all shards") behaviour,

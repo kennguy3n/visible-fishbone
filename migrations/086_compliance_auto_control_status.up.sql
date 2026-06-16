@@ -1,4 +1,4 @@
--- Migration 097: Continuous compliance evidence — latest control status (WP6).
+-- Migration 086: Continuous compliance evidence — latest control status (WP6).
 --
 -- One row per (tenant, framework, control): the most recent evaluation
 -- of a single SOC 2 / ISO 27001 control for a tenant. The collector
@@ -12,7 +12,7 @@
 -- produced the observation, and run_id ties the row back to the
 -- compliance_auto_runs record for the sweep that wrote it.
 --
--- Tenant-scoped + RLS, same posture as compliance_auto_runs (096).
+-- Tenant-scoped + RLS, same posture as compliance_auto_runs (085).
 
 CREATE TABLE compliance_auto_control_status (
     id           UUID        PRIMARY KEY DEFAULT gen_random_uuid(),

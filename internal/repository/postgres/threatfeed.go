@@ -13,7 +13,7 @@ import (
 )
 
 // ThreatFeedRepository owns the managed threat-content engine's global
-// tables (migrations 081-083): the source registry, per-source
+// tables (migrations 076-078): the source registry, per-source
 // ingestion cursors, and the signed versioned bundle history. NONE are
 // tenant-scoped — managed content is a fleet-wide signal — so every
 // operation runs in a system-role transaction, mirroring the global
@@ -32,7 +32,7 @@ func (s *Store) NewThreatFeedRepository() *ThreatFeedRepository {
 
 var _ repository.ThreatFeedRepository = (*ThreatFeedRepository)(nil)
 
-// --- source registry (migration 081) ---------------------------------
+// --- source registry (migration 076) ---------------------------------
 
 // UpsertSources idempotently writes the managed source registry inside
 // one system-role transaction. created_at is preserved on an existing
@@ -101,7 +101,7 @@ ORDER BY name`)
 	return out, err
 }
 
-// --- ingestion state (migration 082) ---------------------------------
+// --- ingestion state (migration 077) ---------------------------------
 
 // SaveIngestState upserts one source's ingestion cursor + last outcome.
 func (r *ThreatFeedRepository) SaveIngestState(ctx context.Context, state repository.ThreatFeedIngestState) error {
@@ -175,7 +175,7 @@ ORDER BY source_name`)
 	return out, err
 }
 
-// --- signed bundle versions (migration 083) --------------------------
+// --- signed bundle versions (migration 078) --------------------------
 
 // SaveBundle persists a signed bundle version. A serial collision (two
 // replicas producing within the same wall-clock second) overwrites the
