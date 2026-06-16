@@ -55,6 +55,7 @@ import (
 	casbconnectors "github.com/kennguy3n/visible-fishbone/internal/service/casb/connectors"
 	"github.com/kennguy3n/visible-fishbone/internal/service/compliance"
 	"github.com/kennguy3n/visible-fishbone/internal/service/complianceauto"
+	"github.com/kennguy3n/visible-fishbone/internal/service/dem"
 	"github.com/kennguy3n/visible-fishbone/internal/service/dlp"
 	"github.com/kennguy3n/visible-fishbone/internal/service/dlpidm"
 	"github.com/kennguy3n/visible-fishbone/internal/service/dlpreview"
@@ -460,6 +461,16 @@ func run() error {
 	if evidenceScheduler != nil {
 		go elector.RunIfLeader(rootCtx, "compliance-evidence", evidenceScheduler.Run)
 		logger.Info("sng-control: compliance evidence scheduler registered (runs on leader only)")
+	}
+
+	// WP5 DEM retention sweep. Singleton background workload: only the
+	// leader prunes expired raw probe results / score samples, so a
+	// multi-replica deployment runs exactly one sweep per interval.
+	// RunIfLeader blocks until rootCtx is cancelled, so it runs in its
+	// own goroutine.
+	if rc.DEMScheduler != nil {
+		go elector.RunIfLeader(rootCtx, "dem-retention", rc.DEMScheduler.Run)
+		logger.Info("sng-control: DEM retention sweep registered (runs on leader only)")
 	}
 
 	// WP6 continuous compliance evidence: the per-tenant control
@@ -1126,6 +1137,11 @@ type routerComponents struct {
 	// machine; the serve loop resumes any in-flight migration on boot.
 	RegionMigrator    *tenant.RegionMigrator
 	EvidenceScheduler *compliance.Scheduler
+	// DEMScheduler is the WP5 Digital Experience Monitoring retention
+	// sweep. Always non-nil; main() runs it leader-only so a
+	// multi-replica deployment prunes raw probe results / score
+	// samples exactly once per interval.
+	DEMScheduler *dem.Scheduler
 	// ComplianceAutoEngine drives the WP6 continuous compliance
 	// evidence sweep; run() launches its leader-gated scheduler loop.
 	ComplianceAutoEngine *complianceauto.Engine
@@ -2306,6 +2322,22 @@ func buildRouter(
 	complianceHandler := handler.NewComplianceHandler(
 		compliance.NewReportService(store.NewComplianceReportRepository(), logger),
 		handler.WithEvidenceAutomation(evidenceSvc, evidenceScheduler, rbacSvc))
+	// WP5 Digital Experience Monitoring: edge probe ingest + per-tenant
+	// experience scoring + degradation alerting (reuses alertRouter for
+	// emit/list). The retention sweep is leader-gated in run() so a
+	// multi-replica deployment prunes raw results / score samples exactly
+	// once per interval instead of once per replica.
+	demService, err := dem.NewService(
+		postgres.NewDEMRepository(store), alertRouter, dem.DefaultConfig(),
+		dem.WithLogger(logger))
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("dem service: %w", err)
+	}
+	demHandler := handler.NewDEMHandler(demService, logger)
+	demScheduler, err := dem.NewScheduler(demService, dem.WithSchedulerLogger(logger))
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("dem scheduler: %w", err)
+	}
 	playbookEngine := playbook.NewEngine(
 		store.NewPlaybookRepository(),
 		store.NewPlaybookExecutionRepository(),
@@ -2842,6 +2874,7 @@ func buildRouter(
 		AppID:                appIDHandler,
 		Sandbox:              handler.NewSandboxHandler(sandboxSvc),
 		RBI:                  handler.NewRBIHandler(rbiSvc),
+		DEM:                  demHandler,
 		DLP:                  handler.NewDLPHandler(dlpSvc),
 		DLPReview:            handler.NewDLPReviewHandler(dlpReviewSvc),
 		DLPIDM:               handler.NewDLPIDMHandler(dlpIDMSvc),
@@ -2906,6 +2939,7 @@ func buildRouter(
 		PoP:                          popSvc,
 		RegionMigrator:               tenantMigrator,
 		EvidenceScheduler:            evidenceScheduler,
+		DEMScheduler:                 demScheduler,
 		ComplianceAutoEngine:         complianceAutoEngine,
 		FeedManager:                  feedMgr,
 		AppNoOpsEngine:               appNoOpsEngine,

@@ -92,6 +92,9 @@ type RouterDeps struct {
 	Health           *Health
 	OpsHealth        *OpsHealthHandler
 	BulkDevice       *BulkDeviceHandler
+	// DEM exposes the Digital Experience Monitoring surface
+	// (probe ingest, experience scores, degradation alerts).
+	DEM *DEMHandler
 	// Metrics, when non-nil, installs the Prometheus HTTP
 	// instrumentation middleware (request count / duration /
 	// in-flight) at the top of the chain. Nil disables it (the
@@ -259,6 +262,9 @@ func NewRouter(deps RouterDeps) http.Handler {
 	}
 	if deps.RBI != nil {
 		deps.RBI.Register(apiMux)
+	}
+	if deps.DEM != nil {
+		deps.DEM.Register(apiMux)
 	}
 	if deps.ManagedThreatContent != nil {
 		deps.ManagedThreatContent.Register(apiMux)
