@@ -67,6 +67,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/playbook"
 	"github.com/kennguy3n/visible-fishbone/internal/service/playbook/executors"
 	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
+	"github.com/kennguy3n/visible-fishbone/internal/service/policyrec"
 	"github.com/kennguy3n/visible-fishbone/internal/service/policytemplates"
 	"github.com/kennguy3n/visible-fishbone/internal/service/pop"
 	"github.com/kennguy3n/visible-fishbone/internal/service/rbac"
@@ -268,6 +269,7 @@ func run() error {
 	appRegHandler := rc.AppRegistry
 	appSyncer := rc.AppSyncer
 	policySimHandler := rc.PolicySim
+	policyRecEngine := rc.PolicyRecEngine
 	aiSvc := rc.AI
 	meteringSvc := rc.Metering
 	popSvc := rc.PoP
@@ -845,6 +847,24 @@ func run() error {
 			}
 		}
 
+		// Wire the Policy Recommendation Engine's telemetry source now
+		// that the ClickHouse hot tier is alive. A separate reader over
+		// the shared pool (the factory does not open a new connection)
+		// keeps the engine's reads independent of the simulator's. Until
+		// this point the /policy/recommendations generate path returns
+		// 503; the persistence paths (list / get / apply / dismiss) were
+		// available from startup.
+		if policyRecEngine != nil {
+			recReader, rErr := chReaderFactory()
+			if rErr != nil {
+				logger.Warn("policyrec: clickhouse reader unavailable; /policy/recommendations generate returns 503",
+					slog.String("error", rErr.Error()))
+			} else {
+				policyRecEngine.SetTelemetrySource(recReader)
+				logger.Info("policyrec: wired to clickhouse hot tier")
+			}
+		}
+
 		// Threat-intel retro-hunt producer. DEFAULT-OFF
 		// (THREAT_INTEL_RETROHUNT) and gated separately from the DNS /
 		// IPS producers. When enabled, the leader diffs the IOC store
@@ -1130,9 +1150,13 @@ type routerComponents struct {
 	AppRegistry       *handler.AppRegistryHandler
 	AppSyncer         *appdb.Syncer
 	PolicySim         *handler.PolicySimulationHandler
-	AI                *aisvc.Service
-	Metering          *metering.MeteringService
-	PoP               *pop.Service
+	PolicyRec         *handler.PolicyRecommendationHandler
+	// PolicyRecEngine is exposed so the serve loop can wire its
+	// telemetry source once the ClickHouse hot tier is alive.
+	PolicyRecEngine *policyrec.Service
+	AI              *aisvc.Service
+	Metering        *metering.MeteringService
+	PoP             *pop.Service
 	// RegionMigrator drives the WS11 cross-region tenant-migration state
 	// machine; the serve loop resumes any in-flight migration on boot.
 	RegionMigrator    *tenant.RegionMigrator
@@ -1571,6 +1595,7 @@ func buildRouter(
 	policyRepo := store.NewPolicyRepository()
 	policyKeyRepo := store.NewPolicySigningKeyRepository()
 	policyRolloutRepo := store.NewPolicyRolloutRepository()
+	policyRecRepo := store.NewPolicyRecommendationRepository()
 	webhookEndpointRepo := store.NewWebhookEndpointRepository()
 	webhookDeliveryRepo := store.NewWebhookDeliveryRepository()
 	apiKeyRepo := store.NewTenantAPIKeyRepository()
@@ -2088,6 +2113,15 @@ func buildRouter(
 	}
 	policySimHandler := handler.NewPolicySimulationHandler(
 		policySvc, canarySvc, nil, policyRepo, logger)
+
+	// Policy Recommendation Engine: observes telemetry, synthesizes a
+	// least-privilege candidate graph, proves coverage + impact, and
+	// stages one-click drafts into the canary-rollout path. The engine
+	// is constructed without a telemetry source (the persistence paths
+	// stay available immediately); the source is wired in the serve loop
+	// once the ClickHouse hot tier is alive (see SetTelemetrySource).
+	policyRecEngine := policyrec.New(policyRecRepo, nil, policySvc, policy.GraphEvaluatorFactory{}, logger)
+	policyRecHandler := handler.NewPolicyRecommendationHandler(policyRecEngine, logger)
 
 	// Baseline + alert services (Phase 3 Block 3, Tasks 11-15).
 	// The Router takes a Publisher for NATS lifecycle events on
@@ -2825,6 +2859,7 @@ func buildRouter(
 		RBAC:             handler.NewRBACHandler(rbacSvc),
 		Policy:           handler.NewPolicyHandler(policySvc, policyKeySvc, policyHandlerOpts...),
 		PolicySimulation: policySimHandler,
+		PolicyRec:        policyRecHandler,
 		Audit:            handler.NewAuditHandler(auditSvc, rbacSvc),
 		Webhooks:         handler.NewWebhookHandler(webhookSvc),
 		APIKeys:          handler.NewAPIKeyHandler(apiKeySvc),
@@ -2934,6 +2969,8 @@ func buildRouter(
 		AppRegistry:                  appRegHandler,
 		AppSyncer:                    appSyncer,
 		PolicySim:                    policySimHandler,
+		PolicyRec:                    policyRecHandler,
+		PolicyRecEngine:              policyRecEngine,
 		AI:                           aiSvc,
 		Metering:                     meteringSvc,
 		PoP:                          popSvc,
