@@ -83,6 +83,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/service/tenancy/hibernation"
 	"github.com/kennguy3n/visible-fishbone/internal/service/tenant"
 	"github.com/kennguy3n/visible-fishbone/internal/service/terraform"
+	"github.com/kennguy3n/visible-fishbone/internal/service/threatfeed"
 	"github.com/kennguy3n/visible-fishbone/internal/service/threatintel"
 	"github.com/kennguy3n/visible-fishbone/internal/service/troubleshoot"
 	"github.com/kennguy3n/visible-fishbone/internal/service/troubleshoot/checks"
@@ -539,6 +540,54 @@ func run() error {
 			logger.Info("sng-control: threat-intel IPS rule producer enabled (runs on leader only)",
 				slog.Duration("refresh_interval", interval),
 				slog.Float64("min_confidence", cfg.ManagedDNSFeeds.IPSRulesMinConfidence))
+		}
+	}
+
+	// WP3 managed (curated) threat-content ingestion. DEFAULT-ON with a
+	// kill switch (MANAGED_THREAT_CONTENT_ENABLED). Leader-gated so the
+	// central ingestion + signed bundle build runs exactly once for the
+	// whole fleet per refresh interval (amortized across all tenants),
+	// never per replica or per tenant, and upstream open feeds are not
+	// fetched N-fold.
+	//
+	// The leader callback always seeds the curated source registry
+	// (SeedRegistry is an idempotent, metadata-only upsert that writes no
+	// indicator content and makes no network calls) so the per-tenant
+	// posture surface lists the managed feeds even when the kill switch
+	// is off — an operator can preview which feeds would activate before
+	// turning it on (the posture's enabled:false conveys the off state).
+	// It then runs the bounded refresh loop unconditionally: RefreshOnce
+	// self-gates on the kill switch (returning Skipped without fetching
+	// or publishing while off), so the ticker is a cheap no-op when
+	// disabled. The loop's existence therefore does not depend on the
+	// boot-time switch value, and a runtime toggle (Engine.SetEnabled)
+	// takes effect on the next cycle without a restart.
+	{
+		engine := rc.ManagedThreatContentEngine
+		interval := rc.ManagedThreatContentInterval
+		// Export sng_threatcontent_degraded so operators are alerted when
+		// the engine silently serves the last good bundle (every upstream
+		// down) instead of fresh content. Self-registered against the
+		// shared registry (no widening of the central metrics.Metrics
+		// struct); a no-op when metrics are disabled.
+		if mx != nil {
+			if err := threatfeed.RegisterDegradedMetric(mx.Registry(), mx.Namespace(), engine); err != nil {
+				logger.Warn("sng-control: could not register managed threat-content degraded metric",
+					slog.String("error", err.Error()))
+			}
+		}
+		go elector.RunIfLeader(rootCtx, "threatcontent-refresh", func(ctx context.Context) {
+			if err := engine.SeedRegistry(ctx); err != nil {
+				logger.Warn("sng-control: managed threat-content source registry seed failed",
+					slog.String("error", err.Error()))
+			}
+			engine.Run(ctx, interval)
+		})
+		if rc.ManagedThreatContentEnabled {
+			logger.Info("sng-control: managed threat-content ingestion enabled (runs on leader only)",
+				slog.Duration("refresh_interval", interval))
+		} else {
+			logger.Info("sng-control: managed threat-content ingestion disabled by kill switch; curated registry still seeded and the leader refresh loop idles (no-op per cycle) until re-enabled (MANAGED_THREAT_CONTENT_ENABLED=false)")
 		}
 	}
 
@@ -1176,6 +1225,18 @@ type routerComponents struct {
 	// the sweep is ever unset, so it stays correct (never starves) by
 	// listing every tenant.
 	AlertFeedbackTenants func(context.Context) ([]uuid.UUID, error)
+	// ManagedThreatContentEngine is the WP3 managed (curated)
+	// threat-content producer. main() runs its bounded refresh on the
+	// leader only (elector.RunIfLeader) so ingestion + signed-bundle
+	// build happen once centrally for the whole fleet (amortized across
+	// all tenants), never per replica or per tenant. Always non-nil.
+	ManagedThreatContentEngine *threatfeed.Engine
+	// ManagedThreatContentInterval is the resolved bounded refresh
+	// cadence (MANAGED_THREAT_CONTENT_REFRESH_INTERVAL).
+	ManagedThreatContentInterval time.Duration
+	// ManagedThreatContentEnabled mirrors the kill switch
+	// (MANAGED_THREAT_CONTENT_ENABLED) for the leader-loop boot decision.
+	ManagedThreatContentEnabled bool
 	// WorkShard is the active/active tenant-shard work distributor (WP2).
 	// Always non-nil. main() Starts it (every replica registers + leases
 	// the shards it owns) and Stops it on shutdown for a clean handoff;
@@ -2489,6 +2550,32 @@ func buildRouter(
 	// never reaches the interface parameter.
 	threatFeedHandler := handler.NewThreatFeedHandler(feedMgr, rbacSvc)
 
+	// --- WP3: managed threat-content ingestion -----------------------
+	// A NEW managed (curated) threat-content producer that runs ALONGSIDE
+	// the operator-configured threatintel pipeline. It ingests built-in
+	// reputable open feeds (domain/IP/URL/hash), normalizes + deduplicates
+	// + scores + expires indicators, and persists a signed, versioned
+	// bundle distributed to ALL tenants by default with zero per-tenant
+	// config (no-ops). Default-ON with a kill switch
+	// (MANAGED_THREAT_CONTENT_ENABLED). Ingestion + bundle build run
+	// centrally on the leader only (scheduled in main, leader-gated), so
+	// the per-tenant cost is zero and upstreams are not hammered N-fold.
+	// The posture API reads the persisted bundle + ingest state from the
+	// repository, so it is correct on every replica (not just the leader).
+	tfCfg := threatfeed.LoadConfig(os.Getenv)
+	tfRepo := store.NewThreatFeedRepository()
+	tfSigner, err := managedThreatContentSigner(tfCfg.SigningKeyHex, logger)
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("managed threat-content signer: %w", err)
+	}
+	tfFeeds := threatfeed.DefaultFeeds(&http.Client{Timeout: tfCfg.HTTPTimeout}, tfCfg.MaxFeedBytes)
+	managedThreatContentEngine, err := threatfeed.NewEngine(tfCfg, tfFeeds, tfSigner, tfRepo,
+		threatfeed.WithLogger(logger))
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("build managed threat-content engine: %w", err)
+	}
+	managedThreatContentHandler := handler.NewManagedThreatContentHandler(tfRepo, managedThreatContentEngine, rbacSvc)
+
 	// --- WP1: Application-ID signature catalog ------------------------
 	// Operator/SaaS-managed, versioned-in-Postgres, Ed25519-signed
 	// application-signature catalog distributed to tenants as a signed
@@ -2732,35 +2819,36 @@ func buildRouter(
 			}
 			return h
 		}(),
-		PolicyTemplates:   handler.NewPolicyTemplateHandler(policyTemplateSvc, handler.WithPolicyTemplateAuthorizer(rbacSvc)),
-		MSP:               handler.NewMSPHandler(mspRepo, bulkSvc, brandingResolver, rbacSvc),
-		AI:                aiHandler,
-		SCIM:              handler.NewSCIMHandler(scimSvc),
-		Compliance:        complianceHandler,
-		ComplianceAuto:    complianceAutoHandler,
-		Playbook:          playbookHandler,
-		Troubleshoot:      troubleshootHandler,
-		OIDC:              oidcHandler,
-		AdminSSO:          adminSSOHandler,
-		IAMCore:           iamCoreValidator,
-		IAMCoreTenant:     iamCoreTenantResolver,
-		TenantRateLimiter: tenantRateLimiter,
-		AuthBruteForce:    authBruteForce,
-		ActivityRecorder:  activityObs,
-		Mobile:            handler.NewMobileHandler(identitySvc),
-		Metering:          meteringHandler,
-		PoP:               popHandler,
-		ThreatFeed:        threatFeedHandler,
-		AppID:             appIDHandler,
-		Sandbox:           handler.NewSandboxHandler(sandboxSvc),
-		RBI:               handler.NewRBIHandler(rbiSvc),
-		DLP:               handler.NewDLPHandler(dlpSvc),
-		DLPReview:         handler.NewDLPReviewHandler(dlpReviewSvc),
-		DLPIDM:            handler.NewDLPIDMHandler(dlpIDMSvc),
-		Rollout:           handler.NewRolloutHandler(rolloutSvc, handler.WithRolloutAuthorizer(rbacSvc)),
-		Browser:           handler.NewBrowserHandler(browserSvc),
-		Terraform:         handler.NewTerraformHandler(terraformProvider),
-		APIKeyLookup:      apiKeySvc,
+		PolicyTemplates:      handler.NewPolicyTemplateHandler(policyTemplateSvc, handler.WithPolicyTemplateAuthorizer(rbacSvc)),
+		MSP:                  handler.NewMSPHandler(mspRepo, bulkSvc, brandingResolver, rbacSvc),
+		AI:                   aiHandler,
+		SCIM:                 handler.NewSCIMHandler(scimSvc),
+		Compliance:           complianceHandler,
+		ComplianceAuto:       complianceAutoHandler,
+		Playbook:             playbookHandler,
+		Troubleshoot:         troubleshootHandler,
+		OIDC:                 oidcHandler,
+		AdminSSO:             adminSSOHandler,
+		IAMCore:              iamCoreValidator,
+		IAMCoreTenant:        iamCoreTenantResolver,
+		TenantRateLimiter:    tenantRateLimiter,
+		AuthBruteForce:       authBruteForce,
+		ActivityRecorder:     activityObs,
+		Mobile:               handler.NewMobileHandler(identitySvc),
+		Metering:             meteringHandler,
+		PoP:                  popHandler,
+		ThreatFeed:           threatFeedHandler,
+		ManagedThreatContent: managedThreatContentHandler,
+		AppID:                appIDHandler,
+		Sandbox:              handler.NewSandboxHandler(sandboxSvc),
+		RBI:                  handler.NewRBIHandler(rbiSvc),
+		DLP:                  handler.NewDLPHandler(dlpSvc),
+		DLPReview:            handler.NewDLPReviewHandler(dlpReviewSvc),
+		DLPIDM:               handler.NewDLPIDMHandler(dlpIDMSvc),
+		Rollout:              handler.NewRolloutHandler(rolloutSvc, handler.WithRolloutAuthorizer(rbacSvc)),
+		Browser:              handler.NewBrowserHandler(browserSvc),
+		Terraform:            handler.NewTerraformHandler(terraformProvider),
+		APIKeyLookup:         apiKeySvc,
 		// Device kill-switch for stateless mobile session JWTs: a
 		// token bound to a suspended/deleted device is refused by the
 		// auth middleware on every endpoint, not just self-service.
@@ -2807,40 +2895,43 @@ func buildRouter(
 	}
 
 	return routerComponents{
-		Router:                 router,
-		WebhookWorker:          webhookWorker,
-		IntegrationWorker:      integrationWorker,
-		AppRegistry:            appRegHandler,
-		AppSyncer:              appSyncer,
-		PolicySim:              policySimHandler,
-		AI:                     aiSvc,
-		Metering:               meteringSvc,
-		PoP:                    popSvc,
-		RegionMigrator:         tenantMigrator,
-		EvidenceScheduler:      evidenceScheduler,
-		ComplianceAutoEngine:   complianceAutoEngine,
-		FeedManager:            feedMgr,
-		AppNoOpsEngine:         appNoOpsEngine,
-		Recompiler:             recompiler,
-		DLPReviewRecompiler:    dlpReviewRecompiler,
-		SampleRateResolver:     sampleRateResolver,
-		IDPSyncService:         idpSyncSvc,
-		DLPReviewService:       dlpReviewSvc,
-		ActivityRecorder:       activityRecorder,
-		TenantRepo:             tenantRepo,
-		RolloutAutopilot:       rolloutAutopilot,
-		RolloutMonitorMetrics:  rolloutMonitorMetrics,
-		MarginAutopilot:        marginAutopilot,
-		AIInferencePool:        aiInferencePool,
-		HibernationRegistry:    hibRegistry,
-		HibernationSyncer:      hibSyncer,
-		HibernationCoordinator: hibCoordinator,
-		HibernationController:  hibController,
-		HibernationMetrics:     hibMetrics,
-		TierActivityLister:     tenantRepo,
-		AlertFeedback:          alertFeedback,
-		AlertFeedbackTenants:   idpTenantSource{activity: tenantRepo}.ListTenants,
-		WorkShard:              workShard,
+		Router:                       router,
+		WebhookWorker:                webhookWorker,
+		IntegrationWorker:            integrationWorker,
+		AppRegistry:                  appRegHandler,
+		AppSyncer:                    appSyncer,
+		PolicySim:                    policySimHandler,
+		AI:                           aiSvc,
+		Metering:                     meteringSvc,
+		PoP:                          popSvc,
+		RegionMigrator:               tenantMigrator,
+		EvidenceScheduler:            evidenceScheduler,
+		ComplianceAutoEngine:         complianceAutoEngine,
+		FeedManager:                  feedMgr,
+		AppNoOpsEngine:               appNoOpsEngine,
+		Recompiler:                   recompiler,
+		DLPReviewRecompiler:          dlpReviewRecompiler,
+		SampleRateResolver:           sampleRateResolver,
+		IDPSyncService:               idpSyncSvc,
+		DLPReviewService:             dlpReviewSvc,
+		ActivityRecorder:             activityRecorder,
+		TenantRepo:                   tenantRepo,
+		RolloutAutopilot:             rolloutAutopilot,
+		RolloutMonitorMetrics:        rolloutMonitorMetrics,
+		MarginAutopilot:              marginAutopilot,
+		AIInferencePool:              aiInferencePool,
+		HibernationRegistry:          hibRegistry,
+		HibernationSyncer:            hibSyncer,
+		HibernationCoordinator:       hibCoordinator,
+		HibernationController:        hibController,
+		HibernationMetrics:           hibMetrics,
+		TierActivityLister:           tenantRepo,
+		AlertFeedback:                alertFeedback,
+		AlertFeedbackTenants:         idpTenantSource{activity: tenantRepo}.ListTenants,
+		ManagedThreatContentEngine:   managedThreatContentEngine,
+		ManagedThreatContentInterval: tfCfg.RefreshInterval,
+		ManagedThreatContentEnabled:  tfCfg.Enabled,
+		WorkShard:                    workShard,
 	}, nil
 }
 
@@ -4059,6 +4150,31 @@ func threatIntelSigner(signingKeyHex string, logger *slog.Logger) (*threatintel.
 		return nil, fmt.Errorf("threatintel signing key: %w", err)
 	}
 	logger.Info("threatintel: signing key loaded from configuration")
+	return signer, nil
+}
+
+// managedThreatContentSigner builds the Ed25519 signer for the WP3
+// managed threat-content bundle from configured key material, or falls
+// back to an ephemeral key with a loud warning when unset. An ephemeral
+// key only verifies within this process lifetime, which is acceptable
+// for dev/test boot but must be set in production so a freshly-elected
+// leader's bundle verifies against the pinned edge key across restarts.
+func managedThreatContentSigner(signingKeyHex string, logger *slog.Logger) (*threatfeed.Signer, error) {
+	raw := strings.TrimSpace(signingKeyHex)
+	if raw == "" {
+		logger.Warn("threatfeed: no signing key configured; generating an EPHEMERAL key — published bundles will not verify against a pinned edge key across restarts",
+			slog.String("env", threatfeed.EnvSigningKeyHex))
+		return threatfeed.GenerateSigner()
+	}
+	key, err := hex.DecodeString(raw)
+	if err != nil {
+		return nil, fmt.Errorf("decode %s: %w", threatfeed.EnvSigningKeyHex, err)
+	}
+	signer, err := threatfeed.NewSigner(key)
+	if err != nil {
+		return nil, fmt.Errorf("threatfeed signing key: %w", err)
+	}
+	logger.Info("threatfeed: signing key loaded from configuration")
 	return signer, nil
 }
 

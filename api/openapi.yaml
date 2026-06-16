@@ -76,6 +76,18 @@ tags:
       (`pops:write` / `pops:read`), and `GET /pops` is public so a
       not-yet-enrolled client can bootstrap. The per-tenant override
       route is tenant-scoped (RLS on `tenant_pop_assignments`).
+  - name: threat-content
+    description: |
+      Managed (curated) threat content. A NEW producer alongside the
+      operator-configured threat-intel feeds: SNG ingests a built-in
+      set of reputable open feeds (domain/IP/URL/hash), then
+      normalizes, deduplicates, scores, and expires the indicators
+      centrally before signing and versioning a single content bundle
+      distributed to ALL tenants by default with zero per-tenant
+      configuration (no-ops). The per-tenant posture route is a
+      read-only view of the fleet-wide bundle a tenant receives; the
+      system-scoped refresh trigger is platform-gated
+      (`threatcontent:write`).
   - name: compliance-auto
     description: |
       Continuous compliance evidence (WP6). Maps real platform state
@@ -3742,6 +3754,52 @@ paths:
         "403":
           description: credential lacks the platform-scoped appid:publish grant
 
+  /tenants/{tenant_id}/threat-content/posture:
+    parameters: [ { $ref: "#/components/parameters/TenantPathID" } ]
+    get:
+      tags: [threat-content]
+      operationId: getManagedThreatContentPosture
+      summary: Get the managed threat-content posture for a tenant
+      description: >-
+        Returns the managed (curated) threat content the tenant
+        receives. The content is fleet-wide — identical for every
+        tenant by design (the no-ops managed model) — so the route is
+        tenant-scoped only for access control, not because the content
+        differs per tenant. Read from the persisted bundle + ingest
+        state, so it is correct on every replica (ingestion runs only
+        on the elected leader).
+      responses:
+        "200":
+          description: managed threat-content posture
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManagedThreatContentPosture" }
+        "403": { $ref: "#/components/responses/Error" }
+
+  /threat-content/refresh:
+    post:
+      tags: [threat-content]
+      operationId: refreshManagedThreatContent
+      summary: Trigger a managed threat-content ingestion cycle
+      description: >-
+        System-scoped manual refresh of the managed threat-content
+        bundle. It produces fleet-wide content, so it requires the
+        platform-level `threatcontent:write` permission. Returns 409
+        when the kill switch (MANAGED_THREAT_CONTENT_ENABLED) is off.
+        Ingestion is idempotent and bounded; when the assembled content
+        is identical to the current bundle no new version is minted
+        (`unchanged: true`).
+      responses:
+        "200":
+          description: refresh result
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ManagedThreatContentRefreshResult" }
+        "401": { $ref: "#/components/responses/Error" }
+        "403": { $ref: "#/components/responses/Error" }
+        "409": { $ref: "#/components/responses/Error" }
+        "500": { $ref: "#/components/responses/Error" }
+
 components:
   securitySchemes:
     BearerJWT:
@@ -3837,6 +3895,142 @@ components:
         application/json:
           schema: { $ref: "#/components/schemas/TenantMigration" }
   schemas:
+    ManagedThreatContentPosture:
+      type: object
+      description: >-
+        Read-only managed threat-content posture a tenant receives. The
+        bundle is fleet-wide (identical for every tenant by design).
+      required: [enabled, generated_at, bundle, sources]
+      properties:
+        enabled:
+          type: boolean
+          description: Kill-switch state; true when managed content is active.
+        generated_at:
+          type: string
+          format: date-time
+          description: When this posture view was assembled.
+        bundle:
+          nullable: true
+          description: Latest distributed bundle metadata, or null if none yet.
+          allOf:
+            - $ref: "#/components/schemas/ManagedThreatContentBundleSummary"
+        sources:
+          type: array
+          description: Per-feed ingestion health, sorted by name.
+          items: { $ref: "#/components/schemas/ManagedThreatContentSourceStatus" }
+    ManagedThreatContentBundleSummary:
+      type: object
+      description: Metadata for the latest signed, versioned content bundle.
+      required:
+        [serial, schema_version, generated_at, key_id, algorithm,
+         indicator_count, size_bytes, digest, counts_by_type]
+      properties:
+        serial:
+          type: integer
+          format: int64
+          description: Monotonic bundle version.
+        schema_version: { type: integer }
+        generated_at: { type: string, format: date-time }
+        key_id:
+          type: string
+          description: Identifier of the Ed25519 key the bundle is signed with.
+        algorithm:
+          type: string
+          description: Signature algorithm (ed25519).
+        indicator_count: { type: integer, format: int64 }
+        size_bytes:
+          type: integer
+          format: int64
+          description: Size of the signed envelope in bytes.
+        digest:
+          type: string
+          description: SHA-256 over the indicator set (stable content identity).
+        counts_by_type:
+          type: object
+          additionalProperties: { type: integer }
+          description: Indicator counts keyed by type (domain/ip/url/hash).
+    ManagedThreatContentSourceStatus:
+      type: object
+      description: Per-feed ingestion health row.
+      required:
+        [name, display_name, kind, weight, enabled, indicator_count,
+         consecutive_failures, stale]
+      properties:
+        name: { type: string }
+        display_name: { type: string }
+        kind:
+          type: string
+          description: Indicator kind the feed contributes.
+          enum: [domain, ip, url, hash, mixed]
+        weight:
+          type: number
+          format: double
+          description: Source trust weight used in corroboration scoring.
+        enabled: { type: boolean }
+        indicator_count: { type: integer, format: int64 }
+        last_success_at: { type: string, format: date-time }
+        last_attempt_at: { type: string, format: date-time }
+        last_error: { type: string }
+        consecutive_failures: { type: integer, format: int64 }
+        stale:
+          type: boolean
+          description: >-
+            True when the feed has never succeeded, is currently
+            failing, or its last success is older than the staleness
+            window.
+    ManagedThreatContentRefreshResult:
+      type: object
+      description: Outcome of a manual managed threat-content refresh.
+      required: [skipped, unchanged, degraded, serial, indicators, published, sources]
+      properties:
+        skipped:
+          type: boolean
+          description: True when the refresh was skipped (kill switch off).
+        unchanged:
+          type: boolean
+          description: >-
+            True when the assembled content matched the current bundle,
+            so no new version was minted.
+        degraded:
+          type: boolean
+          description: >-
+            True when the cycle kept serving the last good bundle because
+            it could not produce a complete fresh result (every upstream
+            down). Distinct from unchanged so monitoring can tell a healthy
+            no-change refresh from one silently serving stale content.
+        serial:
+          type: integer
+          format: int64
+          description: Version of the resulting (or current) bundle.
+        indicators:
+          type: integer
+          description: Total indicators in the assembled bundle.
+        published:
+          type: boolean
+          description: True when the bundle was distributed this cycle.
+        sources:
+          type: array
+          items: { $ref: "#/components/schemas/ManagedThreatContentRefreshSourceStat" }
+    ManagedThreatContentRefreshSourceStat:
+      type: object
+      description: Per-feed outcome of a manual refresh.
+      required: [source, indicators]
+      properties:
+        source: { type: string }
+        indicators: { type: integer }
+        not_modified:
+          type: boolean
+          description: True when the upstream returned 304 Not Modified.
+        used_cache:
+          type: boolean
+          description: True when last-known-good was reused (fetch/parse failed).
+        disabled:
+          type: boolean
+          description: >
+            True when the source is switched off in the registry and was
+            skipped this cycle (distinguishes a disabled feed from one that
+            ran but produced no indicators).
+        error: { type: string }
     ComplianceAutoControl:
       type: object
       description: One control's evaluated status with its evidence reference.
