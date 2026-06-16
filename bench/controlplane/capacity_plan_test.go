@@ -237,7 +237,7 @@ func TestCapacityPlanTierSamplingRendersAndRoundTrips(t *testing.T) {
 	}
 	r.Grade()
 	md := r.ToMarkdown()
-	if !strings.Contains(md, "WS-4 activity-tier telemetry sampling") {
+	if !strings.Contains(md, "Activity-tier telemetry sampling") {
 		t.Errorf("markdown missing tier-sampling section")
 	}
 	js, err := r.ToJSON()

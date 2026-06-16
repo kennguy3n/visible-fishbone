@@ -61,7 +61,7 @@ func main() {
 		fatal("AUTH_JWT_SECRET is unset")
 	}
 	token = mintGlobalAdminJWT(secret, *operator)
-	if err := os.MkdirAll(*out, 0o755); err != nil {
+	if err := os.MkdirAll(*out, 0o750); err != nil {
 		fatal("mkdir out: %v", err)
 	}
 
@@ -218,7 +218,7 @@ func write(name, ext string, status int, body []byte) {
 	} else {
 		content = body
 	}
-	if err := os.WriteFile(dst, content, 0o644); err != nil {
+	if err := os.WriteFile(dst, content, 0o600); err != nil {
 		fatal("write %s: %v", dst, err)
 	}
 	fmt.Printf("[%d] %-44s -> %s\n", status, name, dst)
