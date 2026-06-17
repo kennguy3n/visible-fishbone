@@ -1,6 +1,9 @@
 # Build artifacts
 /bin/
 /target/
+# Stray control-plane binary from `go build ./cmd/sng-control` without -o;
+# the canonical build target is bin/sng-control (see Makefile).
+/sng-control
 
 # Test / coverage
 *.out
