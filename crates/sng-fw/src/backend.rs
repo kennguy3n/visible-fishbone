@@ -33,7 +33,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
-use sng_ebpf::{PortRange as XdpPortRange, XdpControlPlane, XdpRule, XdpRuleAction, XdpRuleSet};
+use sng_ebpf::{
+    Classifier, PortRange as XdpPortRange, XdpControlPlane, XdpRule, XdpRuleAction, XdpRuleSet,
+};
 use sng_policy_eval::matcher::SubjectMatch;
 
 use crate::compile::CompiledRuleSet;
@@ -267,35 +269,66 @@ impl DataPathBackend for EbpfDataPath {
         // surfaced, but enforcement is never lost because nftables already
         // holds the authoritative full ruleset.
         let hot = compile_hot_path(compiled);
-        match self.control.install_rules(hot).map_err(map_ebpf_err) {
-            Ok(()) => {
-                self.installs_total.fetch_add(1, Ordering::Relaxed);
-                Ok(())
+        if let Err(e) = self.control.install_rules(hot).map_err(map_ebpf_err) {
+            // The XDP update failed, but nftables already committed the
+            // authoritative ruleset above. Flush the fast path to a
+            // pass-through so it can never enforce a ruleset older than
+            // nftables — without this, once a real kernel loader is
+            // attached a failed map update would leave the kernel XDP
+            // program matching stale verdicts while nftables enforces the
+            // new ones. Best-effort: if the flush itself fails there is no
+            // safe fast-path state to fall back to, so we log loudly and
+            // still surface the original error (nftables stays
+            // authoritative regardless).
+            if let Err(flush_err) = self.control.clear_rules().map_err(map_ebpf_err) {
+                tracing::error!(
+                    target: "sng_fw::backend",
+                    error = %flush_err,
+                    "failed to flush XDP fast path after a rule-update \
+                     failure; the fast path may hold stale rules until the \
+                     next successful install"
+                );
             }
-            Err(e) => {
-                // The XDP update failed, but nftables already committed the
-                // authoritative ruleset above. Flush the fast path to a
-                // pass-through so it can never enforce a ruleset older than
-                // nftables — without this, once a real kernel loader is
-                // attached a failed map update would leave the kernel XDP
-                // program matching stale verdicts while nftables enforces the
-                // new ones. Best-effort: if the flush itself fails there is no
-                // safe fast-path state to fall back to, so we log loudly and
-                // still surface the original error (nftables stays
-                // authoritative regardless).
-                if let Err(flush_err) = self.control.clear_rules().map_err(map_ebpf_err) {
-                    tracing::error!(
-                        target: "sng_fw::backend",
-                        error = %flush_err,
-                        "failed to flush XDP fast path after a rule-update \
-                         failure; the fast path may hold stale rules until the \
-                         next successful install"
-                    );
-                }
-                self.install_failures.fetch_add(1, Ordering::Relaxed);
-                Err(e)
-            }
+            self.install_failures.fetch_add(1, Ordering::Relaxed);
+            return Err(e);
         }
+
+        // Rules are live on the fast path; now push the destination-IP
+        // traffic-class table to the XDP classify stage. The kernel runs
+        // classify *before* the firewall chains, and its meta slot fails
+        // closed (drop) while unwritten — so installing the table, even an
+        // empty one whose inspect-full fallback punts every flow to the
+        // slow path, is what makes the classify stage usable rather than a
+        // drop-all, and a populated table activates the per-tier verdicts
+        // (trusted fast-pass, blocked drop) the kernel pipeline already
+        // implements. On failure flush the table back to that empty
+        // inspect-full state rather than leave a stale tier map that could
+        // mis-classify a flow, then surface the error; nftables holds the
+        // authoritative full policy regardless.
+        if let Err(e) = self
+            .control
+            .install_classification(compiled.classification.clone())
+            .map_err(map_ebpf_err)
+        {
+            if let Err(flush_err) = self
+                .control
+                .install_classification(Classifier::default())
+                .map_err(map_ebpf_err)
+            {
+                tracing::error!(
+                    target: "sng_fw::backend",
+                    error = %flush_err,
+                    "failed to flush XDP classification table after an \
+                     update failure; the classify stage may hold stale \
+                     tiers until the next successful install"
+                );
+            }
+            self.install_failures.fetch_add(1, Ordering::Relaxed);
+            return Err(e);
+        }
+
+        self.installs_total.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 
     fn get_stats(&self) -> Result<DataPathStats, FirewallError> {
@@ -555,6 +588,7 @@ mod tests {
             source_graph_id: "test-graph".to_owned(),
             source_graph_version: 1,
             script: NftablesScript::new(Vec::new()),
+            classification: Classifier::default(),
         }
     }
 
@@ -720,6 +754,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ebpf_backend_pushes_classification_to_classify_stage() {
+        // The compiled ruleset carries a steering-derived classifier;
+        // a successful install must program it into the XDP classify
+        // stage so the kernel pipeline can tier flows instead of
+        // failing closed on an empty meta slot.
+        let backend: Arc<dyn NftablesBackend> = Arc::new(MockNftables::new());
+        let engine = Arc::new(FirewallEngine::new(backend));
+        let control = Arc::new(XdpControlPlane::in_memory());
+        let dp = EbpfDataPath::new(Arc::clone(&control), NftablesDataPath::new(engine));
+
+        let mut rs = ruleset(
+            vec![l3l4_rule("a", "203.0.113.0/24", RuleAction::Allow)],
+            RuleAction::Deny,
+        );
+        rs.classification = sng_ebpf::Classifier::new(vec![
+            sng_ebpf::ClassRule::new(
+                cidr("10.0.0.0/8"),
+                None,
+                sng_ebpf::TrafficClass::TrustedDirect,
+            ),
+            sng_ebpf::ClassRule::new(cidr("192.0.2.0/24"), None, sng_ebpf::TrafficClass::Block),
+        ]);
+        dp.install_rules(&rs).await.unwrap();
+
+        // Both class rules live on the classify stage; the install
+        // counted exactly once across rules + classification.
+        assert_eq!(control.stats().classification_entries, 2);
+        assert_eq!(dp.get_stats().unwrap().installs_total, 1);
+    }
+
+    #[tokio::test]
     async fn ebpf_backend_does_not_advance_xdp_when_nftables_fails() {
         // nftables is authoritative; if its apply fails, the XDP fast path
         // must not be left holding a newer ruleset than nftables enforces.
@@ -841,6 +906,90 @@ mod tests {
         assert_eq!(stats.install_failures, 1);
         // nftables committed both installs — enforcement was never lost.
         assert_eq!(dp.fallback().get_stats().unwrap().installs_total, 2);
+    }
+
+    /// A loader whose rule updates always succeed but whose
+    /// *classification* update fails for any populated table, while
+    /// the empty flush succeeds. Drives `EbpfDataPath` into the
+    /// "rules committed, classification update failed" branch.
+    #[derive(Debug, Default)]
+    struct ClassFlakyXdpLoader;
+
+    impl sng_ebpf::ProgramLoader for ClassFlakyXdpLoader {
+        fn is_supported(&self) -> bool {
+            false
+        }
+        fn load(&self) -> Result<(), sng_ebpf::EbpfError> {
+            Ok(())
+        }
+        fn attach_xdp(&self, _: &str, _: sng_ebpf::XdpMode) -> Result<(), sng_ebpf::EbpfError> {
+            Ok(())
+        }
+        fn attach_tc_egress(&self, _: &str) -> Result<(), sng_ebpf::EbpfError> {
+            Ok(())
+        }
+        fn detach(&self) -> Result<(), sng_ebpf::EbpfError> {
+            Ok(())
+        }
+        fn pin(&self, _: &std::path::Path) -> Result<(), sng_ebpf::EbpfError> {
+            Ok(())
+        }
+        fn update_rules(&self, _: &XdpRuleSet) -> Result<(), sng_ebpf::EbpfError> {
+            Ok(())
+        }
+        fn update_classification(
+            &self,
+            classifier: &sng_ebpf::Classifier,
+        ) -> Result<(), sng_ebpf::EbpfError> {
+            // The empty flush is the fail-safe and must always
+            // succeed; a populated install is forced to fail.
+            if classifier.is_empty() {
+                Ok(())
+            } else {
+                Err(sng_ebpf::EbpfError::Map(
+                    "forced classification update failure".into(),
+                ))
+            }
+        }
+        fn update_steering(
+            &self,
+            _: &sng_ebpf::EgressSteeringTable,
+        ) -> Result<(), sng_ebpf::EbpfError> {
+            Ok(())
+        }
+        fn update_ddos(&self, _: &sng_ebpf::DdosConfig) -> Result<(), sng_ebpf::EbpfError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn ebpf_backend_flushes_classification_when_update_fails() {
+        // Rules install fine, but the classify-stage map update fails.
+        // The backend must surface the error and flush the classify
+        // stage back to the empty (inspect-full / punt) table rather
+        // than leave a partial tier map that could mis-classify flows.
+        let backend: Arc<dyn NftablesBackend> = Arc::new(MockNftables::new());
+        let engine = Arc::new(FirewallEngine::new(backend));
+        let control = Arc::new(XdpControlPlane::new(Box::new(ClassFlakyXdpLoader)));
+        let dp = EbpfDataPath::new(Arc::clone(&control), NftablesDataPath::new(engine));
+
+        let mut rs = ruleset(
+            vec![l3l4_rule("a", "203.0.113.0/24", RuleAction::Allow)],
+            RuleAction::Deny,
+        );
+        rs.classification = sng_ebpf::Classifier::new(vec![sng_ebpf::ClassRule::new(
+            cidr("10.0.0.0/8"),
+            None,
+            sng_ebpf::TrafficClass::TrustedDirect,
+        )]);
+
+        assert!(dp.install_rules(&rs).await.is_err());
+        // Classify stage flushed back to empty; the failure was counted
+        // and no install was credited.
+        assert_eq!(control.stats().classification_entries, 0);
+        let stats = dp.get_stats().unwrap();
+        assert_eq!(stats.installs_total, 0);
+        assert_eq!(stats.install_failures, 1);
     }
 
     #[tokio::test]

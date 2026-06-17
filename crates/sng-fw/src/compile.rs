@@ -36,9 +36,11 @@
 //!   become "any zone".
 
 use ipnet::IpNet;
+use sng_ebpf::{ClassRule, Classifier};
 use sng_policy_eval::bundle::LoadedBundle;
 use sng_policy_eval::matcher::{PredicateMatch, SubjectMatch};
 use sng_policy_eval::rule::{EnforcementDomain, Rule, SubjectKind, Verb};
+use sng_policy_eval::steering::SteeringRuleSet;
 use std::collections::BTreeSet;
 
 use crate::error::FirewallError;
@@ -69,6 +71,15 @@ pub struct CompiledRuleSet {
     /// Compiled nftables script. Cached so re-applying the same
     /// ruleset is a no-op.
     pub script: NftablesScript,
+    /// Destination-IP traffic-class table for the XDP classify
+    /// stage. Derived from the bundle's steering rule set (the
+    /// `st` block): each steering class's destination CIDRs become
+    /// [`ClassRule`]s carrying that class. Empty — the conservative
+    /// inspect-full fallback — when the bundle carries no steering
+    /// block. Domain and certificate-pin steering deliberately stay
+    /// on the slow path because the kernel classify stage keys on
+    /// the destination address and cannot resolve SNI / TLS pins.
+    pub classification: Classifier,
 }
 
 /// One-shot compiler. Stateless — construct, call `compile`,
@@ -119,6 +130,16 @@ impl RuleCompiler {
 
         let script = render_script(&compiled_rules, &zones, &nat, default_action)?;
 
+        // The XDP classify stage runs before the firewall chains and
+        // fails closed when its table is absent, so the compiled
+        // ruleset always carries a classifier — an empty one (whose
+        // inspect-full fallback punts every flow to the slow path)
+        // when the bundle ships no steering block.
+        let classification = bundle
+            .steering_raw
+            .as_deref()
+            .map_or_else(Classifier::default, compile_classification);
+
         Ok(CompiledRuleSet {
             rules: compiled_rules,
             zones,
@@ -127,8 +148,44 @@ impl RuleCompiler {
             source_graph_id: bundle.graph_id.clone(),
             source_graph_version: bundle.graph_version,
             script,
+            classification,
         })
     }
+}
+
+/// Compile the steering rule set's destination-IP ranges into an
+/// XDP [`Classifier`].
+///
+/// Only the `ip_ranges` (destination CIDRs) of each steering class
+/// are pushable to the kernel classify stage: it keys on the
+/// packet's destination address, so domain and certificate-pin
+/// steering — which resolve at SNI / TLS-handshake time — stay on
+/// the slow path and are deliberately not folded in here.
+///
+/// Classes are walked in the bundle's canonical order, so when two
+/// classes claim overlapping CIDRs the first one wins — matching
+/// [`SteeringTable::from_rule_set`](sng_policy_eval::steering::SteeringTable::from_rule_set)
+/// and the Go-side `ResolveTrafficClass` precedence.
+/// [`Classifier::new`] then stable-sorts the rules longest-prefix-
+/// first so the most specific CIDR matches a flow.
+///
+/// A malformed CIDR is skipped with a warn-level log rather than
+/// failing the compile, so one bad entry never takes the whole
+/// table out — again mirroring `SteeringTable::from_rule_set`.
+#[must_use]
+pub fn compile_classification(rule_set: &SteeringRuleSet) -> Classifier {
+    let mut rules: Vec<ClassRule> = Vec::new();
+    for class_rules in &rule_set.classes {
+        for r in &class_rules.ip_ranges {
+            match r.parse::<IpNet>() {
+                Ok(cidr) => rules.push(ClassRule::new(cidr, None, class_rules.class)),
+                Err(e) => {
+                    tracing::warn!(range = %r, error = %e, "skipping malformed steering CIDR");
+                }
+            }
+        }
+    }
+    Classifier::new(rules)
 }
 
 fn collect_named_subjects(
@@ -921,15 +978,128 @@ pub(crate) fn sanitize_set_name(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TrafficClass;
     use crate::nat::{NatRule, NatType};
     use crate::rule::Protocol;
     use crate::zone::{Zone, ZonePolicy};
     use pretty_assertions::assert_eq;
     use sng_policy_eval::matcher::{PredicateMatch, SubjectMatch};
     use sng_policy_eval::rule::{Predicate as RawPredicate, Subject as RawSubject};
+    use sng_policy_eval::steering::SteeringClassRules;
 
     fn cidr(s: &str) -> IpNet {
         s.parse().unwrap()
+    }
+
+    fn steering_class(
+        class: TrafficClass,
+        ip_ranges: &[&str],
+        domains: &[&str],
+    ) -> SteeringClassRules {
+        SteeringClassRules {
+            class,
+            action: String::new(),
+            domains: domains.iter().map(|d| (*d).to_owned()).collect(),
+            ip_ranges: ip_ranges.iter().map(|r| (*r).to_owned()).collect(),
+            cert_pins: Vec::new(),
+            apps: Vec::new(),
+        }
+    }
+
+    fn steering_set(classes: Vec<SteeringClassRules>) -> SteeringRuleSet {
+        SteeringRuleSet {
+            target: "edge".to_owned(),
+            schema_version: 1,
+            classes,
+        }
+    }
+
+    #[test]
+    fn compile_classification_maps_cidrs_to_class_rules() {
+        let rs = steering_set(vec![steering_class(
+            TrafficClass::TrustedDirect,
+            &["10.0.0.0/8", "1.2.3.4/32"],
+            &[],
+        )]);
+        let c = compile_classification(&rs);
+        assert_eq!(c.len(), 2);
+        assert_eq!(
+            c.classify("10.9.9.9".parse().unwrap(), 0),
+            TrafficClass::TrustedDirect
+        );
+        assert_eq!(
+            c.classify("1.2.3.4".parse().unwrap(), 0),
+            TrafficClass::TrustedDirect
+        );
+    }
+
+    #[test]
+    fn compile_classification_skips_malformed_cidr_keeps_rest() {
+        let rs = steering_set(vec![steering_class(
+            TrafficClass::Block,
+            &["not-a-cidr", "203.0.113.0/24"],
+            &[],
+        )]);
+        let c = compile_classification(&rs);
+        assert_eq!(c.len(), 1);
+        assert_eq!(
+            c.classify("203.0.113.7".parse().unwrap(), 0),
+            TrafficClass::Block
+        );
+    }
+
+    #[test]
+    fn compile_classification_first_class_wins_on_overlap() {
+        // Two classes both claim the same /24; the first one in
+        // bundle order wins, matching SteeringTable::from_rule_set
+        // and the Go-side ResolveTrafficClass precedence.
+        let rs = steering_set(vec![
+            steering_class(TrafficClass::TrustedDirect, &["198.51.100.0/24"], &[]),
+            steering_class(TrafficClass::Block, &["198.51.100.0/24"], &[]),
+        ]);
+        let c = compile_classification(&rs);
+        assert_eq!(
+            c.classify("198.51.100.5".parse().unwrap(), 0),
+            TrafficClass::TrustedDirect
+        );
+    }
+
+    #[test]
+    fn compile_classification_ignores_domains_and_cert_pins() {
+        let rs = steering_set(vec![SteeringClassRules {
+            class: TrafficClass::InspectLite,
+            action: String::new(),
+            domains: vec!["example.com".to_owned(), "*.cdn.net".to_owned()],
+            ip_ranges: Vec::new(),
+            cert_pins: vec!["deadbeef".to_owned()],
+            apps: Vec::new(),
+        }]);
+        let c = compile_classification(&rs);
+        // Domain / cert-pin steering resolves at SNI / TLS time and
+        // stays on the slow path — no ClassRule is emitted for it.
+        assert!(c.is_empty());
+    }
+
+    #[test]
+    fn compile_classification_empty_set_has_inspect_full_fallback() {
+        let c = compile_classification(&steering_set(vec![]));
+        assert!(c.is_empty());
+        assert_eq!(c.fallback(), TrafficClass::InspectFull);
+    }
+
+    #[test]
+    fn compile_without_steering_yields_empty_classifier() {
+        // The common production path: a bundle with no `st` block
+        // compiles to the conservative empty (inspect-full) table.
+        let bundle = make_bundle_with_rules(&[]);
+        let compiled = RuleCompiler::new()
+            .compile(&bundle, ZoneTable::new(), NatTable::new())
+            .expect("compile");
+        assert!(compiled.classification.is_empty());
+        assert_eq!(
+            compiled.classification.fallback(),
+            TrafficClass::InspectFull
+        );
     }
 
     /// Wire-compatible bundle envelope. Lives at module scope

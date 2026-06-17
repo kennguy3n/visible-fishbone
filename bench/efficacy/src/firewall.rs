@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use ipnet::IpNet;
 use sng_fw::{
-    render_nftables, CompiledRuleSet, EvaluationContext, FirewallEngine, FirewallRule,
+    render_nftables, Classifier, CompiledRuleSet, EvaluationContext, FirewallEngine, FirewallRule,
     FlowDirection, FlowKey, MockNftables, NatTable, PortRange, Protocol, RuleAction, RuleCompiler,
     RuleMatch, ZoneTable,
 };
@@ -124,6 +124,7 @@ pub(crate) fn policy_ruleset() -> CompiledRuleSet {
         source_graph_id: "efficacy-fw".into(),
         source_graph_version: 1,
         script,
+        classification: Classifier::default(),
     }
 }
 
