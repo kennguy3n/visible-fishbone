@@ -1278,6 +1278,21 @@ type DeviceEnrollmentRepository interface {
 	RevokeAllCertificates(ctx context.Context, tenantID uuid.UUID, deviceID uuid.UUID, at time.Time) error
 }
 
+// DeviceCARepository owns the device_cas table: the per-tenant device
+// certificate authority that signs enrollment certificates. There is
+// at most one CA per tenant, bootstrapped lazily on first enrollment.
+// All operations are tenant-isolated.
+type DeviceCARepository interface {
+	// GetCA returns the tenant's device CA. Returns ErrNotFound when
+	// the tenant has not bootstrapped one yet.
+	GetCA(ctx context.Context, tenantID uuid.UUID) (DeviceCA, error)
+	// CreateCA persists a freshly generated CA for the tenant.
+	// Returns ErrConflict when a CA already exists (a concurrent
+	// bootstrap won the race), so the caller can re-read the winner
+	// rather than overwrite a live trust anchor.
+	CreateCA(ctx context.Context, tenantID uuid.UUID, ca DeviceCA) (DeviceCA, error)
+}
+
 // --- AI Correlations ------------------------------------------------------
 
 // AICorrelationRepository owns the ai_alert_correlations table.

@@ -18,7 +18,19 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
+	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
 )
+
+// newPassthroughDeviceCA builds an in-memory device CA whose key is
+// sealed under the passthrough wrapper, for enrollment-handler tests.
+func newPassthroughDeviceCA(t *testing.T, s *memory.Store) *identity.CertAuthority {
+	t.Helper()
+	ca, err := identity.NewCertAuthority(memory.NewDeviceCARepository(s), policy.PassthroughWrapper{}, nil)
+	if err != nil {
+		t.Fatalf("NewCertAuthority: %v", err)
+	}
+	return ca
+}
 
 // newEnrollHandlerWithGuard wires a DeviceHandler with a real
 // enrollment service (in-memory repos) and an IP-keyed brute-force
@@ -37,6 +49,7 @@ func newEnrollHandlerWithGuard(t *testing.T, maxFailures int, cooldown time.Dura
 		memory.NewDeviceEnrollmentRepository(s),
 		memory.NewClaimTokenRepository(s),
 		memory.NewAuditLogRepository(s),
+		newPassthroughDeviceCA(t, s),
 		nil,
 	))
 	guard, err := middleware.NewAttemptLimiter(middleware.AttemptLimiterConfig{
@@ -164,6 +177,7 @@ func TestEnrollFailure_LogsClientIP_WhenGuardDisabled(t *testing.T) {
 		memory.NewDeviceEnrollmentRepository(s),
 		memory.NewClaimTokenRepository(s),
 		memory.NewAuditLogRepository(s),
+		newPassthroughDeviceCA(t, s),
 		nil,
 	))
 	var buf bytes.Buffer

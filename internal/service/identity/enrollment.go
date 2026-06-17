@@ -3,16 +3,11 @@ package identity
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/sha256"
-	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
-	"encoding/pem"
 	"fmt"
 	"log/slog"
-	"math/big"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,16 +27,20 @@ type EnrollmentService struct {
 	enrollments repository.DeviceEnrollmentRepository
 	tokens      repository.ClaimTokenRepository
 	audit       repository.AuditLogRepository
+	ca          *CertAuthority
 	logger      *slog.Logger
 	nowFunc     func() time.Time
 	certTTL     time.Duration
 }
 
-// NewEnrollmentService returns a ready-to-use enrollment service.
+// NewEnrollmentService returns a ready-to-use enrollment service. ca is
+// the persistent per-tenant device CA that signs enrollment
+// certificates; it is required.
 func NewEnrollmentService(
 	enrollments repository.DeviceEnrollmentRepository,
 	tokens repository.ClaimTokenRepository,
 	audit repository.AuditLogRepository,
+	ca *CertAuthority,
 	logger *slog.Logger,
 ) *EnrollmentService {
 	if logger == nil {
@@ -51,10 +50,18 @@ func NewEnrollmentService(
 		enrollments: enrollments,
 		tokens:      tokens,
 		audit:       audit,
+		ca:          ca,
 		logger:      logger,
 		nowFunc:     func() time.Time { return time.Now().UTC() },
 		certTTL:     DefaultCertTTL,
 	}
+}
+
+// GetTenantCA returns the tenant's device CA certificate in PEM form —
+// the stable trust anchor used to verify device mTLS certificates. The
+// CA is bootstrapped on demand if the tenant does not have one yet.
+func (s *EnrollmentService) GetTenantCA(ctx context.Context, tenantID uuid.UUID) (string, error) {
+	return s.ca.AnchorPEM(ctx, tenantID)
 }
 
 // EnrollmentResult is returned by RedeemClaimToken.
@@ -186,8 +193,10 @@ func (s *EnrollmentService) GetEnrollmentStatus(
 	return s.enrollments.GetEnrollmentAnyStatus(ctx, tenantID, deviceID)
 }
 
-// issueCertificate generates a short-lived self-signed mTLS
-// certificate binding the device's Ed25519 public key.
+// issueCertificate signs a short-lived mTLS certificate binding the
+// device's Ed25519 public key to the tenant's persistent CA, persists
+// it, and stamps the enrollment's last-cert-issued timestamp. The
+// returned CertPEM is the device certificate chained to the tenant CA.
 func (s *EnrollmentService) issueCertificate(
 	ctx context.Context,
 	tenantID uuid.UUID,
@@ -195,89 +204,19 @@ func (s *EnrollmentService) issueCertificate(
 	publicKey []byte,
 	now time.Time,
 ) (repository.DeviceCertificate, error) {
-	// Generate an ephemeral CA key pair. In production this would be
-	// a persistent tenant CA; for the MVP we create a per-issuance CA
-	// so the resulting certificate chain is cryptographically valid.
-	caPub, caPriv, err := ed25519.GenerateKey(rand.Reader)
+	issued, err := s.ca.Issue(ctx, tenantID, deviceID, ed25519.PublicKey(publicKey), now, s.certTTL)
 	if err != nil {
-		return repository.DeviceCertificate{}, fmt.Errorf("generate CA key: %w", err)
+		return repository.DeviceCertificate{}, err
 	}
-
-	caSerial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return repository.DeviceCertificate{}, fmt.Errorf("generate CA serial: %w", err)
-	}
-
-	caTemplate := &x509.Certificate{
-		SerialNumber: caSerial,
-		Subject: pkix.Name{
-			CommonName:   "SNG Ephemeral CA - " + tenantID.String(),
-			Organization: []string{tenantID.String()},
-		},
-		NotBefore:             now,
-		NotAfter:              now.Add(s.certTTL),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-		MaxPathLen:            0,
-		MaxPathLenZero:        true,
-	}
-
-	// Self-sign the CA certificate (caPub signs with caPriv).
-	caCertDER, err := x509.CreateCertificate(rand.Reader, caTemplate, caTemplate, caPub, caPriv)
-	if err != nil {
-		return repository.DeviceCertificate{}, fmt.Errorf("create CA certificate: %w", err)
-	}
-	caCert, err := x509.ParseCertificate(caCertDER)
-	if err != nil {
-		return repository.DeviceCertificate{}, fmt.Errorf("parse CA certificate: %w", err)
-	}
-
-	deviceSerial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return repository.DeviceCertificate{}, fmt.Errorf("generate device serial: %w", err)
-	}
-
-	deviceTemplate := &x509.Certificate{
-		SerialNumber: deviceSerial,
-		Subject: pkix.Name{
-			CommonName:   deviceID.String(),
-			Organization: []string{tenantID.String()},
-		},
-		NotBefore: now,
-		NotAfter:  now.Add(s.certTTL),
-		KeyUsage:  x509.KeyUsageDigitalSignature,
-		ExtKeyUsage: []x509.ExtKeyUsage{
-			x509.ExtKeyUsageClientAuth,
-		},
-	}
-
-	// Sign the device cert with the CA (parent = caCert, signer = caPriv).
-	devicePubKey := ed25519.PublicKey(publicKey)
-	deviceCertDER, err := x509.CreateCertificate(rand.Reader, deviceTemplate, caCert, devicePubKey, caPriv)
-	if err != nil {
-		return repository.DeviceCertificate{}, fmt.Errorf("create device certificate: %w", err)
-	}
-
-	// PEM chain: device cert followed by CA cert for verification.
-	var certChain []byte
-	certChain = append(certChain, pem.EncodeToMemory(&pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: deviceCertDER,
-	})...)
-	certChain = append(certChain, pem.EncodeToMemory(&pem.Block{
-		Type:  "CERTIFICATE",
-		Bytes: caCertDER,
-	})...)
 
 	cert := repository.DeviceCertificate{
 		ID:        uuid.New(),
 		DeviceID:  deviceID,
 		TenantID:  tenantID,
-		Serial:    deviceSerial.Text(16),
-		CertPEM:   string(certChain),
+		Serial:    issued.Serial,
+		CertPEM:   issued.ChainPEM,
 		IssuedAt:  now,
-		ExpiresAt: now.Add(s.certTTL),
+		ExpiresAt: issued.NotAfter,
 	}
 
 	saved, err := s.enrollments.CreateCertificate(ctx, tenantID, cert)

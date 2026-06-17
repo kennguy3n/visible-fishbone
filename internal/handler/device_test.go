@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -21,6 +23,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
+	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
 )
 
 // newTestDeviceHandler wires a DeviceHandler against the in-memory
@@ -347,5 +350,76 @@ func TestCreateClaimTokenStampsAuthenticatedActor(t *testing.T) {
 	if *stored.CreatedBy != userID {
 		t.Errorf("ClaimToken.CreatedBy = %v, want %v (handler stamped the wrong actor)",
 			*stored.CreatedBy, userID)
+	}
+}
+
+// TestTenantCACertReturnsAnchor verifies the device CA trust-anchor
+// endpoint returns the tenant's persistent CA certificate when an
+// enrollment service is configured.
+func TestTenantCACertReturnsAnchor(t *testing.T) {
+	t.Parallel()
+	s := memory.NewStore()
+	tn, err := memory.NewTenantRepository(s).Create(context.Background(), repository.Tenant{
+		Name: "ca", Slug: "ca-" + uuid.New().String()[:8],
+		Status: repository.TenantStatusActive, Tier: repository.TenantTierStarter,
+	})
+	if err != nil {
+		t.Fatalf("seed tenant: %v", err)
+	}
+	svc := identity.New(
+		memory.NewDeviceRepository(s),
+		memory.NewClaimTokenRepository(s),
+		memory.NewAuditLogRepository(s),
+		nil,
+	)
+	h := NewDeviceHandler(svc, memory.NewDeviceRepository(s), 0)
+	ca, err := identity.NewCertAuthority(memory.NewDeviceCARepository(s), policy.PassthroughWrapper{}, nil)
+	if err != nil {
+		t.Fatalf("NewCertAuthority: %v", err)
+	}
+	h.SetEnrollmentService(identity.NewEnrollmentService(
+		memory.NewDeviceEnrollmentRepository(s),
+		memory.NewClaimTokenRepository(s),
+		memory.NewAuditLogRepository(s),
+		ca,
+		nil,
+	))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/"+tn.ID.String()+"/devices/ca", nil)
+	req.SetPathValue("tenant_id", tn.ID.String())
+	rec := httptest.NewRecorder()
+	h.tenantCACert(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body = %s", rec.Code, rec.Body.String())
+	}
+	var resp TenantCAResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	block, _ := pem.Decode([]byte(resp.CACertPEM))
+	if block == nil || block.Type != "CERTIFICATE" {
+		t.Fatalf("response did not carry a PEM CA certificate: %q", resp.CACertPEM)
+	}
+	caCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		t.Fatalf("parse CA cert: %v", err)
+	}
+	if !caCert.IsCA {
+		t.Error("returned certificate is not a CA")
+	}
+}
+
+// TestTenantCACertNotImplementedWhenUnconfigured verifies the endpoint
+// degrades to 501 when no enrollment service is wired — the dead-surface
+// guard that motivated VF-3.
+func TestTenantCACertNotImplementedWhenUnconfigured(t *testing.T) {
+	t.Parallel()
+	h, tenantID := newTestDeviceHandler(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/"+tenantID.String()+"/devices/ca", nil)
+	req.SetPathValue("tenant_id", tenantID.String())
+	rec := httptest.NewRecorder()
+	h.tenantCACert(rec, req)
+	if rec.Code != http.StatusNotImplemented {
+		t.Fatalf("status = %d, want 501; body = %s", rec.Code, rec.Body.String())
 	}
 }

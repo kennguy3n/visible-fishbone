@@ -113,6 +113,11 @@ func (h *DeviceHandler) Register(mux *http.ServeMux) {
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/devices/{id}/refresh-cert", h.refreshCert)
 	MountTenantScoped(mux, "POST /api/v1/tenants/{tenant_id}/devices/{id}/revoke", h.revokeDevice)
 	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/devices/{id}/status", h.enrollmentStatus)
+
+	// Device CA trust anchor — the stable per-tenant CA certificate an
+	// mTLS verifier pins to validate device certificates. Registered as
+	// a literal segment so it takes precedence over /devices/{id}.
+	MountTenantScoped(mux, "GET /api/v1/tenants/{tenant_id}/devices/ca", h.tenantCACert)
 }
 
 // RegisterPublic attaches unauthenticated enrollment routes.
@@ -560,6 +565,28 @@ func (h *DeviceHandler) enrollmentStatus(w http.ResponseWriter, r *http.Request)
 		resp.RevokedAt = &s
 	}
 	WriteJSON(w, http.StatusOK, resp)
+}
+
+// TenantCAResponse is the JSON response for the device CA trust anchor.
+type TenantCAResponse struct {
+	CACertPEM string `json:"ca_cert_pem"`
+}
+
+func (h *DeviceHandler) tenantCACert(w http.ResponseWriter, r *http.Request) {
+	if h.enrollment == nil {
+		WriteError(w, http.StatusNotImplemented, "not_implemented", "enrollment service not configured")
+		return
+	}
+	tenantID, ok := PathUUID(w, r, "tenant_id")
+	if !ok {
+		return
+	}
+	pemStr, err := h.enrollment.GetTenantCA(r.Context(), tenantID)
+	if err != nil {
+		WriteRepositoryError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, TenantCAResponse{CACertPEM: pemStr})
 }
 
 func decodePublicKey(s string) ([]byte, error) {

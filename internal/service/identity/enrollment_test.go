@@ -14,6 +14,7 @@ import (
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
+	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
 )
 
 func newEnrollmentService(t *testing.T) (*EnrollmentService, uuid.UUID, repository.ClaimTokenRepository) {
@@ -26,10 +27,15 @@ func newEnrollmentService(t *testing.T) (*EnrollmentService, uuid.UUID, reposito
 		t.Fatalf("seed tenant: %v", err)
 	}
 	tokens := memory.NewClaimTokenRepository(s)
+	ca, err := NewCertAuthority(memory.NewDeviceCARepository(s), policy.PassthroughWrapper{}, nil)
+	if err != nil {
+		t.Fatalf("NewCertAuthority: %v", err)
+	}
 	svc := NewEnrollmentService(
 		memory.NewDeviceEnrollmentRepository(s),
 		tokens,
 		memory.NewAuditLogRepository(s),
+		ca,
 		nil,
 	)
 	return svc, tn.ID, tokens

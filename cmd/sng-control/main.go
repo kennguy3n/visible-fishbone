@@ -1609,6 +1609,7 @@ func buildRouter(
 	integrationDeliveryRepo := store.NewIntegrationDeliveryRepository()
 	mspRepo := store.NewMSPRepository()
 	enrollmentRepo := store.NewDeviceEnrollmentRepository()
+	deviceCARepo := store.NewDeviceCARepository()
 	casbConnectorRepo := store.NewCASBConnectorRepository()
 	casbAppRepo := store.NewCASBDiscoveredAppRepository()
 	casbPostureRepo := store.NewCASBPostureCheckRepository()
@@ -1695,7 +1696,31 @@ func buildRouter(
 		identity.NewNATSRevocationPublisher(natsAlertAdapter{p: telPub})))
 
 	identitySvc := identity.New(deviceRepo, claimRepo, auditRepo, logger, identityOpts...)
-	enrollmentSvc := identity.NewEnrollmentService(enrollmentRepo, claimRepo, auditRepo, logger)
+	// The device enrollment CA signs short-lived device mTLS
+	// certificates from a stable, persistent per-tenant root so the
+	// data plane can pin one trust anchor (previously each issuance
+	// minted a throwaway CA, so no verifier could ever trust the
+	// chain). Its private key is sealed at rest with the same
+	// AES-256-GCM master used for policy seeds when configured, falling
+	// back to passthrough (relying on TDE / disk encryption) otherwise.
+	var deviceCASealer identity.CredentialSealer = policy.PassthroughWrapper{}
+	if master, err := loadPolicyKeyWrapMaster(cfg); err != nil {
+		return routerComponents{}, fmt.Errorf("device CA key-wrap master: %w", err)
+	} else if len(master) > 0 {
+		w, err := policy.NewAESGCMWrapper(master)
+		if err != nil {
+			return routerComponents{}, fmt.Errorf("device CA key-wrap aes-gcm: %w", err)
+		}
+		deviceCASealer = w
+		logger.Info("device enrollment: AES-256-GCM at-rest wrap enabled for device CA private keys")
+	} else {
+		logger.Warn("device enrollment: no key-wrap master set; device CA private keys stored under passthrough (relying on at-rest disk/TDE encryption)")
+	}
+	deviceCA, err := identity.NewCertAuthority(deviceCARepo, deviceCASealer, logger)
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("device CA: %w", err)
+	}
+	enrollmentSvc := identity.NewEnrollmentService(enrollmentRepo, claimRepo, auditRepo, deviceCA, logger)
 	scimSvc := identity.NewSCIMService(userRepo, roleRepo, auditRepo, scimOpts...)
 	rbacSvc := rbac.New(roleRepo, auditRepo, logger)
 	auditSvc := audit.New(auditRepo)

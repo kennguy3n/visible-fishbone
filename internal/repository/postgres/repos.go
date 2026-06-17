@@ -109,6 +109,11 @@ func (s *Store) NewDeviceEnrollmentRepository() *DeviceEnrollmentRepository {
 	return &DeviceEnrollmentRepository{s: s}
 }
 
+// NewDeviceCARepository binds the Store to repository.DeviceCARepository.
+func (s *Store) NewDeviceCARepository() *DeviceCARepository {
+	return &DeviceCARepository{s: s}
+}
+
 // NewDeviceIdentityBindingRepository binds the Store to repository.DeviceIdentityBindingRepository.
 func (s *Store) NewDeviceIdentityBindingRepository() *DeviceIdentityBindingRepository {
 	return &DeviceIdentityBindingRepository{s: s}
