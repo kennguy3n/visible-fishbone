@@ -381,6 +381,18 @@ pub struct FwConfig {
     /// degrades to the slow path rather than failing boot.
     #[serde(default = "default_xdp_interface")]
     pub xdp_interface: String,
+    /// Maximum number of hot-path L3/L4 rules the hardware-offload
+    /// data path programs onto the offload device. Only consulted
+    /// when `--datapath=hardware` is selected. A real device exposes
+    /// a finite rule-table size (a SmartNIC TCAM, an FPGA match
+    /// table); the offload path keeps the leading `offload_capacity`
+    /// rules on the device and lets nftables carry the remainder,
+    /// so the device never silently drops rules it cannot hold.
+    /// Defaults to 4096 (the software model's table size); operators
+    /// running real silicon set it to the device's advertised
+    /// capacity.
+    #[serde(default = "default_offload_capacity")]
+    pub offload_capacity: usize,
 }
 
 impl Default for FwConfig {
@@ -388,6 +400,7 @@ impl Default for FwConfig {
         Self {
             nft_binary: None,
             xdp_interface: default_xdp_interface(),
+            offload_capacity: default_offload_capacity(),
         }
     }
 }
@@ -1189,6 +1202,9 @@ fn default_ips_interface() -> String {
 }
 fn default_xdp_interface() -> String {
     "eth0".into()
+}
+fn default_offload_capacity() -> usize {
+    4096
 }
 fn default_ips_rule_file_path() -> PathBuf {
     PathBuf::from("/var/lib/sng/ips/sng.rules")

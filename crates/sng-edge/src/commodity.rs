@@ -789,9 +789,13 @@ impl fmt::Debug for Frame {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DataPathProfile {
     /// The resolved backend (`Auto` is never seen here — it has already
-    /// been resolved to `Ebpf` or `Nftables`).
+    /// been resolved to a concrete `Ebpf` / `Nftables` / `Hardware`
+    /// choice by the supervisor's `resolve_datapath`).
     pub backend: DataPathSelection,
-    /// True iff the eBPF/XDP fast path is the active backend.
+    /// True iff the eBPF/XDP fast path is the active backend. The
+    /// `Hardware` tier programs an offload device rather than the kernel
+    /// XDP hook, so it does not set this — without real silicon it is the
+    /// software model and is sized like the slow path.
     pub xdp_fast_path: bool,
 }
 

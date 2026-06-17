@@ -41,14 +41,15 @@ pub mod error;
 pub mod l7;
 pub mod nat;
 pub mod nftables;
+pub mod offload;
 pub mod rule;
 pub mod tls_policy;
 pub mod zone;
 
 pub use appid::{AppIdEnricher, L7Enrichment};
 pub use backend::{
-    DataPathBackend, DataPathCapabilities, DataPathStats, DpdkDataPath, EbpfDataPath,
-    HardwareOffloadDataPath, NftablesDataPath, compile_hot_path,
+    DataPathBackend, DataPathCapabilities, DataPathStats, EbpfDataPath, HardwareOffloadDataPath,
+    NftablesDataPath, compile_hot_path,
 };
 pub use compile::{CompiledRuleSet, RuleCompiler, render_nftables};
 pub use conntrack::{ConntrackState, ConntrackTracker, FlowDirection};
@@ -59,6 +60,9 @@ pub use l7::{
 };
 pub use nat::{NatRule, NatTable, NatType};
 pub use nftables::{MockNftables, NftablesBackend, NftablesScript, ShellNftables};
+pub use offload::{
+    OffloadAttestation, OffloadDescriptor, OffloadDevice, SoftwareOffloadDevice, fit_to_capacity,
+};
 pub use rule::{FirewallRule, PortRange, Protocol, RuleAction, RuleMatch};
 pub use tls_policy::{
     MissingSniPolicy, TlsBypassReason, TlsDecision, TlsDecryptReason, TlsPolicy, TlsPolicyConfig,

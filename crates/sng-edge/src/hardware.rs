@@ -1,30 +1,31 @@
 // Copyright 2026 ShieldNet Gateway contributors.
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-//! Hardware-readiness abstraction (Phase 6 — PROPOSAL.md §10).
+//! Hardware-readiness abstraction (PROPOSAL.md §10).
 //!
-//! The shipped edge today is a software appliance: enforcement is
-//! nftables or eBPF/XDP ([`sng_fw::DataPathBackend`]), and there is no
-//! hardware root of trust beyond the host OS. PROPOSAL.md §10 plans a
-//! future line of TPM-rooted appliance SKUs with SmartNIC / crypto
-//! offload, where the data-path backend would attest its rule program
-//! against a measured boot chain before the supervisor trusts it.
+//! The shipped edge is a software appliance: enforcement is nftables or
+//! eBPF/XDP ([`sng_fw::DataPathBackend`]), and there is no hardware root
+//! of trust beyond the host OS. PROPOSAL.md §10 plans a future line of
+//! TPM-rooted appliance SKUs with SmartNIC / crypto offload, where the
+//! data-path backend attests its rule program against a measured boot
+//! chain before the supervisor trusts it.
 //!
-//! [`HardwareAccelerator`] is the **trait definition only** for that
-//! future. It is deliberately not implemented or wired into
-//! [`crate::build_edge`] yet — declaring it now fixes the seam the
-//! Phase-6 work will fill (and gives the `ebpf` /
-//! `hardware-offload` data-path backends a place to report attestation
-//! state) without pulling any TPM / SmartNIC dependency into the
-//! current build.
+//! [`HardwareAccelerator`] is the seam for that: the supervisor probes
+//! for an accelerator at boot via [`probe_accelerator`] and, when one
+//! reports itself offload-capable *and* attests trusted, the firewall
+//! subsystem programs the [`sng_fw::HardwareOffloadDataPath`] onto it.
 //!
-//! When Phase 6 lands, a concrete accelerator (e.g. a `TpmAccelerator`
-//! over `tss-esapi`, or a `SmartNicAccelerator` over the vendor SDK)
-//! will implement this trait, the supervisor will probe for one at
-//! boot, and [`sng_fw::HardwareOffloadDataPath`] will gate its rule
-//! install on [`HardwareAccelerator::attest`] succeeding.
+//! This build ships [`HostAccelerator`] — the honest "no hardware root
+//! of trust" probe result for a plain software host: it reports neither
+//! TPM-rooted nor offload-capable, so the firewall always runs the
+//! in-process software offload model and nftables stays authoritative.
+//! A concrete silicon accelerator (a `TpmAccelerator` over `tss-esapi`,
+//! a `SmartNicAccelerator` over the vendor SDK) implements this trait
+//! and is selected by [`probe_accelerator`] without touching the
+//! firewall subsystem or the data path.
 
 use std::fmt::Debug;
+use std::sync::Arc;
 
 /// Identity and capability descriptor for a hardware accelerator.
 ///
@@ -57,14 +58,13 @@ pub struct AttestationReport {
     pub quote: Vec<u8>,
 }
 
-/// A future TPM-rooted / SmartNIC appliance accelerator.
+/// A TPM-rooted / SmartNIC appliance accelerator.
 ///
-/// **Phase 6 stub — trait definition only.** No production type
-/// implements this yet; see the module docs and PROPOSAL.md §10.
-///
-/// The trait is `Send + Sync` because the supervisor will hold the
-/// accelerator behind an `Arc` shared across subsystem tasks, exactly as
-/// it does for [`sng_fw::DataPathBackend`].
+/// The supervisor holds the probed accelerator behind an `Arc` shared
+/// across subsystem tasks (hence `Send + Sync`), exactly as it does for
+/// [`sng_fw::DataPathBackend`]. The shipped implementor is
+/// [`HostAccelerator`]; silicon SKUs add their own implementors selected
+/// by [`probe_accelerator`].
 pub trait HardwareAccelerator: Send + Sync + Debug {
     /// Static identity / capability descriptor for the device.
     fn descriptor(&self) -> HardwareDescriptor;
@@ -76,15 +76,51 @@ pub trait HardwareAccelerator: Send + Sync + Debug {
     ///
     /// Returns a boxed error if the device is unreachable or the
     /// measurement fails. The concrete error type is intentionally left
-    /// open until Phase 6 picks the TPM / SmartNIC binding.
-    ///
-    /// # TODO(stream-b/phase-6)
-    ///
-    /// Implement against a real device (tss-esapi for fTPM/dTPM, or the
-    /// SmartNIC vendor SDK) and have
-    /// [`sng_fw::HardwareOffloadDataPath`] gate rule installation on a
-    /// `trusted` report.
+    /// open so a TPM / SmartNIC binding can pick its own.
     fn attest(&self) -> Result<AttestationReport, Box<dyn std::error::Error + Send + Sync>>;
+}
+
+/// The shipped accelerator: a plain software host with no hardware root
+/// of trust.
+///
+/// It reports neither TPM-rooted nor offload-capable, and attests
+/// **untrusted** (an empty quote) — there is no measured boot chain on a
+/// commodity host to vouch for. The firewall subsystem reads this and
+/// runs the in-process software offload model (which is itself trusted
+/// by construction, being the local process) with nftables authoritative
+/// rather than pretending a SmartNIC is present.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct HostAccelerator;
+
+impl HardwareAccelerator for HostAccelerator {
+    fn descriptor(&self) -> HardwareDescriptor {
+        HardwareDescriptor {
+            name: "host-software".to_owned(),
+            tpm_rooted: false,
+            offload_capable: false,
+        }
+    }
+
+    fn attest(&self) -> Result<AttestationReport, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(AttestationReport {
+            trusted: false,
+            quote: Vec::new(),
+        })
+    }
+}
+
+/// Probe the host for a hardware accelerator at boot.
+///
+/// Returns the accelerator the supervisor should hold for the process
+/// lifetime. This build has no TPM / SmartNIC binding compiled in, so it
+/// always returns a [`HostAccelerator`] — the honest "software host"
+/// result. A silicon SKU adds its discovery here (behind the relevant
+/// target/feature gate) and returns its own implementor; nothing else in
+/// the edge changes, because the firewall subsystem consumes only the
+/// [`HardwareAccelerator`] trait.
+#[must_use]
+pub fn probe_accelerator() -> Arc<dyn HardwareAccelerator> {
+    Arc::new(HostAccelerator)
 }
 
 #[cfg(test)]
@@ -93,7 +129,7 @@ mod tests {
 
     /// A throwaway in-test implementor proving the trait is
     /// object-safe and usable behind a trait object, which is how the
-    /// supervisor will hold it in Phase 6.
+    /// supervisor holds it.
     #[derive(Debug)]
     struct FakeAccelerator;
 
@@ -119,5 +155,18 @@ mod tests {
         let acc: Box<dyn HardwareAccelerator> = Box::new(FakeAccelerator);
         assert_eq!(acc.descriptor().name, "fake");
         assert!(acc.attest().unwrap().trusted);
+    }
+
+    #[test]
+    fn probe_returns_software_host_with_no_offload() {
+        let acc = probe_accelerator();
+        let desc = acc.descriptor();
+        assert_eq!(desc.name, "host-software");
+        assert!(!desc.tpm_rooted);
+        // A commodity host advertises no offload silicon, so the
+        // firewall must not select a hardware-offload device for it.
+        assert!(!desc.offload_capable);
+        // And it does not vouch for a measured boot chain.
+        assert!(!acc.attest().unwrap().trusted);
     }
 }

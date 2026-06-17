@@ -192,13 +192,17 @@ fn bootstrap_bundle_body() -> Vec<u8> {
 
 /// Resolve a [`DataPathSelection`] into the concrete backend the
 /// firewall subsystem will run. `Auto` consults the XDP
-/// capability probe ([`sng_ebpf::detect_xdp_capable`]); an
-/// explicit `Nftables` / `Ebpf` is returned verbatim so an
-/// operator override is never silently second-guessed.
+/// capability probe ([`sng_ebpf::detect_xdp_capable`]) and
+/// collapses to `Ebpf`/`Nftables`; an explicit `Nftables` /
+/// `Ebpf` / `Hardware` is returned verbatim so an operator
+/// override is never silently second-guessed.
 ///
-/// The returned value is always `Nftables` or `Ebpf` — never
-/// `Auto` — so the subsystem constructor receives a settled
-/// choice.
+/// The returned value is never `Auto` — the subsystem
+/// constructor always receives a settled choice. `Hardware` is
+/// deliberately **never** reached from `Auto`: the offload tier
+/// must be opted into explicitly because, absent real silicon,
+/// it runs the software model with no throughput gain over
+/// `Ebpf`.
 #[must_use]
 fn resolve_datapath(selection: DataPathSelection) -> DataPathSelection {
     match selection {

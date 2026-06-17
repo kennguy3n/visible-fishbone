@@ -14,10 +14,15 @@
 //!   fallback for the rules XDP cannot express (subject-gated, zoned, or
 //!   L7 / inspect / steer verdicts). XDP accelerates the unambiguous
 //!   early drops; everything else flows to nftables exactly as before.
-//! * [`DpdkDataPath`] / [`HardwareOffloadDataPath`] — future substrates
-//!   (ARCHITECTURE.md §4.1's VPP/DPDK fast path, and the TPM-rooted
-//!   appliance SKUs of PROPOSAL.md §10). Stubbed: they report their
-//!   capabilities but refuse to install until implemented.
+//! * [`HardwareOffloadDataPath`] — the opt-in offload fast path. Programs
+//!   the same hot-path L3/L4 subset onto a pluggable
+//!   [`crate::offload::OffloadDevice`] (a SmartNIC / FPGA / DPDK / VPP
+//!   driver, or the in-process [`crate::offload::SoftwareOffloadDevice`]
+//!   model) behind an attestation gate, and keeps an [`NftablesDataPath`]
+//!   fallback for everything the device cannot express — mirroring
+//!   [`EbpfDataPath`]. Real silicon (ARCHITECTURE.md §4.1's VPP/DPDK fast
+//!   path, the TPM-rooted appliance SKUs of PROPOSAL.md §10) plugs in as
+//!   an `OffloadDevice` implementor without touching this backend.
 //!
 //! ## Why the trait is async
 //!
@@ -40,6 +45,7 @@ use crate::compile::CompiledRuleSet;
 use crate::engine::FirewallEngine;
 use crate::error::FirewallError;
 use crate::nftables::{NftablesBackend, ShellNftables};
+use crate::offload::OffloadDevice;
 use crate::rule::RuleAction;
 
 /// Point-in-time counters describing one data-path backend.
@@ -415,7 +421,7 @@ pub fn compile_hot_path(compiled: &CompiledRuleSet) -> XdpRuleSet {
 
 /// Map an `sng-ebpf` error into the firewall error taxonomy so callers
 /// see one error type regardless of backend.
-fn map_ebpf_err(e: sng_ebpf::EbpfError) -> FirewallError {
+pub(crate) fn map_ebpf_err(e: sng_ebpf::EbpfError) -> FirewallError {
     use sng_ebpf::EbpfError;
     match e {
         EbpfError::RuleInvalid(m) => FirewallError::RuleInvalid(m),
@@ -426,55 +432,71 @@ fn map_ebpf_err(e: sng_ebpf::EbpfError) -> FirewallError {
     }
 }
 
-/// A stub for the ARCHITECTURE.md §4.1 VPP/DPDK fast path. Declared so
-/// the backend-selection surface is complete; refuses to install until
-/// implemented.
-#[derive(Debug, Default)]
-pub struct DpdkDataPath;
+/// The hardware-offload fast path. Programs the hot-path L3/L4 subset of
+/// a compiled ruleset onto a pluggable [`OffloadDevice`] (a SmartNIC /
+/// FPGA / DPDK / VPP driver, or the in-process
+/// [`crate::offload::SoftwareOffloadDevice`] model) and defers everything
+/// the device cannot express to an [`NftablesDataPath`] fallback.
+///
+/// It mirrors [`EbpfDataPath`]'s nftables-authoritative-first contract,
+/// with one extra gate before the fast path is trusted: the device must
+/// **attest** (PROPOSAL.md §10 / ARCHITECTURE.md §4.1). The slow path is
+/// always committed first, so a device that cannot attest — or whose
+/// program fails — degrades to nftables-only enforcement, never to a
+/// stale or unmeasured fast path.
+#[derive(Debug)]
+pub struct HardwareOffloadDataPath {
+    device: Arc<dyn OffloadDevice>,
+    fallback: NftablesDataPath,
+    installs_total: AtomicU64,
+    install_failures: AtomicU64,
+}
 
-#[async_trait]
-impl DataPathBackend for DpdkDataPath {
-    fn name(&self) -> &'static str {
-        "dpdk"
+impl HardwareOffloadDataPath {
+    /// Build over an offload device and an nftables fallback. The fallback
+    /// owns the full ruleset (the device only accelerates the hot-path
+    /// subset), so its engine is the one the per-packet evaluation path
+    /// should use — exactly as for [`EbpfDataPath`].
+    #[must_use]
+    pub fn new(device: Arc<dyn OffloadDevice>, fallback: NftablesDataPath) -> Self {
+        Self {
+            device,
+            fallback,
+            installs_total: AtomicU64::new(0),
+            install_failures: AtomicU64::new(0),
+        }
     }
 
-    async fn install_rules(&self, _compiled: &CompiledRuleSet) -> Result<(), FirewallError> {
-        // TODO(stream-b/phase-future): wire the VPP/DPDK fast path
-        // (ARCHITECTURE.md §4.1). Until then this backend must never be
-        // selected; the edge only constructs it behind an explicit opt-in
-        // that does not yet exist.
-        Err(FirewallError::Io(
-            "dpdk data path not implemented".to_owned(),
-        ))
+    /// Borrow the offload device.
+    #[must_use]
+    pub fn device(&self) -> &Arc<dyn OffloadDevice> {
+        &self.device
     }
 
-    fn get_stats(&self) -> Result<DataPathStats, FirewallError> {
-        Ok(DataPathStats {
-            backend: "dpdk",
-            rules_installed: 0,
-            installs_total: 0,
-            install_failures: 0,
-            kernel_offload: false,
-        })
+    /// Borrow the nftables fallback (and thus the shared engine).
+    #[must_use]
+    pub fn fallback(&self) -> &NftablesDataPath {
+        &self.fallback
     }
 
-    fn capabilities(&self) -> DataPathCapabilities {
-        DataPathCapabilities {
-            name: "dpdk",
-            l3l4_filter: false,
-            l7_inspection: false,
-            kernel_offload: false,
-            egress_steering: false,
-            hardware_offload: false,
+    /// Flush the device to pass-through, logging loudly on failure. Called
+    /// after the authoritative nftables ruleset has committed but the
+    /// device must not (or could not) be advanced — so the device can
+    /// never enforce a ruleset older than nftables. Best-effort: if the
+    /// flush itself fails there is no safe device state to fall back to,
+    /// but nftables stays authoritative regardless.
+    fn flush_device_or_log(&self) {
+        if let Err(flush_err) = self.device.clear() {
+            tracing::error!(
+                target: "sng_fw::backend",
+                error = %flush_err,
+                "failed to flush hardware offload device after an install \
+                 failure; the device may hold stale rules until the next \
+                 successful install"
+            );
         }
     }
 }
-
-/// A stub for the TPM-rooted hardware-offload appliance SKUs of
-/// PROPOSAL.md §10 (Phase 6). Declared for surface completeness; refuses
-/// to install until implemented.
-#[derive(Debug, Default)]
-pub struct HardwareOffloadDataPath;
 
 #[async_trait]
 impl DataPathBackend for HardwareOffloadDataPath {
@@ -482,33 +504,83 @@ impl DataPathBackend for HardwareOffloadDataPath {
         "hardware-offload"
     }
 
-    async fn install_rules(&self, _compiled: &CompiledRuleSet) -> Result<(), FirewallError> {
-        // TODO(stream-b/phase-6): wire SmartNIC / hardware-offload rule
-        // installation once the appliance SKU and its
-        // `HardwareAccelerator` runtime exist (PROPOSAL.md §10).
-        Err(FirewallError::Io(
-            "hardware offload data path not implemented".to_owned(),
-        ))
+    async fn install_rules(&self, compiled: &CompiledRuleSet) -> Result<(), FirewallError> {
+        // 1. nftables is authoritative — commit it first, exactly as the
+        //    eBPF path does. If it fails we return without touching the
+        //    device, leaving the fast path consistent with the last-good
+        //    ruleset.
+        if let Err(e) = self.fallback.install_rules(compiled).await {
+            self.install_failures.fetch_add(1, Ordering::Relaxed);
+            return Err(e);
+        }
+
+        // 2. Attest the device before trusting it to enforce. A device
+        //    that cannot attest (or attests untrusted) must never program
+        //    rules — flush it to pass-through so the authoritative nftables
+        //    ruleset carries enforcement alone.
+        match self.device.attest() {
+            Ok(report) if report.trusted => {}
+            Ok(_) => {
+                self.flush_device_or_log();
+                self.install_failures.fetch_add(1, Ordering::Relaxed);
+                return Err(FirewallError::Io(format!(
+                    "offload device '{}' failed attestation; refusing to \
+                     offload (nftables remains authoritative)",
+                    self.device.descriptor().name
+                )));
+            }
+            Err(e) => {
+                self.flush_device_or_log();
+                self.install_failures.fetch_add(1, Ordering::Relaxed);
+                return Err(e);
+            }
+        }
+
+        // 3. Program the hot-path subset onto the attested device. On
+        //    failure, flush the device so it can never enforce a ruleset
+        //    older than nftables (which already committed above).
+        let hot = compile_hot_path(compiled);
+        match self.device.program(&hot) {
+            Ok(_) => {
+                self.installs_total.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }
+            Err(e) => {
+                self.flush_device_or_log();
+                self.install_failures.fetch_add(1, Ordering::Relaxed);
+                Err(e)
+            }
+        }
     }
 
     fn get_stats(&self) -> Result<DataPathStats, FirewallError> {
         Ok(DataPathStats {
-            backend: "hardware-offload",
-            rules_installed: 0,
-            installs_total: 0,
-            install_failures: 0,
-            kernel_offload: true,
+            backend: self.name(),
+            rules_installed: self.device.programmed_rules(),
+            installs_total: self.installs_total.load(Ordering::Relaxed),
+            install_failures: self.install_failures.load(Ordering::Relaxed),
+            // Honest: only real silicon is hardware offload. The software
+            // model reports `false` even when selected as this backend,
+            // exactly as `EbpfDataPath` reports `false` on the in-memory
+            // control plane.
+            kernel_offload: self.device.descriptor().silicon,
         })
     }
 
     fn capabilities(&self) -> DataPathCapabilities {
+        let silicon = self.device.descriptor().silicon;
         DataPathCapabilities {
             name: "hardware-offload",
             l3l4_filter: true,
-            l7_inspection: false,
-            kernel_offload: true,
-            egress_steering: true,
-            hardware_offload: true,
+            // L7 is covered by the nftables fallback this backend owns.
+            l7_inspection: true,
+            // Both bits track whether the device is genuine silicon, so the
+            // health surface never reads a software model as accelerated.
+            kernel_offload: silicon,
+            // Egress steering is not modelled by the offload device; it
+            // rides the nftables fallback, which does not accelerate it.
+            egress_steering: false,
+            hardware_offload: silicon,
         }
     }
 }
@@ -843,12 +915,296 @@ mod tests {
         assert_eq!(dp.fallback().get_stats().unwrap().installs_total, 2);
     }
 
+    use crate::offload::{
+        OffloadAttestation, OffloadDescriptor, OffloadDevice, SoftwareOffloadDevice,
+    };
+
+    /// Test double: reachable but attests *untrusted* (measurement
+    /// mismatch). The data path must refuse to program it and flush it.
+    #[derive(Debug, Default)]
+    struct UntrustedDevice {
+        cleared: AtomicU64,
+    }
+
+    impl OffloadDevice for UntrustedDevice {
+        fn descriptor(&self) -> OffloadDescriptor {
+            OffloadDescriptor {
+                name: "untrusted".to_owned(),
+                silicon: true,
+                capacity: 16,
+            }
+        }
+        fn attest(&self) -> Result<OffloadAttestation, FirewallError> {
+            Ok(OffloadAttestation {
+                trusted: false,
+                measurement: Vec::new(),
+            })
+        }
+        fn program(&self, _: &XdpRuleSet) -> Result<usize, FirewallError> {
+            panic!("program must never be called on an untrusted device")
+        }
+        fn clear(&self) -> Result<(), FirewallError> {
+            self.cleared.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        fn programmed_rules(&self) -> u64 {
+            0
+        }
+    }
+
+    /// Test double: attestation transport is down (returns `Err`). Same
+    /// safe-degrade contract as an untrusted device.
+    #[derive(Debug, Default)]
+    struct FailAttestDevice {
+        cleared: AtomicU64,
+    }
+
+    impl OffloadDevice for FailAttestDevice {
+        fn descriptor(&self) -> OffloadDescriptor {
+            OffloadDescriptor {
+                name: "fail-attest".to_owned(),
+                silicon: true,
+                capacity: 16,
+            }
+        }
+        fn attest(&self) -> Result<OffloadAttestation, FirewallError> {
+            Err(FirewallError::Io("attestation transport down".to_owned()))
+        }
+        fn program(&self, _: &XdpRuleSet) -> Result<usize, FirewallError> {
+            panic!("program must never be called when attestation errors")
+        }
+        fn clear(&self) -> Result<(), FirewallError> {
+            self.cleared.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        fn programmed_rules(&self) -> u64 {
+            0
+        }
+    }
+
+    /// Test double: attests trusted, programs once, then fails — lets us
+    /// drive the "nftables committed, device program failed" branch and
+    /// observe the flush.
+    #[derive(Debug, Default)]
+    struct FlakyProgramDevice {
+        programs: AtomicU64,
+        cleared: AtomicU64,
+    }
+
+    impl OffloadDevice for FlakyProgramDevice {
+        fn descriptor(&self) -> OffloadDescriptor {
+            OffloadDescriptor {
+                name: "flaky".to_owned(),
+                silicon: false,
+                capacity: 16,
+            }
+        }
+        fn attest(&self) -> Result<OffloadAttestation, FirewallError> {
+            Ok(OffloadAttestation {
+                trusted: true,
+                measurement: b"flaky".to_vec(),
+            })
+        }
+        fn program(&self, rules: &XdpRuleSet) -> Result<usize, FirewallError> {
+            if self.programs.fetch_add(1, Ordering::Relaxed) == 0 {
+                Ok(rules.len())
+            } else {
+                Err(FirewallError::Io("forced program failure".to_owned()))
+            }
+        }
+        fn clear(&self) -> Result<(), FirewallError> {
+            self.cleared.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        }
+        fn programmed_rules(&self) -> u64 {
+            0
+        }
+    }
+
+    /// Test double: a genuine-silicon device (reports `silicon: true`), so
+    /// the data path's honest capability/stat surface can be asserted.
+    #[derive(Debug)]
+    struct SiliconDevice;
+
+    impl OffloadDevice for SiliconDevice {
+        fn descriptor(&self) -> OffloadDescriptor {
+            OffloadDescriptor {
+                name: "silicon".to_owned(),
+                silicon: true,
+                capacity: 1024,
+            }
+        }
+        fn attest(&self) -> Result<OffloadAttestation, FirewallError> {
+            Ok(OffloadAttestation {
+                trusted: true,
+                measurement: b"silicon".to_vec(),
+            })
+        }
+        fn program(&self, rules: &XdpRuleSet) -> Result<usize, FirewallError> {
+            Ok(rules.len())
+        }
+        fn clear(&self) -> Result<(), FirewallError> {
+            Ok(())
+        }
+        fn programmed_rules(&self) -> u64 {
+            0
+        }
+    }
+
     #[tokio::test]
-    async fn stub_backends_refuse_to_install() {
-        let rs = ruleset(Vec::new(), RuleAction::Deny);
-        assert!(DpdkDataPath.install_rules(&rs).await.is_err());
-        assert!(HardwareOffloadDataPath.install_rules(&rs).await.is_err());
-        assert!(!DpdkDataPath.capabilities().l3l4_filter);
-        assert!(HardwareOffloadDataPath.capabilities().hardware_offload);
+    async fn hardware_offload_programs_device_and_keeps_fallback() {
+        let backend: Arc<dyn NftablesBackend> = Arc::new(MockNftables::new());
+        let engine = Arc::new(FirewallEngine::new(backend));
+        let device = Arc::new(SoftwareOffloadDevice::default());
+        let dp = HardwareOffloadDataPath::new(device.clone(), NftablesDataPath::new(engine));
+        assert_eq!(dp.name(), "hardware-offload");
+
+        let rs = ruleset(
+            vec![
+                l3l4_rule("a", "203.0.113.0/24", RuleAction::Allow),
+                l3l4_rule("d", "192.0.2.0/24", RuleAction::Deny),
+            ],
+            RuleAction::Deny,
+        );
+        dp.install_rules(&rs).await.unwrap();
+
+        let stats = dp.get_stats().unwrap();
+        assert_eq!(stats.backend, "hardware-offload");
+        // Both hot-path rules were programmed onto the device.
+        assert_eq!(stats.rules_installed, 2);
+        assert_eq!(stats.installs_total, 1);
+        // Software model is not genuine silicon — reported honestly.
+        assert!(!stats.kernel_offload);
+        // Fallback installed the full ruleset too.
+        assert_eq!(dp.fallback().get_stats().unwrap().installs_total, 1);
+
+        // The device enforces the offloaded subset identically to the slow
+        // path: the Deny rule drops its target.
+        let hit = device.evaluate(
+            "10.0.0.1".parse().unwrap(),
+            "192.0.2.5".parse().unwrap(),
+            5000,
+            443,
+            6,
+        );
+        assert_eq!(hit.action, XdpRuleAction::Drop);
+
+        // Capabilities are honest for a software device.
+        let caps = dp.capabilities();
+        assert!(!caps.hardware_offload);
+        assert!(!caps.kernel_offload);
+        assert!(caps.l3l4_filter);
+        assert!(caps.l7_inspection);
+    }
+
+    #[tokio::test]
+    async fn hardware_offload_does_not_program_when_nftables_fails() {
+        // nftables is authoritative; if its apply fails the device must not
+        // be touched at all.
+        let mock = Arc::new(MockNftables::new());
+        mock.fail_next_apply("kernel rejected");
+        let backend: Arc<dyn NftablesBackend> = Arc::clone(&mock) as _;
+        let engine = Arc::new(FirewallEngine::new(backend));
+        let device = Arc::new(SoftwareOffloadDevice::default());
+        let dp = HardwareOffloadDataPath::new(device.clone(), NftablesDataPath::new(engine));
+
+        let rs = ruleset(
+            vec![l3l4_rule("a", "203.0.113.0/24", RuleAction::Deny)],
+            RuleAction::Deny,
+        );
+        assert!(dp.install_rules(&rs).await.is_err());
+        // Device was never programmed.
+        assert_eq!(device.programmed_rules(), 0);
+        assert_eq!(device.programs_total(), 0);
+        let stats = dp.get_stats().unwrap();
+        assert_eq!(stats.installs_total, 0);
+        assert_eq!(stats.install_failures, 1);
+    }
+
+    #[tokio::test]
+    async fn hardware_offload_refuses_and_flushes_untrusted_device() {
+        let backend: Arc<dyn NftablesBackend> = Arc::new(MockNftables::new());
+        let engine = Arc::new(FirewallEngine::new(backend));
+        let device = Arc::new(UntrustedDevice::default());
+        let dp = HardwareOffloadDataPath::new(device.clone(), NftablesDataPath::new(engine));
+
+        let rs = ruleset(
+            vec![l3l4_rule("a", "203.0.113.0/24", RuleAction::Deny)],
+            RuleAction::Deny,
+        );
+        assert!(dp.install_rules(&rs).await.is_err());
+        // The untrusted device was flushed, never programmed.
+        assert_eq!(device.cleared.load(Ordering::Relaxed), 1);
+        let stats = dp.get_stats().unwrap();
+        assert_eq!(stats.installs_total, 0);
+        assert_eq!(stats.install_failures, 1);
+        // nftables (authoritative) still committed — enforcement is intact.
+        assert_eq!(dp.fallback().get_stats().unwrap().installs_total, 1);
+    }
+
+    #[tokio::test]
+    async fn hardware_offload_errors_and_flushes_when_attestation_fails() {
+        let backend: Arc<dyn NftablesBackend> = Arc::new(MockNftables::new());
+        let engine = Arc::new(FirewallEngine::new(backend));
+        let device = Arc::new(FailAttestDevice::default());
+        let dp = HardwareOffloadDataPath::new(device.clone(), NftablesDataPath::new(engine));
+
+        let rs = ruleset(
+            vec![l3l4_rule("a", "203.0.113.0/24", RuleAction::Deny)],
+            RuleAction::Deny,
+        );
+        assert!(dp.install_rules(&rs).await.is_err());
+        assert_eq!(device.cleared.load(Ordering::Relaxed), 1);
+        let stats = dp.get_stats().unwrap();
+        assert_eq!(stats.installs_total, 0);
+        assert_eq!(stats.install_failures, 1);
+        assert_eq!(dp.fallback().get_stats().unwrap().installs_total, 1);
+    }
+
+    #[tokio::test]
+    async fn hardware_offload_flushes_device_when_program_fails() {
+        // nftables succeeds on every install, but the device program fails
+        // on the *second* install. The device must then be flushed so it
+        // cannot keep enforcing the first install's (now stale) rules.
+        let backend: Arc<dyn NftablesBackend> = Arc::new(MockNftables::new());
+        let engine = Arc::new(FirewallEngine::new(backend));
+        let device = Arc::new(FlakyProgramDevice::default());
+        let dp = HardwareOffloadDataPath::new(device.clone(), NftablesDataPath::new(engine));
+
+        let rs = ruleset(
+            vec![l3l4_rule("a", "203.0.113.0/24", RuleAction::Deny)],
+            RuleAction::Deny,
+        );
+        // First install: attest + program both succeed.
+        dp.install_rules(&rs).await.unwrap();
+        // Second install: nftables commits, device program fails → flush.
+        assert!(dp.install_rules(&rs).await.is_err());
+
+        assert_eq!(device.cleared.load(Ordering::Relaxed), 1);
+        let stats = dp.get_stats().unwrap();
+        assert_eq!(stats.installs_total, 1);
+        assert_eq!(stats.install_failures, 1);
+        // nftables committed both installs — enforcement was never lost.
+        assert_eq!(dp.fallback().get_stats().unwrap().installs_total, 2);
+    }
+
+    #[tokio::test]
+    async fn hardware_offload_reports_silicon_capabilities_when_genuine() {
+        let backend: Arc<dyn NftablesBackend> = Arc::new(MockNftables::new());
+        let engine = Arc::new(FirewallEngine::new(backend));
+        let device: Arc<dyn OffloadDevice> = Arc::new(SiliconDevice);
+        let dp = HardwareOffloadDataPath::new(device, NftablesDataPath::new(engine));
+
+        // Genuine silicon advertises hardware/kernel offload.
+        let caps = dp.capabilities();
+        assert!(caps.hardware_offload);
+        assert!(caps.kernel_offload);
+
+        let rs = ruleset(
+            vec![l3l4_rule("a", "203.0.113.0/24", RuleAction::Deny)],
+            RuleAction::Deny,
+        );
+        dp.install_rules(&rs).await.unwrap();
+        assert!(dp.get_stats().unwrap().kernel_offload);
     }
 }
