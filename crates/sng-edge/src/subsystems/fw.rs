@@ -23,6 +23,7 @@
 
 use crate::cli::DataPathSelection;
 use crate::config::FwConfig;
+use crate::hardware::HardwareAccelerator;
 use async_trait::async_trait;
 use sng_core::{
     HealthCheck, HealthStatus, ShutdownSignal, Subsystem, SubsystemError, SubsystemHandle,
@@ -30,8 +31,8 @@ use sng_core::{
 };
 use sng_ebpf::XdpControlPlane;
 use sng_fw::{
-    CompiledRuleSet, DataPathBackend, EbpfDataPath, FirewallEngine, NftablesBackend,
-    NftablesDataPath,
+    CompiledRuleSet, DataPathBackend, EbpfDataPath, FirewallEngine, HardwareOffloadDataPath,
+    NftablesBackend, NftablesDataPath, OffloadDevice, SoftwareOffloadDevice,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -127,8 +128,82 @@ impl FwSubsystem {
                 }
                 Arc::new(ebpf)
             }
+            DataPathSelection::Hardware => {
+                // Probe the boot-time accelerator and build the offload
+                // device it (or, absent silicon, the software model) backs.
+                let accelerator = crate::hardware::probe_accelerator();
+                let device = Self::build_offload_device(accelerator.as_ref(), cfg.offload_capacity);
+                let hw = HardwareOffloadDataPath::new(device, nft_dp);
+                // Be loud when there is no real silicon behind the tier: the
+                // software model offers no throughput gain over `ebpf`, and
+                // nftables remains authoritative. An operator who asked for
+                // `--datapath=hardware` must not believe a SmartNIC is live.
+                if !hw.capabilities().hardware_offload {
+                    tracing::warn!(
+                        target: "sng_edge::fw",
+                        capacity = cfg.offload_capacity,
+                        "hardware-offload data path selected but no attested \
+                         offload silicon is present; running the in-process \
+                         software offload model — nftables carries authoritative \
+                         enforcement and there is no throughput gain over ebpf"
+                    );
+                }
+                Arc::new(hw)
+            }
         };
         Self::from_parts(engine, datapath)
+    }
+
+    /// Build the offload device the hardware data path programs onto.
+    ///
+    /// When the boot probe reports genuine, **attested** offload silicon
+    /// the device's vendor driver would be constructed here. No silicon
+    /// binding ships in this build, so an offload-capable+trusted probe is
+    /// logged but still backed by the software model rather than
+    /// fabricating a driver — the only honest option without the
+    /// hardware. A host that is not offload-capable (the shipped
+    /// [`crate::hardware::HostAccelerator`]) goes straight to the software
+    /// model. Either way nftables stays authoritative via the data path's
+    /// fallback.
+    #[must_use]
+    fn build_offload_device(
+        accelerator: &dyn HardwareAccelerator,
+        capacity: usize,
+    ) -> Arc<dyn OffloadDevice> {
+        let descriptor = accelerator.descriptor();
+        if descriptor.offload_capable {
+            match accelerator.attest() {
+                Ok(report) if report.trusted => {
+                    tracing::info!(
+                        target: "sng_edge::fw",
+                        sku = %descriptor.name,
+                        "attested offload silicon present; no vendor driver is \
+                         compiled into this build, so the software offload model \
+                         backs the tier"
+                    );
+                }
+                Ok(_) => tracing::warn!(
+                    target: "sng_edge::fw",
+                    sku = %descriptor.name,
+                    "offload silicon present but failed attestation; refusing to \
+                     program it — falling back to the software offload model"
+                ),
+                Err(err) => tracing::warn!(
+                    target: "sng_edge::fw",
+                    error = %err,
+                    "offload-silicon attestation errored; falling back to the \
+                     software offload model"
+                ),
+            }
+        } else {
+            tracing::info!(
+                target: "sng_edge::fw",
+                sku = %descriptor.name,
+                tpm_rooted = descriptor.tpm_rooted,
+                "no offload-capable hardware detected at boot"
+            );
+        }
+        Arc::new(SoftwareOffloadDevice::new(capacity))
     }
 
     /// Build the eBPF control plane for the selected fast path.
@@ -382,6 +457,65 @@ mod tests {
             .await
             .expect("drain budget");
         assert!(res.expect("join").is_ok());
+    }
+
+    #[tokio::test]
+    async fn hardware_selection_builds_software_offload_datapath() {
+        let cfg = FwConfig {
+            offload_capacity: 8,
+            ..FwConfig::default()
+        };
+        let sub = FwSubsystem::new(&cfg, DataPathSelection::Hardware);
+        // The hardware-offload tier is genuinely wired and selectable.
+        assert_eq!(sub.datapath.name(), "hardware-offload");
+        // No real silicon on a CI host: the software model backs the tier
+        // and must honestly report no kernel/hardware offload so the
+        // health line and capabilities never overstate acceleration.
+        let stats = sub.datapath.get_stats().expect("stats");
+        assert!(!stats.kernel_offload);
+        let caps = sub.datapath.capabilities();
+        assert!(!caps.hardware_offload, "software model is not silicon");
+        assert!(caps.l3l4_filter, "the tier still filters L3/L4");
+    }
+
+    #[test]
+    fn build_offload_device_falls_back_to_software_for_host_accelerator() {
+        // The shipped boot probe reports a commodity host with no offload
+        // silicon, so the firewall must build the software model.
+        let device = FwSubsystem::build_offload_device(&crate::hardware::HostAccelerator, 16);
+        assert_eq!(device.descriptor().name, "software-model");
+        assert!(!device.descriptor().silicon);
+        assert_eq!(device.descriptor().capacity, 16);
+    }
+
+    #[test]
+    fn build_offload_device_uses_software_model_even_for_attested_silicon() {
+        // No vendor driver ships in this build, so even an attested,
+        // offload-capable accelerator is backed by the software model
+        // rather than a fabricated driver — the honest boundary.
+        #[derive(Debug)]
+        struct AttestedSilicon;
+        impl crate::hardware::HardwareAccelerator for AttestedSilicon {
+            fn descriptor(&self) -> crate::hardware::HardwareDescriptor {
+                crate::hardware::HardwareDescriptor {
+                    name: "test-smartnic".to_owned(),
+                    tpm_rooted: true,
+                    offload_capable: true,
+                }
+            }
+            fn attest(
+                &self,
+            ) -> Result<crate::hardware::AttestationReport, Box<dyn std::error::Error + Send + Sync>>
+            {
+                Ok(crate::hardware::AttestationReport {
+                    trusted: true,
+                    quote: vec![0x01],
+                })
+            }
+        }
+        let device = FwSubsystem::build_offload_device(&AttestedSilicon, 32);
+        assert_eq!(device.descriptor().name, "software-model");
+        assert!(!device.descriptor().silicon);
     }
 
     #[tokio::test]

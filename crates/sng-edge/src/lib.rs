@@ -71,7 +71,9 @@ pub use commodity::{
     WorkerAffinity,
 };
 pub use config::{ConfigError, EdgeConfig, EdgeMode, PopConfig};
-pub use hardware::{AttestationReport, HardwareAccelerator, HardwareDescriptor};
+pub use hardware::{
+    AttestationReport, HardwareAccelerator, HardwareDescriptor, HostAccelerator, probe_accelerator,
+};
 pub use pop::{AtCapacity, CapacityReport, ConnGuard, PoPRouter, RouteError, TenantSelector};
 pub use supervisor::{BuiltEdge, EdgeBuildError, build_edge, run_edge};
 pub use watchdog::{

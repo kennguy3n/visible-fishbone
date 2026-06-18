@@ -141,6 +141,20 @@ pub enum DataPathSelection {
     /// well as by the technology name (`--datapath=ebpf`).
     #[value(name = "ebpf", alias = "xdp")]
     Ebpf,
+    /// Force the hardware-offload fast path. Programs the hot-path
+    /// L3/L4 subset onto an attested offload device (a SmartNIC /
+    /// FPGA / DPDK / VPP driver, or the in-process software model
+    /// when no silicon is present) and keeps an nftables fallback
+    /// for everything the device cannot express. Never auto-
+    /// selected — an operator must ask for it explicitly, because
+    /// without real silicon it is the software model and offers no
+    /// throughput gain over `ebpf`.
+    ///
+    /// Accepts `offload` as an alias so operators can select it by
+    /// what it does (`--datapath=offload`) as well as by the tier
+    /// name (`--datapath=hardware`).
+    #[value(name = "hardware", alias = "offload")]
+    Hardware,
 }
 
 #[cfg(test)]
@@ -196,5 +210,21 @@ mod tests {
             "nftables",
         ]);
         assert_eq!(nft.datapath, DataPathSelection::Nftables);
+    }
+
+    #[test]
+    fn datapath_accepts_hardware_offload_alias_and_canonical_names() {
+        // The offload tier may be selected by tier name (`hardware`)
+        // or by what it does (`offload`); both resolve identically.
+        for token in ["hardware", "offload"] {
+            let cli = Cli::parse_from([
+                "sng-edge",
+                "--config",
+                "/etc/sng/edge.toml",
+                "--datapath",
+                token,
+            ]);
+            assert_eq!(cli.datapath, DataPathSelection::Hardware, "token {token}");
+        }
     }
 }
