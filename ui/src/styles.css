@@ -25,6 +25,7 @@
      uses --brand so the console reads as one ShieldNet 360 blue surface. */
   --accent: #06b6d4;
   --ok: #059669;
+  --ok-strong: #047857;
   --warn: #d97706;
   --warn-alt: #f59e0b;
   --danger: #dc2626;
@@ -116,6 +117,7 @@
   --brand-rgb: 77, 131, 240;
   --accent: #22d3ee;
   --ok: #34d399;
+  --ok-strong: #059669;
   --warn: #fbbf24;
   --warn-alt: #f59e0b;
   --danger: #f87171;
@@ -161,6 +163,7 @@
     --brand-rgb: 77, 131, 240;
     --accent: #22d3ee;
     --ok: #34d399;
+    --ok-strong: #059669;
     --warn: #fbbf24;
     --warn-alt: #f59e0b;
     --danger: #f87171;
@@ -266,7 +269,7 @@ a:hover {
   background: linear-gradient(135deg, var(--brand), var(--brand-strong));
   display: grid;
   place-items: center;
-  color: #06101f;
+  color: #fff;
   font-weight: 800;
 }
 .sidebar__brand small {
@@ -1566,7 +1569,7 @@ label.field > span {
   background: linear-gradient(
     100deg,
     rgba(var(--brand-rgb), 0.16),
-    rgba(34, 211, 238, 0.08)
+    rgba(var(--brand-rgb), 0.06)
   );
   margin-bottom: 18px;
 }
