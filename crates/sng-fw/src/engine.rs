@@ -454,6 +454,7 @@ mod tests {
             source_graph_id: "g".into(),
             source_graph_version: 1,
             script: NftablesScript::new(b"add table inet sng_filter\n".to_vec()),
+            classification: sng_ebpf::Classifier::default(),
         }
     }
 

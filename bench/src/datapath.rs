@@ -155,6 +155,7 @@ pub fn build_synthetic_ruleset(rule_count: usize) -> CompiledRuleSet {
         source_graph_id: "bench-datapath".to_owned(),
         source_graph_version: 1,
         script: NftablesScript::new(Vec::new()),
+        classification: sng_ebpf::Classifier::default(),
     }
 }
 

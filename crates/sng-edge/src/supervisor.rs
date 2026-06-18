@@ -66,11 +66,12 @@ use sng_core::{
     BundleTarget, ShutdownSignal, Supervisor, SupervisorBuilder, SupervisorReport,
     SupervisorRunError,
 };
+use sng_fw::{CompiledRuleSet, NatTable, RuleCompiler, ZoneTable};
 use sng_telemetry::TelemetryEvent;
 use sng_ztna::{SessionTracker, ZtnaServiceConfig};
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 /// Errors raised by [`build_edge`].
 #[derive(Debug, Error)]
@@ -277,18 +278,38 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
     let bootstrap_body = bootstrap_bundle_body();
     let policy_eval = Arc::new(PolicyEvalSubsystem::new(&bootstrap_body)?);
 
+    // 1b. Firewall. Built ahead of comms (out of the numbered
+    //     boot order below) because the bundle publisher wired
+    //     into comms needs the firewall's ruleset sender: every
+    //     accepted bundle is compiled into a `CompiledRuleSet`
+    //     and pushed to the data path, so the firewall must
+    //     exist before the publisher closure is constructed.
+    //     Resolve the data-path selection first — `auto` probes
+    //     the kernel for XDP support and picks the eBPF fast path
+    //     when available, nftables otherwise — so a forced
+    //     `ebpf`/`nftables` is honoured verbatim and `auto` never
+    //     boot-fails on an XDP-incapable box.
+    let datapath = resolve_datapath(cli.datapath);
+    tracing::info!(
+        target: "sng_edge::supervisor",
+        requested = ?cli.datapath,
+        resolved = ?datapath,
+        "firewall data-path backend selected"
+    );
+    let fw = Arc::new(FwSubsystem::new(&cfg.fw, datapath));
+
     // 2. Comms. Builds the long-lived ControlPlaneClient
     //    internally from the operator-supplied TLS material;
     //    the telemetry subsystem will reuse the same client
     //    via `comms.client()` so cert / trust store / endpoint
     //    are configured in exactly one place. Wire the bundle
     //    publisher to dispatch fresh bundles into the policy
-    //    evaluator. Future subsystems that need their own
-    //    bundle slice (compiled IPS rules, Envoy config) will
-    //    subscribe to a fan-out built on top of this single
-    //    publisher; for now the policy_eval subsystem is the
-    //    only consumer.
-    let publisher = make_bundle_publisher(Arc::clone(&policy_eval));
+    //    evaluator and, on each accepted bundle, compile the
+    //    NGFW + steering slice and push it to the firewall data
+    //    path. Future subsystems that need their own bundle
+    //    slice (compiled IPS rules, Envoy config) will subscribe
+    //    to a fan-out built on top of this publisher.
+    let publisher = make_bundle_publisher(Arc::clone(&policy_eval), fw.ruleset_sender());
     let trust_store = Arc::new(PolicyTrustStore::new());
     let comms = Arc::new(CommsSubsystem::new(
         &cfg.comms,
@@ -329,20 +350,8 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
     let telemetry_tx = pipeline_handle_to_telemetry_sender(&telemetry, shutdown_signal_for_bridges);
     let dns = Arc::new(DnsSubsystem::new(&cfg.dns, telemetry_tx.clone()));
 
-    // 5. Firewall. Resolve the data-path selection — `auto`
-    //    probes the kernel for XDP support and picks the eBPF
-    //    fast path when available, nftables otherwise — before
-    //    constructing the subsystem, so a forced `ebpf`/`nftables`
-    //    is honoured verbatim and `auto` never boot-fails on an
-    //    XDP-incapable box.
-    let datapath = resolve_datapath(cli.datapath);
-    tracing::info!(
-        target: "sng_edge::supervisor",
-        requested = ?cli.datapath,
-        resolved = ?datapath,
-        "firewall data-path backend selected"
-    );
-    let fw = Arc::new(FwSubsystem::new(&cfg.fw, datapath));
+    // 5. Firewall is constructed earlier (step 1b) so its
+    //    ruleset sender can be wired into the bundle publisher.
 
     // 6. IPS.
     let ips = Arc::new(IpsSubsystem::new(&cfg.ips));
@@ -729,15 +738,27 @@ fn pipeline_handle_to_telemetry_sender(
 }
 
 /// Build the bundle publisher closure that the comms puller
-/// invokes on every fresh bundle. For the Edge target we
-/// dispatch into the policy evaluator. Subsystems whose
-/// compiled artifacts are derived from the policy bundle (IPS
-/// rules, nftables ruleset, Envoy config, SD-WAN paths, ZTNA
-/// catalog) will subscribe to a fan-out built on top of the
-/// policy evaluator's swap notification in a follow-up PR;
-/// today they boot with empty providers and the policy
-/// evaluator is the single consumer.
-fn make_bundle_publisher(policy_eval: Arc<PolicyEvalSubsystem>) -> BundlePublisher {
+/// invokes on every fresh bundle. For the Edge target we swap
+/// the bundle into the policy evaluator (the per-flow decision
+/// engine) and then compile its NGFW + steering slice into a
+/// [`CompiledRuleSet`] which is pushed to the firewall data
+/// path over `fw_ruleset_tx` — wiring the nftables / XDP
+/// enforcement substrate to the bundle for the first time. The
+/// remaining bundle-derived artifacts (IPS rules, Envoy config,
+/// SD-WAN paths, ZTNA catalog) will subscribe to a fan-out built
+/// on top of this publisher in a follow-up PR; today the policy
+/// evaluator and the firewall are the two consumers.
+///
+/// The firewall compile is best-effort relative to the swap: the
+/// policy evaluator has already accepted the bundle by the time
+/// we compile, so a compile failure (e.g. a rule referencing an
+/// undefined zone) is logged and the previous ruleset is left in
+/// place rather than failing the whole publish and stalling the
+/// per-flow engine on a stale bundle.
+fn make_bundle_publisher(
+    policy_eval: Arc<PolicyEvalSubsystem>,
+    fw_ruleset_tx: watch::Sender<Option<Arc<CompiledRuleSet>>>,
+) -> BundlePublisher {
     Arc::new(move |target, body| {
         match target {
             BundleTarget::Edge => {
@@ -749,6 +770,46 @@ fn make_bundle_publisher(policy_eval: Arc<PolicyEvalSubsystem>) -> BundlePublish
                     body_bytes = body.len(),
                     "policy_eval bundle swap accepted"
                 );
+
+                // The evaluator now holds the accepted bundle.
+                // Compile its firewall slice (NGFW rules + the
+                // steering-derived XDP classification table) and
+                // push it to the data path. Zones / NAT are not
+                // bundle-sourced today, so compile against empty
+                // tables — rules referencing named zones compile
+                // fail-closed and are surfaced below.
+                let bundle = policy_eval.engine().current_bundle();
+                match RuleCompiler::new().compile(
+                    &bundle,
+                    ZoneTable::default(),
+                    NatTable::default(),
+                ) {
+                    Ok(compiled) => {
+                        // `send` only errors when every receiver
+                        // has dropped; the firewall subsystem holds
+                        // one for its whole lifetime, so a send
+                        // error means the appliance is shutting down
+                        // and a missed ruleset is irrelevant.
+                        let rules = compiled.rules.len();
+                        let classes = compiled.classification.len();
+                        if fw_ruleset_tx.send(Some(Arc::new(compiled))).is_ok() {
+                            tracing::info!(
+                                target: "sng_edge::bundle_publisher",
+                                rules,
+                                classification_entries = classes,
+                                "firewall ruleset compiled and pushed to data path"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            target: "sng_edge::bundle_publisher",
+                            error = %e,
+                            "firewall ruleset compile failed; data path retains \
+                             the previous ruleset"
+                        );
+                    }
+                }
                 Ok(())
             }
             other => {
@@ -775,5 +836,40 @@ mod tests {
         // exact variant depends on the build host, which CI
         // varies by job matrix.
         let _ = host_platform();
+    }
+
+    #[test]
+    fn bundle_publisher_compiles_and_pushes_ruleset_to_fw() {
+        // The Edge publisher must swap the bundle into the policy
+        // evaluator AND compile its firewall slice onto the data
+        // path's ruleset channel — the wiring this change adds.
+        let body = bootstrap_bundle_body();
+        let policy_eval = Arc::new(PolicyEvalSubsystem::new(&body).expect("policy_eval"));
+        let (tx, rx) = watch::channel::<Option<Arc<CompiledRuleSet>>>(None);
+        assert!(rx.borrow().is_none(), "fw channel starts empty");
+
+        let publisher = make_bundle_publisher(Arc::clone(&policy_eval), tx);
+        publisher(BundleTarget::Edge, body).expect("edge publish succeeds");
+
+        let received = rx.borrow();
+        let compiled = received.as_ref().expect("ruleset pushed to fw data path");
+        // The deny-all bootstrap skeleton ships no steering block,
+        // so the classify table is the conservative empty one.
+        assert!(compiled.classification.is_empty());
+    }
+
+    #[test]
+    fn bundle_publisher_rejects_non_edge_target_without_pushing() {
+        let body = bootstrap_bundle_body();
+        let policy_eval = Arc::new(PolicyEvalSubsystem::new(&body).expect("policy_eval"));
+        let (tx, rx) = watch::channel::<Option<Arc<CompiledRuleSet>>>(None);
+
+        let publisher = make_bundle_publisher(Arc::clone(&policy_eval), tx);
+        assert!(
+            publisher(BundleTarget::Endpoint, body).is_err(),
+            "edge publisher must reject a non-Edge target"
+        );
+        // A rejected target never reaches the compile/push step.
+        assert!(rx.borrow().is_none());
     }
 }

@@ -51,7 +51,7 @@ pub use backend::{
     DataPathBackend, DataPathCapabilities, DataPathStats, EbpfDataPath, HardwareOffloadDataPath,
     NftablesDataPath, compile_hot_path,
 };
-pub use compile::{CompiledRuleSet, RuleCompiler, render_nftables};
+pub use compile::{CompiledRuleSet, RuleCompiler, compile_classification, render_nftables};
 pub use conntrack::{ConntrackState, ConntrackTracker, FlowDirection};
 pub use engine::{EvaluationContext, FirewallEngine, FirewallVerdict, FlowKey};
 pub use error::FirewallError;
@@ -71,7 +71,8 @@ pub use tls_policy::{
 pub use zone::{Zone, ZonePolicy, ZoneTable};
 
 // Re-export commonly needed types so callers don't need extra
-// dependencies on sng-core / sng-policy-eval just to build a
-// FirewallEngine.
+// dependencies on sng-core / sng-policy-eval / sng-ebpf just to
+// build a FirewallEngine or read a CompiledRuleSet.
 pub use sng_core::traffic_class::TrafficClass;
+pub use sng_ebpf::Classifier;
 pub use sng_policy_eval::BundleTarget;
