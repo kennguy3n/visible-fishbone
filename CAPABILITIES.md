@@ -124,7 +124,7 @@ with a documented rationale.
   (zero false positives), while the hardest slice, `malware_wild`, is
   reported as a 9.6% false-positive-rate WARN rather than smoothed
   ([`blog/artifacts/efficacy-report.json`](./blog/artifacts/efficacy-report.json)).
-- **Threat intelligence.** Indicator enrichment over a feed of 76.4k
+- **Threat intelligence.** Indicator enrichment over a feed of 76,432
   indicators in the seeded fixture. (`internal/service/ai/` threat
   intel + `docs/THREAT_INTEL.md`.)
 
