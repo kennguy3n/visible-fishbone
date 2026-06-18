@@ -91,7 +91,7 @@ the persona, the business outcome, the UI surfaces, and the evidence source.
 - **Capabilities:** SWG deny-list/categorize, IPS (Suricata), malware (`sng-swg` yara-x),
   DNS threat-intel, anomaly detection (z-score), and **managed threat content** — a
   curated, ed25519-signed indicator bundle (`internal/service/threatfeed`,
-  ≈77,000 indicators across five built-in feeds) delivered with no per-tenant
+  76,432 indicators across five built-in feeds) delivered with no per-tenant
   config.
 - **UI surfaces:** Alerts (scatter + table), Troubleshoot, Threat-intel.
 - **Evidence:** **confusion matrix + catch-rate/FPR from

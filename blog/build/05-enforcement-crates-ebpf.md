@@ -39,9 +39,9 @@ Because the crates share one evaluator and one bundle format, you can add an
 enforcement surface without touching the others, and a verdict from any crate
 escalates consistently (the DLP OCR hook, for instance, can only ever *raise* a
 verdict, never weaken one — `Option::max` semantics). The throughput is measured:
-**5.569 Gbps single-stream floor → 28.567 Gbps multi-queue ceiling across 8
-cores (5.13×)** ([`multiqueue-micro.json`](../artifacts/multiqueue-micro.json)),
-and 5.063 → 21.564 Gbps on the branch-large profile (4.26×). The lift is RSS
+**5.718 Gbps single-stream floor → 27.264 Gbps multi-queue ceiling across 8
+cores (4.77×)** ([`multiqueue-micro.json`](../artifacts/multiqueue-micro.json)),
+and 4.461 → 20.588 Gbps on the branch-large profile (4.61×). The lift is RSS
 queue fan-out plus the kernel cache, not silicon.
 
 ## The business call: scale by adding cores, not boxes

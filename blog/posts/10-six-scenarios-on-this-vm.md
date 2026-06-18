@@ -49,8 +49,8 @@ Wild malware **WARNs at 90.1% / 9.6% FPR** (published, never gates).
 
 | Profile | Floor (1q) | Ceiling | Lift |
 | --- | --- | --- | --- |
-| micro ([`multiqueue-micro.json`](../artifacts/multiqueue-micro.json)) | 5.569 Gbps | 28.567 Gbps (16q) | 5.13× |
-| branch-large ([`multi-queue-branch-large.json`](../artifacts/multi-queue-branch-large.json)) | 5.063 Gbps | 21.564 Gbps (32q) | 4.26× |
+| micro ([`multiqueue-micro.json`](../artifacts/multiqueue-micro.json)) | 5.718 Gbps | 27.264 Gbps (16q) | 4.77× |
+| branch-large ([`multi-queue-branch-large.json`](../artifacts/multi-queue-branch-large.json)) | 4.461 Gbps | 20.588 Gbps (32q) | 4.61× |
 
 **Scale economics** ([`capacity-plan-5000/report.md`](../artifacts/capacity-plan-5000/report.md),
 at 5,000 tenants): dormancy tiering **10×** fewer tenant-visits/cycle (idle 10×,
@@ -59,7 +59,7 @@ recommendations for ClickHouse batch, AI slots, NATS partitions, and Postgres
 pool.
 
 **Fleet** ([`refresh-dashboard-fleet.png`](../artifacts/screenshots/refresh-dashboard-fleet.png)):
-nine tenants across seven countries and five compliance regimes, ~50.7% blended
+nine tenants across seven countries and five compliance regimes, ~50.9% blended
 margin, one deliberate loss-maker the margin autopilot surfaces.
 
 ## The whole thesis in one paragraph

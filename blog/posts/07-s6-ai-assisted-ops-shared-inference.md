@@ -59,7 +59,7 @@ The self-hosted model is **Ternary-Bonsai-8B Q2_0** (custom AVX2-repack kernels)
 validated by `blog/harness/llm_validation`
 ([`quality_report.md`](../artifacts/llm_validation/quality_report.md)). On this
 8-vCPU EPYC profile: parse 100%, verifier 100%, classification 100%,
-fallback-agreement 100%; latency **p50 ≈8.9 s / p95 ≈10.8 s**. It's a CPU-only
+fallback-agreement 100%; latency **p50 ≈9.0 s / p95 ≈11.1 s**. It's a CPU-only
 model on a generic VM — not a GPU farm — and the latency table says so plainly.
 The verifier is what makes a multi-second, sometimes-wrong model *safe* to put in
 front of an operator: a wrong translation fails the check and falls back to the

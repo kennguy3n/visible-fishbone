@@ -99,8 +99,8 @@ the floor *and* the ceiling on the same run:
 
 | Profile | Single-stream floor | Multi-queue ceiling | Lift |
 | --- | --- | --- | --- |
-| micro ([`multiqueue-micro.json`](../artifacts/multiqueue-micro.json)) | 5.569 Gbps (1q) | 28.567 Gbps (16q) | 5.13× |
-| branch-large ([`multi-queue-branch-large.json`](../artifacts/multi-queue-branch-large.json)) | 5.063 Gbps (1q) | 21.564 Gbps (32q) | 4.26× |
+| micro ([`multiqueue-micro.json`](../artifacts/multiqueue-micro.json)) | 5.718 Gbps (1q) | 27.264 Gbps (16q) | 4.77× |
+| branch-large ([`multi-queue-branch-large.json`](../artifacts/multi-queue-branch-large.json)) | 4.461 Gbps (1q) | 20.588 Gbps (32q) | 4.61× |
 
 **Read this honestly** (the artifact says so itself): this is the in-process
 forwarding fast path fanned across 8 worker threads on a generic x86 VM — a

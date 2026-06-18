@@ -68,7 +68,7 @@ same measured number the engineering series publishes, from the same harness on
 the same VM: the efficacy matrix
 ([`efficacy-report.json`](../artifacts/efficacy-report.json), 16 functions, suite
 verdict PASS), the throughput floor-and-ceiling
-([`multiqueue-micro.json`](../artifacts/multiqueue-micro.json), 5.569 → 28.567
+([`multiqueue-micro.json`](../artifacts/multiqueue-micro.json), 5.718 → 27.264
 Gbps), the 5,000-tenant capacity model
 ([`capacity-plan-5000/report.md`](../artifacts/capacity-plan-5000/report.md)), and
 the verbatim API payloads in [`../artifacts/payloads/`](../artifacts/payloads/).

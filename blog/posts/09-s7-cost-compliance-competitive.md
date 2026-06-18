@@ -22,8 +22,8 @@ The metering engine computes per-tenant cost from real usage and compares it to
 revenue. On the seeded nine-tenant fleet
 ([`s7-admin-cost-report.json`](../artifacts/payloads/s7-admin-cost-report.json)):
 
-- **Revenue $8,191/mo · projected cost ≈$4,039/mo · margin ≈$4,152 (~50.7%).**
-- Per-tenant margin spans **+66.8% (Globex)** down to **−14.3% (Maple Health)** —
+- **Revenue $8,191/mo · projected cost ≈$4,025/mo · margin ≈$4,166 (~50.9%).**
+- Per-tenant margin spans **+66.9% (Globex)** down to **−13.9% (Maple Health)** —
   Maple is the deliberate underwater tenant (Post 8), Initech the thin-margin one
   at +15.2%.
 
@@ -38,8 +38,8 @@ instead of an all-green table**, which is what makes it useful to a CFO.
 ## The anomaly detector earns its keep
 
 Cost surprises are the CFO's nightmare. The detector flags Initech's
-`url_cat_lookups` projecting **$224.77 against a $72.31 five-month baseline =
-ratio 3.11, severity `warning`**
+`url_cat_lookups` projecting **$220.39 against a $72.31 five-month baseline =
+ratio 3.05, severity `warning`**
 ([`s7-initech-cost-anomalies.json`](../artifacts/payloads/s7-initech-cost-anomalies.json))
 — a modelled mid-period traffic surge it catches while Initech still clears its
 $499 tier. Acme's anomaly set is empty (the control). This is the detector firing

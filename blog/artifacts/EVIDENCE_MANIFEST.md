@@ -37,10 +37,10 @@ enforcement-path-authentic.
 
 ### 1.2 Multi-queue throughput — `multiqueue-micro.json`, `multi-queue-branch-large.json`
 - **Source:** `sng-bench multi-queue --mode full-stack --backend nftables`.
-- **Micro SKU:** single-stream floor **5.569 Gbps → 16-queue ceiling 28.567 Gbps
-  (5.13×)** on 8 cores.
-- **Branch-large SKU:** floor **5.063 Gbps → 32-queue ceiling 21.564 Gbps
-  (4.26×)**.
+- **Micro SKU:** single-stream floor **5.718 Gbps → 16-queue ceiling 27.264 Gbps
+  (4.77×)** on 8 cores.
+- **Branch-large SKU:** floor **4.461 Gbps → 32-queue ceiling 20.588 Gbps
+  (4.61×)**.
 - We publish floor *and* ceiling side by side; the single-stream wire is a
   per-frame syscall ceiling, not an inspection bound, and CPU headroom is exposed
   by fanning out across RSS queues.
@@ -49,23 +49,23 @@ enforcement-path-authentic.
 - **Source:** `blog/harness/llm_validation` against the self-hosted
   **Ternary-Bonsai-8B Q2_0** (prism AVX2-repack kernels).
 - **8B numbers (live inference, 8-vCPU EPYC profile):** parse 100%, verifier
-  100%, classification 100%, fallback-agreement 100%; **latency p50 8,948 ms /
-  p95 10,793 ms**. The deterministic verifier/fallback path is exercised and
+  100%, classification 100%, fallback-agreement 100%; **latency p50 9,000 ms /
+  p95 11,083 ms**. The deterministic verifier/fallback path is exercised and
   passes even when the model is unavailable.
 
 ### 1.4 Fleet cost & margin — `payloads/s7-admin-cost-report.json`
 - **Source:** `GET /api/v1/admin/cost-report` over the 9-tenant fleet after a
   full `blog/harness/usage` seed (every tenant carries current + 5-month history).
-- **9-tenant fleet:** revenue **$8,191/mo** · projected cost **≈$4,039/mo** ·
-  **margin ≈$4,152 (≈50.7%)**. Per-tenant margin spans **≈+66.8% (Globex)** down
-  to **≈−14.3% (Maple Health)** — Maple is the deliberate *underwater* tenant (a
+- **9-tenant fleet:** revenue **$8,191/mo** · projected cost **≈$4,025/mo** ·
+  **margin ≈$4,166 (≈50.9%)**. Per-tenant margin spans **≈+66.9% (Globex)** down
+  to **≈−13.9% (Maple Health)** — Maple is the deliberate *underwater* tenant (a
   professional-tier client consuming enterprise-scale bandwidth/ClickHouse), the
   honest upsell/margin signal the report is built to surface. These are
   *projected* (elapsed-fraction-extrapolated) figures, so they drift sub-percent
   within a billing period; the saved payload is the point-in-time source of
   record and prose uses approximate figures deliberately.
-- **Cost anomaly (real):** Initech's `url_cat_lookups` projects **$224.77 vs a
-  $72.31 baseline = ratio 3.11, severity `warning`** (`s7-initech-cost-anomalies.json`)
+- **Cost anomaly (real):** Initech's `url_cat_lookups` projects **$220.39 vs a
+  $72.31 baseline = ratio 3.05, severity `warning`** (`s7-initech-cost-anomalies.json`)
   — a modelled mid-period surge the detector flags while Initech still clears its
   tier. Acme's anomaly set is empty (control).
 
@@ -92,9 +92,9 @@ experience-probe batch, and reads every surface back.
 | Capability | Artifact(s) | Load-bearing numbers |
 | --- | --- | --- |
 | Application identification | `appid-acme-catalog-current.json`, `appid-admin-catalog-versions.json`, `appid-acme-catalog-bundle.json` | **215 apps / 17 categories**, signed catalog with a monotonic serial; matcher ranks most-specific-suffix-first |
-| Managed threat content | `threatcontent-acme-posture.json` | **≈77,000 indicators** across 5 built-in feeds, **ed25519-signed** bundle (digest `e55319ce…`), counts by type (domain / hash / ip / url); no per-tenant config |
+| Managed threat content | `threatcontent-acme-posture.json` | **76,432 indicators** across 5 built-in feeds, **ed25519-signed** bundle (digest `ee79836a…`), counts by type (domain / hash / ip / url); no per-tenant config |
 | Continuous compliance | `complianceauto-acme-posture.json`, `complianceauto-{acme,globex,maple}-collect-response.json`, `complianceauto-acme-evidence-pack-{soc2,iso27001}.json`, `…-soc2.csv` | **16 controls (10 SOC 2 + 6 ISO 27001)**, 3 collectors; on a bare dev stack Acme scores **SOC 2 6/10**, **ISO 27001 4/6** (the failing controls are real un-wired-service gaps) |
-| Digital-experience monitoring | `dem-acme-ingest-result-response.json`, `dem-acme-scores.json`, `dem-acme-targets.json`, `dem-acme-alerts.json` | ingest **HTTP 202** (72 samples), 6 auto-provisioned targets; 5 healthy targets score **100**, Zoom degrades to **30** (availability 50%, p50/p95 3,100 ms), firing **1 critical `dem.experience_degraded` alert** |
+| Digital-experience monitoring | `dem-acme-ingest-result-response.json`, `dem-acme-scores.json`, `dem-acme-targets.json`, `dem-acme-alerts.json` | ingest **HTTP 202** (72 samples), 6 auto-provisioned targets; 5 healthy targets score **100**, Zoom degrades to **30** (availability 50%, p50/p95 3,100 ms), firing **critical `dem.experience_degraded` alerts on Zoom** (2 records across detection windows) |
 | Active/active work distributor | (code) `internal/service/workshard` | **1,024 shards**, lease TTL 20 s / 7 s safety margin — periodic work spreads across replicas, not one leader |
 | Policy recommendation engine | `policyrec-acme-generate-response.json`, `policyrec-acme-list.json` | honest **HTTP 503** on a stack without the telemetry hot tier configured (`unavailable`); the recommendation list is empty until the hot tier is wired |
 
@@ -107,15 +107,15 @@ experience-probe batch, and reads every surface back.
 
 | Tenant | Tier | Residency | Industry | Margin % |
 | --- | --- | --- | --- | --- |
-| Globex Health Systems | enterprise | US | health | ≈+66.8 |
-| Acme Retail Group | enterprise | US | retail | ≈+47 |
-| Britannia Robotics | enterprise | GB | robotics | ≈+62 |
-| Umbrella Logistics | starter | SG | logistics | ≈+42 |
-| Nordic EduCloud | starter | SE | education | ≈+54 |
-| Lumière Légal | professional | FR | legal | ≈+55 |
-| Outback Retail | professional | AU | retail | ≈+49 |
-| Initech Financial | professional | EU | financial | ≈+15 |
-| Maple Health | professional | CA | health | ≈−14.3 |
+| Globex Health Systems | enterprise | US | health | ≈+66.9 |
+| Acme Retail Group | enterprise | US | retail | ≈+47.4 |
+| Britannia Robotics | enterprise | GB | robotics | ≈+62.7 |
+| Umbrella Logistics | starter | SG | logistics | ≈+42.8 |
+| Nordic EduCloud | starter | SE | education | ≈+54.2 |
+| Lumière Légal | professional | FR | legal | ≈+55.6 |
+| Outback Retail Co | professional | AU | retail | ≈+49.7 |
+| Initech Financial | professional | EU | financial | ≈+15.6 |
+| Maple Health Network | professional | CA | health | ≈−13.9 |
 
 ## 4. Payload index (`payloads/`)
 

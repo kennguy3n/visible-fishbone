@@ -95,7 +95,7 @@ underwater tenants. The fleet metering view leads with the blended number:
 
 **Maple Health is the deliberate underwater tenant** — a professional-tier
 ($499) tenant consuming enterprise-scale bandwidth and ClickHouse, projected
-≈$573/mo, **≈−14.3% margin**
+≈$568/mo, **≈−13.9% margin**
 ([`ws7-maple-cost-report-underwater.json`](../artifacts/payloads/ws7-maple-cost-report-underwater.json)).
 That is the exact signal the autopilot is built to surface: it can recommend an
 upsell, enforce a trial budget cap, or throttle the loss-making usage — gated, by
