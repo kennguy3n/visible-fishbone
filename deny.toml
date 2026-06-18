@@ -43,9 +43,9 @@
 # ---------------------------------------------------------------------------
 # Check every target the SNG workspace builds for so a
 # non-permissive licence cannot hide behind a `cfg(target_os = "...")`
-# gate. Mirrors the platform support matrix in `ARCHITECTURE.md` §5.1
-# (Edge VM Linux x86_64/aarch64; Endpoint Linux/macOS/Windows
-# x86_64 + macOS aarch64).
+# gate. Mirrors the platform support matrix in `ARCHITECTURE.md`
+# §4 (Edge VM Linux x86_64/aarch64) and §5.1 (Endpoint
+# Linux/macOS/Windows x86_64 + macOS aarch64).
 [graph]
 targets = [
     { triple = "x86_64-unknown-linux-gnu" },
@@ -115,9 +115,9 @@ deny = [
     # introduce a non-Rust toolchain dependency on the build
     # host, and (c) duplicate the audit surface that `ring`
     # already covers.
-    { name = "openssl", reason = "OpenSSL-FFI is barred; SNG uses `ring` via `rustls` for all crypto (see ARCHITECTURE.md §8)." },
+    { name = "openssl", reason = "OpenSSL-FFI is barred; SNG uses `ring` via `rustls` for all crypto (see ARCHITECTURE.md §8, 'Pure-Rust crypto stack')." },
     { name = "openssl-sys", reason = "OpenSSL-FFI is barred; see `openssl` ban above." },
-    { name = "native-tls", reason = "`native-tls` pulls a platform OpenSSL on Linux; SNG mandates `rustls` (see ARCHITECTURE.md §8)." },
+    { name = "native-tls", reason = "`native-tls` pulls a platform OpenSSL on Linux; SNG mandates `rustls` (see ARCHITECTURE.md §8, 'Pure-Rust crypto stack')." },
 
     # Async-std is barred; the workspace standardises on Tokio.
     # Mixing runtimes pulls the executor into the binary twice

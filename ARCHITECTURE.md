@@ -779,6 +779,13 @@ Same posture as the rest of the SN360 family:
   cross-region replication is opt-in.
 - **Customer-managed keys** — available on higher tiers (Data
   Guard); HSM / external KMS bindings supported.
+- **Pure-Rust crypto stack** — all TLS and cryptographic
+  primitives on `sng-edge` and `sng-agent` run through `ring`
+  via `rustls`; OpenSSL / `native-tls` FFI is barred from the
+  Rust workspace (enforced in `deny.toml`). This keeps the audit
+  surface to a single vetted implementation, avoids a platform
+  OpenSSL/toolchain dependency on the build host, and holds the
+  endpoint's resident-memory budget.
 
 ---
 
