@@ -1,5 +1,5 @@
 # SNG NoOps self-operation — live metrics snapshot
-# host=devin-box  git=65824c75cf0d463d64f7ea83ca90f41859b8b76b  generated=2026-06-14T11:51:21Z
+# host=devin-box  git=9d4f3f7319f2263e7d85ca26d9a013db2cb56655  generated=2026-06-18T12:46:22Z
 # Source: GET http://127.0.0.1:9090/metrics on the seeded 9-tenant(+platform) stack with
 # WS-3/4/5/6/7/9 controllers enabled. Verbatim scrape, filtered to the workstream metric families.
 
@@ -19,7 +19,7 @@ sng_capacity_fleet_tenants 10
 sng_capacity_recommendation_pending{axis="clickhouse"} 0
 sng_capacity_recommendation_pending{axis="nats"} 0
 sng_capacity_recommendation_pending{axis="postgres"} 0
-sng_capacity_reconcile_total{outcome="ok"} 3
+sng_capacity_reconcile_total{outcome="ok"} 1
 sng_capacity_setting{axis="clickhouse",kind="current",knob="batch_size"} 1024
 sng_capacity_setting{axis="clickhouse",kind="current",knob="shards"} 1
 sng_capacity_setting{axis="clickhouse",kind="recommended",knob="batch_size"} 1024
@@ -33,5 +33,19 @@ sng_capacity_setting{axis="postgres",kind="recommended",knob="pool_size_per_repl
 sng_hibernation_hibernate_failures_total 0
 sng_hibernation_hibernate_total 0
 sng_hibernation_hibernated_tenants 0
+sng_hibernation_wake_latency_seconds_bucket{le="+Inf"} 0
+sng_hibernation_wake_latency_seconds_bucket{le="0.001"} 0
+sng_hibernation_wake_latency_seconds_bucket{le="0.0023101297000831605"} 0
+sng_hibernation_wake_latency_seconds_bucket{le="0.005336699231206312"} 0
+sng_hibernation_wake_latency_seconds_bucket{le="0.01232846739442067"} 0
+sng_hibernation_wake_latency_seconds_bucket{le="0.028480358684358047"} 0
+sng_hibernation_wake_latency_seconds_bucket{le="0.06579332246575688"} 0
+sng_hibernation_wake_latency_seconds_bucket{le="0.1519911082952936"} 0
+sng_hibernation_wake_latency_seconds_bucket{le="0.3511191734215137"} 0
+sng_hibernation_wake_latency_seconds_bucket{le="0.8111308307896887"} 0
+sng_hibernation_wake_latency_seconds_bucket{le="1.8738174228603883"} 0
+sng_hibernation_wake_latency_seconds_bucket{le="10.000000000000027"} 0
+sng_hibernation_wake_latency_seconds_bucket{le="4.328761281083069"} 0
 sng_hibernation_wake_latency_seconds_count 0
+sng_hibernation_wake_latency_seconds_sum 0
 sng_hibernation_wake_total 0

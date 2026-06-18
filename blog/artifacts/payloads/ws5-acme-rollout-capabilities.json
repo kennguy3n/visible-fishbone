@@ -2,31 +2,47 @@
   "items": [
     {
       "capability": "clamav_swg",
+      "created_at": "2026-06-18T12:41:31Z",
       "enforces": false,
-      "evaluates": false,
-      "state": "off",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+      "evaluates": true,
+      "reason": "autopilot: auto-enrolled off->monitor (dry-run; no enforcement)",
+      "state": "monitor",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+      "updated_at": "2026-06-18T12:41:31Z",
+      "updated_by": "autopilot"
     },
     {
       "capability": "noops_autoenforce",
+      "created_at": "2026-06-18T12:41:31Z",
       "enforces": false,
-      "evaluates": false,
-      "state": "off",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+      "evaluates": true,
+      "reason": "autopilot: auto-enrolled off->monitor (dry-run; no enforcement)",
+      "state": "monitor",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+      "updated_at": "2026-06-18T12:41:31Z",
+      "updated_by": "autopilot"
     },
     {
       "capability": "idp_directory_sync",
+      "created_at": "2026-06-18T12:41:31Z",
       "enforces": false,
-      "evaluates": false,
-      "state": "off",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+      "evaluates": true,
+      "reason": "autopilot: auto-enrolled off->monitor (dry-run; no enforcement)",
+      "state": "monitor",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+      "updated_at": "2026-06-18T12:41:31Z",
+      "updated_by": "autopilot"
     },
     {
       "capability": "margin_autopilot",
+      "created_at": "2026-06-18T12:41:31Z",
       "enforces": false,
-      "evaluates": false,
-      "state": "off",
-      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a"
+      "evaluates": true,
+      "reason": "autopilot: auto-enrolled off->monitor (dry-run; no enforcement)",
+      "state": "monitor",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+      "updated_at": "2026-06-18T12:41:31Z",
+      "updated_by": "autopilot"
     }
   ]
 }

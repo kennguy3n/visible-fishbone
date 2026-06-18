@@ -1,7 +1,35 @@
 {
   "items": [
     {
-      "id": "b9eeb0ae-1a6f-4567-a238-b59214d19ef2",
+      "id": "432de929-aef2-4290-b494-f2690481ff90",
+      "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
+      "kind": "dem.experience_degraded",
+      "severity": "critical",
+      "dimension": "zoom",
+      "observed_value": 30,
+      "baseline_mean": 30,
+      "baseline_stddev": 0,
+      "z_score": 0,
+      "window_start": "2026-06-18T12:46:37.784Z",
+      "window_end": "2026-06-18T12:46:48.784Z",
+      "window_seconds": 300,
+      "summary": "Experience degraded for Zoom: score 30, availability 50%",
+      "evidence": {
+        "score": 30,
+        "z_exceeded": false,
+        "below_floor": true,
+        "availability": 0.5,
+        "sample_count": 12,
+        "latency_p50_ms": 3100,
+        "latency_p95_ms": 3100,
+        "baseline_samples": 1
+      },
+      "state": "open",
+      "created_at": "2026-06-18T12:46:49.830802Z",
+      "updated_at": "2026-06-18T12:46:49.830802Z"
+    },
+    {
+      "id": "12daa0f8-c952-41dc-b037-38560f0ecdda",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
       "kind": "dem.experience_degraded",
       "severity": "critical",
@@ -10,8 +38,8 @@
       "baseline_mean": 0,
       "baseline_stddev": 0,
       "z_score": 0,
-      "window_start": "2026-06-16T03:22:35.571Z",
-      "window_end": "2026-06-16T03:22:46.571Z",
+      "window_start": "2026-06-18T12:31:08.203Z",
+      "window_end": "2026-06-18T12:31:19.203Z",
       "window_seconds": 300,
       "summary": "Experience degraded for Zoom: score 30, availability 50%",
       "evidence": {
@@ -25,8 +53,8 @@
         "baseline_samples": 0
       },
       "state": "open",
-      "created_at": "2026-06-16T03:22:47.623632Z",
-      "updated_at": "2026-06-16T03:22:47.623632Z"
+      "created_at": "2026-06-18T12:31:20.250542Z",
+      "updated_at": "2026-06-18T12:31:20.250542Z"
     }
   ]
 }

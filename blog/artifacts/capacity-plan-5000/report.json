@@ -1,7 +1,8 @@
 {
   "schema_version": 1,
   "mode": "capacity-plan",
-  "unix_time_secs": 1781437282,
+  "unix_time_secs": 1781786038,
+  "git_sha": "9d4f3f7319f2263e7d85ca26d9a013db2cb56655",
   "dry_run": false,
   "capacity_plan": {
     "tenant_count": 5000,

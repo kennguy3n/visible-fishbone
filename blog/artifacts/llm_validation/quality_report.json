@@ -1,7 +1,11 @@
 {
-  "generated_at": "2026-06-10T15:52:44.888925206Z",
-  "endpoint": "http://localhost:11434/v1/chat/completions",
-  "model": "qwen2.5:0.5b",
+  "generated_at": "2026-06-18T12:36:24.448560382Z",
+  "git_sha": "9d4f3f7319f2263e7d85ca26d9a013db2cb56655",
+  "endpoint": "http://127.0.0.1:8081/v1/chat/completions",
+  "model": "Ternary-Bonsai-8B",
+  "hardware": "8 vCPU AMD EPYC 7763 (AVX2/FMA/F16C, no AVX-512/VNNI), 31 GiB RAM, CPU-only -ngl 0, cloud dev VM",
+  "quant": "Q2_0",
+  "note": "Served by llama-server (prism fork b1-d6cea6e, system_info REPACK=1) on the Ternary-Bonsai-8B Q2_0 GGUF; OpenAI-compatible /v1/chat/completions on :8081.",
   "live_inference": true,
   "query_count": 20,
   "parse_success_rate": 1,
@@ -11,9 +15,9 @@
   "fallback_agreement_rate": 1,
   "ai_generated_correctness": 1,
   "raw_parse_agreement_rate": 1,
-  "latency_p50_ms": 890,
-  "latency_p95_ms": 1093,
-  "latency_p99_ms": 1093,
+  "latency_p50_ms": 9000,
+  "latency_p95_ms": 11083,
+  "latency_p99_ms": 11336,
   "queries": [
     {
       "question": "Can app salesforce.com be reached from device laptop1?",
@@ -30,7 +34,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 753
+      "latency_ms": 9791
     },
     {
       "question": "Can app evil.com be reached from device laptop2?",
@@ -47,7 +51,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 823
+      "latency_ms": 9000
     },
     {
       "question": "Can app internal.corp be reached from device kiosk9?",
@@ -64,7 +68,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 811
+      "latency_ms": 9481
     },
     {
       "question": "Can user alice access app salesforce.com from device laptop1?",
@@ -81,7 +85,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 779
+      "latency_ms": 9313
     },
     {
       "question": "show blocked traffic for user alice in the last 24h",
@@ -98,7 +102,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 890
+      "latency_ms": 8612
     },
     {
       "question": "show blocked traffic for user bob since last week",
@@ -115,7 +119,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 805
+      "latency_ms": 7063
     },
     {
       "question": "list blocked connections for user carol in the last 7 days",
@@ -132,7 +136,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 801
+      "latency_ms": 8254
     },
     {
       "question": "report blocked traffic for dave today",
@@ -149,7 +153,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 783
+      "latency_ms": 6872
     },
     {
       "question": "what changed since last week",
@@ -166,7 +170,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 913
+      "latency_ms": 8843
     },
     {
       "question": "what has changed since yesterday",
@@ -183,7 +187,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 945
+      "latency_ms": 7671
     },
     {
       "question": "what changed in the last 7 days",
@@ -200,7 +204,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 940
+      "latency_ms": 9011
     },
     {
       "question": "what configuration changed since last month",
@@ -217,7 +221,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 912
+      "latency_ms": 8821
     },
     {
       "question": "compare policy versions",
@@ -234,7 +238,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 949
+      "latency_ms": 7695
     },
     {
       "question": "compare policy versions 3 and 5",
@@ -251,7 +255,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 856
+      "latency_ms": 8945
     },
     {
       "question": "compare policy v2 and v5",
@@ -268,7 +272,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 895
+      "latency_ms": 9123
     },
     {
       "question": "diff policy versions 7 and 8",
@@ -285,7 +289,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 1093
+      "latency_ms": 11083
     },
     {
       "question": "which devices failed posture in 24h",
@@ -302,7 +306,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 801
+      "latency_ms": 9263
     },
     {
       "question": "show devices failing posture checks today",
@@ -319,7 +323,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 952
+      "latency_ms": 10758
     },
     {
       "question": "which devices failed posture in the last 7 days",
@@ -336,7 +340,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 849
+      "latency_ms": 11336
     },
     {
       "question": "list devices that failed posture since yesterday",
@@ -353,7 +357,7 @@
       "ai_generated_correct": true,
       "fallback_agreement": true,
       "raw_parse_agreement": true,
-      "latency_ms": 966
+      "latency_ms": 10534
     }
   ]
 }

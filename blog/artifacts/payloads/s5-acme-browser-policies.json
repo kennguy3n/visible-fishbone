@@ -2,9 +2,9 @@
   "items": [
     {
       "action": "rbi",
-      "created_at": "2026-06-14T11:40:51.123272000Z",
+      "created_at": "2026-06-18T12:30:48.266637000Z",
       "enabled": true,
-      "id": "dd3faf8e-4d62-462a-a16c-66d7695b8174",
+      "id": "01226145-3ed2-4d67-b64c-020b19ba1120",
       "name": "Isolate uncategorized sites",
       "rules": [
         {
@@ -15,13 +15,13 @@
       ],
       "scope": "group",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-14T11:40:51.123272000Z"
+      "updated_at": "2026-06-18T12:30:48.266637000Z"
     },
     {
       "action": "block",
-      "created_at": "2026-06-14T11:40:51.118822000Z",
+      "created_at": "2026-06-18T12:30:48.261849000Z",
       "enabled": true,
-      "id": "3a08671f-4814-44e3-8ea8-9bbdd7d4ef56",
+      "id": "44683a5b-dbc2-41ce-b1eb-25411725c63d",
       "name": "Block gambling at stores",
       "rules": [
         {
@@ -32,7 +32,7 @@
       ],
       "scope": "site",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-14T11:40:51.118822000Z"
+      "updated_at": "2026-06-18T12:30:48.261849000Z"
     }
   ],
   "next_cursor": ""

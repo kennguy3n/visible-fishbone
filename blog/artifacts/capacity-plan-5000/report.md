@@ -1,6 +1,7 @@
 ## SNG control-plane scale benchmark — capacity-plan
 
-- run (unix): `1781437282`
+- run (unix): `1781786038`
+- commit: `9d4f3f7319f2263e7d85ca26d9a013db2cb56655`
 
 ### Verdict
 

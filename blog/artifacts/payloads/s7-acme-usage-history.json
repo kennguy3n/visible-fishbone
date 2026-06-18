@@ -4,49 +4,49 @@
       "meter": "bandwidth_proxied_bytes",
       "period_end": "2026-07-01T00:00:00Z",
       "period_start": "2026-06-01T00:00:00Z",
-      "value": 2247802990485
+      "value": 2920267058409
     },
     {
       "meter": "clickhouse_rows_written",
       "period_end": "2026-07-01T00:00:00Z",
       "period_start": "2026-06-01T00:00:00Z",
-      "value": 134868179
+      "value": 175216024
     },
     {
       "meter": "llm_calls",
       "period_end": "2026-07-01T00:00:00Z",
       "period_start": "2026-06-01T00:00:00Z",
-      "value": 5844
+      "value": 7593
     },
     {
       "meter": "llm_tokens_used",
       "period_end": "2026-07-01T00:00:00Z",
       "period_start": "2026-06-01T00:00:00Z",
-      "value": 5394727
+      "value": 7008641
     },
     {
       "meter": "malware_scans",
       "period_end": "2026-07-01T00:00:00Z",
       "period_start": "2026-06-01T00:00:00Z",
-      "value": 2434
+      "value": 2608
     },
     {
       "meter": "policy_evaluations",
       "period_end": "2026-07-01T00:00:00Z",
       "period_start": "2026-06-01T00:00:00Z",
-      "value": 29209077
+      "value": 31296141
     },
     {
       "meter": "s3_bytes_archived",
       "period_end": "2026-07-01T00:00:00Z",
       "period_start": "2026-06-01T00:00:00Z",
-      "value": 674340897146
+      "value": 876080117523
     },
     {
       "meter": "url_cat_lookups",
       "period_end": "2026-07-01T00:00:00Z",
       "period_start": "2026-06-01T00:00:00Z",
-      "value": 58418
+      "value": 62592
     },
     {
       "meter": "bandwidth_proxied_bytes",
