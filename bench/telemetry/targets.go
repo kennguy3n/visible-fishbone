@@ -6,7 +6,7 @@ import "github.com/kennguy3n/visible-fishbone/internal/service/telemetry"
 // competitor "industry norm" figures the report compares against, so a
 // reviewer can audit every number in one place.
 //
-// HONESTY: the design targets are drawn from ARCHITECTURE.md / PROPOSAL.md
+// HONESTY: the design targets are drawn from ARCHITECTURE.md / docs/cost-model.md
 // (JetStream as the sole bus, per-tenant token-bucket rate limiting, the
 // $0.30–1.20/user/month direct-infra-cost band). The competitor figures
 // are rough industry order-of-magnitude numbers for telemetry pipelines,

@@ -83,8 +83,8 @@ parser).
 > *load-generator's* synthetic packet path on this 8-vCPU runner, **not** the
 > SNG data plane's enforced throughput. They are recorded to prove the harness
 > produces well-formed reports, not as a measurement of the product against the
-> PROPOSAL.md targets. Real numbers require the live in-path setup the harness
-> README describes.
+> design targets in docs/throughput-skus.md. Real numbers require the live
+> in-path setup the harness README describes.
 
 Profile dimensions: packet size 1500 B, 100 policy rules, no-inspect.
 

@@ -22,7 +22,7 @@ type PolicyCompiler interface {
 // Verifier takes an AI-proposed PolicySuggestion, compiles it
 // through the deterministic policy pipeline, and rejects anything
 // that does not compile. This enforces the "AI proposes,
-// deterministic systems enforce" invariant from PROPOSAL.md §8.1.
+// deterministic systems enforce" invariant from ARCHITECTURE.md §3.5.
 type Verifier struct {
 	compiler PolicyCompiler
 }

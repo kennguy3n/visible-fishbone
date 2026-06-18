@@ -43,7 +43,7 @@
 # ---------------------------------------------------------------------------
 # Check every target the SNG workspace builds for so a
 # non-permissive licence cannot hide behind a `cfg(target_os = "...")`
-# gate. Mirrors the platform support matrix in `PROPOSAL.md` §4.2
+# gate. Mirrors the platform support matrix in `ARCHITECTURE.md` §5.1
 # (Edge VM Linux x86_64/aarch64; Endpoint Linux/macOS/Windows
 # x86_64 + macOS aarch64).
 [graph]
@@ -99,7 +99,7 @@ license-files = [
 # Bans encode "wire-compat with sn360-desktop-agent" + "no
 # OpenSSL-FFI build" policy. Multiple-versions is a warn, not
 # deny, because transitively duplicated minor versions (e.g.
-# `rand_core` 0.6 + 0.7) are common in the early-Phase-2 graph
+# `rand_core` 0.6 + 0.7) are common in a large workspace graph
 # and surfacing them as build errors blocks unrelated work.
 [bans]
 multiple-versions = "warn"
@@ -115,9 +115,9 @@ deny = [
     # introduce a non-Rust toolchain dependency on the build
     # host, and (c) duplicate the audit surface that `ring`
     # already covers.
-    { name = "openssl", reason = "OpenSSL-FFI is barred; SNG uses `ring` via `rustls` for all crypto (see PROPOSAL.md §4.1, ARCHITECTURE.md §5.2)." },
+    { name = "openssl", reason = "OpenSSL-FFI is barred; SNG uses `ring` via `rustls` for all crypto (see ARCHITECTURE.md §8)." },
     { name = "openssl-sys", reason = "OpenSSL-FFI is barred; see `openssl` ban above." },
-    { name = "native-tls", reason = "`native-tls` pulls a platform OpenSSL on Linux; SNG mandates `rustls` (see PROPOSAL.md §4.1)." },
+    { name = "native-tls", reason = "`native-tls` pulls a platform OpenSSL on Linux; SNG mandates `rustls` (see ARCHITECTURE.md §8)." },
 
     # Async-std is barred; the workspace standardises on Tokio.
     # Mixing runtimes pulls the executor into the binary twice

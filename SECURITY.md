@@ -3,11 +3,12 @@
 ShieldNet Gateway (SNG) is a security product. We take vulnerability
 reports seriously and prioritise them ahead of other work.
 
-## Supported versions
+## Supported surface
 
-We accept and triage vulnerability reports against the current
-release branch (the most recent tagged release on `main`). Older
-preview tags and unreleased pre-`v0.x` commits are not supported.
+We accept and triage vulnerability reports against `main` — the
+shipping state of the product. Build the affected binary from the
+latest `main` (or report the git SHA you built from) so we triage
+against the same code you ran.
 
 The product surface this policy covers, for code that lives in
 *this* repository:
@@ -74,7 +75,7 @@ We aim to:
   high-severity issues, sooner for actively exploited ones.
 
 We will coordinate disclosure with you. Public advisories (CVE,
-GitHub Security Advisory, changelog entry) credit the reporter
+GitHub Security Advisory, release notes) credit the reporter
 unless you ask to remain anonymous.
 
 ## Out of scope

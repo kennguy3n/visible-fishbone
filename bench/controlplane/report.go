@@ -77,7 +77,7 @@ type BusinessBenchmarkReport struct {
 	CapacityPlan *CapacityPlanSection `json:"capacity_plan,omitempty"`
 
 	// Theoretical holds the design targets the verdicts are graded
-	// against (sourced from PROPOSAL.md / ARCHITECTURE.md).
+	// against (sourced from docs/cost-model.md / ARCHITECTURE.md).
 	Theoretical TheoreticalTargets `json:"theoretical"`
 	// Competitor holds the published competitor numbers, with the
 	// honesty caveat that makes the comparison fair.
@@ -280,7 +280,7 @@ type PostgresScaleSection struct {
 // the shared internal/capacityplan model — see capacity_plan.go.
 
 // TheoreticalTargets are the design goals the verdicts grade against.
-// Sourced from PROPOSAL.md / ARCHITECTURE.md; see field docs.
+// Sourced from docs/cost-model.md / ARCHITECTURE.md; see field docs.
 type TheoreticalTargets struct {
 	// APIP99Ms is the control-plane API p99 target at scale.
 	APIP99Ms float64 `json:"api_p99_ms"`

@@ -21,12 +21,12 @@
 //!   model) behind an attestation gate, and keeps an [`NftablesDataPath`]
 //!   fallback for everything the device cannot express — mirroring
 //!   [`EbpfDataPath`]. Real silicon (ARCHITECTURE.md §4.1's VPP/DPDK fast
-//!   path, the TPM-rooted appliance SKUs of PROPOSAL.md §10) plugs in as
+//!   path, the TPM-rooted appliance SKUs) plugs in as
 //!   an `OffloadDevice` implementor without touching this backend.
 //!
 //! ## Why the trait is async
 //!
-//! The plan sketched `install_rules` as a synchronous `fn`, but the
+//! `install_rules` is `async` rather than a synchronous `fn` because the
 //! nftables apply this crate already owns is `async` (it shells out to
 //! `nft -f` so the data path is never blocked). Bridging that to a sync
 //! trait method would force a `block_on`, which panics inside the
@@ -473,7 +473,7 @@ pub(crate) fn map_ebpf_err(e: sng_ebpf::EbpfError) -> FirewallError {
 ///
 /// It mirrors [`EbpfDataPath`]'s nftables-authoritative-first contract,
 /// with one extra gate before the fast path is trusted: the device must
-/// **attest** (PROPOSAL.md §10 / ARCHITECTURE.md §4.1). The slow path is
+/// **attest** (ARCHITECTURE.md §4.1). The slow path is
 /// always committed first, so a device that cannot attest — or whose
 /// program fails — degrades to nftables-only enforcement, never to a
 /// stale or unmeasured fast path.
