@@ -21,6 +21,8 @@
   /* Brand RGB channels so translucent brand tints (focus ring, soft fills,
      glows, info accents) compose via rgba() and all track --brand. */
   --brand-rgb: 37, 95, 229;
+  /* Cyan is a data-viz accent only (charts read it via --accent); UI chrome
+     uses --brand so the console reads as one ShieldNet 360 blue surface. */
   --accent: #06b6d4;
   --ok: #059669;
   --warn: #d97706;
@@ -28,27 +30,40 @@
   --danger: #dc2626;
   --danger-strong: #b91c1c;
   --chart-violet: #a78bfa;
+  /* Sequential blue data-viz ramp (ShieldNet 360). Theme-independent — charts
+     read these for quantitative scales; categorical series keep using
+     --brand / --accent / --chart-violet / --ok / --warn. */
+  --chart-1: #91c5ff;
+  --chart-2: #3a81f6;
+  --chart-3: #2563ef;
+  --chart-4: #1a4eda;
+  --chart-5: #1f3fad;
   /* Text on the translucent active-nav fill (high-contrast per theme). */
   --nav-active-text: var(--brand-strong);
   /* Ambient glow behind the login hero / radial backdrops. */
   --hero-glow: #e6eefe;
-  --radius: 12px;
+  --radius: 10px;
   --radius-sm: 8px;
+  --radius-xs: 2px;
   --radius-lg: 16px;
   --radius-pill: 9999px;
   /* Horizontal gutter between a nav link and the sidebar edge. Shared by the
      link margin and the active-indicator offset so the accent bar always sits
      flush against the sidebar regardless of this value. */
   --nav-gutter: 10px;
-  --shadow: 0 8px 24px rgba(17, 24, 39, 0.12);
+  --shadow: 0 1px 3px rgba(17, 24, 39, 0.08), 0 6px 16px rgba(17, 24, 39, 0.1);
   --font: "Noto Sans", "Inter", system-ui, -apple-system, "Segoe UI", Roboto,
     Helvetica, Arial, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
 
   /* Richer design system additions (WS5) ------------------------------- */
   /* Gradient accent used on card accent bars, hero rings, and emphasis. */
-  --accent-gradient: linear-gradient(90deg, var(--brand), var(--accent));
-  --accent-gradient-vert: linear-gradient(180deg, var(--brand), var(--accent));
+  --accent-gradient: linear-gradient(90deg, var(--brand), var(--brand-strong));
+  --accent-gradient-vert: linear-gradient(
+    180deg,
+    var(--brand),
+    var(--brand-strong)
+  );
 
   /* Card elevation levels. `flat` sits in the page, `raised` lifts on hover,
      `floating` is for overlays / popovers / toasts. Layered shadows (a tight
@@ -108,7 +123,7 @@
   --chart-violet: #a78bfa;
   --nav-active-text: #ffffff;
   --hero-glow: #15233f;
-  --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  --shadow: 0 1px 3px rgba(0, 0, 0, 0.3), 0 6px 16px rgba(0, 0, 0, 0.36);
   --elev-flat: 0 1px 2px rgba(0, 0, 0, 0.28);
   --elev-raised: 0 1px 2px rgba(0, 0, 0, 0.3), 0 8px 22px rgba(3, 6, 12, 0.45);
   --elev-floating: 0 2px 4px rgba(0, 0, 0, 0.3),
@@ -153,7 +168,7 @@
     --chart-violet: #a78bfa;
     --nav-active-text: #ffffff;
     --hero-glow: #15233f;
-    --shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+    --shadow: 0 1px 3px rgba(0, 0, 0, 0.3), 0 6px 16px rgba(0, 0, 0, 0.36);
     --elev-flat: 0 1px 2px rgba(0, 0, 0, 0.28);
     --elev-raised: 0 1px 2px rgba(0, 0, 0, 0.3),
       0 8px 22px rgba(3, 6, 12, 0.45);
@@ -248,7 +263,7 @@ a:hover {
   width: 28px;
   height: 28px;
   border-radius: 8px;
-  background: linear-gradient(135deg, var(--brand), var(--accent));
+  background: linear-gradient(135deg, var(--brand), var(--brand-strong));
   display: grid;
   place-items: center;
   color: #06101f;
@@ -492,7 +507,7 @@ a:hover {
   opacity: 0.9;
 }
 .card--accent.card--accent-ok::before {
-  background: linear-gradient(90deg, var(--ok), var(--accent));
+  background: linear-gradient(90deg, var(--ok), var(--ok-strong, var(--ok)));
 }
 .card--accent.card--accent-warn::before {
   background: linear-gradient(90deg, var(--warn), var(--warn-alt));
@@ -1468,7 +1483,7 @@ label.field > span {
   transition: width 500ms ease;
 }
 .meter__fill--ok {
-  background: linear-gradient(90deg, var(--ok), var(--accent));
+  background: linear-gradient(90deg, var(--ok), var(--ok-strong, var(--ok)));
 }
 .meter__fill--warn {
   background: linear-gradient(90deg, var(--warn), var(--warn-alt));

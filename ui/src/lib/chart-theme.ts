@@ -25,6 +25,19 @@ export const CHART = {
   get violet() {
     return cssVar("--chart-violet", "#a78bfa");
   },
+
+  // Sequential blue data-viz ramp (ShieldNet 360). Use for quantitative /
+  // ordered scales (heatmaps, gauges, single-series gradients) so charts stay
+  // on-brand; categorical series keep using brand/accent/violet/ok/warn.
+  get ramp(): string[] {
+    return [
+      cssVar("--chart-1", "#91c5ff"),
+      cssVar("--chart-2", "#3a81f6"),
+      cssVar("--chart-3", "#2563ef"),
+      cssVar("--chart-4", "#1a4eda"),
+      cssVar("--chart-5", "#1f3fad"),
+    ];
+  },
   get ok() {
     return cssVar("--ok", "#34d399");
   },
