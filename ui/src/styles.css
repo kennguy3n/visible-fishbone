@@ -266,7 +266,7 @@ a:hover {
   width: 28px;
   height: 28px;
   border-radius: 8px;
-  background: linear-gradient(135deg, var(--brand), var(--brand-strong));
+  background: var(--brand-strong);
   display: grid;
   place-items: center;
   color: #fff;
@@ -373,7 +373,7 @@ a:hover {
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  background: linear-gradient(135deg, var(--brand), var(--brand-strong));
+  background: var(--brand-strong);
   color: #fff;
   font-size: 12px;
   font-weight: 700;
