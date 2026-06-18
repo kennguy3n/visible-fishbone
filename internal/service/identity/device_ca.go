@@ -171,7 +171,7 @@ func (a *CertAuthority) caFor(ctx context.Context, tenantID uuid.UUID) (*caMater
 
 	stored, err := a.store.GetCA(ctx, tenantID)
 	if err == nil {
-		return a.materializeAndCache(tenantID, stored)
+		return a.materializeAndCache(ctx, tenantID, stored)
 	}
 	if !errors.Is(err, repository.ErrNotFound) {
 		return nil, fmt.Errorf("load device CA: %w", err)
@@ -235,7 +235,7 @@ func (a *CertAuthority) bootstrap(ctx context.Context, tenantID uuid.UUID) (*caM
 			if getErr != nil {
 				return nil, fmt.Errorf("reload device CA after bootstrap race: %w", getErr)
 			}
-			return a.materializeAndCache(tenantID, stored)
+			return a.materializeAndCache(ctx, tenantID, stored)
 		}
 		return nil, fmt.Errorf("persist device CA: %w", err)
 	}
@@ -251,8 +251,10 @@ func (a *CertAuthority) bootstrap(ctx context.Context, tenantID uuid.UUID) (*caM
 }
 
 // materializeAndCache unseals and parses a stored CA into ready-to-sign
-// material and caches it.
-func (a *CertAuthority) materializeAndCache(tenantID uuid.UUID, stored repository.DeviceCA) (*caMaterial, error) {
+// material and caches it. The caller's context is forwarded to the unseal so a
+// network-backed sealer (e.g. a KMS) honours request deadlines, cancellation,
+// and tracing rather than running detached.
+func (a *CertAuthority) materializeAndCache(ctx context.Context, tenantID uuid.UUID, stored repository.DeviceCA) (*caMaterial, error) {
 	block, _ := pem.Decode([]byte(stored.CertPEM))
 	if block == nil || block.Type != "CERTIFICATE" {
 		return nil, fmt.Errorf("device CA for tenant %s has malformed certificate PEM", tenantID)
@@ -261,7 +263,7 @@ func (a *CertAuthority) materializeAndCache(tenantID uuid.UUID, stored repositor
 	if err != nil {
 		return nil, fmt.Errorf("parse stored CA certificate: %w", err)
 	}
-	pkcs8, err := a.sealer.Unwrap(context.Background(), tenantID, stored.PrivateKeySealed)
+	pkcs8, err := a.sealer.Unwrap(ctx, tenantID, stored.PrivateKeySealed)
 	if err != nil {
 		return nil, fmt.Errorf("unseal CA private key: %w", err)
 	}
