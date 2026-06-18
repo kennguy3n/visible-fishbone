@@ -179,6 +179,28 @@ pipeline does this) so the exclusion is in effect.
 > path, so the gateway must be configured **before** rolling out this
 > build. See `docs/deploy.md` (“Operator authentication in production”).
 
+### Upgrading an existing production deployment
+
+A deployment that previously authenticated operators with an
+HMAC-signed `AUTH_JWT_SECRET` must migrate before it can run a
+production (`-tags production`) build, because that build refuses to
+verify HMAC tokens and refuses to boot with `AUTH_JWT_SECRET` set:
+
+1. **Terminate operator identity at the OIDC gateway first.** Stand up
+   the gateway in front of the control plane and confirm it translates
+   an authenticated OIDC session into a credential the control plane
+   accepts (a provisioned `X-SNG-API-Key` or a trusted,
+   gateway-asserted header). Verify operators can reach the console
+   through it while the old build is still running.
+2. **Unset `AUTH_JWT_SECRET`.** Remove it from the production
+   environment/secret store. Config validation hard-fails if it is
+   still set when the new build starts, so this must happen before the
+   rollout.
+3. **Roll out the production build.** Deploy the `-tags production`
+   artifact (the release pipeline builds this by default). The HMAC
+   verification path is now compiled out and operator auth flows
+   entirely through the gateway.
+
 ## Defense-in-depth for tenant isolation
 
 Postgres RLS is the primary tenant boundary, but a single boundary is

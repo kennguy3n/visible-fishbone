@@ -425,7 +425,7 @@ func (r *BusinessReport) writeUnitEconomics(b *strings.Builder) {
 		return
 	}
 	ue := r.Theoretical.UnitEconomics
-	b.WriteString("Design envelopes (direct infra cost), from docs/cost-model.md cohort tables:\n\n")
+	b.WriteString("Design envelopes (direct infra cost / user / month), bounded by the docs/cost-model.md per-user envelope (§5, §7):\n\n")
 	b.WriteString("| Cohort | Design infra $/user/mo | Site $/mo |\n|---|---|---|\n")
 	cohort := func(name string, c Cohort) {
 		fmt.Fprintf(b, "| %s | %s | %s |\n", name, rangeStr(c.InfraCostUserMonth), rangeStr(c.SiteMonth))
