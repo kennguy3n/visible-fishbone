@@ -1718,7 +1718,10 @@ func buildRouter(
 	if err != nil {
 		return routerComponents{}, fmt.Errorf("device CA: %w", err)
 	}
-	enrollmentSvc := identity.NewEnrollmentService(enrollmentRepo, claimRepo, auditRepo, deviceCA, logger)
+	enrollmentSvc, err := identity.NewEnrollmentService(enrollmentRepo, claimRepo, auditRepo, deviceCA, logger)
+	if err != nil {
+		return routerComponents{}, fmt.Errorf("enrollment service: %w", err)
+	}
 	scimSvc := identity.NewSCIMService(userRepo, roleRepo, auditRepo, scimOpts...)
 	rbacSvc := rbac.New(roleRepo, auditRepo, logger)
 	auditSvc := audit.New(auditRepo)

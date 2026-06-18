@@ -45,13 +45,17 @@ func newEnrollHandlerWithGuard(t *testing.T, maxFailures int, cooldown time.Dura
 		nil,
 	)
 	h := NewDeviceHandler(svc, memory.NewDeviceRepository(s), 0)
-	h.SetEnrollmentService(identity.NewEnrollmentService(
+	enrollSvc, err := identity.NewEnrollmentService(
 		memory.NewDeviceEnrollmentRepository(s),
 		memory.NewClaimTokenRepository(s),
 		memory.NewAuditLogRepository(s),
 		newPassthroughDeviceCA(t, s),
 		nil,
-	))
+	)
+	if err != nil {
+		t.Fatalf("NewEnrollmentService: %v", err)
+	}
+	h.SetEnrollmentService(enrollSvc)
 	guard, err := middleware.NewAttemptLimiter(middleware.AttemptLimiterConfig{
 		MaxFailures:     maxFailures,
 		Cooldown:        cooldown,
@@ -173,13 +177,17 @@ func TestEnrollFailure_LogsClientIP_WhenGuardDisabled(t *testing.T) {
 		nil,
 	)
 	h := NewDeviceHandler(svc, memory.NewDeviceRepository(s), 0)
-	h.SetEnrollmentService(identity.NewEnrollmentService(
+	enrollSvc, err := identity.NewEnrollmentService(
 		memory.NewDeviceEnrollmentRepository(s),
 		memory.NewClaimTokenRepository(s),
 		memory.NewAuditLogRepository(s),
 		newPassthroughDeviceCA(t, s),
 		nil,
-	))
+	)
+	if err != nil {
+		t.Fatalf("NewEnrollmentService: %v", err)
+	}
+	h.SetEnrollmentService(enrollSvc)
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	// Guard disabled (nil) but logging on — the production guard-off case.

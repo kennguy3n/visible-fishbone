@@ -86,13 +86,17 @@ func newEnrollHandlerForCoverage(t *testing.T) (*handler.DeviceHandler, *memory.
 	if err != nil {
 		t.Fatalf("NewCertAuthority: %v", err)
 	}
-	h.SetEnrollmentService(identity.NewEnrollmentService(
+	enrollSvc, err := identity.NewEnrollmentService(
 		memory.NewDeviceEnrollmentRepository(s),
 		memory.NewClaimTokenRepository(s),
 		memory.NewAuditLogRepository(s),
 		deviceCA,
 		nil,
-	))
+	)
+	if err != nil {
+		t.Fatalf("NewEnrollmentService: %v", err)
+	}
+	h.SetEnrollmentService(enrollSvc)
 	obs := &fakeActivityObserver{}
 	h.SetActivityObserver(obs)
 	return h, s, tn.ID, obs

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -35,14 +36,18 @@ type EnrollmentService struct {
 
 // NewEnrollmentService returns a ready-to-use enrollment service. ca is
 // the persistent per-tenant device CA that signs enrollment
-// certificates; it is required.
+// certificates; it is required, matching NewCertAuthority which
+// validates its own deps at construction time.
 func NewEnrollmentService(
 	enrollments repository.DeviceEnrollmentRepository,
 	tokens repository.ClaimTokenRepository,
 	audit repository.AuditLogRepository,
 	ca *CertAuthority,
 	logger *slog.Logger,
-) *EnrollmentService {
+) (*EnrollmentService, error) {
+	if ca == nil {
+		return nil, errors.New("identity: enrollment device CA is required")
+	}
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -54,7 +59,7 @@ func NewEnrollmentService(
 		logger:      logger,
 		nowFunc:     func() time.Time { return time.Now().UTC() },
 		certTTL:     DefaultCertTTL,
-	}
+	}, nil
 }
 
 // GetTenantCA returns the tenant's device CA certificate in PEM form —

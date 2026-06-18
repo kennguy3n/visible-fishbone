@@ -2442,7 +2442,6 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TenantCAResponse" }
-        "404": { $ref: "#/components/responses/Error" }
         "501": { $ref: "#/components/responses/Error" }
 
   # ── Browser Protection (Phase 4, Task 43) ──────────────────────

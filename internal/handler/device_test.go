@@ -377,13 +377,17 @@ func TestTenantCACertReturnsAnchor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewCertAuthority: %v", err)
 	}
-	h.SetEnrollmentService(identity.NewEnrollmentService(
+	enrollSvc, err := identity.NewEnrollmentService(
 		memory.NewDeviceEnrollmentRepository(s),
 		memory.NewClaimTokenRepository(s),
 		memory.NewAuditLogRepository(s),
 		ca,
 		nil,
-	))
+	)
+	if err != nil {
+		t.Fatalf("NewEnrollmentService: %v", err)
+	}
+	h.SetEnrollmentService(enrollSvc)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/v1/tenants/"+tn.ID.String()+"/devices/ca", nil)
 	req.SetPathValue("tenant_id", tn.ID.String())
