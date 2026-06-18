@@ -1701,20 +1701,18 @@ func buildRouter(
 	// data plane can pin one trust anchor (previously each issuance
 	// minted a throwaway CA, so no verifier could ever trust the
 	// chain). Its private key is sealed at rest with the same
-	// AES-256-GCM master used for policy seeds when configured, falling
-	// back to passthrough (relying on TDE / disk encryption) otherwise.
-	var deviceCASealer identity.CredentialSealer = policy.PassthroughWrapper{}
-	if master, err := loadPolicyKeyWrapMaster(cfg); err != nil {
+	// AES-256-GCM master used for policy seeds when configured. In a
+	// production environment a master is mandatory — boot is refused
+	// rather than storing CA keys under passthrough — because the CA is
+	// a long-lived trust anchor whose theft enables device-cert forgery.
+	// Non-production falls back to passthrough (relying on TDE / disk).
+	caWrapMaster, err := loadPolicyKeyWrapMaster(cfg)
+	if err != nil {
 		return routerComponents{}, fmt.Errorf("device CA key-wrap master: %w", err)
-	} else if len(master) > 0 {
-		w, err := policy.NewAESGCMWrapper(master)
-		if err != nil {
-			return routerComponents{}, fmt.Errorf("device CA key-wrap aes-gcm: %w", err)
-		}
-		deviceCASealer = w
-		logger.Info("device enrollment: AES-256-GCM at-rest wrap enabled for device CA private keys")
-	} else {
-		logger.Warn("device enrollment: no key-wrap master set; device CA private keys stored under passthrough (relying on at-rest disk/TDE encryption)")
+	}
+	deviceCASealer, err := selectDeviceCASealer(caWrapMaster, cfg.Environment, logger)
+	if err != nil {
+		return routerComponents{}, err
 	}
 	deviceCA, err := identity.NewCertAuthority(deviceCARepo, deviceCASealer, logger)
 	if err != nil {
@@ -3622,6 +3620,30 @@ func (s aiAuditSink) RecordAIAudit(ctx context.Context, rec aisvc.AuditRecord) e
 		Details:      details,
 	})
 	return err
+}
+
+// selectDeviceCASealer chooses the at-rest sealer for device CA private
+// keys. With a key-wrap master it returns an AES-256-GCM wrapper. Without
+// one it returns a passthrough wrapper in non-production (relying on TDE /
+// disk encryption), but in a production environment a missing master is
+// fatal: the device CA is a long-lived trust anchor whose private key, if
+// recovered from the database or a backup, lets an attacker mint trusted
+// device certificates for mTLS impersonation, so it must never be stored
+// without application-layer encryption in production.
+func selectDeviceCASealer(master []byte, env config.Environment, logger *slog.Logger) (identity.CredentialSealer, error) {
+	if len(master) > 0 {
+		w, err := policy.NewAESGCMWrapper(master)
+		if err != nil {
+			return nil, fmt.Errorf("device CA key-wrap aes-gcm: %w", err)
+		}
+		logger.Info("device enrollment: AES-256-GCM at-rest wrap enabled for device CA private keys")
+		return w, nil
+	}
+	if env.IsProduction() {
+		return nil, fmt.Errorf("device CA key-wrap master is required in the %q environment: set POLICY_KEY_WRAP_MASTER_B64 or POLICY_KEY_WRAP_MASTER_FILE so device CA private keys are sealed at rest (refusing to store them under passthrough in production)", env)
+	}
+	logger.Warn("device enrollment: no key-wrap master set; device CA private keys stored under passthrough (relying on at-rest disk/TDE encryption)")
+	return policy.PassthroughWrapper{}, nil
 }
 
 // loadPolicyKeyWrapMaster resolves the AES-GCM master key from
