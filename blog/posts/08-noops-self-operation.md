@@ -25,19 +25,24 @@ honesty contract, Post 0). The cost of that safety is toil: someone has to decid
 automates that decision with guardrails.
 
 Each capability is a state machine — `off → monitor → enforce` — and the
-auto-promotion controller escalates a tenant **only when monitor-mode guardrails
-hold for a dwell window** (24h default). The per-tenant ladder is a real
-RLS-scoped read ([`ws5-acme-rollout-capabilities.json`](../artifacts/payloads/ws5-acme-rollout-capabilities.json)):
+auto-promotion controller advances a tenant **only when monitor-mode guardrails
+hold for a dwell window** (24h default). On the seeded Acme tenant the autopilot
+has already taken the first safe rung — `off → monitor` — for every capability:
+each is now observing (`evaluates: true`) but **not enforcing**
+(`enforces: false`), so the upgrade stays inert for live traffic while the
+evidence accrues. The per-tenant ladder is a real RLS-scoped read
+([`ws5-acme-rollout-capabilities.json`](../artifacts/payloads/ws5-acme-rollout-capabilities.json)):
 
 ```json
-[ { "capability": "clamav_swg", "state": "off", "enforces": false, ... },
-  { "capability": "casb_inline_enforce", "state": "off", ... },
-  { "capability": "idp_directory_sync", "state": "off", ... } ]
+[ { "capability": "clamav_swg", "state": "monitor", "enforces": false, "evaluates": true,
+    "reason": "autopilot: auto-enrolled off->monitor (dry-run; no enforcement)", "updated_by": "autopilot" },
+  { "capability": "noops_autoenforce", "state": "monitor", "enforces": false, ... },
+  { "capability": "idp_directory_sync", "state": "monitor", "enforces": false, ... } ]
 ```
 
 A dedicated evidence table backs the promotion gate: a capability can't be
-promoted on a hunch, it's promoted because the monitor mode *recorded* that it
-would have been safe (no
+promoted to **enforce** on a hunch, it's promoted because the monitor mode
+*recorded* that it would have been safe (no
 false-positive storm, no enforcement that would have broken legitimate traffic)
 for the full dwell window. The cross-tenant view:
 
@@ -101,8 +106,10 @@ That is the exact signal the autopilot is built to surface: it can recommend an
 upsell, enforce a trial budget cap, or throttle the loss-making usage — gated, by
 default, behind the same off→monitor→enforce ladder
 ([`ws5-acme-rollout-margin-autopilot.json`](../artifacts/payloads/ws5-acme-rollout-margin-autopilot.json)
-shows the `margin_autopilot` capability sitting at `off`). Acme, by contrast, is
-healthy at ≈+47% ([`ws7-acme-cost.json`](../artifacts/payloads/ws7-acme-cost.json)).
+shows `margin_autopilot` auto-enrolled to `monitor` — observing the cost signal
+with `enforces: false`, so it surfaces the recommendation but doesn't yet act).
+Acme, by contrast, is healthy at ≈+47%
+([`ws7-acme-cost.json`](../artifacts/payloads/ws7-acme-cost.json)).
 
 ## The three together
 
