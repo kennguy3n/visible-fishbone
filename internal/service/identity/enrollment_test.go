@@ -14,6 +14,7 @@ import (
 
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
+	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
 )
 
 func newEnrollmentService(t *testing.T) (*EnrollmentService, uuid.UUID, repository.ClaimTokenRepository) {
@@ -26,13 +27,39 @@ func newEnrollmentService(t *testing.T) (*EnrollmentService, uuid.UUID, reposito
 		t.Fatalf("seed tenant: %v", err)
 	}
 	tokens := memory.NewClaimTokenRepository(s)
-	svc := NewEnrollmentService(
+	ca, err := NewCertAuthority(memory.NewDeviceCARepository(s), policy.PassthroughWrapper{}, nil)
+	if err != nil {
+		t.Fatalf("NewCertAuthority: %v", err)
+	}
+	svc, err := NewEnrollmentService(
 		memory.NewDeviceEnrollmentRepository(s),
 		tokens,
 		memory.NewAuditLogRepository(s),
+		ca,
 		nil,
 	)
+	if err != nil {
+		t.Fatalf("NewEnrollmentService: %v", err)
+	}
 	return svc, tn.ID, tokens
+}
+
+// TestNewEnrollmentServiceRejectsNilCA verifies the constructor enforces
+// its documented contract that ca is required — failing fast at
+// construction (like NewCertAuthority validates its own deps) rather than
+// deferring a nil-pointer panic to GetTenantCA / RedeemClaimToken /
+// RefreshCertificate.
+func TestNewEnrollmentServiceRejectsNilCA(t *testing.T) {
+	s := memory.NewStore()
+	if _, err := NewEnrollmentService(
+		memory.NewDeviceEnrollmentRepository(s),
+		memory.NewClaimTokenRepository(s),
+		memory.NewAuditLogRepository(s),
+		nil, // required CA omitted
+		nil,
+	); err == nil {
+		t.Fatal("NewEnrollmentService(nil ca) = nil error, want a required-CA error")
+	}
 }
 
 func seedClaimToken(t *testing.T, tokens repository.ClaimTokenRepository, tenantID uuid.UUID) string {

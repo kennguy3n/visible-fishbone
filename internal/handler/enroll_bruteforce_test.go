@@ -18,7 +18,19 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/middleware"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
+	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
 )
+
+// newPassthroughDeviceCA builds an in-memory device CA whose key is
+// sealed under the passthrough wrapper, for enrollment-handler tests.
+func newPassthroughDeviceCA(t *testing.T, s *memory.Store) *identity.CertAuthority {
+	t.Helper()
+	ca, err := identity.NewCertAuthority(memory.NewDeviceCARepository(s), policy.PassthroughWrapper{}, nil)
+	if err != nil {
+		t.Fatalf("NewCertAuthority: %v", err)
+	}
+	return ca
+}
 
 // newEnrollHandlerWithGuard wires a DeviceHandler with a real
 // enrollment service (in-memory repos) and an IP-keyed brute-force
@@ -33,12 +45,17 @@ func newEnrollHandlerWithGuard(t *testing.T, maxFailures int, cooldown time.Dura
 		nil,
 	)
 	h := NewDeviceHandler(svc, memory.NewDeviceRepository(s), 0)
-	h.SetEnrollmentService(identity.NewEnrollmentService(
+	enrollSvc, err := identity.NewEnrollmentService(
 		memory.NewDeviceEnrollmentRepository(s),
 		memory.NewClaimTokenRepository(s),
 		memory.NewAuditLogRepository(s),
+		newPassthroughDeviceCA(t, s),
 		nil,
-	))
+	)
+	if err != nil {
+		t.Fatalf("NewEnrollmentService: %v", err)
+	}
+	h.SetEnrollmentService(enrollSvc)
 	guard, err := middleware.NewAttemptLimiter(middleware.AttemptLimiterConfig{
 		MaxFailures:     maxFailures,
 		Cooldown:        cooldown,
@@ -160,12 +177,17 @@ func TestEnrollFailure_LogsClientIP_WhenGuardDisabled(t *testing.T) {
 		nil,
 	)
 	h := NewDeviceHandler(svc, memory.NewDeviceRepository(s), 0)
-	h.SetEnrollmentService(identity.NewEnrollmentService(
+	enrollSvc, err := identity.NewEnrollmentService(
 		memory.NewDeviceEnrollmentRepository(s),
 		memory.NewClaimTokenRepository(s),
 		memory.NewAuditLogRepository(s),
+		newPassthroughDeviceCA(t, s),
 		nil,
-	))
+	)
+	if err != nil {
+		t.Fatalf("NewEnrollmentService: %v", err)
+	}
+	h.SetEnrollmentService(enrollSvc)
 	var buf bytes.Buffer
 	logger := slog.New(slog.NewJSONHandler(&buf, nil))
 	// Guard disabled (nil) but logging on — the production guard-off case.

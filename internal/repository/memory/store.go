@@ -76,6 +76,9 @@ type Store struct {
 	deviceEnrollments  map[deviceEnrollmentKey]repository.DeviceEnrollment
 	deviceCertificates map[uuid.UUID]repository.DeviceCertificate
 
+	// Per-tenant device CA — see migration 089.
+	deviceCAs map[uuid.UUID]repository.DeviceCA
+
 	// CASB tables — see migration 016.
 	casbConnectors     map[uuid.UUID]repository.CASBConnector
 	casbDiscoveredApps map[uuid.UUID]repository.CASBDiscoveredApp
@@ -241,6 +244,7 @@ func NewStore() *Store {
 		mspTenants:             map[mspTenantKey]repository.MSPTenantBinding{},
 		deviceEnrollments:      map[deviceEnrollmentKey]repository.DeviceEnrollment{},
 		deviceCertificates:     map[uuid.UUID]repository.DeviceCertificate{},
+		deviceCAs:              map[uuid.UUID]repository.DeviceCA{},
 		appRegistry:            map[uuid.UUID]repository.AppRegistry{},
 		appOverrides:           map[uuid.UUID]repository.AppRegistryOverride{},
 		browserPolicies:        map[uuid.UUID]repository.BrowserPolicy{},

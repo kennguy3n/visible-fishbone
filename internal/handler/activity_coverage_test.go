@@ -22,6 +22,7 @@ import (
 	"github.com/kennguy3n/visible-fishbone/internal/repository"
 	"github.com/kennguy3n/visible-fishbone/internal/repository/memory"
 	"github.com/kennguy3n/visible-fishbone/internal/service/identity"
+	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
 )
 
 // fakeActivityObserver is a test double for the activity Recorder. It
@@ -81,12 +82,21 @@ func newEnrollHandlerForCoverage(t *testing.T) (*handler.DeviceHandler, *memory.
 		nil,
 	)
 	h := handler.NewDeviceHandler(svc, memory.NewDeviceRepository(s), 0)
-	h.SetEnrollmentService(identity.NewEnrollmentService(
+	deviceCA, err := identity.NewCertAuthority(memory.NewDeviceCARepository(s), policy.PassthroughWrapper{}, nil)
+	if err != nil {
+		t.Fatalf("NewCertAuthority: %v", err)
+	}
+	enrollSvc, err := identity.NewEnrollmentService(
 		memory.NewDeviceEnrollmentRepository(s),
 		memory.NewClaimTokenRepository(s),
 		memory.NewAuditLogRepository(s),
+		deviceCA,
 		nil,
-	))
+	)
+	if err != nil {
+		t.Fatalf("NewEnrollmentService: %v", err)
+	}
+	h.SetEnrollmentService(enrollSvc)
 	obs := &fakeActivityObserver{}
 	h.SetActivityObserver(obs)
 	return h, s, tn.ID, obs

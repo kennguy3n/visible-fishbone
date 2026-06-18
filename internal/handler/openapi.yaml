@@ -2420,6 +2420,29 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/EnrollmentStatusResponse" }
         "404": { $ref: "#/components/responses/Error" }
+  /tenants/{tenant_id}/devices/ca:
+    get:
+      tags: [enrollment]
+      operationId: getTenantDeviceCA
+      summary: Get the tenant's device certificate authority trust anchor
+      description: >
+        Returns the tenant's persistent device CA certificate in PEM
+        form — the stable trust anchor an mTLS verifier pins to validate
+        device certificates. The CA is bootstrapped on first use. Returns
+        501 when the enrollment service is not configured.
+      parameters:
+        - name: tenant_id
+          in: path
+          required: true
+          description: Tenant whose device CA trust anchor is requested.
+          schema: { type: string, format: uuid }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TenantCAResponse" }
+        "501": { $ref: "#/components/responses/Error" }
 
   # ── Browser Protection (Phase 4, Task 43) ──────────────────────
   /tenants/{tenant_id}/browser-policies:
@@ -5642,6 +5665,11 @@ components:
         enrolled_at: { type: string, format: date-time }
         last_cert_issued_at: { type: string, format: date-time }
         revoked_at: { type: string, format: date-time }
+    TenantCAResponse:
+      type: object
+      required: [ca_cert_pem]
+      properties:
+        ca_cert_pem: { type: string, description: "PEM-encoded device CA certificate (trust anchor)" }
 
     # ── Browser Protection (Phase 4, Task 43) ──────────────────────
     BrowserRule:

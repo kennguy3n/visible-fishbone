@@ -7,6 +7,8 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"io"
+	"log/slog"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -15,7 +17,50 @@ import (
 	"time"
 
 	"github.com/kennguy3n/visible-fishbone/internal/config"
+	"github.com/kennguy3n/visible-fishbone/internal/service/policy"
 )
+
+func TestSelectDeviceCASealer(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	validMaster := make([]byte, 32) // any 32 bytes; only length is validated
+
+	// Production environments must fail closed when no key-wrap master is
+	// set, rather than silently storing CA keys under passthrough.
+	for _, env := range []config.Environment{config.EnvironmentUAT, config.EnvironmentProd} {
+		if _, err := selectDeviceCASealer(nil, env, logger); err == nil {
+			t.Errorf("selectDeviceCASealer(nil, %q) = nil error, want fail-closed error", env)
+		}
+	}
+
+	// Non-production environments fall back to passthrough (TDE/disk).
+	for _, env := range []config.Environment{config.EnvironmentLocal, config.EnvironmentDev, config.EnvironmentQA} {
+		sealer, err := selectDeviceCASealer(nil, env, logger)
+		if err != nil {
+			t.Fatalf("selectDeviceCASealer(nil, %q) error = %v, want nil", env, err)
+		}
+		if _, ok := sealer.(policy.PassthroughWrapper); !ok {
+			t.Errorf("selectDeviceCASealer(nil, %q) = %T, want policy.PassthroughWrapper", env, sealer)
+		}
+	}
+
+	// A configured master yields an AES-GCM wrapper in every environment,
+	// production included.
+	for _, env := range []config.Environment{config.EnvironmentLocal, config.EnvironmentProd} {
+		sealer, err := selectDeviceCASealer(validMaster, env, logger)
+		if err != nil {
+			t.Fatalf("selectDeviceCASealer(master, %q) error = %v, want nil", env, err)
+		}
+		if _, ok := sealer.(*policy.AESGCMWrapper); !ok {
+			t.Errorf("selectDeviceCASealer(master, %q) = %T, want *policy.AESGCMWrapper", env, sealer)
+		}
+	}
+
+	// A malformed master surfaces the construction error rather than
+	// silently degrading to passthrough.
+	if _, err := selectDeviceCASealer(make([]byte, 16), config.EnvironmentLocal, logger); err == nil {
+		t.Error("selectDeviceCASealer(short master) = nil error, want aes-gcm construction error")
+	}
+}
 
 func TestRedactURL(t *testing.T) {
 	cases := []struct {

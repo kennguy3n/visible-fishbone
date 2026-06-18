@@ -1965,6 +1965,23 @@ type DeviceCertificate struct {
 	RevokedAt *time.Time
 }
 
+// DeviceCA represents a row in the device_cas table: a tenant's
+// persistent device certificate authority. It is the stable trust
+// anchor that signs every device enrollment certificate, so an mTLS
+// verifier can pin one root per tenant rather than chasing a CA that
+// changes on every issuance.
+//
+// PrivateKeySealed holds the Ed25519 CA private key sealed at rest
+// (AES-256-GCM-wrapped under the operator key-wrap master, or stored
+// verbatim under passthrough when no master is configured). It is
+// never exposed beyond the identity layer that unseals it.
+type DeviceCA struct {
+	TenantID         uuid.UUID
+	CertPEM          string
+	PrivateKeySealed []byte
+	CreatedAt        time.Time
+}
+
 // --- AI Correlations ------------------------------------------------------
 
 // AICorrelation represents a row in the ai_alert_correlations table.
