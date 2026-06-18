@@ -82,7 +82,7 @@ the regression gate keys on.
 
 ## Published throughput
 
-Measured at revision `8e66a68`.
+Measured at revision `d94732e3`.
 
 ### SKU: `micro`
 
@@ -92,30 +92,30 @@ Synthetic policy: 128 rules · representative frame 1500 B · 100000 packets/mea
 
 | Mode | Mpps | Gbps | p50 | p99 | CPU headroom |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| raw-l3 | 3.03 | 36.366 | 463 ns | 674 ns | 99% |
-| ngfw-verdict | 0.44 | 5.222 | 2.293 µs | 3.989 µs | 92% |
-| full-stack | 0.41 | 4.887 | 2.453 µs | 4.303 µs | 92% |
-| full-stack-tls | 0.30 | 3.553 | 2.455 µs | 9.639 µs | 89% |
+| raw-l3 | 3.00 | 36.036 | 443 ns | 635 ns | 99% |
+| ngfw-verdict | 0.47 | 5.635 | 2.157 µs | 4.279 µs | 93% |
+| full-stack | 0.44 | 5.239 | 2.373 µs | 4.471 µs | 92% |
+| full-stack-tls | 0.32 | 3.841 | 2.357 µs | 9.511 µs | 90% |
 
 **Raw-L3 datapath toggle (nftables vs XDP):**
 
 | Substrate | Mpps | Gbps |
 | --- | ---: | ---: |
-| nftables (slow path) | 0.49 | 5.895 |
-| XDP (fast path) | 3.03 | 36.366 |
+| nftables (slow path) | 0.52 | 6.246 |
+| XDP (fast path) | 3.00 | 36.036 |
 
-XDP fast-path speedup: **6.17×**.
+XDP fast-path speedup: **5.77×**.
 
 **Per-traffic-class (full-stack + TLS, XDP fast path):**
 
 | Traffic class | Mpps | Gbps | p50 | p99 |
 | --- | ---: | ---: | ---: | ---: |
-| trusted_direct | 0.42 | 5.036 | 2.357 µs | 3.799 µs |
-| trusted_media_bypass | 0.42 | 5.017 | 2.385 µs | 3.779 µs |
-| inspect_lite | 0.34 | 4.096 | 2.885 µs | 4.555 µs |
-| inspect_full | 0.12 | 1.407 | 8.543 µs | 12.679 µs |
-| tunnel_private | 0.37 | 4.416 | 2.791 µs | 4.555 µs |
-| block | 1.65 | 19.857 | 586 ns | 828 ns |
+| trusted_direct | 0.42 | 4.995 | 2.273 µs | 3.927 µs |
+| trusted_media_bypass | 0.45 | 5.460 | 2.221 µs | 3.637 µs |
+| inspect_lite | 0.37 | 4.469 | 2.781 µs | 4.255 µs |
+| inspect_full | 0.12 | 1.460 | 8.223 µs | 14.071 µs |
+| tunnel_private | 0.37 | 4.425 | 2.661 µs | 4.227 µs |
+| block | 1.70 | 20.406 | 562 ns | 851 ns |
 
 ### SKU: `small`
 
@@ -125,30 +125,30 @@ Synthetic policy: 256 rules · representative frame 1500 B · 200000 packets/mea
 
 | Mode | Mpps | Gbps | p50 | p99 | CPU headroom |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| raw-l3 | 1.56 | 18.669 | 743 ns | 1.473 µs | 97% |
-| ngfw-verdict | 0.34 | 4.059 | 3.089 µs | 5.359 µs | 85% |
-| full-stack | 0.31 | 3.729 | 3.259 µs | 6.479 µs | 83% |
-| full-stack-tls | 0.22 | 2.699 | 3.455 µs | 10.327 µs | 77% |
+| raw-l3 | 1.46 | 17.498 | 736 ns | 1.328 µs | 96% |
+| ngfw-verdict | 0.34 | 4.070 | 3.025 µs | 5.331 µs | 85% |
+| full-stack | 0.32 | 3.842 | 3.213 µs | 5.819 µs | 84% |
+| full-stack-tls | 0.23 | 2.778 | 3.495 µs | 12.279 µs | 77% |
 
 **Raw-L3 datapath toggle (nftables vs XDP):**
 
 | Substrate | Mpps | Gbps |
 | --- | ---: | ---: |
-| nftables (slow path) | 0.40 | 4.743 |
-| XDP (fast path) | 1.56 | 18.669 |
+| nftables (slow path) | 0.41 | 4.880 |
+| XDP (fast path) | 1.46 | 17.498 |
 
-XDP fast-path speedup: **3.94×**.
+XDP fast-path speedup: **3.59×**.
 
 **Per-traffic-class (full-stack + TLS, XDP fast path):**
 
 | Traffic class | Mpps | Gbps | p50 | p99 |
 | --- | ---: | ---: | ---: | ---: |
-| trusted_direct | 0.32 | 3.854 | 3.031 µs | 5.823 µs |
-| trusted_media_bypass | 0.31 | 3.779 | 3.215 µs | 5.963 µs |
-| inspect_lite | 0.27 | 3.280 | 3.587 µs | 6.459 µs |
-| inspect_full | 0.11 | 1.327 | 9.079 µs | 13.015 µs |
-| tunnel_private | 0.29 | 3.443 | 3.303 µs | 6.187 µs |
-| block | 0.80 | 9.563 | 1.153 µs | 1.511 µs |
+| trusted_direct | 0.32 | 3.804 | 3.029 µs | 5.919 µs |
+| trusted_media_bypass | 0.31 | 3.758 | 3.081 µs | 6.875 µs |
+| inspect_lite | 0.28 | 3.305 | 3.551 µs | 6.483 µs |
+| inspect_full | 0.11 | 1.311 | 8.983 µs | 13.703 µs |
+| tunnel_private | 0.29 | 3.528 | 3.265 µs | 6.223 µs |
+| block | 0.81 | 9.660 | 1.196 µs | 1.973 µs |
 
 ### SKU: `medium`
 
@@ -158,30 +158,30 @@ Synthetic policy: 512 rules · representative frame 1500 B · 400000 packets/mea
 
 | Mode | Mpps | Gbps | p50 | p99 | CPU headroom |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| raw-l3 | 0.82 | 9.883 | 1.272 µs | 2.643 µs | 92% |
-| ngfw-verdict | 0.21 | 2.484 | 4.847 µs | 8.719 µs | 70% |
-| full-stack | 0.13 | 1.536 | 7.475 µs | 19.199 µs | 51% |
-| full-stack-tls | 0.15 | 1.806 | 6.667 µs | 21.551 µs | 58% |
+| raw-l3 | 0.75 | 8.972 | 1.345 µs | 2.715 µs | 92% |
+| ngfw-verdict | 0.22 | 2.590 | 4.755 µs | 8.727 µs | 71% |
+| full-stack | 0.20 | 2.368 | 5.067 µs | 10.231 µs | 68% |
+| full-stack-tls | 0.15 | 1.741 | 6.139 µs | 15.687 µs | 57% |
 
 **Raw-L3 datapath toggle (nftables vs XDP):**
 
 | Substrate | Mpps | Gbps |
 | --- | ---: | ---: |
-| nftables (slow path) | 0.28 | 3.386 |
-| XDP (fast path) | 0.82 | 9.883 |
+| nftables (slow path) | 0.28 | 3.341 |
+| XDP (fast path) | 0.75 | 8.972 |
 
-XDP fast-path speedup: **2.92×**.
+XDP fast-path speedup: **2.69×**.
 
 **Per-traffic-class (full-stack + TLS, XDP fast path):**
 
 | Traffic class | Mpps | Gbps | p50 | p99 |
 | --- | ---: | ---: | ---: | ---: |
-| trusted_direct | 0.21 | 2.473 | 6.203 µs | 24.703 µs |
-| trusted_media_bypass | 0.11 | 1.330 | 7.747 µs | 21.711 µs |
-| inspect_lite | 0.10 | 1.250 | 5.551 µs | 10.703 µs |
-| inspect_full | 0.09 | 1.073 | 11.159 µs | 16.511 µs |
-| tunnel_private | 0.19 | 2.253 | 5.359 µs | 10.383 µs |
-| block | 0.39 | 4.694 | 2.517 µs | 3.495 µs |
+| trusted_direct | 0.20 | 2.377 | 4.927 µs | 10.791 µs |
+| trusted_media_bypass | 0.20 | 2.404 | 4.819 µs | 9.791 µs |
+| inspect_lite | 0.18 | 2.189 | 5.483 µs | 11.047 µs |
+| inspect_full | 0.09 | 1.062 | 10.839 µs | 18.975 µs |
+| tunnel_private | 0.19 | 2.297 | 5.299 µs | 11.335 µs |
+| block | 0.40 | 4.805 | 2.325 µs | 3.577 µs |
 
 ### SKU: `large`
 
@@ -191,30 +191,30 @@ Synthetic policy: 1024 rules · representative frame 1500 B · 600000 packets/me
 
 | Mode | Mpps | Gbps | p50 | p99 | CPU headroom |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| raw-l3 | 0.38 | 4.559 | 2.645 µs | 5.343 µs | 84% |
-| ngfw-verdict | 0.12 | 1.400 | 8.447 µs | 16.991 µs | 46% |
-| full-stack | 0.12 | 1.385 | 8.895 µs | 17.423 µs | 46% |
-| full-stack-tls | 0.10 | 1.149 | 8.911 µs | 22.447 µs | 35% |
+| raw-l3 | 0.40 | 4.766 | 2.471 µs | 5.479 µs | 84% |
+| ngfw-verdict | 0.12 | 1.407 | 8.471 µs | 17.087 µs | 47% |
+| full-stack | 0.11 | 1.371 | 9.007 µs | 18.399 µs | 45% |
+| full-stack-tls | 0.09 | 1.113 | 9.239 µs | 23.951 µs | 33% |
 
 **Raw-L3 datapath toggle (nftables vs XDP):**
 
 | Substrate | Mpps | Gbps |
 | --- | ---: | ---: |
-| nftables (slow path) | 0.16 | 1.916 |
-| XDP (fast path) | 0.38 | 4.559 |
+| nftables (slow path) | 0.17 | 2.036 |
+| XDP (fast path) | 0.40 | 4.766 |
 
-XDP fast-path speedup: **2.38×**.
+XDP fast-path speedup: **2.34×**.
 
 **Per-traffic-class (full-stack + TLS, XDP fast path):**
 
 | Traffic class | Mpps | Gbps | p50 | p99 |
 | --- | ---: | ---: | ---: | ---: |
-| trusted_direct | 0.12 | 1.385 | 8.247 µs | 17.935 µs |
-| trusted_media_bypass | 0.11 | 1.378 | 8.311 µs | 17.967 µs |
-| inspect_lite | 0.11 | 1.298 | 8.863 µs | 18.719 µs |
-| inspect_full | 0.07 | 0.821 | 14.231 µs | 24.751 µs |
-| tunnel_private | 0.11 | 1.322 | 8.703 µs | 18.351 µs |
-| block | 0.20 | 2.420 | 4.907 µs | 6.071 µs |
+| trusted_direct | 0.11 | 1.372 | 8.439 µs | 19.279 µs |
+| trusted_media_bypass | 0.11 | 1.337 | 8.423 µs | 20.175 µs |
+| inspect_lite | 0.11 | 1.262 | 9.015 µs | 20.655 µs |
+| inspect_full | 0.07 | 0.793 | 14.807 µs | 27.023 µs |
+| tunnel_private | 0.11 | 1.289 | 8.887 µs | 20.591 µs |
+| block | 0.20 | 2.423 | 4.955 µs | 8.367 µs |
 
 ## Regression detection
 

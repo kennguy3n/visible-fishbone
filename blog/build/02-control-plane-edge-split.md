@@ -40,10 +40,10 @@ single narrow interface is what lets each plane evolve on its own clock.
 ## Why the edge is fast without silicon
 
 The throughput story is measured, not asserted. On a generic x86 VM the
-multi-queue edge scales from a **single-stream floor of 5.569 Gbps to a
-multi-queue ceiling of 28.567 Gbps** across 8 cores — a **5.13× lift**
+multi-queue edge scales from a **single-stream floor of 5.718 Gbps to a
+multi-queue ceiling of 27.264 Gbps** across 8 cores — a **4.77× lift**
 ([`multiqueue-micro.json`](../artifacts/multiqueue-micro.json)) — and a
-branch-large profile from 5.063 to 21.564 Gbps (4.26×,
+branch-large profile from 4.461 to 20.588 Gbps (4.61×,
 [`multi-queue-branch-large.json`](../artifacts/multi-queue-branch-large.json)).
 The lift comes from fanning out across NIC RSS queues and a kernel fast path
 (Post 5), not from an ASIC. We publish floor *and* ceiling because quoting only

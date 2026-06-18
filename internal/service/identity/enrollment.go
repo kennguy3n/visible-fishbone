@@ -23,7 +23,7 @@ import (
 const DefaultCertTTL = 24 * time.Hour
 
 // EnrollmentService implements the claim-token device enrollment
-// flow described in PROPOSAL.md §7 and ARCHITECTURE.md §3.4.
+// flow described in ARCHITECTURE.md §3.4.
 type EnrollmentService struct {
 	enrollments repository.DeviceEnrollmentRepository
 	tokens      repository.ClaimTokenRepository

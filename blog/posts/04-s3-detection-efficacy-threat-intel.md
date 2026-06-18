@@ -102,7 +102,7 @@ is verbatim from the control plane for the seeded tenant:
 
 - **5 curated built-in feeds, enabled by default** — abuse.ch Feodo Tracker,
   MalwareBazaar, URLhaus, the URLhaus host file, and OpenPhish.
-- **≈77,000 indicators** in the published bundle (domains, file hashes, IPs,
+- **76,432 indicators** in the published bundle (domains, file hashes, IPs,
   and URLs), assembled and counted by type so the data plane knows exactly what
   it loaded.
 - **Signed with Ed25519** (`key_id: sng-managed-threat-content`) so the edge

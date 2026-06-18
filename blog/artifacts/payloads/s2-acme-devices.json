@@ -1,58 +1,58 @@
 {
   "items": [
     {
-      "created_at": "2026-06-14T11:40:51.104109Z",
-      "id": "90231ca0-1171-4bb4-a063-c5fc6c70a573",
+      "created_at": "2026-06-18T12:30:48.245132Z",
+      "id": "14a3fe8f-d405-45db-bb01-59fca0618236",
       "name": "acme-mgr-laptop-02",
       "platform": "macos",
       "posture": {
         "disk_encrypted": true
       },
-      "public_key_ed25519": "d3sc/0lAn3AcZBfr3cBM84x5UrNOptfMpZE9heJgIvI=",
+      "public_key_ed25519": "wbf9s3xlvLuuwNHGZpcyGKkQ+dPb3XXTx80PGXNQiSc=",
       "status": "pending",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-14T11:40:51.104109Z"
+      "updated_at": "2026-06-18T12:30:48.245132Z"
     },
     {
-      "created_at": "2026-06-14T11:40:51.095087Z",
-      "id": "f7094423-56ff-49b7-ae1d-ced9066b5e29",
+      "created_at": "2026-06-18T12:30:48.233541Z",
+      "id": "249870d9-4e9f-461a-bff5-30f7f2716bbd",
       "name": "acme-mgr-laptop-01",
       "platform": "windows",
       "posture": {
         "disk_encrypted": true
       },
-      "public_key_ed25519": "g6+jqLHdU0EXAqFK9ozxAJA2FDY7Q958wiOn2c0TfXw=",
+      "public_key_ed25519": "IvZEm5s//Hk3Cl7QCykp4JghxxKQLH5CNOeLgjkt35I=",
       "status": "pending",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-14T11:40:51.095087Z"
+      "updated_at": "2026-06-18T12:30:48.233541Z"
     },
     {
-      "created_at": "2026-06-14T11:40:51.084556Z",
-      "id": "76ad3064-4f57-4224-9855-6a0279459e7a",
+      "created_at": "2026-06-18T12:30:48.223169Z",
+      "id": "01367801-24a9-4902-86dc-368d49e835f3",
       "name": "acme-pos-204-01",
       "platform": "linux",
       "posture": {
         "disk_encrypted": true,
         "firewall_enabled": true
       },
-      "public_key_ed25519": "SulhFuzx5OZqiUcDLa2ITQZHKVhaFwGDPSwNazXcy3A=",
+      "public_key_ed25519": "MNrf6ovlSZflzqhUSAQXhoz1EnB4pKDEVbr/iSix/yw=",
       "status": "pending",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-14T11:40:51.084556Z"
+      "updated_at": "2026-06-18T12:30:48.223169Z"
     },
     {
-      "created_at": "2026-06-14T11:40:51.07219Z",
-      "id": "4107f31f-5c87-4a4f-8bb4-9f068665a035",
+      "created_at": "2026-06-18T12:30:48.212411Z",
+      "id": "5e588525-bbaf-4c69-96ae-bf44de4ab316",
       "name": "acme-pos-118-01",
       "platform": "linux",
       "posture": {
         "disk_encrypted": true,
         "firewall_enabled": true
       },
-      "public_key_ed25519": "huHP2eKKqlyBBdhcMEKxUaNOfsxm+0a4rIqTqTaeKaw=",
+      "public_key_ed25519": "wnx6mc1UNjNDGZib5zePRRR/zWWkX0kkvmMbncy8+AE=",
       "status": "pending",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-      "updated_at": "2026-06-14T11:40:51.07219Z"
+      "updated_at": "2026-06-18T12:30:48.212411Z"
     }
   ],
   "next_cursor": ""

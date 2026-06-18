@@ -1,5 +1,5 @@
 {
-  "_comment": "Theoretical design targets extracted from PROPOSAL.md and ARCHITECTURE.md plus the bench/profiles SKU definitions. Used by bench/business-report/generate.go as the 'Design Target' column.",
+  "_comment": "Theoretical design targets extracted from ARCHITECTURE.md and docs/cost-model.md plus the bench/profiles SKU definitions. Used by bench/business-report/generate.go as the 'Design Target' column.",
   "edge_throughput": [
     { "sku": "branch-small",     "vcpus": 2, "ram_gb": 4,  "nic_gbps": 1.0,  "target_gbps": 0.8 },
     { "sku": "branch-medium",    "vcpus": 4, "ram_gb": 8,  "nic_gbps": 10.0, "target_gbps": 5.0 },
@@ -25,7 +25,7 @@
     "cold_retention": "1+ year, compressed"
   },
   "unit_economics": {
-    "_source": "PROPOSAL.md cohort tables (direct infra cost / user / month)",
+    "_source": "per-cohort direct-infra cost/user/month maintained here; bounded by the docs/cost-model.md per-user envelope (§5 reconciliation, §7 per-user target band)",
     "starter":   { "infra_cost_user_month": [0.30, 0.80], "site_month": [10, 25] },
     "growth":    { "infra_cost_user_month": [0.40, 1.00], "site_month": [15, 40] },
     "scale":     { "infra_cost_user_month": [0.60, 1.20], "site_month": [25, 60], "data_guard_user_month": [0.50, 1.50] },

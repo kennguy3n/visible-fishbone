@@ -1,8 +1,8 @@
 # ShieldNet Gateway — Architecture
 
 > Detailed system architecture for SNG. Companion to
-> [`PROPOSAL.md`](./PROPOSAL.md) (product / commercial /
-> competitive context) and
+> [`CAPABILITIES.md`](./CAPABILITIES.md) (the capability-by-capability
+> reference) and
 > [`docs/TRAFFIC_CLASSIFICATION.md`](./docs/TRAFFIC_CLASSIFICATION.md)
 > (the six-class steering framework). Modeled after
 > [`sn360-es/internal/docs/ARCHITECTURE.md`](https://github.com/kennguy3n/sn360-es/blob/main/internal/docs/ARCHITECTURE.md).
@@ -175,8 +175,8 @@ S3 (telemetry).
 The AI service lives in `internal/service/ai/` and is wired through
 `internal/handler/ai.go`. It covers policy auto-suggest, baseline
 modeling, incident summarization, and the enhanced capabilities
-added in Phase 5. Its design invariants are unchanged from
-[`PROPOSAL.md` §8.1](./PROPOSAL.md#81-ai-use-cases):
+(alert correlation, NL policy query, posture reports, threat-intel
+enrichment, guardrails). Its design invariants are:
 
 - **Verifier-gated enforcement.** All AI-proposed enforcement
   changes pass through the deterministic verifier
@@ -325,11 +325,10 @@ Multi-tier partner hierarchy for Managed Service Providers.
   assignments, bulk operations, branding config, MSP-role
   authorization middleware.
 
-### 3.11 Data Protection (Phase 4)
+### 3.11 Data Protection
 
-Shipped in Phase 4. The detectors / connectors run in the control
-plane; enforcement verdicts feed the policy graph and telemetry
-fabric.
+The detectors / connectors run in the control plane; enforcement
+verdicts feed the policy graph and telemetry fabric.
 
 - **CASB** (`internal/service/casb/`). Passive SaaS discovery plus
   active SaaS API connectors (`connectors/{m365,google,slack,
@@ -426,7 +425,7 @@ assessments per tenant and framework.
   `compliance_reports` (`migrations/022_compliance.*`) and served by
   `internal/handler/compliance.go`.
 
-### 3.15 Operational Automation (Phase 5)
+### 3.15 Operational Automation
 
 Operational health and lifecycle automation across several packages.
 
@@ -501,8 +500,7 @@ resolver). Dual-bank image install allows safe rollback.
 Every flow is classified into one of six **traffic classes** before
 enforcement decides which subsystem(s) inspect it. The class is the
 single dimension that drives "expensive vs. cheap path" — and is
-the foundation for the cloud-only deployment mode's unit economics
-(see PROPOSAL.md §9.4).
+the foundation for the cloud-only deployment mode's unit economics.
 
 - **Six classes**: `TRUSTED_DIRECT`, `TRUSTED_MEDIA_BYPASS`,
   `INSPECT_LITE`, `INSPECT_FULL`, `TUNNEL_PRIVATE`, `BLOCK`.
@@ -781,6 +779,13 @@ Same posture as the rest of the SN360 family:
   cross-region replication is opt-in.
 - **Customer-managed keys** — available on higher tiers (Data
   Guard); HSM / external KMS bindings supported.
+- **Pure-Rust crypto stack** — all TLS and cryptographic
+  primitives on `sng-edge` and `sng-agent` run through `ring`
+  via `rustls`; OpenSSL / `native-tls` FFI is barred from the
+  Rust workspace (enforced in `deny.toml`). This keeps the audit
+  surface to a single vetted implementation, avoids a platform
+  OpenSSL/toolchain dependency on the build host, and holds the
+  endpoint's resident-memory budget.
 
 ---
 

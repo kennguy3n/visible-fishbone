@@ -1,6 +1,6 @@
 {
   "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
-  "generated_at": "2026-06-16T03:22:48.153969569Z",
+  "generated_at": "2026-06-18T12:46:50.355499437Z",
   "frameworks": [
     {
       "framework": "SOC2",
@@ -20,7 +20,7 @@
           "status": "pass",
           "summary": "active policy graph enforces default-deny",
           "source": "policy_graph",
-          "observed_at": "2026-06-16T03:22:48.141754399Z",
+          "observed_at": "2026-06-18T12:46:50.345748706Z",
           "evidence": {
             "default_deny": true,
             "graph_version": 1,
@@ -37,7 +37,7 @@
           "status": "pass",
           "summary": "row-level security is enforced for tenant data isolation",
           "source": "database_role",
-          "observed_at": "2026-06-16T03:22:48.141754399Z",
+          "observed_at": "2026-06-18T12:46:50.345748706Z",
           "evidence": {
             "db_role": "sng_app",
             "rls_enforced": true,
@@ -55,7 +55,7 @@
           "status": "fail",
           "summary": "no identity provider is configured for federated access",
           "source": "idp_configs",
-          "observed_at": "2026-06-16T03:22:48.141754399Z",
+          "observed_at": "2026-06-18T12:46:50.345748706Z",
           "evidence": {
             "idp_configured": 0,
             "idp_enabled": 0
@@ -71,7 +71,7 @@
           "status": "fail",
           "summary": "no key-wrap master is configured; data-at-rest encryption is disabled",
           "source": "platform_config",
-          "observed_at": "2026-06-16T03:22:48.141754399Z",
+          "observed_at": "2026-06-18T12:46:50.345748706Z",
           "evidence": {
             "encryption_at_rest": false
           }
@@ -86,7 +86,7 @@
           "status": "fail",
           "summary": "TLS is not enforced for data in transit",
           "source": "platform_config",
-          "observed_at": "2026-06-16T03:22:48.141754399Z",
+          "observed_at": "2026-06-18T12:46:50.345748706Z",
           "evidence": {
             "tls_enforced": false,
             "tls_mode": "disable"
@@ -102,7 +102,7 @@
           "status": "pass",
           "summary": "an active policy bundle signing key is present",
           "source": "policy_signing_keys",
-          "observed_at": "2026-06-16T03:22:48.141754399Z",
+          "observed_at": "2026-06-18T12:46:50.345748706Z",
           "evidence": {
             "has_active_signing_key": true
           }
@@ -117,10 +117,10 @@
           "status": "pass",
           "summary": "append-only audit trail has recorded activity",
           "source": "audit_log",
-          "observed_at": "2026-06-16T03:22:48.141754399Z",
+          "observed_at": "2026-06-18T12:46:50.345748706Z",
           "evidence": {
             "has_audit_activity": true,
-            "last_audit_at": "2026-06-16T02:52:39Z"
+            "last_audit_at": "2026-06-18T12:41:31Z"
           }
         },
         {
@@ -133,9 +133,9 @@
           "status": "pass",
           "summary": "active signing key is within the managed rotation window",
           "source": "policy_signing_keys",
-          "observed_at": "2026-06-16T03:22:48.141754399Z",
+          "observed_at": "2026-06-18T12:46:50.345748706Z",
           "evidence": {
-            "activated_at": "2026-06-16T02:52:39Z",
+            "activated_at": "2026-06-18T12:30:48Z",
             "has_active_signing_key": true,
             "key_age_days": 0,
             "max_age_days": 365
@@ -151,7 +151,7 @@
           "status": "fail",
           "summary": "no data-retention period is configured",
           "source": "tenant_settings",
-          "observed_at": "2026-06-16T03:22:48.141754399Z",
+          "observed_at": "2026-06-18T12:46:50.345748706Z",
           "evidence": {
             "retention_days": 0
           }
@@ -166,7 +166,7 @@
           "status": "pass",
           "summary": "tenant data is pinned to a declared residency region",
           "source": "tenant_record",
-          "observed_at": "2026-06-16T03:22:48.141754399Z",
+          "observed_at": "2026-06-18T12:46:50.345748706Z",
           "evidence": {
             "region": "us-east-1"
           }
@@ -191,7 +191,7 @@
           "status": "pass",
           "summary": "active policy graph enforces default-deny",
           "source": "policy_graph",
-          "observed_at": "2026-06-16T03:22:48.141754399Z",
+          "observed_at": "2026-06-18T12:46:50.345748706Z",
           "evidence": {
             "default_deny": true,
             "graph_version": 1,
@@ -208,7 +208,7 @@
           "status": "fail",
           "summary": "no identity provider is configured for federated access",
           "source": "idp_configs",
-          "observed_at": "2026-06-16T03:22:48.141754399Z",
+          "observed_at": "2026-06-18T12:46:50.345748706Z",
           "evidence": {
             "idp_configured": 0,
             "idp_enabled": 0
@@ -224,7 +224,7 @@
           "status": "fail",
           "summary": "no key-wrap master is configured; data-at-rest encryption is disabled",
           "source": "platform_config",
-          "observed_at": "2026-06-16T03:22:48.141754399Z",
+          "observed_at": "2026-06-18T12:46:50.345748706Z",
           "evidence": {
             "encryption_at_rest": false
           }
@@ -239,9 +239,9 @@
           "status": "pass",
           "summary": "active signing key is within the managed rotation window",
           "source": "policy_signing_keys",
-          "observed_at": "2026-06-16T03:22:48.141754399Z",
+          "observed_at": "2026-06-18T12:46:50.345748706Z",
           "evidence": {
-            "activated_at": "2026-06-16T02:52:39Z",
+            "activated_at": "2026-06-18T12:30:48Z",
             "has_active_signing_key": true,
             "key_age_days": 0,
             "max_age_days": 365
@@ -257,10 +257,10 @@
           "status": "pass",
           "summary": "append-only audit trail has recorded activity",
           "source": "audit_log",
-          "observed_at": "2026-06-16T03:22:48.141754399Z",
+          "observed_at": "2026-06-18T12:46:50.345748706Z",
           "evidence": {
             "has_audit_activity": true,
-            "last_audit_at": "2026-06-16T02:52:39Z"
+            "last_audit_at": "2026-06-18T12:41:31Z"
           }
         },
         {
@@ -273,7 +273,7 @@
           "status": "pass",
           "summary": "tenant data is pinned to a declared residency region",
           "source": "tenant_record",
-          "observed_at": "2026-06-16T03:22:48.141754399Z",
+          "observed_at": "2026-06-18T12:46:50.345748706Z",
           "evidence": {
             "region": "us-east-1"
           }

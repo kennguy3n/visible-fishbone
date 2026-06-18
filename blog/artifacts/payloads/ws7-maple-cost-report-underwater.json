@@ -1,32 +1,32 @@
 {
-  "generated_at": "2026-06-14T11:50:58.091704146Z",
+  "generated_at": "2026-06-18T12:46:49.6847624Z",
   "lines": [
     {
       "budget_utilization": 0,
-      "cost_usd": 105.2,
+      "cost_usd": 136.67,
       "hard_limit": 0,
       "meter": "bandwidth_proxied_bytes",
-      "monthly_cost_usd": 233.88,
+      "monthly_cost_usd": 233.85,
       "over_budget": false,
       "period": "monthly",
-      "projected_cost_usd": 233.88,
-      "projected_usage": 2598668572319,
-      "usage": 1168857555052
+      "projected_cost_usd": 233.85,
+      "projected_usage": 2598381032019,
+      "usage": 1518538870372
     },
     {
       "budget_utilization": 0,
-      "cost_usd": 15.29,
+      "cost_usd": 19.86,
       "hard_limit": 0,
       "meter": "clickhouse_rows_written",
       "monthly_cost_usd": 33.98,
       "over_budget": false,
       "period": "monthly",
       "projected_cost_usd": 33.98,
-      "projected_usage": 169912946,
-      "usage": 76425302
+      "projected_usage": 169894145,
+      "usage": 99289080
     },
     {
-      "budget_utilization": 1.4394,
+      "budget_utilization": 1.4392,
       "cost_usd": 0,
       "hard_limit": 5000,
       "meter": "llm_calls",
@@ -34,75 +34,75 @@
       "over_budget": true,
       "period": "monthly",
       "projected_cost_usd": 0,
-      "projected_usage": 7197,
-      "usage": 3237
+      "projected_usage": 7196,
+      "usage": 4205
     },
     {
-      "budget_utilization": 1.3593,
-      "cost_usd": 6.11,
+      "budget_utilization": 1.3592,
+      "cost_usd": 7.94,
       "hard_limit": 5000000,
       "meter": "llm_tokens_used",
       "monthly_cost_usd": 13.59,
       "over_budget": true,
       "period": "monthly",
       "projected_cost_usd": 13.59,
-      "projected_usage": 6796518,
-      "usage": 3057012
+      "projected_usage": 6795766,
+      "usage": 3971563
     },
     {
       "budget_utilization": 0,
-      "cost_usd": 1.27,
+      "cost_usd": 1.36,
       "hard_limit": 0,
       "meter": "malware_scans",
-      "monthly_cost_usd": 76.95,
+      "monthly_cost_usd": 76.41,
       "over_budget": false,
       "period": "daily",
-      "projected_cost_usd": 2.57,
-      "projected_usage": 2565,
-      "usage": 1266
+      "projected_cost_usd": 2.55,
+      "projected_usage": 2547,
+      "usage": 1356
     },
     {
-      "budget_utilization": 1.341,
-      "cost_usd": 0.17,
+      "budget_utilization": 1.3321,
+      "cost_usd": 0.18,
       "hard_limit": 25000000,
       "meter": "policy_evaluations",
-      "monthly_cost_usd": 10.06,
+      "monthly_cost_usd": 9.99,
       "over_budget": true,
       "period": "daily",
-      "projected_cost_usd": 0.34,
-      "projected_usage": 33524153,
-      "usage": 16551810
+      "projected_cost_usd": 0.33,
+      "projected_usage": 33302969,
+      "usage": 17734480
     },
     {
       "budget_utilization": 0,
-      "cost_usd": 0.38,
+      "cost_usd": 0.49,
       "hard_limit": 0,
       "meter": "s3_bytes_archived",
       "monthly_cost_usd": 0.84,
       "over_budget": false,
       "period": "monthly",
       "projected_cost_usd": 0.84,
-      "projected_usage": 849564725568,
-      "usage": 382126508383
+      "projected_usage": 849470722006,
+      "usage": 496445399929
     },
     {
-      "budget_utilization": 0.1341,
-      "cost_usd": 3.31,
+      "budget_utilization": 0.1332,
+      "cost_usd": 3.55,
       "hard_limit": 500000,
       "meter": "url_cat_lookups",
-      "monthly_cost_usd": 201.15,
+      "monthly_cost_usd": 199.82,
       "over_budget": false,
       "period": "daily",
-      "projected_cost_usd": 6.71,
-      "projected_usage": 67050,
-      "usage": 33104
+      "projected_cost_usd": 6.66,
+      "projected_usage": 66607,
+      "usage": 35469
     }
   ],
-  "margin_pct": -0.1432,
-  "margin_usd": -71.45,
+  "margin_pct": -0.1392,
+  "margin_usd": -69.48,
   "monthly_revenue_usd": 499,
-  "projected_monthly_cost_usd": 570.45,
+  "projected_monthly_cost_usd": 568.48,
   "tenant_id": "cef9c934-507c-4adc-985b-48f3cbe274b0",
   "tier": "professional",
-  "total_cost_usd": 131.73
+  "total_cost_usd": 170.05
 }

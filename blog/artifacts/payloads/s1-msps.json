@@ -2,13 +2,13 @@
   "items": [
     {
       "branding": {},
-      "created_at": "2026-06-14T11:40:50.983444Z",
+      "created_at": "2026-06-18T12:30:48.117784Z",
       "id": "b47fb518-f336-4449-82b0-bd33a1f36833",
       "name": "Northwind Managed Security",
       "settings": {},
       "slug": "northwind-msp",
       "status": "active",
-      "updated_at": "2026-06-14T11:40:50.983444Z"
+      "updated_at": "2026-06-18T12:30:48.117784Z"
     }
   ]
 }

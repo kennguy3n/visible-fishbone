@@ -2,10 +2,10 @@
   "items": [
     {
       "action": "redact",
-      "created_at": "2026-06-14T11:40:51.972561Z",
+      "created_at": "2026-06-18T12:30:49.06742Z",
       "description": "Singapore PDPA: NRIC/FIN (check-letter validated), phone, email.",
       "enabled": true,
-      "id": "b029447a-7d1b-4af5-bb08-8a2c92f54e98",
+      "id": "7c1e90c7-576e-452d-8ffd-ea8c20c68252",
       "name": "PDPA — Singapore PII",
       "rules": [
         {
@@ -25,7 +25,7 @@
         }
       ],
       "tenant_id": "0c8d2d9d-896d-45b1-8001-6a6776f832b9",
-      "updated_at": "2026-06-14T11:40:51.972561Z"
+      "updated_at": "2026-06-18T12:30:49.06742Z"
     }
   ],
   "next_cursor": ""

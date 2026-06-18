@@ -1,6 +1,6 @@
 // Package ai implements the AI assistant service for ShieldNet
 // Gateway. It follows the "AI proposes, deterministic systems
-// enforce" invariant from PROPOSAL.md §8.1: every AI-generated
+// enforce" invariant from ARCHITECTURE.md §3.5: every AI-generated
 // policy suggestion MUST compile through the deterministic policy
 // compiler before it can be queued, and every output is flagged
 // with ai_generated: true.

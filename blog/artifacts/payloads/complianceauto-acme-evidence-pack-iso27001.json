@@ -1,7 +1,7 @@
 {
   "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
   "framework": "ISO_27001",
-  "generated_at": "2026-06-16T03:22:48.141754Z",
+  "generated_at": "2026-06-18T12:46:50.345748Z",
   "summary": {
     "total": 6,
     "pass": 4,
@@ -19,7 +19,7 @@
       "status": "fail",
       "summary": "no identity provider is configured for federated access",
       "source": "idp_configs",
-      "observed_at": "2026-06-16T03:22:48.141754Z",
+      "observed_at": "2026-06-18T12:46:50.345748Z",
       "evidence": {
         "idp_enabled": 0,
         "idp_configured": 0
@@ -35,7 +35,7 @@
       "status": "pass",
       "summary": "tenant data is pinned to a declared residency region",
       "source": "tenant_record",
-      "observed_at": "2026-06-16T03:22:48.141754Z",
+      "observed_at": "2026-06-18T12:46:50.345748Z",
       "evidence": {
         "region": "us-east-1"
       }
@@ -50,9 +50,9 @@
       "status": "pass",
       "summary": "append-only audit trail has recorded activity",
       "source": "audit_log",
-      "observed_at": "2026-06-16T03:22:48.141754Z",
+      "observed_at": "2026-06-18T12:46:50.345748Z",
       "evidence": {
-        "last_audit_at": "2026-06-16T02:52:39Z",
+        "last_audit_at": "2026-06-18T12:41:31Z",
         "has_audit_activity": true
       }
     },
@@ -66,7 +66,7 @@
       "status": "pass",
       "summary": "active policy graph enforces default-deny",
       "source": "policy_graph",
-      "observed_at": "2026-06-16T03:22:48.141754Z",
+      "observed_at": "2026-06-18T12:46:50.345748Z",
       "evidence": {
         "default_deny": true,
         "graph_version": 1,
@@ -83,7 +83,7 @@
       "status": "fail",
       "summary": "no key-wrap master is configured; data-at-rest encryption is disabled",
       "source": "platform_config",
-      "observed_at": "2026-06-16T03:22:48.141754Z",
+      "observed_at": "2026-06-18T12:46:50.345748Z",
       "evidence": {
         "encryption_at_rest": false
       }
@@ -98,9 +98,9 @@
       "status": "pass",
       "summary": "active signing key is within the managed rotation window",
       "source": "policy_signing_keys",
-      "observed_at": "2026-06-16T03:22:48.141754Z",
+      "observed_at": "2026-06-18T12:46:50.345748Z",
       "evidence": {
-        "activated_at": "2026-06-16T02:52:39Z",
+        "activated_at": "2026-06-18T12:30:48Z",
         "key_age_days": 0,
         "max_age_days": 365,
         "has_active_signing_key": true

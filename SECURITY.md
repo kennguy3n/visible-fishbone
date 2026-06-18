@@ -3,11 +3,12 @@
 ShieldNet Gateway (SNG) is a security product. We take vulnerability
 reports seriously and prioritise them ahead of other work.
 
-## Supported versions
+## Supported surface
 
-We accept and triage vulnerability reports against the current
-release branch (the most recent tagged release on `main`). Older
-preview tags and unreleased pre-`v0.x` commits are not supported.
+We accept and triage vulnerability reports against `main` — the
+shipping state of the product. Build the affected binary from the
+latest `main` (or report the git SHA you built from) so we triage
+against the same code you ran.
 
 The product surface this policy covers, for code that lives in
 *this* repository:
@@ -74,7 +75,7 @@ We aim to:
   high-severity issues, sooner for actively exploited ones.
 
 We will coordinate disclosure with you. Public advisories (CVE,
-GitHub Security Advisory, changelog entry) credit the reporter
+GitHub Security Advisory, release notes) credit the reporter
 unless you ask to remain anonymous.
 
 ## Out of scope
@@ -177,6 +178,28 @@ pipeline does this) so the exclusion is in effect.
 > without that gateway in place leaves operators with no console auth
 > path, so the gateway must be configured **before** rolling out this
 > build. See `docs/deploy.md` (“Operator authentication in production”).
+
+### Upgrading an existing production deployment
+
+A deployment that previously authenticated operators with an
+HMAC-signed `AUTH_JWT_SECRET` must migrate before it can run a
+production (`-tags production`) build, because that build refuses to
+verify HMAC tokens and refuses to boot with `AUTH_JWT_SECRET` set:
+
+1. **Terminate operator identity at the OIDC gateway first.** Stand up
+   the gateway in front of the control plane and confirm it translates
+   an authenticated OIDC session into a credential the control plane
+   accepts (a provisioned `X-SNG-API-Key` or a trusted,
+   gateway-asserted header). Verify operators can reach the console
+   through it while the old build is still running.
+2. **Unset `AUTH_JWT_SECRET`.** Remove it from the production
+   environment/secret store. Config validation hard-fails if it is
+   still set when the new build starts, so this must happen before the
+   rollout.
+3. **Roll out the production build.** Deploy the `-tags production`
+   artifact (the release pipeline builds this by default). The HMAC
+   verification path is now compiled out and operator auth flows
+   entirely through the gateway.
 
 ## Defense-in-depth for tenant isolation
 

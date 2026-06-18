@@ -119,7 +119,7 @@ stay reproducible across reseeds (`blog/harness/seed`, idempotent).
 
 | Tenant | Country | Industry | Tier | Compliance regime | Margin % |
 | --- | --- | --- | --- | --- | ---: |
-| Globex Health Systems | US | healthcare / HIPAA | enterprise | us-baseline | +66.8 |
+| Globex Health Systems | US | healthcare / HIPAA | enterprise | us-baseline | +66.9 |
 | Britannia Robotics | GB | technology | enterprise | uk-dpa | +62.5 |
 | Lumière Légal | FR | legal | professional | eu-gdpr | +55.5 |
 | Outback Retail Co | AU | retail | professional | au-privacy | +54.1 |
@@ -127,13 +127,13 @@ stay reproducible across reseeds (`blog/harness/seed`, idempotent).
 | Acme Retail Group | US | retail / PCI | enterprise | us-baseline | +47.2 |
 | Umbrella Logistics | SG | logistics | starter | (default) | +42.6 |
 | Initech Financial | DE | finance | professional | eu-gdpr | +15.2 |
-| Maple Health Network | CA | healthcare | professional | ca-pipeda | **−14.3** |
+| Maple Health Network | CA | healthcare | professional | ca-pipeda | **−13.9** |
 
 Acme is the richest tenant and the one most posts walk through; Umbrella is the
 deliberately-sparse one we use for honest empty states; **Maple is deliberately
 underwater** — a professional-tier tenant consuming enterprise-scale resources,
 the honest upsell signal the margin autopilot (Post 8) is built to surface. The
-fleet runs at **≈50.7% blended margin** ([`s7-admin-cost-report.json`](../artifacts/payloads/s7-admin-cost-report.json)).
+fleet runs at **≈50.9% blended margin** ([`s7-admin-cost-report.json`](../artifacts/payloads/s7-admin-cost-report.json)).
 
 ## The personas
 

@@ -5,7 +5,7 @@
 > series believable. The decision: *how do you build a product whose claims you
 > can actually back, and keep backing as the code changes?*
 
-Every preceding post made a claim with a number attached — 5.13× throughput lift,
+Every preceding post made a claim with a number attached — 4.77× throughput lift,
 3,696× memory saving, 100% / 0% on curated corpora, 90.1% / 9.6% on wild malware,
 10× fewer tenant-visits. The decision that makes those numbers worth anything is
 the last one: **build a culture where every claim traces to a reproducible

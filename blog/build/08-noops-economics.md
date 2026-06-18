@@ -50,7 +50,7 @@ each **off by default and guardrailed**:
   (raise ClickHouse batch to 13,250, AI pool concurrency to 7, Postgres pool/replica
   to 5).
 - **Margin autopilot** surfaces underwater tenants — like the deliberately
-  loss-making Maple Health (−14.3%) — as an upsell signal rather than a silent
+  loss-making Maple Health (−13.9%) — as an upsell signal rather than a silent
   loss.
 
 The live gauges are real: `sng_capacity_fleet_tenants 10` (the nine customer

@@ -1,7 +1,7 @@
 {
   "items": [
     {
-      "id": "05273694-1ead-4120-af2b-0a6b49edd4ca",
+      "id": "d3c0d32d-e7dc-40ee-bba2-e007a2bc65dd",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
       "target_key": "zoom",
       "target_name": "Zoom",
@@ -11,12 +11,12 @@
       "latency_p95_ms": 3100,
       "sample_count": 12,
       "window_seconds": 300,
-      "window_start": "2026-06-16T03:22:35.571Z",
-      "window_end": "2026-06-16T03:22:46.571Z",
-      "created_at": "2026-06-16T03:22:47.61704Z"
+      "window_start": "2026-06-18T12:46:37.784Z",
+      "window_end": "2026-06-18T12:46:48.784Z",
+      "created_at": "2026-06-18T12:46:49.824838Z"
     },
     {
-      "id": "03c0c48f-0328-4642-8723-adfa9c96915d",
+      "id": "1deaece9-f029-43d6-9afb-577b7aac7e6d",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
       "target_key": "slack",
       "target_name": "Slack",
@@ -26,12 +26,12 @@
       "latency_p95_ms": 45,
       "sample_count": 12,
       "window_seconds": 300,
-      "window_start": "2026-06-16T03:22:35.571Z",
-      "window_end": "2026-06-16T03:22:46.571Z",
-      "created_at": "2026-06-16T03:22:47.611609Z"
+      "window_start": "2026-06-18T12:46:37.784Z",
+      "window_end": "2026-06-18T12:46:48.784Z",
+      "created_at": "2026-06-18T12:46:49.81903Z"
     },
     {
-      "id": "d67cd311-305f-41a1-9f05-e518781bb64a",
+      "id": "0dee4341-7cc5-46a7-a620-ca4e466cd094",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
       "target_key": "salesforce",
       "target_name": "Salesforce",
@@ -41,12 +41,12 @@
       "latency_p95_ms": 45,
       "sample_count": 12,
       "window_seconds": 300,
-      "window_start": "2026-06-16T03:22:35.571Z",
-      "window_end": "2026-06-16T03:22:46.571Z",
-      "created_at": "2026-06-16T03:22:47.606145Z"
+      "window_start": "2026-06-18T12:46:37.784Z",
+      "window_end": "2026-06-18T12:46:48.784Z",
+      "created_at": "2026-06-18T12:46:49.814204Z"
     },
     {
-      "id": "2dd1a15d-2a3f-45df-8f79-eb0347554818",
+      "id": "e00a8701-7ea6-46e5-8d07-7856b514122f",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
       "target_key": "m365",
       "target_name": "Microsoft 365",
@@ -56,12 +56,12 @@
       "latency_p95_ms": 45,
       "sample_count": 12,
       "window_seconds": 300,
-      "window_start": "2026-06-16T03:22:35.571Z",
-      "window_end": "2026-06-16T03:22:46.571Z",
-      "created_at": "2026-06-16T03:22:47.600134Z"
+      "window_start": "2026-06-18T12:46:37.784Z",
+      "window_end": "2026-06-18T12:46:48.784Z",
+      "created_at": "2026-06-18T12:46:49.80944Z"
     },
     {
-      "id": "7aff7f48-b4a0-4d03-b33f-70490b2a8601",
+      "id": "ebc43758-69f1-44f4-ac29-cb8fc13bc3ca",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
       "target_key": "google_workspace",
       "target_name": "Google Workspace",
@@ -71,12 +71,12 @@
       "latency_p95_ms": 45,
       "sample_count": 12,
       "window_seconds": 300,
-      "window_start": "2026-06-16T03:22:35.571Z",
-      "window_end": "2026-06-16T03:22:46.571Z",
-      "created_at": "2026-06-16T03:22:47.593951Z"
+      "window_start": "2026-06-18T12:46:37.784Z",
+      "window_end": "2026-06-18T12:46:48.784Z",
+      "created_at": "2026-06-18T12:46:49.804702Z"
     },
     {
-      "id": "5c09b769-986b-4e3f-9874-11cb1a0f8ea4",
+      "id": "3555e01d-0cdb-4d2a-bbf1-2b7377d2230b",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
       "target_key": "github",
       "target_name": "GitHub",
@@ -86,9 +86,9 @@
       "latency_p95_ms": 45,
       "sample_count": 12,
       "window_seconds": 300,
-      "window_start": "2026-06-16T03:22:35.571Z",
-      "window_end": "2026-06-16T03:22:46.571Z",
-      "created_at": "2026-06-16T03:22:47.584504Z"
+      "window_start": "2026-06-18T12:46:37.784Z",
+      "window_end": "2026-06-18T12:46:48.784Z",
+      "created_at": "2026-06-18T12:46:49.797081Z"
     }
   ]
 }

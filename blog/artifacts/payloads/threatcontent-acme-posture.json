@@ -1,20 +1,20 @@
 {
   "enabled": true,
-  "generated_at": "2026-06-16T03:22:48.304270416Z",
+  "generated_at": "2026-06-18T12:46:50.631443427Z",
   "bundle": {
-    "serial": 1781580155,
+    "serial": 1781786719,
     "schema_version": 1,
-    "generated_at": "2026-06-16T03:22:35.651577000Z",
+    "generated_at": "2026-06-18T12:45:19.981504000Z",
     "key_id": "sng-managed-threat-content",
     "algorithm": "ed25519",
-    "indicator_count": 77056,
-    "size_bytes": 26666015,
-    "digest": "e55319ce6dd57611abc2dba3cb5b952a379f2aa0d8f6c49094ba37385b076f0b",
+    "indicator_count": 76432,
+    "size_bytes": 26145119,
+    "digest": "ee79836a0b22d942952ad1c25800f5699d2121114ad8b8cb8ca47f89b74e6361",
     "counts_by_type": {
-      "domain": 580,
-      "hash": 767,
+      "domain": 570,
+      "hash": 802,
       "ip": 5,
-      "url": 75704
+      "url": 75055
     }
   },
   "sources": [
@@ -25,8 +25,8 @@
       "weight": 0.9,
       "enabled": true,
       "indicator_count": 5,
-      "last_success_at": "2026-06-16T03:22:35.651577000Z",
-      "last_attempt_at": "2026-06-16T03:22:35.651577000Z",
+      "last_success_at": "2026-06-18T12:45:57.361905000Z",
+      "last_attempt_at": "2026-06-18T12:45:57.361905000Z",
       "consecutive_failures": 0,
       "stale": false
     },
@@ -36,9 +36,9 @@
       "kind": "hash",
       "weight": 0.8,
       "enabled": true,
-      "indicator_count": 767,
-      "last_success_at": "2026-06-16T03:22:35.651577000Z",
-      "last_attempt_at": "2026-06-16T03:22:35.651577000Z",
+      "indicator_count": 802,
+      "last_success_at": "2026-06-18T12:45:57.361905000Z",
+      "last_attempt_at": "2026-06-18T12:45:57.361905000Z",
       "consecutive_failures": 0,
       "stale": false
     },
@@ -48,9 +48,9 @@
       "kind": "url",
       "weight": 0.85,
       "enabled": true,
-      "indicator_count": 75404,
-      "last_success_at": "2026-06-16T03:22:35.651577000Z",
-      "last_attempt_at": "2026-06-16T03:22:35.651577000Z",
+      "indicator_count": 74755,
+      "last_success_at": "2026-06-18T12:45:57.361905000Z",
+      "last_attempt_at": "2026-06-18T12:45:57.361905000Z",
       "consecutive_failures": 0,
       "stale": false
     },
@@ -60,9 +60,9 @@
       "kind": "domain",
       "weight": 0.8,
       "enabled": true,
-      "indicator_count": 580,
-      "last_success_at": "2026-06-16T03:22:35.651577000Z",
-      "last_attempt_at": "2026-06-16T03:22:35.651577000Z",
+      "indicator_count": 570,
+      "last_success_at": "2026-06-18T12:45:57.361905000Z",
+      "last_attempt_at": "2026-06-18T12:45:57.361905000Z",
       "consecutive_failures": 0,
       "stale": false
     },
@@ -73,8 +73,8 @@
       "weight": 0.7,
       "enabled": true,
       "indicator_count": 300,
-      "last_success_at": "2026-06-16T03:22:35.651577000Z",
-      "last_attempt_at": "2026-06-16T03:22:35.651577000Z",
+      "last_success_at": "2026-06-18T12:45:57.361905000Z",
+      "last_attempt_at": "2026-06-18T12:45:57.361905000Z",
       "consecutive_failures": 0,
       "stale": false
     }

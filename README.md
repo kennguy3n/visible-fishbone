@@ -60,7 +60,6 @@ plane, policy model, and telemetry fabric.
 | **Enhanced AI** — alert correlation, NL policy query, posture reports, threat-intel enrichment, guardrails | Implemented | Control plane |
 | **Operational automation** — policy-review scheduler, certificate monitor, capacity planning, bulk device ops, ops-health snapshots, automation audit report | Implemented | Control plane |
 | **Config-as-code** — Terraform-style tenant config export / import + drift detection | Implemented | Control plane |
-| **Hardware appliance SKUs (TPM-rooted)** | Planned | Branch edge |
 
 The SNG control plane in this repo (`cmd/sng-control`, `internal/`,
 `migrations/`, `api/openapi.yaml`) is the Go service that compiles
@@ -234,37 +233,21 @@ capture, posture, and tunnel primitives.
 | `aarch64-apple-darwin` | Apple Silicon macOS |
 | `x86_64-pc-windows-msvc` | Windows 10/11 endpoints |
 
-## Roadmap
+## Hardware packaging
 
-The current code covers the full enforcement plane, the unified
-operations layer (Phase 3), data-protection expansion (Phase 4),
-and advanced automation (Phase 5). See [`PROGRESS.md`](./PROGRESS.md)
-for the per-task audit trail. Shipped and remaining roadmap:
+The edge runs today as a virtual appliance — the same `sng-edge`
+image on any hypervisor or commodity x86 server (see
+[`docs/commodity-hardware.md`](./docs/commodity-hardware.md) for the
+sizing the throughput SKUs are measured on). Purpose-built,
+TPM-rooted branch appliances reuse that identical image and its
+dual-bank install path, with the TPM as the root of device
+identity; they are the one enforcement form not yet packaged as a
+shipping SKU.
 
-- **Data protection expansion (Phase 4) — shipped.** CASB discovery
-  + SaaS API connectors (M365, Google Workspace, Slack, Salesforce)
-  with SaaS posture assessment; DLP for web + SaaS with regex
-  (PII/PCI/PHI), MIP label awareness, and content fingerprinting;
-  unified browser protection policy engine; data-classification
-  taxonomy; Terraform-style config-as-code + drift detection.
-- **Advanced automation (Phase 5) — shipped.** Compliance reporting;
-  guided remediation playbooks (approval-gated, 7 step executors);
-  AI policy-tightening deltas that compile through the deterministic
-  verifier before they can be applied; autonomous troubleshooting
-  assistant; enhanced AI (alert correlation, NL policy query,
-  posture reports, threat-intel enrichment, guardrails); operational
-  automation (policy-review scheduler, certificate monitor, capacity
-  planning, bulk device ops, ops-health snapshots, automation audit
-  report).
-- **Hardware packaging (Phase 6) — planned.** Small / medium / large
-  branch profiles on vetted OEM platforms; same `sng-edge` image as
-  the VM, with the TPM as the root of device identity and the same
-  dual-bank install path.
-
-Operator-driven roadmap items should be filed as a GitHub issue
-labelled `roadmap`. Include the use case, the workaround you are
-using today, and any constraints (network architecture, hypervisor /
-cloud, identity provider, MSP context).
+Operator-driven requests should be filed as a GitHub issue labelled
+`roadmap`. Include the use case, the workaround you are using today,
+and any constraints (network architecture, hypervisor / cloud,
+identity provider, MSP context).
 
 ## Related Repositories
 
@@ -282,13 +265,12 @@ cloud, identity provider, MSP context).
 
 | Document | Purpose |
 |---|---|
-| [`PROPOSAL.md`](./PROPOSAL.md) | Product design proposal — competitive baseline, SME constraints, capability scope, reference architecture, AI / data / security model, commercial model, risk register |
 | [`ARCHITECTURE.md`](./ARCHITECTURE.md) | System architecture — topology diagrams, control plane services, edge VM internals, endpoint client internals, telemetry pipeline, data tiering, security model, SN360 integration points, wire protocol |
+| [`CAPABILITIES.md`](./CAPABILITIES.md) | Capability-by-capability reference — every enforcement, control-plane, data-protection, AI, and operations surface the platform ships today, with the code paths and evidence that back it |
 | [`docs/TRAFFIC_CLASSIFICATION.md`](./docs/TRAFFIC_CLASSIFICATION.md) | Traffic classification and steering framework — six traffic classes, per-deployment-mode steering tables, app registry overrides, byte-deterministic bundle layout |
 | [`docs/deploy.md`](./docs/deploy.md) | Control-plane deployment runbook — PostgreSQL role hierarchy, RLS GUC contract, migration runner privileges, policy signing-key modes, API-key cap |
-| [`SECURITY.md`](./SECURITY.md) | Security policy — supported versions, reporting process, response SLAs, scope, crypto / signing posture |
+| [`SECURITY.md`](./SECURITY.md) | Security policy — reporting process, response SLAs, scope, crypto / signing posture |
 | Per-crate `README.md` | Each library / binary crate carries its own README under [`crates/`](./crates) covering module surface, wire-format compatibility, and local verification commands |
-| [`PROGRESS.md`](./PROGRESS.md) | Phase-by-phase task tracker with per-task audit trail |
 
 ## Control Plane Service Layout
 

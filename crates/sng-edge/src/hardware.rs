@@ -1,11 +1,11 @@
 // Copyright 2026 ShieldNet Gateway contributors.
 // SPDX-License-Identifier: LicenseRef-Proprietary
 
-//! Hardware-readiness abstraction (PROPOSAL.md §10).
+//! Hardware-readiness abstraction (ARCHITECTURE.md §4).
 //!
-//! The shipped edge is a software appliance: enforcement is nftables or
+//! The edge runs as a software appliance: enforcement is nftables or
 //! eBPF/XDP ([`sng_fw::DataPathBackend`]), and there is no hardware root
-//! of trust beyond the host OS. PROPOSAL.md §10 plans a future line of
+//! of trust beyond the host OS. This abstraction is the seam for
 //! TPM-rooted appliance SKUs with SmartNIC / crypto offload, where the
 //! data-path backend attests its rule program against a measured boot
 //! chain before the supervisor trusts it.

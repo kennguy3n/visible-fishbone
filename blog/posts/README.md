@@ -74,9 +74,9 @@ engineering decision with the business call behind it and how the incumbents
   classifier, two adversarial corpora, three wild corpora, and two
   false-positive load corpora), real crate APIs, suite verdict PASS.
 - **Edge throughput:** [`../artifacts/multiqueue-micro.json`](../artifacts/multiqueue-micro.json)
-  (5.569 → 28.567 Gbps, 5.13×) and
+  (5.718 → 27.264 Gbps, 4.77×) and
   [`../artifacts/multi-queue-branch-large.json`](../artifacts/multi-queue-branch-large.json)
-  (5.063 → 21.564 Gbps, 4.26×) — single-stream floor vs multi-queue ceiling.
+  (4.461 → 20.588 Gbps, 4.61×) — single-stream floor vs multi-queue ceiling.
 - **Scale economics:** [`../artifacts/capacity-plan-5000/report.md`](../artifacts/capacity-plan-5000/report.md)
   — 5,000-tenant capacity plan: dormancy dividend 10×, shared AI memory 3,696×,
   sized recommendations for ClickHouse/AI/NATS/Postgres.

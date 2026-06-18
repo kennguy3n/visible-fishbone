@@ -19,7 +19,7 @@ compares. This post answers all three with measured numbers.
 
 The metering engine computes real per-tenant cost against revenue. On the seeded
 fleet ([`s7-admin-cost-report.json`](../../artifacts/payloads/s7-admin-cost-report.json)):
-**$8,191/mo revenue, ≈$4,039/mo cost, ≈$4,152 margin (~50.7%).**
+**$8,191/mo revenue, ≈$4,025/mo cost, ≈$4,166 margin (~50.9%).**
 
 ![Fleet metering](../../artifacts/screenshots/new-metering-fleet-top.png)
 
@@ -27,7 +27,7 @@ But the number Tom should trust is the *spread*, not the blend:
 
 ![Per-tenant margin](../../artifacts/screenshots/new-metering-fleet-table.png)
 
-Per-tenant margin runs from **+66.8% (Globex)** down to **−14.3% (Maple
+Per-tenant margin runs from **+66.9% (Globex)** down to **−13.9% (Maple
 Health)** — Maple is a professional-tier tenant consuming enterprise-scale
 resources, deliberately seeded so the report has a *real loss-maker* to surface
 rather than an all-green fiction. That's the honest signal a CFO needs: the

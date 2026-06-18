@@ -15,7 +15,7 @@ usually managed by an MSP alongside dozens or hundreds of siblings.** The fleet
 the seed harness builds (`blog/harness/seed`) is deliberately shaped like that
 reality: nine customer tenants across seven countries, eight industries, three
 service tiers, and five compliance regimes, under one MSP — plus one deliberate
-loss-maker (Maple Health, **−14.3%** margin) so the money story is not an
+loss-maker (Maple Health, **−13.9%** margin) so the money story is not an
 all-green fiction.
 
 That fleet shape forces a specific cost model. At 5,000 tenants the activity mix
