@@ -511,7 +511,10 @@ export function RichMessage({
   values,
 }: {
   id: RichLaneB2Key;
-  values?: ComponentProps<typeof FormattedMessage>["values"];
+  // `b` is reserved for the injected bold renderer (`richBold`), so it's typed
+  // `never` to make passing a `b` value a compile error rather than letting the
+  // spread below silently drop it.
+  values?: ComponentProps<typeof FormattedMessage>["values"] & { b?: never };
 }) {
   return <FormattedMessage id={id} values={{ ...values, ...richBold }} />;
 }

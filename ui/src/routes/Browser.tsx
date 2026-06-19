@@ -145,7 +145,12 @@ function BrowserInner({ tenantId }: { tenantId: string }) {
           onConfirm={() =>
             del.mutate(
               { tenantId, id: pendingDelete.id },
-              { onSuccess: () => setPendingDelete(null) },
+              {
+                onSuccess: () => {
+                  del.reset();
+                  setPendingDelete(null);
+                },
+              },
             )
           }
         />
