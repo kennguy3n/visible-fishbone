@@ -67,7 +67,7 @@ export function Tenants() {
             {t.name}
           </button>
           {t.id === selectedTenantId && (
-            <Badge tone="ok">{fm(M.activeTenantTag)}</Badge>
+            <Badge tone="info">{fm(M.activeTenantTag)}</Badge>
           )}
         </span>
       ),

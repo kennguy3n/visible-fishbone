@@ -110,7 +110,7 @@ export const M = defineMessages({
   },
   activeTenantTag: {
     id: "laneB6.tenants.activeTag",
-    defaultMessage: "Active",
+    defaultMessage: "You’re here",
   },
   // create tenant modal
   createTenantTitle: {
