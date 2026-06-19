@@ -10,6 +10,7 @@ import { TenantProvider, useTenant } from "@/lib/tenant-context";
 function TenantSwitcher() {
   const { tenants, selectedTenantId, setSelectedTenantId, isLoading } =
     useTenant();
+  const intl = useIntl();
   if (isLoading)
     return (
       <span className="muted">
@@ -28,6 +29,7 @@ function TenantSwitcher() {
         <FormattedMessage id="topbar.tenant" />
       </span>
       <select
+        aria-label={intl.formatMessage({ id: "topbar.tenant" })}
         value={selectedTenantId ?? ""}
         onChange={(e) => setSelectedTenantId(e.target.value)}
       >

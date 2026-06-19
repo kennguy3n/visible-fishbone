@@ -1,58 +1,12 @@
 /* =========================================================================
-   Lane B4 — Identity, governance & audit — SCOPED overrides
+   Lane B4 — Identity, governance & audit — lane-local utilities
    =========================================================================
-   Every rule here compensates for a KNOWN WS0-level WCAG AA contrast gap that
-   the shared foundation will fix in a coordinated follow-up (see the "WS0
-   follow-up" section of the lane PR). Nothing here edits the frozen layer:
-   the rules are scoped under `.lane-b4`, reference design tokens only (no
-   hard-coded colours), and resolve automatically for light + dark. When WS0
-   ships the token-level fix, this whole file can be deleted.
-   ------------------------------------------------------------------------- */
-
-/* 1. Faint secondary text — table headers, `.muted`, `.kv dt`, `.stat__label`
-      and empty-state illustrations all resolve to `--text-faint`, which dips
-      below 4.5:1 on our surfaces in both themes. Lift lane-local faint text to
-      the next step up (`--text-dim`), which clears AA on every surface we use. */
-.lane-b4 {
-  --text-faint: var(--text-dim);
-}
-
-/* 2. Soft-tinted badges paint their hue at full saturation over a ~12% tint,
-      which lands under 4.5:1. Mixing each hue toward the theme foreground
-      (`--text` is near-black in light, near-white in dark) keeps the semantic
-      colour recognisable while lifting contrast in BOTH themes at once. */
-.lane-b4 .badge--ok {
-  color: color-mix(in srgb, var(--ok) 66%, var(--text));
-}
-.lane-b4 .badge--warn {
-  color: color-mix(in srgb, var(--warn) 60%, var(--text));
-}
-.lane-b4 .badge--danger {
-  color: color-mix(in srgb, var(--danger) 70%, var(--text));
-}
-.lane-b4 .badge--info {
-  color: color-mix(in srgb, var(--brand) 70%, var(--text));
-}
-
-/* 3. White text on `--brand` only reaches ~3.6:1 in dark. `--brand-strong` is
-      the darker brand step (white ≈ 5.5:1) and is already the button hover
-      colour, so primary actions stay on-brand. Light already clears AA, so the
-      swap is scoped to dark — including the no-JS `prefers-color-scheme`
-      fallback the foundation ships. */
-[data-theme="dark"] .lane-b4 .btn--primary {
-  background: var(--brand-strong);
-  border-color: var(--brand-strong);
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]):not([data-theme="dark"]) .lane-b4 .btn--primary {
-    background: var(--brand-strong);
-    border-color: var(--brand-strong);
-  }
-}
-
-/* -------------------------------------------------------------------------
-   Lane-local helpers (not contrast fixes) — small, token-only utilities used
-   by this lane's screens. They introduce no new colours or one-off styling.
+   The known WS0-level WCAG AA contrast gaps this lane originally compensated
+   for (faint secondary text via `--text-faint`, soft-tinted badge text, and
+   white-on-`--brand` primary buttons in dark) are now fixed at the shared WS0
+   foundation, so those scoped overrides have been removed. What remains are
+   small, token-only utilities used by this lane's screens; they are scoped
+   under `.lane-b4`, reference design tokens only, and introduce no new colours.
    ------------------------------------------------------------------------- */
 
 /* Visually-hidden text for accessible chart summaries and control labels.

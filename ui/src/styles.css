@@ -15,9 +15,17 @@
   --border-soft: #eef0f4;
   --text: #111827;
   --text-dim: #4b5563;
-  --text-faint: #6b7280;
+  --text-faint: #5b6573;
   --brand: #255fe5;
   --brand-strong: #1e4fc4;
+  /* Solid brand fill for surfaces that carry white text (primary buttons,
+     active segmented control). --brand-solid resolves per theme to a shade
+     that clears WCAG AA against --on-brand (white >= 5.46:1 in both themes);
+     --brand-solid-hover darkens one step so the resting->hover shift stays
+     visible. */
+  --brand-solid: var(--brand);
+  --brand-solid-hover: var(--brand-strong);
+  --on-brand: #ffffff;
   /* Brand RGB channels so translucent brand tints (focus ring, soft fills,
      glows, info accents) compose via rgba() and all track --brand. */
   --brand-rgb: 37, 95, 229;
@@ -111,9 +119,12 @@
   --border-soft: #1e2632;
   --text: #eef2f8;
   --text-dim: #9aa7bd;
-  --text-faint: #69748a;
+  --text-faint: #828ea4;
   --brand: #4d83f0;
   --brand-strong: #255fe5;
+  --brand-solid: var(--brand-strong);
+  --brand-solid-hover: color-mix(in srgb, var(--brand-strong) 85%, #000);
+  --on-brand: #ffffff;
   --brand-rgb: 77, 131, 240;
   --accent: #22d3ee;
   --ok: #34d399;
@@ -157,9 +168,12 @@
     --border-soft: #1e2632;
     --text: #eef2f8;
     --text-dim: #9aa7bd;
-    --text-faint: #69748a;
+    --text-faint: #828ea4;
     --brand: #4d83f0;
     --brand-strong: #255fe5;
+    --brand-solid: var(--brand-strong);
+    --brand-solid-hover: color-mix(in srgb, var(--brand-strong) 85%, #000);
+    --on-brand: #ffffff;
     --brand-rgb: 77, 131, 240;
     --accent: #22d3ee;
     --ok: #34d399;
@@ -266,10 +280,10 @@ a:hover {
   width: 28px;
   height: 28px;
   border-radius: 8px;
-  background: var(--brand-strong);
+  background: var(--brand-solid);
   display: grid;
   place-items: center;
-  color: #fff;
+  color: var(--on-brand);
   font-weight: 800;
 }
 .sidebar__brand small {
@@ -373,8 +387,8 @@ a:hover {
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  background: var(--brand-strong);
-  color: #fff;
+  background: var(--brand-solid);
+  color: var(--on-brand);
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0.3px;
@@ -647,17 +661,17 @@ table.data tbody tr:hover {
 }
 .badge--ok {
   background: var(--ok-soft);
-  color: var(--ok);
+  color: color-mix(in srgb, var(--ok) 66%, var(--text));
   border-color: var(--ok-border);
 }
 .badge--warn {
   background: var(--warn-soft);
-  color: var(--warn);
+  color: color-mix(in srgb, var(--warn) 60%, var(--text));
   border-color: var(--warn-border);
 }
 .badge--danger {
   background: var(--danger-soft);
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 70%, var(--text));
   border-color: var(--danger-border);
 }
 .badge--neutral {
@@ -667,7 +681,7 @@ table.data tbody tr:hover {
 }
 .badge--info {
   background: var(--brand-soft);
-  color: var(--brand);
+  color: color-mix(in srgb, var(--brand) 70%, var(--text));
   border-color: rgba(var(--brand-rgb), 0.3);
 }
 
@@ -702,23 +716,23 @@ table.data tbody tr:hover {
   cursor: not-allowed;
 }
 .btn--primary {
-  background: var(--brand);
-  border-color: var(--brand);
-  color: #fff;
+  background: var(--brand-solid);
+  border-color: var(--brand-solid);
+  color: var(--on-brand);
   border-radius: var(--radius-sm);
   box-shadow: 0 1px 2px rgba(17, 24, 39, 0.12),
     inset 0 1px 0 rgba(255, 255, 255, 0.14);
 }
 .btn--primary:hover {
-  background: var(--brand-strong);
-  border-color: var(--brand-strong);
+  background: var(--brand-solid-hover);
+  border-color: var(--brand-solid-hover);
   box-shadow: 0 3px 12px rgba(var(--brand-rgb), 0.32),
     inset 0 1px 0 rgba(255, 255, 255, 0.16);
 }
 .btn--danger {
   background: transparent;
   border-color: rgba(248, 113, 113, 0.4);
-  color: var(--danger);
+  color: color-mix(in srgb, var(--danger) 78%, var(--text));
 }
 .btn--danger:hover {
   background: rgba(248, 113, 113, 0.12);
