@@ -296,7 +296,7 @@ function DashboardInner() {
             </div>
           </div>
           <Link to="/onboarding" className="btn btn--primary">
-            <FormattedMessage id="b1.dash.banner.cta" /> →
+            <FormattedMessage id="b1.dash.banner.cta" />
           </Link>
         </div>
       )}
@@ -629,7 +629,7 @@ function DashboardInner() {
             <DataTable columns={alertColumns} rows={recentAlerts} rowKey={(a) => a.id} />
             <div style={{ marginTop: 12 }}>
               <Link to="/alerts" className="btn btn--sm">
-                <FormattedMessage id="b1.dash.alerts.viewAll" /> →
+                <FormattedMessage id="b1.dash.alerts.viewAll" />
               </Link>
             </div>
           </>
