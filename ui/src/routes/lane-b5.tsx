@@ -16,6 +16,13 @@ export function LanePage({ children }: { children: ReactNode }) {
  * (replaces the browser `confirm()`, which traps focus poorly and can't be
  * styled or translated). Built on the frozen Modal primitive, so it inherits
  * Escape-to-close, backdrop dismissal, and dialog semantics.
+ *
+ * While `busy` (the confirmed action is in flight) every dismissal path —
+ * Escape, backdrop, the header ✕, and Cancel — is suppressed. The frozen Modal
+ * routes Escape/backdrop/✕ through the single `onClose` prop, so guarding it
+ * here closes all of them at once. This keeps the dialog open until the
+ * mutation settles so its success/error feedback can't be lost; the busy state
+ * is transient and resolves on its own, so this isn't a keyboard trap.
  */
 export function ConfirmDialog({
   title,
@@ -41,10 +48,13 @@ export function ConfirmDialog({
   onConfirm: () => void;
   onClose: () => void;
 }) {
+  const requestClose = () => {
+    if (!busy) onClose();
+  };
   return (
     <Modal
       title={title}
-      onClose={onClose}
+      onClose={requestClose}
       footer={
         <>
           {/* For destructive dialogs, initial focus lands on the safe option
@@ -53,7 +63,7 @@ export function ConfirmDialog({
               dialogs focus the confirm button for fast keyboard completion. */}
           <button
             className="btn"
-            onClick={onClose}
+            onClick={requestClose}
             disabled={busy}
             autoFocus={tone === "danger"}
           >
