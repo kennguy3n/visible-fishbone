@@ -1,0 +1,161 @@
+/* =========================================================================
+   Lane B4 — Identity, governance & audit — SCOPED overrides
+   =========================================================================
+   Every rule here compensates for a KNOWN WS0-level WCAG AA contrast gap that
+   the shared foundation will fix in a coordinated follow-up (see the "WS0
+   follow-up" section of the lane PR). Nothing here edits the frozen layer:
+   the rules are scoped under `.lane-b4`, reference design tokens only (no
+   hard-coded colours), and resolve automatically for light + dark. When WS0
+   ships the token-level fix, this whole file can be deleted.
+   ------------------------------------------------------------------------- */
+
+/* 1. Faint secondary text — table headers, `.muted`, `.kv dt`, `.stat__label`
+      and empty-state illustrations all resolve to `--text-faint`, which dips
+      below 4.5:1 on our surfaces in both themes. Lift lane-local faint text to
+      the next step up (`--text-dim`), which clears AA on every surface we use. */
+.lane-b4 {
+  --text-faint: var(--text-dim);
+}
+
+/* 2. Soft-tinted badges paint their hue at full saturation over a ~12% tint,
+      which lands under 4.5:1. Mixing each hue toward the theme foreground
+      (`--text` is near-black in light, near-white in dark) keeps the semantic
+      colour recognisable while lifting contrast in BOTH themes at once. */
+.lane-b4 .badge--ok {
+  color: color-mix(in srgb, var(--ok) 66%, var(--text));
+}
+.lane-b4 .badge--warn {
+  color: color-mix(in srgb, var(--warn) 60%, var(--text));
+}
+.lane-b4 .badge--danger {
+  color: color-mix(in srgb, var(--danger) 70%, var(--text));
+}
+.lane-b4 .badge--info {
+  color: color-mix(in srgb, var(--brand) 70%, var(--text));
+}
+
+/* 3. White text on `--brand` only reaches ~3.6:1 in dark. `--brand-strong` is
+      the darker brand step (white ≈ 5.5:1) and is already the button hover
+      colour, so primary actions stay on-brand. Light already clears AA, so the
+      swap is scoped to dark — including the no-JS `prefers-color-scheme`
+      fallback the foundation ships. */
+[data-theme="dark"] .lane-b4 .btn--primary {
+  background: var(--brand-strong);
+  border-color: var(--brand-strong);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) .lane-b4 .btn--primary {
+    background: var(--brand-strong);
+    border-color: var(--brand-strong);
+  }
+}
+
+/* -------------------------------------------------------------------------
+   Lane-local helpers (not contrast fixes) — small, token-only utilities used
+   by this lane's screens. They introduce no new colours or one-off styling.
+   ------------------------------------------------------------------------- */
+
+/* Visually-hidden text for accessible chart summaries and control labels.
+   Standard clip pattern; remains in the accessibility tree for screen readers. */
+.lane-b4 .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* A field's helper/error line: small, dim, sits directly under the control.
+   `--err` flips it to the danger tone for announced validation messages. */
+.lane-b4 .field-help {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+.lane-b4 .field-help--error {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* Two-line cell: a plain-language primary label above the raw technical value,
+   so non-expert operators read meaning first and the exact identifier second. */
+.lane-b4 .cell-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.lane-b4 .cell-stack__sub {
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+/* Permission picker: a responsive two-column grid of real checkboxes inside a
+   fieldset. Replaces the CSS `column-count` layout (which can split a single
+   label across columns) with a grid that keeps each label intact. */
+.lane-b4 .perm-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px 16px;
+  margin: 8px 0 0;
+  padding: 0;
+  border: 0;
+}
+.lane-b4 .perm-grid legend {
+  padding: 0;
+  margin-bottom: 4px;
+  color: var(--text-dim);
+  font-size: 12px;
+  font-weight: 600;
+}
+.lane-b4 .perm-option {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+}
+.lane-b4 .perm-option input {
+  width: 16px;
+  height: 16px;
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+.lane-b4 .perm-option__label {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  line-height: 1.35;
+}
+.lane-b4 .perm-option__code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-dim);
+}
+
+/* Reveal-once secret callout: a guarded, attention-drawing block for a value
+   shown a single time (a freshly minted API key). Built from status tokens. */
+.lane-b4 .secret-reveal {
+  border: 1px solid var(--warn-border);
+  background: var(--warn-soft);
+  border-radius: var(--radius);
+  padding: 14px 16px;
+}
+.lane-b4 .secret-reveal__title {
+  font-weight: 700;
+  margin: 0 0 4px;
+}
+.lane-b4 .secret-reveal__warning {
+  color: color-mix(in srgb, var(--warn) 60%, var(--text));
+  font-size: 12.5px;
+  margin: 0 0 12px;
+}
+
+/* Inline guidance banner spacing tweak when used at the top of a card body. */
+.lane-b4 .lane-guidance {
+  margin-bottom: 16px;
+}

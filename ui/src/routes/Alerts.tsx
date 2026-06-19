@@ -41,20 +41,40 @@ import { HelpTooltip } from "@/components/HelpTooltip";
 import { RequireTenant } from "@/components/RequireTenant";
 import { useToast } from "@/components/Toast";
 import { formatRelative, titleCase } from "@/lib/format";
+import { LaneB4Screen, useT } from "./lane-b4-i18n";
+import { isForbidden, PermissionDenied } from "./lane-b4-ui";
+import type { LaneKey } from "./lane-b4-messages";
 
 export function Alerts() {
   return (
-    <RequireTenant>{(tenantId) => <AlertsInner tenantId={tenantId} />}</RequireTenant>
+    <LaneB4Screen>
+      <RequireTenant>{(tenantId) => <AlertsInner tenantId={tenantId} />}</RequireTenant>
+    </LaneB4Screen>
   );
 }
 
-const RECOMMENDED: Record<string, string> = {
-  critical: "Investigate now and consider auto-remediation — this deviates far from the learned baseline.",
-  warning: "Review the affected resource and acknowledge once you've triaged it.",
-  info: "Informational. No action is usually required, but you can resolve it to clear the queue.",
-};
+const SEVERITY_LABEL = new Map<string, LaneKey>([
+  ["all", "alerts.filter.all"],
+  ["info", "alerts.severity.info"],
+  ["warning", "alerts.severity.warning"],
+  ["critical", "alerts.severity.critical"],
+]);
+const STATE_LABEL = new Map<string, LaneKey>([
+  ["all", "alerts.filter.all"],
+  ["open", "alerts.state.open"],
+  ["acknowledged", "alerts.state.acknowledged"],
+  ["resolved", "alerts.state.resolved"],
+  ["suppressed", "alerts.state.suppressed"],
+]);
+
+function recKey(severity: string): LaneKey {
+  if (severity === AlertSeverity.critical) return "alerts.rec.critical";
+  if (severity === AlertSeverity.warning) return "alerts.rec.warning";
+  return "alerts.rec.info";
+}
 
 function AlertsInner({ tenantId }: { tenantId: string }) {
+  const t = useT();
   const qc = useQueryClient();
   const list = useListAlerts(tenantId, undefined);
   const correlations = useAiListCorrelations(tenantId, undefined, {
@@ -121,7 +141,7 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
             : old,
         );
       }
-      toast.error("Action failed", "The alert could not be updated.");
+      toast.error(t("alerts.toast.failTitle"), t("alerts.toast.failBody"));
     },
     onSettled: (
       _d: unknown,
@@ -136,15 +156,17 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
   const ack = useAcknowledgeAlert({
     mutation: {
       ...optimistic(AlertState.acknowledged),
-      onSuccess: () => toast.success("Acknowledged", "Alert marked as acknowledged."),
+      onSuccess: () => toast.success(t("alerts.toast.ackTitle"), t("alerts.toast.ackBody")),
     },
   });
   const resolve = useResolveAlert({
     mutation: {
       ...optimistic(AlertState.resolved),
-      onSuccess: () => toast.success("Resolved", "Alert marked as resolved."),
+      onSuccess: () => toast.success(t("alerts.toast.resolveTitle"), t("alerts.toast.resolveBody")),
     },
   });
+
+  if (isForbidden(list.error)) return <PermissionDenied />;
 
   const all = list.data?.items ?? [];
   const filtered = all.filter(
@@ -153,10 +175,8 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
       (state === "all" || a.state === state),
   );
 
-  // Group filtered alerts by AI-correlated incident. The list endpoint
-  // (useAiListCorrelations -> AiListCorrelations200) returns the correlations
-  // under `items` (each an AICorrelation with id + alert_ids); `clusters`
-  // belongs to the separate analyze endpoint's AICorrelationResult, not here.
+  // Group filtered alerts by AI-correlated incident. The list endpoint returns
+  // the correlations under `items` (each an AICorrelation with id + alert_ids).
   const clusters = correlations.data?.items ?? [];
   const groupedAlertIds = new Set<string>();
   for (const c of clusters) {
@@ -176,9 +196,18 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
     z: Math.abs(a.z_score),
     kind: a.kind,
   }));
+  const beyondThreshold = scatterData.filter((d) => Math.abs(d.y) >= 3).length;
+  const chartSummary = t("alerts.chart.summary", {
+    count: scatterData.length,
+    beyond: beyondThreshold,
+  });
 
   const severityOptions = ["all", ...Object.values(AlertSeverity)];
   const stateOptions = ["all", ...Object.values(AlertState)];
+  const sevLabel = (s: string) =>
+    SEVERITY_LABEL.has(s) ? t(SEVERITY_LABEL.get(s)!) : titleCase(s);
+  const stateLabel = (s: string) =>
+    STATE_LABEL.has(s) ? t(STATE_LABEL.get(s)!) : titleCase(s);
 
   const renderCard = (a: Alert) => (
     <div key={a.id} className={`alert-card alert-card--${a.severity}`}>
@@ -189,20 +218,23 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
         <span className="alert-card__when muted">{formatRelative(a.created_at)}</span>
       </div>
       <div className="alert-card__desc">
-        {a.summary || `Anomaly on ${a.dimension}.`}
+        {a.summary || t("alerts.card.fallbackSummary", { dimension: a.dimension })}
       </div>
       <div className="alert-card__meta">
         <span>
-          <span className="muted">Affected:</span> {a.dimension}
+          <span className="muted">{t("alerts.card.affected")}</span> {a.dimension}
         </span>
         <span className="mono">
-          {a.observed_value?.toFixed(1)} vs {a.baseline_mean?.toFixed(1)}±
-          {a.baseline_stddev?.toFixed(1)} (z {a.z_score?.toFixed(2)})
+          {t("alerts.card.metric", {
+            observed: a.observed_value?.toFixed(1) ?? "—",
+            baseline: a.baseline_mean?.toFixed(1) ?? "—",
+            stddev: a.baseline_stddev?.toFixed(1) ?? "—",
+            z: a.z_score?.toFixed(2) ?? "—",
+          })}
         </span>
       </div>
       <div className="alert-card__rec">
-        <span className="muted">Recommended:</span>{" "}
-        {RECOMMENDED[a.severity] ?? RECOMMENDED.info}
+        <span className="muted">{t("alerts.card.recommended")}</span> {t(recKey(a.severity))}
       </div>
       <div className="alert-card__actions">
         <button
@@ -210,28 +242,20 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
           disabled={a.state !== "open" || ack.isPending}
           onClick={() => ack.mutate({ tenantId, alertId: a.id })}
         >
-          Acknowledge
+          {t("alerts.action.acknowledge")}
         </button>
         <button
           className="btn btn--sm btn--primary"
           disabled={a.state === "resolved" || resolve.isPending}
           onClick={() => resolve.mutate({ tenantId, alertId: a.id })}
         >
-          Resolve
+          {t("alerts.action.resolve")}
         </button>
-        <Link
-          to="/troubleshoot"
-          className="btn btn--sm"
-          title="Open troubleshooting tools"
-        >
-          Investigate
+        <Link to="/troubleshoot" className="btn btn--sm" title={t("alerts.action.investigate.hint")}>
+          {t("alerts.action.investigate")}
         </Link>
-        <Link
-          to="/playbooks"
-          className="btn btn--sm"
-          title="Trigger an automated response playbook"
-        >
-          Auto-remediate
+        <Link to="/playbooks" className="btn btn--sm" title={t("alerts.action.remediate.hint")}>
+          {t("alerts.action.remediate")}
         </Link>
       </div>
     </div>
@@ -240,83 +264,85 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
   return (
     <>
       <PageHeader
-        title="Alerts"
-        subtitle="Baseline anomaly detections, grouped into incidents with recommended actions."
+        title={t("alerts.title")}
+        subtitle={t("alerts.subtitle")}
         actions={
-          <HelpTooltip title="How alerts work" align="right">
-            ShieldNet learns what's normal for your traffic, then flags
-            statistically significant deviations (z-score). Related anomalies
-            are grouped into a single incident by the AI correlation engine.
+          <HelpTooltip title={t("alerts.help.title")} align="right">
+            {t("alerts.help.body")}
           </HelpTooltip>
         }
       />
 
-      <Card title="Anomaly scatter — deviation (z-score) over time">
+      <Card title={t("alerts.chart.title")}>
         {scatterData.length === 0 ? (
           <EmptyState
             illustration={<EmptyIllustration kind="alert" />}
-            title="No anomalies recorded"
-            description="Deviation telemetry will plot here once anomalies are detected."
+            title={t("alerts.chart.empty.title")}
+            description={t("alerts.chart.empty.desc")}
           />
         ) : (
-          <div style={{ height: 260 }}>
-            <ResponsiveContainer width="100%" height="100%">
-              <ScatterChart margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
-                <CartesianGrid stroke={CHART.border} />
-                <XAxis
-                  type="number"
-                  dataKey="x"
-                  domain={["dataMin", "dataMax"]}
-                  tickFormatter={(v) => new Date(v).toLocaleDateString()}
-                  tick={{ fill: CHART.axis, fontSize: 11 }}
-                />
-                <YAxis
-                  type="number"
-                  dataKey="y"
-                  tick={{ fill: CHART.axis, fontSize: 11 }}
-                  label={{ value: "z-score", angle: -90, fill: CHART.axis, fontSize: 11 }}
-                />
-                <ZAxis type="number" dataKey="z" range={[40, 400]} />
-                <ReferenceLine y={3} stroke={CHART.danger} strokeDasharray="4 4" />
-                <ReferenceLine y={-3} stroke={CHART.danger} strokeDasharray="4 4" />
-                <Tooltip
-                  cursor={{ strokeDasharray: "3 3" }}
-                  contentStyle={CHART_TOOLTIP}
-                  labelFormatter={(v) => new Date(v).toLocaleString()}
-                />
-                <Scatter data={scatterData} fill={CHART.accent} fillOpacity={0.7} />
-              </ScatterChart>
-            </ResponsiveContainer>
+          <div style={{ height: 260 }} role="img" aria-label={chartSummary}>
+            <div aria-hidden="true" style={{ height: "100%" }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <ScatterChart margin={{ top: 10, right: 20, bottom: 10, left: 0 }}>
+                  <CartesianGrid stroke={CHART.border} />
+                  <XAxis
+                    type="number"
+                    dataKey="x"
+                    domain={["dataMin", "dataMax"]}
+                    tickFormatter={(v) => new Date(v).toLocaleDateString()}
+                    tick={{ fill: CHART.axis, fontSize: 11 }}
+                  />
+                  <YAxis
+                    type="number"
+                    dataKey="y"
+                    tick={{ fill: CHART.axis, fontSize: 11 }}
+                    label={{ value: t("alerts.chart.yLabel"), angle: -90, fill: CHART.axis, fontSize: 11 }}
+                  />
+                  <ZAxis type="number" dataKey="z" range={[40, 400]} />
+                  <ReferenceLine y={3} stroke={CHART.danger} strokeDasharray="4 4" />
+                  <ReferenceLine y={-3} stroke={CHART.danger} strokeDasharray="4 4" />
+                  <Tooltip
+                    cursor={{ strokeDasharray: "3 3" }}
+                    contentStyle={CHART_TOOLTIP}
+                    labelFormatter={(v) => new Date(v).toLocaleString()}
+                  />
+                  <Scatter data={scatterData} fill={CHART.accent} fillOpacity={0.7} />
+                </ScatterChart>
+              </ResponsiveContainer>
+            </div>
           </div>
         )}
       </Card>
 
       <div className="filter-bar" style={{ marginTop: 16 }}>
-        <div className="pill-tabs">
+        <div className="pill-tabs" role="group" aria-label={t("alerts.filter.severity")}>
           {severityOptions.map((s) => (
             <button
               key={s}
               className={severity === s ? "active" : ""}
+              aria-pressed={severity === s}
               onClick={() => setSeverity(s)}
             >
-              {titleCase(s)}
+              {sevLabel(s)}
             </button>
           ))}
         </div>
-        <div className="pill-tabs">
+        <div className="pill-tabs" role="group" aria-label={t("alerts.filter.state")}>
           {stateOptions.map((s) => (
             <button
               key={s}
               className={state === s ? "active" : ""}
+              aria-pressed={state === s}
               onClick={() => setState(s)}
             >
-              {titleCase(s)}
+              {stateLabel(s)}
             </button>
           ))}
         </div>
         <div className="toolbar__spacer" />
         <span className="muted">
-          {baselines.data?.items?.length ?? 0} baseline models trained
+          {t("alerts.baselines", { count: baselines.data?.items?.length ?? 0 })}
         </span>
       </div>
 
@@ -330,22 +356,21 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
         <Card>
           <EmptyState
             illustration={<EmptyIllustration kind="alert" />}
-            title="No matching alerts"
-            description="Nothing matches the current filters. Try widening severity or state."
+            title={t("alerts.empty.title")}
+            description={t("alerts.empty.desc")}
           />
         </Card>
       ) : (
         <>
           {correlations.isError && (
             <p className="muted" style={{ marginTop: 0 }}>
-              Incident grouping is temporarily unavailable — alerts are shown
-              individually below.
+              {t("alerts.incident.unavailable")}
             </p>
           )}
           {incidents.map(({ cluster, alerts }) => (
             <Card
               key={cluster.id || cluster.summary}
-              title={`Incident · ${alerts.length} correlated alert${alerts.length === 1 ? "" : "s"}`}
+              title={t("alerts.incident.title", { count: alerts.length })}
               actions={
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                   {cluster.severity && <StatusBadge status={cluster.severity} />}
@@ -362,9 +387,9 @@ function AlertsInner({ tenantId }: { tenantId: string }) {
             </Card>
           ))}
 
-          <Card title={incidents.length > 0 ? "Other alerts" : "Alerts"}>
+          <Card title={incidents.length > 0 ? t("alerts.other.title") : t("alerts.list.title")}>
             {ungrouped.length === 0 ? (
-              <p className="muted">All matching alerts are part of an incident above.</p>
+              <p className="muted">{t("alerts.other.allGrouped")}</p>
             ) : (
               <div className="alert-cards">{ungrouped.map(renderCard)}</div>
             )}

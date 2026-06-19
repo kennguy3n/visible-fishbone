@@ -1,6 +1,16 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
+import { Link } from "@tanstack/react-router";
 import { runtimeConfig } from "@/lib/runtime-config";
-import { PageHeader, Card, Badge, Spinner, EmptyState } from "@/components/ui";
+import {
+  PageHeader,
+  Card,
+  Badge,
+  LoadingState,
+  EmptyState,
+  EmptyIllustration,
+} from "@/components/ui";
+import { HelpTooltip } from "@/components/HelpTooltip";
+import { LaneB4Screen, useT } from "./lane-b4-i18n";
 
 async function fetchDiscovery(issuer: string): Promise<Record<string, unknown>> {
   const base = issuer.replace(/\/+$/, "");
@@ -13,72 +23,115 @@ async function fetchDiscovery(issuer: string): Promise<Record<string, unknown>> 
 }
 
 export function Idp() {
+  return (
+    <LaneB4Screen>
+      <IdpInner />
+    </LaneB4Screen>
+  );
+}
+
+function IdpInner() {
+  const t = useT();
   const cfg = runtimeConfig();
   const [discovery, setDiscovery] = useState<Record<string, unknown> | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<boolean>(false);
   const [loading, setLoading] = useState(false);
 
-  useEffect(() => {
+  const load = useCallback(() => {
     if (cfg.authMode !== "oidc" || !cfg.oidcIssuer) return;
     setLoading(true);
+    setError(false);
     fetchDiscovery(cfg.oidcIssuer)
       .then((d) => setDiscovery(d))
-      .catch((e) => setError(e instanceof Error ? e.message : "Discovery failed"))
+      .catch(() => setError(true))
       .finally(() => setLoading(false));
   }, [cfg.authMode, cfg.oidcIssuer]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const isOidc = cfg.authMode === "oidc";
 
   return (
     <>
       <PageHeader
-        title="Identity provider / SSO"
-        subtitle="Active authentication mode and OIDC federation metadata."
+        title={t("idp.title")}
+        subtitle={t("idp.subtitle")}
+        actions={
+          <HelpTooltip title={t("idp.help.title")} align="right">
+            {t("idp.help.body")}
+          </HelpTooltip>
+        }
       />
       <div className="grid grid--2">
-        <Card title="Authentication mode">
+        <Card title={t("idp.mode.card")}>
           <div style={{ marginBottom: 12 }}>
-            <Badge tone={cfg.authMode === "oidc" ? "ok" : "info"}>
-              {cfg.authMode === "oidc" ? "OIDC / SSO (production)" : "JWT bearer (development)"}
+            <Badge tone={isOidc ? "ok" : "info"} dot>
+              {isOidc ? t("idp.mode.oidc") : t("idp.mode.jwt")}
             </Badge>
           </div>
           <dl className="kv">
-            <dt>Issuer</dt>
+            <dt>{t("idp.field.issuer")}</dt>
             <dd className="mono">{cfg.oidcIssuer || "—"}</dd>
-            <dt>Client ID</dt>
+            <dt>{t("idp.field.clientId")}</dt>
             <dd className="mono">{cfg.oidcClientId || "—"}</dd>
-            <dt>Scopes</dt>
+            <dt>{t("idp.field.scopes")}</dt>
             <dd className="mono">{cfg.oidcScope}</dd>
           </dl>
-          {cfg.authMode === "jwt" && (
-            <p className="muted" style={{ fontSize: 12.5 }}>
-              In development the console accepts a pasted HMAC-signed JWT. Set
-              <span className="mono"> auth_mode=oidc </span> and the issuer/client
-              in runtime config to enable the Authorization Code + PKCE flow.
+          {!isOidc && (
+            <p className="field-help" style={{ marginTop: 12 }}>
+              {t("idp.jwt.help")}
             </p>
           )}
         </Card>
 
-        <Card title="OIDC discovery">
-          {cfg.authMode !== "oidc" ? (
-            <p className="muted">OIDC is not the active mode.</p>
+        <Card title={t("idp.discovery.card")}>
+          {!isOidc ? (
+            <EmptyState
+              illustration={<EmptyIllustration kind="shield" />}
+              title={t("idp.empty.title")}
+              description={t("idp.empty.desc")}
+              action={
+                <Link to="/onboarding/guided" className="btn btn--primary btn--sm">
+                  {t("idp.empty.action")}
+                </Link>
+              }
+            />
           ) : loading ? (
-            <Spinner />
+            <LoadingState label={t("idp.discovery.loading")} />
           ) : error ? (
-            <p className="error-text">{error}</p>
+            <EmptyState
+              illustration={<EmptyIllustration kind="alert" />}
+              title={t("idp.discovery.errorTitle")}
+              description={t("idp.discovery.errorDesc")}
+              action={
+                <button className="btn btn--sm" onClick={load}>
+                  {t("b4.action.retry")}
+                </button>
+              }
+            />
           ) : discovery ? (
             <dl className="kv">
-              <dt>Authorization</dt>
+              <dt>{t("idp.discovery.authorization")}</dt>
               <dd className="mono">{String(discovery.authorization_endpoint ?? "—")}</dd>
-              <dt>Token</dt>
+              <dt>{t("idp.discovery.token")}</dt>
               <dd className="mono">{String(discovery.token_endpoint ?? "—")}</dd>
-              <dt>JWKS</dt>
+              <dt>{t("idp.discovery.jwks")}</dt>
               <dd className="mono">{String(discovery.jwks_uri ?? "—")}</dd>
-              <dt>Userinfo</dt>
+              <dt>{t("idp.discovery.userinfo")}</dt>
               <dd className="mono">{String(discovery.userinfo_endpoint ?? "—")}</dd>
             </dl>
           ) : (
             <EmptyState
-              title="No issuer configured"
-              description="Configure an OIDC issuer to enable single sign-on for this tenant."
+              illustration={<EmptyIllustration kind="shield" />}
+              title={t("idp.empty.title")}
+              description={t("idp.empty.desc")}
+              action={
+                <Link to="/onboarding/guided" className="btn btn--primary btn--sm">
+                  {t("idp.empty.action")}
+                </Link>
+              }
             />
           )}
         </Card>
