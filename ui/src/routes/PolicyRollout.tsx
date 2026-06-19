@@ -1,6 +1,7 @@
 import { useMemo, useState } from "react";
 import { PageHeader, Card, Badge, Spinner } from "@/components/ui";
 import { DataTable, type Column } from "@/components/DataTable";
+import { HelpTooltip } from "@/components/HelpTooltip";
 import { useTenant } from "@/lib/tenant-context";
 import { useToast } from "@/components/Toast";
 import { titleCase, shortId, type Tone } from "@/lib/format";
@@ -15,6 +16,7 @@ import type {
   RolloutAction,
   RolloutStatus,
 } from "@/api/manual/types";
+import { LaneB2Intl, useT, type LaneB2Key } from "./lane-b2/i18n";
 
 const ACTION_TONE: Record<RolloutAction, Tone> = {
   create: "info",
@@ -29,11 +31,33 @@ const STATUS_TONE: Record<RolloutStatus, Tone> = {
   cancelled: "warn",
 };
 
+const ACTION_LABEL: Record<RolloutAction, LaneB2Key> = {
+  create: "rollout.action.create",
+  update: "rollout.action.update",
+  noop: "rollout.action.noop",
+};
+
+const STATUS_LABEL: Record<RolloutStatus, LaneB2Key> = {
+  applied: "rollout.status.applied",
+  unchanged: "rollout.status.unchanged",
+  failed: "rollout.status.failed",
+  cancelled: "rollout.status.cancelled",
+};
+
 // Cross-tenant roll-out: render one baseline (industry + country) and push it
 // to many tenants at once. The operator picks the baseline, multi-selects the
 // target tenants, previews the per-tenant diff, then executes — with a
 // per-tenant result and rollback of any tenant whose apply fails.
 export function PolicyRollout() {
+  return (
+    <LaneB2Intl>
+      <PolicyRolloutInner />
+    </LaneB2Intl>
+  );
+}
+
+function PolicyRolloutInner() {
+  const t = useT();
   const { tenants, isLoading: tenantsLoading } = useTenant();
   const toast = useToast();
   const options = usePolicyTemplateOptions();
@@ -73,7 +97,7 @@ export function PolicyRollout() {
     setSelected(
       allSelected
         ? {}
-        : Object.fromEntries(tenants.map((t) => [t.id, true])),
+        : Object.fromEntries(tenants.map((ten) => [ten.id, true])),
     );
     preview.reset();
     execute.reset();
@@ -85,7 +109,7 @@ export function PolicyRollout() {
       {
         onError: (e) =>
           toast.error(
-            "Preview failed",
+            t("rollout.toast.preview.err"),
             e instanceof Error ? e.message : undefined,
           ),
       },
@@ -99,24 +123,33 @@ export function PolicyRollout() {
         onSuccess: (result) => {
           if (result.cancelled > 0) {
             toast.error(
-              "Roll-out cancelled",
-              `${result.applied} applied · ${result.cancelled} not attempted`,
+              t("rollout.toast.cancelled.title"),
+              t("rollout.toast.cancelled.body", {
+                applied: result.applied,
+                cancelled: result.cancelled,
+              }),
             );
           } else if (result.failed > 0) {
             toast.error(
-              "Roll-out completed with failures",
-              `${result.applied} applied · ${result.failed} failed (rolled back)`,
+              t("rollout.toast.failures.title"),
+              t("rollout.toast.failures.body", {
+                applied: result.applied,
+                failed: result.failed,
+              }),
             );
           } else {
             toast.success(
-              "Roll-out complete",
-              `${result.applied} applied · ${result.unchanged} unchanged`,
+              t("rollout.toast.complete.title"),
+              t("rollout.toast.complete.body", {
+                applied: result.applied,
+                unchanged: result.unchanged,
+              }),
             );
           }
         },
         onError: (e) =>
           toast.error(
-            "Roll-out failed",
+            t("rollout.toast.err"),
             e instanceof Error ? e.message : undefined,
           ),
       },
@@ -125,20 +158,24 @@ export function PolicyRollout() {
 
   const diffColumns: Column<RolloutTargetDiff>[] = [
     {
-      header: "Tenant",
+      header: t("rollout.col.tenant"),
       cell: (row) => {
-        const t = tenants.find((x) => x.id === row.tenant_id);
-        return t ? t.name : <span className="mono">{shortId(row.tenant_id)}</span>;
+        const tenant = tenants.find((x) => x.id === row.tenant_id);
+        return tenant ? (
+          tenant.name
+        ) : (
+          <span className="mono">{shortId(row.tenant_id)}</span>
+        );
       },
     },
     {
-      header: "Change",
+      header: t("rollout.col.change"),
       cell: (row) => (
-        <Badge tone={ACTION_TONE[row.action]}>{titleCase(row.action)}</Badge>
+        <Badge tone={ACTION_TONE[row.action]}>{t(ACTION_LABEL[row.action])}</Badge>
       ),
     },
     {
-      header: "Current baseline",
+      header: t("rollout.col.currentBaseline"),
       cell: (row) =>
         row.current ? (
           <span>
@@ -146,40 +183,50 @@ export function PolicyRollout() {
             <span className="mono">{shortId(row.current.graph_hash)}</span>
           </span>
         ) : (
-          <span style={{ color: "var(--text-dim)" }}>None</span>
+          <span style={{ color: "var(--text-dim)" }}>
+            {t("rollout.current.none")}
+          </span>
         ),
     },
   ];
 
   const outcomeColumns: Column<RolloutOutcome>[] = [
     {
-      header: "Tenant",
+      header: t("rollout.col.tenant"),
       cell: (row) => {
-        const t = tenants.find((x) => x.id === row.tenant_id);
-        return t ? t.name : <span className="mono">{shortId(row.tenant_id)}</span>;
+        const tenant = tenants.find((x) => x.id === row.tenant_id);
+        return tenant ? (
+          tenant.name
+        ) : (
+          <span className="mono">{shortId(row.tenant_id)}</span>
+        );
       },
     },
     {
-      header: "Result",
+      header: t("rollout.col.result"),
       cell: (row) => (
-        <Badge tone={STATUS_TONE[row.status]}>{titleCase(row.status)}</Badge>
+        <Badge tone={STATUS_TONE[row.status]}>{t(STATUS_LABEL[row.status])}</Badge>
       ),
     },
     {
-      header: "Detail",
+      header: t("rollout.col.detail"),
       cell: (row) => {
         if (row.status === "failed") {
+          const detail = row.error ?? t("rollout.detail.failed.default");
           return (
             <span style={{ color: "var(--text-dim)" }}>
-              {row.error ?? "apply failed"}
-              {row.rolled_back ? " · rolled back" : ""}
+              {row.rolled_back
+                ? t("rollout.detail.failed", { error: detail })
+                : t("rollout.detail.failed.norollback", { error: detail })}
             </span>
           );
         }
         if (row.status === "cancelled") {
           return (
             <span style={{ color: "var(--text-dim)" }}>
-              {row.error ?? "cancelled"} · not attempted
+              {row.error
+                ? t("rollout.detail.cancelled", { error: row.error })
+                : t("rollout.detail.cancelled.default")}
             </span>
           );
         }
@@ -190,15 +237,19 @@ export function PolicyRollout() {
 
   return (
     <div>
-      <PageHeader
-        title="Cross-tenant roll-out"
-        subtitle="Apply one security baseline to many tenants at once — preview the per-tenant change before you commit."
-      />
+      <PageHeader title={t("rollout.title")} subtitle={t("rollout.subtitle")} />
 
-      <Card title="1 · Choose the baseline">
+      <Card
+        title={t("rollout.step1.title")}
+        actions={
+          <HelpTooltip title={t("rollout.step1.help.title")} align="right">
+            {t("rollout.step1.help.body")}
+          </HelpTooltip>
+        }
+      >
         <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
           <label className="field" style={{ minWidth: 220 }}>
-            <span>Industry</span>
+            <span>{t("rollout.industry")}</span>
             <select
               value={industry}
               disabled={options.isLoading}
@@ -208,7 +259,7 @@ export function PolicyRollout() {
                 execute.reset();
               }}
             >
-              <option value="">Select an industry…</option>
+              <option value="">{t("rollout.industry.placeholder")}</option>
               {(options.data?.industries ?? []).map((i) => (
                 <option key={i.industry} value={i.industry}>
                   {i.name}
@@ -218,7 +269,7 @@ export function PolicyRollout() {
           </label>
 
           <label className="field" style={{ minWidth: 220 }}>
-            <span>Country / data residency</span>
+            <span>{t("rollout.country")}</span>
             <select
               value={country}
               disabled={options.isLoading}
@@ -228,7 +279,7 @@ export function PolicyRollout() {
                 execute.reset();
               }}
             >
-              <option value="">Select a country…</option>
+              <option value="">{t("rollout.country.placeholder")}</option>
               {(options.data?.countries ?? []).map((c) => (
                 <option key={c.country} value={c.country}>
                   {c.country} — {c.regime}
@@ -239,17 +290,20 @@ export function PolicyRollout() {
         </div>
         {country && regimeForCountry[country] && (
           <p style={{ marginTop: 8, color: "var(--text-dim)" }}>
-            Compliance regime: <Badge tone="info">{regimeForCountry[country]}</Badge>
+            {t("rollout.regime")}:{" "}
+            <Badge tone="info">{regimeForCountry[country]}</Badge>
           </p>
         )}
       </Card>
 
       <Card
-        title="2 · Select target tenants"
+        title={t("rollout.step2.title")}
         actions={
           tenants.length > 0 ? (
             <button className="btn btn--sm" onClick={toggleAll}>
-              {selectedIds.length === tenants.length ? "Clear all" : "Select all"}
+              {selectedIds.length === tenants.length
+                ? t("rollout.clearAll")
+                : t("rollout.selectAll")}
             </button>
           ) : undefined
         }
@@ -257,68 +311,73 @@ export function PolicyRollout() {
         {tenantsLoading ? (
           <div className="skeleton" style={{ height: 96 }} />
         ) : tenants.length === 0 ? (
-          <p style={{ color: "var(--text-dim)" }}>No tenants available.</p>
+          <p style={{ color: "var(--text-dim)" }}>{t("rollout.noTenants")}</p>
         ) : (
           <div className="choice-grid">
-            {tenants.map((t) => (
+            {tenants.map((tenant) => (
               <label
-                key={t.id}
-                className={`choice${selected[t.id] ? " choice--selected" : ""}`}
+                key={tenant.id}
+                className={`choice${selected[tenant.id] ? " choice--selected" : ""}`}
                 style={{ cursor: "pointer" }}
               >
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <input
                     type="checkbox"
                     style={{ width: 16 }}
-                    checked={!!selected[t.id]}
-                    onChange={() => toggle(t.id)}
+                    checked={!!selected[tenant.id]}
+                    onChange={() => toggle(tenant.id)}
                   />
-                  <span className="choice__name">{t.name}</span>
+                  <span className="choice__name">{tenant.name}</span>
                 </div>
                 <div className="choice__desc">
-                  <span className="mono">{t.slug}</span>
-                  {t.region ? ` · ${t.region}` : ""}
+                  <span className="mono">{tenant.slug}</span>
+                  {tenant.region ? ` · ${tenant.region}` : ""}
                 </div>
               </label>
             ))}
           </div>
         )}
         <p style={{ marginTop: 10, color: "var(--text-dim)" }}>
-          {selectedIds.length} tenant{selectedIds.length === 1 ? "" : "s"} selected
+          {t("rollout.selectedCount", { count: selectedIds.length })}
         </p>
       </Card>
 
-      <Card title="3 · Preview &amp; execute">
+      <Card title={t("rollout.step3.title")}>
         <div style={{ display: "flex", gap: 10 }}>
           <button
             className="btn"
             disabled={!ready || preview.isPending}
             onClick={runPreview}
           >
-            {preview.isPending ? <Spinner /> : "Preview diff"}
+            {preview.isPending ? <Spinner /> : t("rollout.previewBtn")}
           </button>
           <button
             className="btn btn--primary"
             disabled={!previewed || execute.isPending}
-            title={
-              !previewed ? "Preview the diff before applying" : undefined
-            }
+            title={!previewed ? t("rollout.previewFirst.tip") : undefined}
             onClick={runExecute}
           >
-            {execute.isPending ? <Spinner /> : `Apply to ${selectedIds.length} tenant${selectedIds.length === 1 ? "" : "s"}`}
+            {execute.isPending ? (
+              <Spinner />
+            ) : (
+              t("rollout.applyBtn", { count: selectedIds.length })
+            )}
           </button>
         </div>
         {ready && !previewed && (
           <p style={{ marginTop: 8, color: "var(--text-dim)" }}>
-            Preview the per-tenant diff before applying.
+            {t("rollout.previewFirst")}
           </p>
         )}
 
         {preview.data && !execute.data && (
           <div style={{ marginTop: 16 }}>
             <h3 className="card__title" style={{ marginBottom: 8 }}>
-              Preview — {titleCase(preview.data.selection.industry)} ·{" "}
-              {preview.data.selection.country} ({preview.data.regime})
+              {t("rollout.preview.heading", {
+                industry: titleCase(preview.data.selection.industry),
+                country: preview.data.selection.country,
+                regime: preview.data.regime,
+              })}
             </h3>
             <DataTable
               columns={diffColumns}
@@ -331,11 +390,18 @@ export function PolicyRollout() {
         {execute.data && (
           <div style={{ marginTop: 16 }}>
             <h3 className="card__title" style={{ marginBottom: 8 }}>
-              Result — {execute.data.applied} applied · {execute.data.unchanged}{" "}
-              unchanged · {execute.data.failed} failed
               {execute.data.cancelled > 0
-                ? ` · ${execute.data.cancelled} cancelled`
-                : ""}
+                ? t("rollout.result.heading.cancelled", {
+                    applied: execute.data.applied,
+                    unchanged: execute.data.unchanged,
+                    failed: execute.data.failed,
+                    cancelled: execute.data.cancelled,
+                  })
+                : t("rollout.result.heading", {
+                    applied: execute.data.applied,
+                    unchanged: execute.data.unchanged,
+                    failed: execute.data.failed,
+                  })}
             </h3>
             <DataTable
               columns={outcomeColumns}

@@ -1,0 +1,40 @@
+/* Lane B2 scoped accessibility overrides.
+ *
+ * The WS0 design-system foundation is frozen, so these rules live in this
+ * lane-local file and apply only inside the `.lane-b2` wrapper that
+ * `LaneB2Intl` renders. They re-point existing design tokens (never introduce
+ * new colours) so the seven Lane B2 screens clear WCAG 2.2 AA contrast in dark
+ * mode, where the foundation has known gaps. The underlying token fixes belong
+ * in WS0 — see the "WS0 follow-up" section of the lane PR.
+ *
+ * Each override is dark-mode-only (`[data-theme="dark"]` plus the no-JS
+ * prefers-dark fallback the foundation uses) because the light theme already
+ * meets AA for these tokens; light mode is left byte-identical to WS0.
+ */
+
+/* (1) Faint secondary text. `--text-faint` resolves to ~3.4:1 on dark surfaces
+ * (.muted, table headers, card subtitles, field labels, key/value terms).
+ * Re-pointing it to `--text-dim` lifts every faint string in the lane to >6:1
+ * in one place, with no hard-coded colour. */
+:root[data-theme="dark"] .lane-b2,
+:root:not([data-theme="light"]):not([data-theme="dark"]) .lane-b2 {
+  --text-faint: var(--text-dim);
+}
+
+/* (2) White text on `--brand` is ~3.6:1 in dark mode. `--brand-strong`
+ * (#255fe5) gives ~5.4:1 with white. The foundation's `.btn--primary:hover`
+ * already targets `--brand-strong`, so the hover glow still reads as a state
+ * change. */
+:root[data-theme="dark"] .lane-b2 .btn--primary,
+:root:not([data-theme="light"]):not([data-theme="dark"]) .lane-b2 .btn--primary {
+  background: var(--brand-strong);
+  border-color: var(--brand-strong);
+}
+
+/* (3) The info badge paints `--brand` text on a `--brand-soft` tint (~4.0:1 in
+ * dark). Keeping the brand-tinted fill + border but using the primary text
+ * colour restores >10:1 while preserving the blue "info" identity. */
+:root[data-theme="dark"] .lane-b2 .badge--info,
+:root:not([data-theme="light"]):not([data-theme="dark"]) .lane-b2 .badge--info {
+  color: var(--text);
+}

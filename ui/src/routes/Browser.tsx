@@ -20,38 +20,58 @@ import {
 } from "@/components/ui";
 import { DataTable, type Column } from "@/components/DataTable";
 import { Modal } from "@/components/Modal";
+import { HelpTooltip } from "@/components/HelpTooltip";
 import { RequireTenant } from "@/components/RequireTenant";
 import { titleCase } from "@/lib/format";
+import { LaneB2Intl, useT } from "./lane-b2/i18n";
+import { ConfirmDialog } from "./lane-b2/ConfirmDialog";
 
 export function Browser() {
   return (
-    <RequireTenant>{(tenantId) => <BrowserInner tenantId={tenantId} />}</RequireTenant>
+    <LaneB2Intl>
+      <RequireTenant>
+        {(tenantId) => <BrowserInner tenantId={tenantId} />}
+      </RequireTenant>
+    </LaneB2Intl>
   );
 }
 
 function BrowserInner({ tenantId }: { tenantId: string }) {
+  const t = useT();
   const list = useListBrowserPolicies(tenantId);
   const del = useDeleteBrowserPolicy();
   const [showCreate, setShowCreate] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<BrowserPolicy | null>(null);
 
   const cols: Column<BrowserPolicy>[] = [
-    { header: "Name", cell: (p) => p.name },
-    { header: "Scope", cell: (p) => <Badge tone="neutral">{titleCase(p.scope)}</Badge> },
-    { header: "Action", cell: (p) => <Badge tone={p.action === "block" ? "danger" : "info"}>{titleCase(p.action)}</Badge> },
-    { header: "Rules", cell: (p) => p.rules?.length ?? 0 },
-    { header: "Enabled", cell: (p) => <StatusBadge status={p.enabled ? "enabled" : "disabled"} /> },
+    { header: t("browser.col.name"), cell: (p) => p.name },
     {
-      header: "",
+      header: t("browser.col.scope"),
+      cell: (p) => <Badge tone="neutral">{titleCase(p.scope)}</Badge>,
+    },
+    {
+      header: t("browser.col.action"),
+      cell: (p) => (
+        <Badge tone={p.action === "block" ? "danger" : "info"}>
+          {titleCase(p.action)}
+        </Badge>
+      ),
+    },
+    { header: t("browser.col.rules"), cell: (p) => p.rules?.length ?? 0 },
+    {
+      header: t("browser.col.status"),
+      cell: (p) => <StatusBadge status={p.enabled ? "enabled" : "disabled"} />,
+    },
+    {
+      header: t("sites.col.actions"),
       cell: (p) => (
         <button
           className="btn btn--danger btn--sm"
+          aria-label={t("browser.delete.aria", { name: p.name })}
           disabled={del.isPending}
-          onClick={() => {
-            if (confirm(`Delete browser policy "${p.name}"?`))
-              del.mutate({ tenantId, id: p.id });
-          }}
+          onClick={() => setPendingDelete(p)}
         >
-          Delete
+          {t("browser.delete")}
         </button>
       ),
     },
@@ -60,39 +80,80 @@ function BrowserInner({ tenantId }: { tenantId: string }) {
   return (
     <>
       <PageHeader
-        title="Browser protection"
-        subtitle="Managed-browser isolation, download and clipboard policies."
+        title={t("browser.title")}
+        subtitle={t("browser.subtitle")}
         actions={
           <button className="btn btn--primary" onClick={() => setShowCreate(true)}>
-            + Policy
+            {t("browser.new")}
           </button>
         }
       />
-      <Card>
+      <Card
+        title={t("browser.title")}
+        actions={
+          <HelpTooltip title={t("browser.help.title")} align="right">
+            {t("browser.help.body")}
+          </HelpTooltip>
+        }
+      >
         <AsyncBoundary
           isLoading={list.isLoading}
           error={list.error}
           data={list.data}
+          onRetry={() => list.refetch()}
           isEmpty={(d) => (d.items?.length ?? 0) === 0}
           empty={
             <EmptyState
               illustration={<EmptyIllustration kind="shield" />}
-              title="No browser policies yet"
-              description="Add a browser isolation or protection policy to control risky web activity."
+              title={t("browser.empty.title")}
+              description={t("browser.empty.body")}
+              action={
+                <button
+                  className="btn btn--primary"
+                  onClick={() => setShowCreate(true)}
+                >
+                  {t("browser.new")}
+                </button>
+              }
             />
           }
         >
-          {(d) => <DataTable columns={cols} rows={d.items ?? []} rowKey={(p) => p.id} />}
+          {(d) => (
+            <DataTable columns={cols} rows={d.items ?? []} rowKey={(p) => p.id} />
+          )}
         </AsyncBoundary>
       </Card>
       {showCreate && (
         <CreatePolicy tenantId={tenantId} onClose={() => setShowCreate(false)} />
       )}
+      {pendingDelete && (
+        <ConfirmDialog
+          title={t("browser.delete.title")}
+          message={t("browser.delete.confirm", { name: pendingDelete.name })}
+          confirmLabel={t("browser.delete.cta")}
+          cancelLabel={t("common.cancel")}
+          busy={del.isPending}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={() =>
+            del.mutate(
+              { tenantId, id: pendingDelete.id },
+              { onSuccess: () => setPendingDelete(null) },
+            )
+          }
+        />
+      )}
     </>
   );
 }
 
-function CreatePolicy({ tenantId, onClose }: { tenantId: string; onClose: () => void }) {
+function CreatePolicy({
+  tenantId,
+  onClose,
+}: {
+  tenantId: string;
+  onClose: () => void;
+}) {
+  const t = useT();
   const create = useCreateBrowserPolicy();
   const [name, setName] = useState("");
   const [action, setAction] = useState<BrowserPolicyCreateAction>(
@@ -104,12 +165,12 @@ function CreatePolicy({ tenantId, onClose }: { tenantId: string; onClose: () => 
 
   return (
     <Modal
-      title="New browser policy"
+      title={t("browser.modal.title")}
       onClose={onClose}
       footer={
         <>
           <button className="btn" onClick={onClose}>
-            Cancel
+            {t("common.cancel")}
           </button>
           <button
             className="btn btn--primary"
@@ -121,18 +182,25 @@ function CreatePolicy({ tenantId, onClose }: { tenantId: string; onClose: () => 
               )
             }
           >
-            {create.isPending ? "Creating…" : "Create"}
+            {create.isPending
+              ? t("browser.modal.creating")
+              : t("browser.modal.create")}
           </button>
         </>
       }
     >
       <label className="field">
-        <span>Name</span>
-        <input value={name} onChange={(e) => setName(e.target.value)} />
+        <span>{t("browser.modal.name.label")}</span>
+        <input
+          value={name}
+          autoFocus
+          onChange={(e) => setName(e.target.value)}
+          placeholder={t("browser.modal.name.placeholder")}
+        />
       </label>
       <div className="field-row">
         <label className="field">
-          <span>Action</span>
+          <span>{t("browser.modal.action.label")}</span>
           <select
             value={action}
             onChange={(e) => setAction(e.target.value as BrowserPolicyCreateAction)}
@@ -145,7 +213,7 @@ function CreatePolicy({ tenantId, onClose }: { tenantId: string; onClose: () => 
           </select>
         </label>
         <label className="field">
-          <span>Scope</span>
+          <span>{t("browser.modal.scope.label")}</span>
           <select
             value={scope}
             onChange={(e) => setScope(e.target.value as BrowserPolicyCreateScope)}
@@ -159,8 +227,8 @@ function CreatePolicy({ tenantId, onClose }: { tenantId: string; onClose: () => 
         </label>
       </div>
       {create.isError && (
-        <p className="error-text">
-          {create.error instanceof Error ? create.error.message : "Failed"}
+        <p className="error-text" role="alert">
+          {t("browser.modal.error")}
         </p>
       )}
     </Modal>

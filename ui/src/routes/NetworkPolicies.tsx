@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { FormattedMessage } from "react-intl";
 import {
   useGetPolicyGraph,
   useUpdatePolicyGraph,
@@ -18,20 +19,31 @@ import {
 import { HelpTooltip } from "@/components/HelpTooltip";
 import { RequireTenant } from "@/components/RequireTenant";
 import { useToast } from "@/components/Toast";
+import { LaneB2Intl, useT, richBold, type LaneB2Key } from "./lane-b2/i18n";
 
 // Each network-security domain is a lens over the one unified tenant policy
 // graph (the same `rules` the Policy editor authors). A rule's `domain` field
 // places it under exactly one tab; the verb vocabulary is domain-specific so
 // the guided form only offers actions that make sense for that plane.
-const DOMAINS = [
-  { key: "ngfw", label: "NGFW", blurb: "L3–L7 firewall rules, app-id and IPS profiles." },
-  { key: "swg", label: "SWG", blurb: "Secure web gateway: URL filtering, TLS inspection, content rules." },
-  { key: "dns", label: "DNS", blurb: "DNS-layer security: sinkholing, category blocking, DoH control." },
-  { key: "ztna", label: "ZTNA", blurb: "Identity-aware per-app access with device posture gating." },
-  { key: "sdwan", label: "SD-WAN", blurb: "Path selection, link SLAs and traffic-steering policy." },
-] as const;
+const DOMAINS = ["ngfw", "swg", "dns", "ztna", "sdwan"] as const;
 
-type DomainKey = (typeof DOMAINS)[number]["key"];
+type DomainKey = (typeof DOMAINS)[number];
+
+const DOMAIN_LABEL: Record<DomainKey, LaneB2Key> = {
+  ngfw: "net.domain.ngfw",
+  swg: "net.domain.swg",
+  dns: "net.domain.dns",
+  ztna: "net.domain.ztna",
+  sdwan: "net.domain.sdwan",
+};
+
+const DOMAIN_BLURB: Record<DomainKey, LaneB2Key> = {
+  ngfw: "net.domain.ngfw.blurb",
+  swg: "net.domain.swg.blurb",
+  dns: "net.domain.dns.blurb",
+  ztna: "net.domain.ztna.blurb",
+  sdwan: "net.domain.sdwan.blurb",
+};
 
 const DOMAIN_VERBS: Record<DomainKey, string[]> = {
   ngfw: ["allow", "deny", "inspect", "log"],
@@ -48,6 +60,18 @@ const VERB_TONE: Record<string, "ok" | "danger" | "warn" | "info" | "neutral"> =
   inspect: "info",
   decrypt: "warn",
   log: "neutral",
+};
+
+const VERB_KEYS: Record<string, LaneB2Key> = {
+  allow: "verb.allow",
+  deny: "verb.deny",
+  inspect: "verb.inspect",
+  decrypt: "verb.decrypt",
+  log: "verb.log",
+  steer: "verb.steer",
+  isolate: "verb.isolate",
+  block: "verb.block",
+  bypass: "verb.bypass",
 };
 
 interface GraphRule {
@@ -136,13 +160,16 @@ function signatureOf(rules: GraphRule[], defaultAction: string): string {
 
 export function NetworkPolicies() {
   return (
-    <RequireTenant>
-      {(tenantId) => <NetworkPoliciesInner tenantId={tenantId} />}
-    </RequireTenant>
+    <LaneB2Intl>
+      <RequireTenant>
+        {(tenantId) => <NetworkPoliciesInner tenantId={tenantId} />}
+      </RequireTenant>
+    </LaneB2Intl>
   );
 }
 
 function NetworkPoliciesInner({ tenantId }: { tenantId: string }) {
+  const t = useT();
   const graphQuery = useGetPolicyGraph(tenantId, { query: { retry: false } });
   const update = useUpdatePolicyGraph();
   const compile = useCompilePolicyBundles();
@@ -281,6 +308,11 @@ function NetworkPoliciesInner({ tenantId }: { tenantId: string }) {
       return next;
     });
 
+  const verbLabel = (v: string): string => {
+    const k = VERB_KEYS[v.toLowerCase()];
+    return k ? t(k) : v;
+  };
+
   const test = () => {
     const sig = draftSig;
     sim.mutate(
@@ -294,10 +326,10 @@ function NetworkPoliciesInner({ tenantId }: { tenantId: string }) {
       { tenantId, data: proposed() as Record<string, unknown> },
       {
         onSuccess: () =>
-          toast.success("Network policy updated", "Your changes are live."),
+          toast.success(t("net.apply.ok.title"), t("net.apply.ok.body")),
         onError: (e) =>
           toast.error(
-            "Could not save policy",
+            t("net.apply.err.title"),
             e instanceof Error ? e.message : undefined,
           ),
       },
@@ -327,29 +359,26 @@ function NetworkPoliciesInner({ tenantId }: { tenantId: string }) {
   if (graphQuery.isError) {
     return (
       <>
-        <PageHeader
-          title="Network policies"
-          subtitle="Guided, domain-segmented editor over the unified tenant policy graph."
-        />
-        <Card title="No policy graph yet">
+        <PageHeader title={t("net.title")} subtitle={t("net.subtitle")} />
+        <Card title={t("net.noGraph.empty.title")}>
           <EmptyState
             illustration={<EmptyIllustration kind="policy" />}
-            title="No policy graph for this tenant"
-            description="Initialize the tenant policy in the Policy editor, then return here to manage NGFW / SWG / DNS / ZTNA / SD-WAN rules."
+            title={t("net.noGraph.empty.title")}
+            description={t("net.noGraph.empty.body")}
           />
         </Card>
       </>
     );
   }
 
-  const activeMeta = DOMAINS.find((d) => d.key === active)!;
+  const activeLabel = t(DOMAIN_LABEL[active]);
   const activeIdxs = indicesForDomain(active);
 
   return (
     <>
       <PageHeader
-        title="Network policies"
-        subtitle="Guided, domain-segmented editor over the unified tenant policy graph."
+        title={t("net.title")}
+        subtitle={t("net.subtitle")}
         actions={
           <button
             className="btn"
@@ -359,12 +388,12 @@ function NetworkPoliciesInner({ tenantId }: { tenantId: string }) {
                 {
                   onSuccess: () =>
                     toast.success(
-                      "Bundles compiled",
-                      "Enforcers will pick up the new policy.",
+                      t("net.compile.ok.title"),
+                      t("net.compile.ok.body"),
                     ),
                   onError: (e) =>
                     toast.error(
-                      "Compile failed",
+                      t("net.compile.err.title"),
                       e instanceof Error ? e.message : undefined,
                     ),
                 },
@@ -372,46 +401,50 @@ function NetworkPoliciesInner({ tenantId }: { tenantId: string }) {
             }
             disabled={compile.isPending}
           >
-            {compile.isPending ? "Compiling…" : "Compile bundles"}
+            {compile.isPending ? t("net.compiling") : t("net.compile")}
           </button>
         }
       />
 
-      <div className="pill-tabs">
+      <div className="pill-tabs" role="tablist" aria-label={t("net.title")}>
         {DOMAINS.map((d) => {
-          const count = rows.filter((r) => (r.rule.domain ?? "") === d.key).length;
+          const count = rows.filter((r) => (r.rule.domain ?? "") === d).length;
           return (
             <button
-              key={d.key}
-              className={active === d.key ? "active" : ""}
-              onClick={() => setActive(d.key)}
+              key={d}
+              role="tab"
+              aria-selected={active === d}
+              className={active === d ? "active" : ""}
+              onClick={() => setActive(d)}
             >
-              {d.label} {count > 0 && <Badge tone="info">{count}</Badge>}
+              {t(DOMAIN_LABEL[d])} {count > 0 && <Badge tone="info">{count}</Badge>}
             </button>
           );
         })}
       </div>
 
       <Card
-        title={`${activeMeta.label} rules`}
+        title={t("net.card.title", { domain: activeLabel })}
         actions={
-          <HelpTooltip title="Test before you apply" align="right">
-            Rules evaluate top to bottom; the first match wins. After any edit
-            you must run a dry-run (which replays recent traffic) before the
-            change can be applied — a change that would introduce policy errors
-            stays blocked.
+          <HelpTooltip title={t("net.help.title")} align="right">
+            {t("net.help.body")}
           </HelpTooltip>
         }
       >
         <p className="muted" style={{ marginTop: 0 }}>
-          {activeMeta.blurb}
+          {t(DOMAIN_BLURB[active])}
         </p>
 
         {activeIdxs.length === 0 ? (
           <EmptyState
             illustration={<EmptyIllustration kind="policy" />}
-            title={`No ${activeMeta.label} rules`}
-            description={`This tenant has no ${activeMeta.label} rules yet. Add one below to get started.`}
+            title={t("net.empty.title", { domain: activeLabel })}
+            description={t("net.empty.body", { domain: activeLabel })}
+            action={
+              <button className="btn btn--primary" onClick={addRule}>
+                {t("net.add", { domain: activeLabel })}
+              </button>
+            }
           />
         ) : (
           <div className="rule-table">
@@ -423,6 +456,7 @@ function NetworkPoliciesInner({ tenantId }: { tenantId: string }) {
               const verbOptions = verbs.includes(verb)
                 ? verbs
                 : [verb, ...verbs].filter(Boolean);
+              const n = posInDomain + 1;
               return (
                 <div
                   key={row.key}
@@ -430,40 +464,44 @@ function NetworkPoliciesInner({ tenantId }: { tenantId: string }) {
                 >
                   <div>
                     <label className="net-rule__label">
-                      Source <b>{idx + 1}.</b>
+                      {t("net.rule.source")} <b>{n}.</b>
                     </label>
                     <input
                       value={row.srcText}
-                      placeholder="any (identity / group / cidr refs)"
+                      placeholder={t("net.rule.source.placeholder")}
                       onChange={(e) => setText(row.key, "srcText", e.target.value)}
                     />
                   </div>
                   <div>
-                    <label className="net-rule__label">Action</label>
+                    <label className="net-rule__label">{t("net.rule.action")}</label>
                     <select
                       value={verb}
+                      aria-label={t("net.rule.action")}
                       onChange={(e) => patchRule(row.key, { verb: e.target.value })}
                     >
                       {verbOptions.map((v) => (
                         <option key={v} value={v}>
-                          {v}
+                          {verbLabel(v)}
                         </option>
                       ))}
                     </select>
                   </div>
                   <div>
-                    <label className="net-rule__label">Destination</label>
+                    <label className="net-rule__label">{t("net.rule.dest")}</label>
                     <input
                       value={row.dstText}
-                      placeholder="any (app / url-category / fqdn refs)"
+                      placeholder={t("net.rule.dest.placeholder")}
                       onChange={(e) => setText(row.key, "dstText", e.target.value)}
                     />
                   </div>
                   <div className="net-rule__acts">
-                    <Badge tone={VERB_TONE[verb] ?? "neutral"}>{r.verb ?? "—"}</Badge>
+                    <Badge tone={VERB_TONE[verb] ?? "neutral"}>
+                      {r.verb ? verbLabel(r.verb) : "—"}
+                    </Badge>
                     <button
                       className="btn btn--sm"
-                      title="Move up"
+                      aria-label={t("net.rule.moveUp", { n })}
+                      title={t("net.rule.moveUp", { n })}
                       disabled={posInDomain === 0}
                       onClick={() => move(row.key, -1)}
                     >
@@ -471,7 +509,8 @@ function NetworkPoliciesInner({ tenantId }: { tenantId: string }) {
                     </button>
                     <button
                       className="btn btn--sm"
-                      title="Move down"
+                      aria-label={t("net.rule.moveDown", { n })}
+                      title={t("net.rule.moveDown", { n })}
                       disabled={posInDomain === activeIdxs.length - 1}
                       onClick={() => move(row.key, 1)}
                     >
@@ -479,16 +518,18 @@ function NetworkPoliciesInner({ tenantId }: { tenantId: string }) {
                     </button>
                     <button
                       className="btn btn--sm btn--danger"
-                      title="Remove rule"
+                      aria-label={t("net.rule.remove", { n })}
+                      title={t("net.rule.remove", { n })}
                       onClick={() => removeRule(row.key)}
                     >
-                      Remove
+                      {t("common.remove")}
                     </button>
                   </div>
                   <div className="net-rule__desc">
                     <input
                       value={r.description ?? ""}
-                      placeholder="Description (optional) — why this rule exists"
+                      aria-label={t("net.rule.desc")}
+                      placeholder={t("net.rule.desc.placeholder")}
                       onChange={(e) =>
                         patchRule(row.key, { description: e.target.value })
                       }
@@ -502,66 +543,65 @@ function NetworkPoliciesInner({ tenantId }: { tenantId: string }) {
 
         <div className="rule-actions">
           <button className="btn" onClick={addRule}>
-            + Add {activeMeta.label} rule
+            + {t("net.add", { domain: activeLabel })}
           </button>
         </div>
 
         <div className="field-row" style={{ marginTop: 16, alignItems: "center" }}>
           <label className="net-rule__label" style={{ marginBottom: 0 }}>
-            Default action (no rule matches)
+            {t("net.default.label")}
           </label>
           <select
             value={defaultAction}
+            aria-label={t("net.default.label")}
             onChange={(e) => setDefaultAction(e.target.value)}
             style={{ maxWidth: 160 }}
           >
-            <option value="deny">deny</option>
-            <option value="allow">allow</option>
+            <option value="deny">{t("verb.deny")}</option>
+            <option value="allow">{t("verb.allow")}</option>
           </select>
         </div>
 
         {dirty &&
           (canApply ? (
-            <div className="net-gate net-gate--ready">
-              Dry-run passed — this change is safe to apply.
+            <div className="net-gate net-gate--ready" role="status">
+              {t("net.gate.ready")}
             </div>
           ) : introducesErrors ? (
-            <div className="net-gate net-gate--blocked">
-              This change would introduce policy errors — resolve them before
-              applying.
+            <div className="net-gate net-gate--blocked" role="status">
+              {t("net.gate.blocked")}
             </div>
           ) : (
-            <div className="net-gate">
-              Run a dry-run to preview the impact before this change can be
-              applied.
+            <div className="net-gate" role="status">
+              {t("net.gate.untested")}
             </div>
           ))}
 
         <div className="rule-actions">
           <button className="btn" onClick={test} disabled={sim.isPending || !dirty}>
-            {sim.isPending ? "Testing…" : "Test this change"}
+            {sim.isPending ? t("net.testing") : t("net.test")}
           </button>
           <button
             className="btn btn--primary"
             onClick={apply}
             disabled={update.isPending || !canApply}
           >
-            {update.isPending ? "Saving…" : "Apply changes"}
+            {update.isPending ? t("net.applying") : t("net.apply")}
           </button>
           {dirty && (
             <button className="btn" onClick={discard} disabled={update.isPending}>
-              Discard
+              {t("common.discard")}
             </button>
           )}
         </div>
       </Card>
 
       {(sim.isPending || sim.data || sim.isError) && (
-        <Card title="Impact of this change">
+        <Card title={t("net.impact.title")}>
           {sim.isError ? (
             <ErrorState error={sim.error} />
           ) : sim.isPending ? (
-            <p className="muted">Replaying recent traffic…</p>
+            <p className="muted">{t("net.impact.replaying")}</p>
           ) : sim.data ? (
             <ImpactSummary report={sim.data} stale={simulatedSig !== draftSig} />
           ) : null}
@@ -578,43 +618,66 @@ function ImpactSummary({
   report: SimulationResponse;
   stale: boolean;
 }) {
+  const t = useT();
   return (
     <>
       {stale && (
         <p className="net-gate" style={{ marginTop: 0 }}>
-          This preview is for an earlier draft — re-test to refresh it.
+          {t("net.impact.stale")}
         </p>
       )}
       <div className="impact-summary">
         {report.changed === 0 ? (
-          <>
-            Replaying the last {report.total} request{report.total === 1 ? "" : "s"},{" "}
-            <b>nothing changes</b> — this edit looks safe to apply.
-          </>
+          <FormattedMessage
+            id="net.impact.safe"
+            values={{ total: report.total, ...richBold }}
+          />
         ) : (
-          <>
-            Replaying the last {report.total} request{report.total === 1 ? "" : "s"},{" "}
-            <b>
-              {report.changed} verdict{report.changed === 1 ? "" : "s"} change
-            </b>
-            .
-          </>
+          <FormattedMessage
+            id="net.impact.changed"
+            values={{ total: report.total, changed: report.changed, ...richBold }}
+          />
         )}
         <ul className="impact-list">
-          {report.transitions.map((t, i) => (
+          {report.transitions.map((tr, i) => (
             <li key={i}>
-              {t.prev_verdict} → {t.next_verdict}: <b>{t.count}</b>
+              <FormattedMessage
+                id="net.impact.transition"
+                values={{
+                  from: tr.prev_verdict,
+                  to: tr.next_verdict,
+                  count: tr.count,
+                  ...richBold,
+                }}
+              />
             </li>
           ))}
           {report.affected_devices.length > 0 && (
-            <li>{report.affected_devices.length} device(s) affected</li>
+            <li>
+              <FormattedMessage
+                id="net.impact.affected"
+                values={{ devices: report.affected_devices.length }}
+              />
+            </li>
           )}
           {report.affected_sites.length > 0 && (
-            <li>{report.affected_sites.length} site(s) affected</li>
+            <li>
+              <FormattedMessage
+                id="net.impact.sites"
+                values={{ sites: report.affected_sites.length }}
+              />
+            </li>
           )}
           {report.next_errors !== report.prev_errors && (
             <li>
-              policy errors: {report.prev_errors} → <b>{report.next_errors}</b>
+              <FormattedMessage
+                id="net.impact.errors"
+                values={{
+                  prev: report.prev_errors,
+                  next: report.next_errors,
+                  ...richBold,
+                }}
+              />
             </li>
           )}
         </ul>
