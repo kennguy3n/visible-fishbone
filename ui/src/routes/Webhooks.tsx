@@ -169,6 +169,14 @@ function CreateWebhook({ tenantId, onClose }: { tenantId: string; onClose: () =>
     }
   };
 
+  // Block every dismissal path (Escape, backdrop, ✕) while the webhook is being
+  // created: the signing secret is shown only once, on success, and tearing the
+  // modal down mid-flight would create the webhook server-side but lose that
+  // secret for good. Once it's settled the dialog closes normally.
+  const requestClose = () => {
+    if (!create.isPending) onClose();
+  };
+
   return (
     <Modal
       title={
@@ -176,7 +184,7 @@ function CreateWebhook({ tenantId, onClose }: { tenantId: string; onClose: () =>
           ? intl.formatMessage(secret ? M.secretTitle : M.createdTitle)
           : intl.formatMessage(M.createTitle)
       }
-      onClose={onClose}
+      onClose={requestClose}
       footer={
         created ? (
           <button className="btn btn--primary" onClick={onClose} autoFocus>
