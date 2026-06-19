@@ -11,11 +11,16 @@ import {
   EmptyState,
   EmptyIllustration,
 } from "@/components/ui";
-import { Modal } from "@/components/Modal";
 import { useToast } from "@/components/Toast";
 import { MspPicker } from "./MspPicker";
 import { M } from "./lane-b6.messages";
-import { LanePage, MspScopeBanner, ConfirmDialog, LabelText } from "./_lane";
+import {
+  LanePage,
+  LaneModal,
+  MspScopeBanner,
+  ConfirmDialog,
+  LabelText,
+} from "./_lane";
 
 // Cross-tenant policy templates are authored once and pushed to an MSP's
 // entire tenant cohort. The library is persisted locally so operators can
@@ -327,7 +332,7 @@ function TemplateEditor({
   };
 
   return (
-    <Modal
+    <LaneModal
       title={template ? fm(M.tplEditTitle) : fm(M.tplCreateTitle)}
       onClose={onClose}
       footer={
@@ -371,6 +376,6 @@ function TemplateEditor({
           {err}
         </p>
       )}
-    </Modal>
+    </LaneModal>
   );
 }

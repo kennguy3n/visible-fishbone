@@ -2,6 +2,7 @@
 // `lane-utils.ts`) so react-refresh stays happy. Importing this module also
 // pulls in the lane's scoped stylesheet exactly once.
 import type { ReactNode } from "react";
+import { useEffect, useRef } from "react";
 import { useIntl } from "react-intl";
 import { EmptyState, EmptyIllustration } from "@/components/ui";
 import { Modal } from "@/components/Modal";
@@ -12,6 +13,76 @@ import "@/routes/lane-b6.css";
 /** Wraps a screen so the lane's scoped styles (`.lane-b6 …`) apply. */
 export function LanePage({ children }: { children: ReactNode }) {
   return <div className="lane-b6">{children}</div>;
+}
+
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+
+/**
+ * Drop-in wrapper around the frozen WS0 `Modal` that adds the keyboard focus
+ * management the shared component doesn't implement: it moves initial focus
+ * into the dialog (unless a child already claimed it via `autoFocus`) and traps
+ * Tab / Shift+Tab inside the dialog while it is open. The foundation component
+ * is not modified — we only manage focus on the `.modal` node it renders.
+ */
+export function LaneModal({
+  title,
+  onClose,
+  children,
+  footer,
+}: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+  footer?: ReactNode;
+}) {
+  const anchorRef = useRef<HTMLSpanElement>(null);
+
+  useEffect(() => {
+    const dialog = anchorRef.current?.closest<HTMLElement>(".modal");
+    if (!dialog) return;
+    const focusables = () =>
+      Array.from(
+        dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR),
+      ).filter((el) => el.offsetParent !== null);
+
+    // Respect a child's `autoFocus`; otherwise pull focus into the dialog.
+    if (!dialog.contains(document.activeElement)) {
+      (focusables()[0] ?? dialog).focus();
+    }
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== "Tab") return;
+      const items = focusables();
+      if (items.length === 0) {
+        e.preventDefault();
+        return;
+      }
+      const first = items[0];
+      const last = items[items.length - 1];
+      const active = document.activeElement;
+      if (!dialog.contains(active)) {
+        e.preventDefault();
+        first.focus();
+      } else if (e.shiftKey && active === first) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && active === last) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    // Capture phase so we intercept Tab even if focus has escaped the dialog.
+    document.addEventListener("keydown", onKeyDown, true);
+    return () => document.removeEventListener("keydown", onKeyDown, true);
+  }, []);
+
+  return (
+    <Modal title={title} onClose={onClose} footer={footer}>
+      <span ref={anchorRef} aria-hidden="true" style={{ display: "none" }} />
+      {children}
+    </Modal>
+  );
 }
 
 function ScopeIcon() {
@@ -129,7 +200,7 @@ export function ConfirmDialog({
 }) {
   const { formatMessage } = useIntl();
   return (
-    <Modal
+    <LaneModal
       title={title}
       onClose={onClose}
       footer={
@@ -148,7 +219,7 @@ export function ConfirmDialog({
       }
     >
       {children}
-    </Modal>
+    </LaneModal>
   );
 }
 

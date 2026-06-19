@@ -12,11 +12,10 @@ import {
   EmptyIllustration,
 } from "@/components/ui";
 import { DataTable, type Column } from "@/components/DataTable";
-import { Modal } from "@/components/Modal";
 import { useToast } from "@/components/Toast";
 import { useTenant } from "@/lib/tenant-context";
 import { M } from "./lane-b6.messages";
-import { LanePage, PermissionDenied, LabelText } from "./_lane";
+import { LanePage, LaneModal, PermissionDenied, LabelText } from "./_lane";
 import { isPermissionDenied } from "./lane-utils";
 
 // MSP-scoped roles share the RBAC store but carry scope "msp" or "platform",
@@ -205,7 +204,7 @@ function CreateMspRole({
       : fm(M.rbacScopeMspHelp);
 
   return (
-    <Modal
+    <LaneModal
       title={fm(M.rbacCreateTitle)}
       onClose={onClose}
       footer={
@@ -299,6 +298,6 @@ function CreateMspRole({
           {fm(M.rbacError)}
         </p>
       )}
-    </Modal>
+    </LaneModal>
   );
 }

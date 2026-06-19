@@ -18,12 +18,17 @@ import {
   EmptyState,
   EmptyIllustration,
 } from "@/components/ui";
-import { Modal } from "@/components/Modal";
 import { useToast } from "@/components/Toast";
 import { titleCase } from "@/lib/format";
 import { useTenant } from "@/lib/tenant-context";
 import { M } from "./lane-b6.messages";
-import { LanePage, ConfirmDialog, PermissionDenied, LabelText } from "./_lane";
+import {
+  LanePage,
+  LaneModal,
+  ConfirmDialog,
+  PermissionDenied,
+  LabelText,
+} from "./_lane";
 import { isPermissionDenied } from "./lane-utils";
 
 export function MspHierarchy() {
@@ -243,7 +248,7 @@ function CreateMsp({ onClose }: { onClose: () => void }) {
   const [slug, setSlug] = useState("");
 
   return (
-    <Modal
+    <LaneModal
       title={fm(M.hierCreateTitle)}
       onClose={onClose}
       footer={
@@ -292,6 +297,6 @@ function CreateMsp({ onClose }: { onClose: () => void }) {
           {fm(M.hierCreateError)}
         </p>
       )}
-    </Modal>
+    </LaneModal>
   );
 }

@@ -18,13 +18,13 @@ import {
   EmptyIllustration,
 } from "@/components/ui";
 import { DataTable, type Column } from "@/components/DataTable";
-import { Modal } from "@/components/Modal";
 import { useToast } from "@/components/Toast";
 import { formatDateTime, titleCase } from "@/lib/format";
 import { useTenant } from "@/lib/tenant-context";
 import { M } from "@/routes/msp/lane-b6.messages";
 import {
   LanePage,
+  LaneModal,
   ConfirmDialog,
   PermissionDenied,
   LabelText,
@@ -267,7 +267,7 @@ function CreateTenantModal({
   };
 
   return (
-    <Modal
+    <LaneModal
       title={fm(M.createTenantTitle)}
       onClose={onClose}
       footer={
@@ -324,6 +324,6 @@ function CreateTenantModal({
           </p>
         )}
       </form>
-    </Modal>
+    </LaneModal>
   );
 }
