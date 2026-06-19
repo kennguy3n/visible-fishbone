@@ -298,7 +298,7 @@ const en = {
   "policy.simple.title": "Rules — who can do what, to where",
   "policy.simple.help.title": "Editing rules",
   "policy.simple.help.body":
-    "Rules run top to bottom and the first match wins. Drag the handle to reorder. Mark a rule for removal to preview deleting it, then test the change before you save.",
+    "Rules run top to bottom and the first match wins. Drag the handle — or focus it and press the Up and Down arrow keys — to reorder. Mark a rule for removal to preview deleting it, then test the change before you save.",
   "policy.simple.empty.title": "No rules yet",
   "policy.simple.empty.body":
     "This tenant’s policy has no rules. Switch to Advanced to author the policy graph, then return to manage rules in plain English.",
@@ -308,10 +308,12 @@ const en = {
   "policy.col.domain": "Area",
   "policy.row.remove": "Remove rule {n}",
   "policy.row.undo": "Keep rule {n}",
+  "policy.row.reorder":
+    "Reorder rule {n}. Press the Up or Down arrow key to move it.",
   "policy.legend.active": "Active",
   "policy.legend.reordered": "Reordered (draft)",
   "policy.legend.removed": "Will be removed",
-  "policy.dragHint": "Drag to reorder",
+  "policy.dragHint": "Drag, or focus and press arrow keys, to reorder",
   "policy.describe.anyone": "Anyone",
   "policy.describe.anything": "anything",
   "policy.describe.allDomain": "All {domain} traffic",

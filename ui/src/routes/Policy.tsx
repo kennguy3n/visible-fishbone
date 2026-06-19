@@ -579,6 +579,30 @@ function SimpleRules({
     setDragKey(null);
   };
 
+  // Keyboard-operable reorder: drag-and-drop alone leaves keyboard-only
+  // operators unable to change rule order, so the handle is a focusable button
+  // and the arrow keys swap a rule with its nearest active neighbour. Removed
+  // rows are skipped (they don't define the live order) and stay put, mirroring
+  // the drag behaviour. React keeps the same handle DOM node for a stable
+  // `row.key`, so focus rides along with the row as it moves.
+  const moveRow = (key: string, dir: -1 | 1) => {
+    setRows((prev) => {
+      const from = prev.findIndex((r) => r.key === key);
+      if (from < 0 || prev[from].status !== "active") return prev;
+      let to = -1;
+      for (let j = from + dir; j >= 0 && j < prev.length; j += dir) {
+        if (prev[j].status === "active") {
+          to = j;
+          break;
+        }
+      }
+      if (to < 0) return prev;
+      const next = [...prev];
+      [next[from], next[to]] = [next[to], next[from]];
+      return next;
+    });
+  };
+
   const test = () => {
     sim.mutate({ proposed: proposed() });
   };
@@ -646,12 +670,28 @@ function SimpleRules({
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={() => onDrop(row.key)}
               >
-                <span
-                  className="rule-row__handle"
-                  role="cell"
-                  title={t("policy.dragHint")}
-                >
-                  <span aria-hidden>⠿</span>
+                <span className="rule-row__handle" role="cell">
+                  {row.status === "active" ? (
+                    <button
+                      type="button"
+                      className="rule-row__reorder"
+                      aria-label={t("policy.row.reorder", { n: i + 1 })}
+                      title={t("policy.dragHint")}
+                      onKeyDown={(e) => {
+                        if (e.key === "ArrowUp") {
+                          e.preventDefault();
+                          moveRow(row.key, -1);
+                        } else if (e.key === "ArrowDown") {
+                          e.preventDefault();
+                          moveRow(row.key, 1);
+                        }
+                      }}
+                    >
+                      <span aria-hidden>⠿</span>
+                    </button>
+                  ) : (
+                    <span aria-hidden>⠿</span>
+                  )}
                 </span>
                 <span className="rule-row__src" role="cell" title={src}>
                   <b>{i + 1}.</b> {src}
