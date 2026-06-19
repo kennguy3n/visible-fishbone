@@ -4,22 +4,49 @@ import {
   EffectiveAppEffectiveClass,
   EffectiveAppSource,
 } from "@/api/generated/model";
-import { PageHeader, Card, AsyncBoundary, Badge, Stat } from "@/components/ui";
+import {
+  PageHeader,
+  Card,
+  AsyncBoundary,
+  Badge,
+  Stat,
+  EmptyState,
+  EmptyIllustration,
+} from "@/components/ui";
 import { DataTable, type Column } from "@/components/DataTable";
 import { RequireTenant } from "@/components/RequireTenant";
+import { HelpTooltip } from "@/components/HelpTooltip";
 import { titleCase } from "@/lib/format";
+import { LaneB4Screen, useT } from "./lane-b4-i18n";
+import { isForbidden, PermissionDenied } from "./lane-b4-ui";
+import type { LaneKey } from "./lane-b4-messages";
+
+const CLASS_LABEL = new Map<string, LaneKey>([
+  ["trusted_direct", "appReg.class.trusted_direct"],
+  ["trusted_media_bypass", "appReg.class.trusted_media_bypass"],
+  ["inspect_lite", "appReg.class.inspect_lite"],
+  ["inspect_full", "appReg.class.inspect_full"],
+  ["tunnel_private", "appReg.class.tunnel_private"],
+  ["block", "appReg.class.block"],
+]);
+
+const SOURCE_LABEL = new Map<string, LaneKey>([
+  ["global", "appReg.source.global"],
+  ["override", "appReg.source.override"],
+]);
 
 export function AppRegistry() {
   return (
-    <RequireTenant>
-      {(tenantId) => <AppRegistryInner tenantId={tenantId} />}
-    </RequireTenant>
+    <LaneB4Screen>
+      <RequireTenant>
+        {(tenantId) => <AppRegistryInner tenantId={tenantId} />}
+      </RequireTenant>
+    </LaneB4Screen>
   );
 }
 
 // effective_class is a traffic class (see EffectiveAppEffectiveClass), not a
-// sanction verdict. The previous allow/deny/sanctioned strings matched none of
-// the real enum values, so every badge rendered neutral.
+// sanction verdict — the colour signals how strictly traffic is handled.
 function classTone(cls: string) {
   if (cls === EffectiveAppEffectiveClass.block) return "danger" as const;
   if (
@@ -36,13 +63,14 @@ function classTone(cls: string) {
 }
 
 function AppRegistryInner({ tenantId }: { tenantId: string }) {
+  const t = useT();
   const list = useListTenantAppRegistry(tenantId);
 
-  // Summary cards are derived from the effective-app list itself. The separate
-  // /app-registry/stats endpoint returns per-class *traffic* volume
-  // (events/bytes), not catalog counts, so it can't back these cards — the old
-  // code cast it to an invented {total,overrides,by_class} shape that never
-  // existed, leaving every card stuck on "—".
+  if (isForbidden(list.error)) return <PermissionDenied />;
+
+  // Summary cards are derived from the effective-app list itself; the separate
+  // /app-registry/stats endpoint returns per-class traffic volume, not catalog
+  // counts, so it can't back these cards.
   const items = list.data?.items ?? [];
   const overrideCount = items.filter(
     (e) => e.source === EffectiveAppSource.override,
@@ -57,21 +85,33 @@ function AppRegistryInner({ tenantId }: { tenantId: string }) {
   ).length;
   const hasData = list.data !== undefined;
 
+  const classLabel = (cls: string) =>
+    CLASS_LABEL.has(cls) ? t(CLASS_LABEL.get(cls)!) : titleCase(cls);
+  const sourceLabel = (src: string) =>
+    SOURCE_LABEL.has(src) ? t(SOURCE_LABEL.get(src)!) : titleCase(src);
+
   const cols: Column<EffectiveApp>[] = [
-    { header: "Application", cell: (e) => e.app?.name ?? e.app?.id ?? "—" },
-    { header: "Category", cell: (e) => <Badge tone="neutral">{titleCase(e.app?.category ?? "")}</Badge> },
+    { header: t("appReg.col.application"), cell: (e) => e.app?.name ?? e.app?.id ?? "—" },
     {
-      header: "Effective class",
-      cell: (e) => <Badge tone={classTone(e.effective_class)}>{titleCase(e.effective_class)}</Badge>,
+      header: t("appReg.col.category"),
+      cell: (e) => <Badge tone="neutral">{titleCase(e.app?.category ?? "")}</Badge>,
     },
     {
-      header: "Source",
+      header: t("appReg.col.class"),
       cell: (e) => (
-        <Badge tone={e.source === "override" ? "info" : "neutral"}>{titleCase(e.source)}</Badge>
+        <Badge tone={classTone(e.effective_class)}>{classLabel(e.effective_class)}</Badge>
       ),
     },
     {
-      header: "Override reason",
+      header: t("appReg.col.source"),
+      cell: (e) => (
+        <Badge tone={e.source === "override" ? "info" : "neutral"}>
+          {sourceLabel(e.source)}
+        </Badge>
+      ),
+    },
+    {
+      header: t("appReg.col.reason"),
       cell: (e) => e.override_reason ?? "—",
     },
   ];
@@ -79,22 +119,34 @@ function AppRegistryInner({ tenantId }: { tenantId: string }) {
   return (
     <>
       <PageHeader
-        title="App registry"
-        subtitle="Effective application classifications: global catalog with per-tenant overrides."
+        title={t("appReg.title")}
+        subtitle={t("appReg.subtitle")}
+        actions={
+          <HelpTooltip title={t("appReg.help.title")} align="right">
+            {t("appReg.help.body")}
+          </HelpTooltip>
+        }
       />
       <div className="grid grid--stats">
-        <Stat label="Apps" value={hasData ? items.length : "—"} />
-        <Stat label="Overrides" value={hasData ? overrideCount : "—"} />
-        <Stat label="Inspected" value={hasData ? inspectedCount : "—"} />
-        <Stat label="Blocked" value={hasData ? blockedCount : "—"} />
+        <Stat label={t("appReg.stat.apps")} value={hasData ? items.length : "—"} />
+        <Stat label={t("appReg.stat.overrides")} value={hasData ? overrideCount : "—"} />
+        <Stat label={t("appReg.stat.inspected")} value={hasData ? inspectedCount : "—"} />
+        <Stat label={t("appReg.stat.blocked")} value={hasData ? blockedCount : "—"} />
       </div>
       <Card>
         <AsyncBoundary
           isLoading={list.isLoading}
           error={list.error}
           data={list.data}
+          onRetry={() => list.refetch()}
           isEmpty={(d) => (d.items?.length ?? 0) === 0}
-          empty={<p className="muted">App catalog is empty.</p>}
+          empty={
+            <EmptyState
+              illustration={<EmptyIllustration kind="search" />}
+              title={t("appReg.empty.title")}
+              description={t("appReg.empty.desc")}
+            />
+          }
         >
           {(d) => (
             <DataTable
