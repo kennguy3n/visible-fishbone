@@ -20,6 +20,7 @@ export function LanePage({ children }: { children: ReactNode }) {
 export function ConfirmDialog({
   title,
   body,
+  error,
   confirmLabel,
   cancelLabel,
   busyLabel,
@@ -30,6 +31,8 @@ export function ConfirmDialog({
 }: {
   title: string;
   body: ReactNode;
+  /** Plain-language failure message shown in-dialog so the user can retry. */
+  error?: ReactNode;
   confirmLabel: string;
   cancelLabel: string;
   busyLabel?: string;
@@ -68,6 +71,11 @@ export function ConfirmDialog({
       }
     >
       <p className="lane-prose">{body}</p>
+      {error ? (
+        <p className="error-text" role="alert">
+          {error}
+        </p>
+      ) : null}
     </Modal>
   );
 }

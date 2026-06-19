@@ -6,7 +6,7 @@ import {
   useTestIntegrationConnector,
   useDeleteIntegrationConnector,
 } from "@/api/generated/endpoints/integration/integration";
-import { IntegrationConnectorType } from "@/api/generated/model";
+import { IntegrationConnectorType, IntegrationConnectorTestResult } from "@/api/generated/model";
 import type { IntegrationConnector } from "@/api/generated/model";
 import {
   PageHeader,
@@ -62,7 +62,7 @@ function IntegrationsInner({ tenantId }: { tenantId: string }) {
     {
       header: intl.formatMessage(M.colLastTest),
       cell: (c) =>
-        c.last_test_result ? (
+        c.last_test_result !== IntegrationConnectorTestResult.never ? (
           <span title={c.last_test_error ?? undefined}>
             <StatusBadge status={c.last_test_result} />{" "}
             {c.last_test_at ? formatRelative(c.last_test_at) : ""}
@@ -138,6 +138,7 @@ function IntegrationsInner({ tenantId }: { tenantId: string }) {
         <ConfirmDialog
           title={intl.formatMessage(M.deleteTitle)}
           body={intl.formatMessage(M.deleteBody, { name: toDelete.name })}
+          error={del.isError ? intl.formatMessage(M.deleteError) : undefined}
           confirmLabel={intl.formatMessage(M.deleteConfirm)}
           cancelLabel={intl.formatMessage(M.cancel)}
           busyLabel={intl.formatMessage(M.removing)}
@@ -149,7 +150,10 @@ function IntegrationsInner({ tenantId }: { tenantId: string }) {
               { onSuccess: () => setToDelete(null) },
             )
           }
-          onClose={() => setToDelete(null)}
+          onClose={() => {
+            del.reset();
+            setToDelete(null);
+          }}
         />
       )}
     </LanePage>

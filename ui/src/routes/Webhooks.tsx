@@ -116,6 +116,7 @@ function WebhooksInner({ tenantId }: { tenantId: string }) {
         <ConfirmDialog
           title={intl.formatMessage(M.deleteTitle)}
           body={intl.formatMessage(M.deleteBody)}
+          error={del.isError ? intl.formatMessage(M.deleteError) : undefined}
           confirmLabel={intl.formatMessage(M.deleteConfirm)}
           cancelLabel={intl.formatMessage(M.cancel)}
           busyLabel={intl.formatMessage(M.removing)}
@@ -127,7 +128,10 @@ function WebhooksInner({ tenantId }: { tenantId: string }) {
               { onSuccess: () => setToDelete(null) },
             )
           }
-          onClose={() => setToDelete(null)}
+          onClose={() => {
+            del.reset();
+            setToDelete(null);
+          }}
         />
       )}
     </LanePage>

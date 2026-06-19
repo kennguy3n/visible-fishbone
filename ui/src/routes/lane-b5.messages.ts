@@ -57,6 +57,10 @@ export const integrationsMsg = defineMessages({
     id: "laneB5.integrations.delete.confirm",
     defaultMessage: "Remove integration",
   },
+  deleteError: {
+    id: "laneB5.integrations.delete.error",
+    defaultMessage: "We couldn''t remove that integration. Please try again.",
+  },
   removing: { id: "laneB5.integrations.removing", defaultMessage: "Removing…" },
   createTitle: { id: "laneB5.integrations.create.title", defaultMessage: "Connect a tool" },
   nameLabel: { id: "laneB5.integrations.create.name.label", defaultMessage: "Name" },
@@ -121,6 +125,10 @@ export const webhooksMsg = defineMessages({
       "ShieldNet will stop sending events to this endpoint. Deliveries already sent aren''t affected. You can add the endpoint again at any time.",
   },
   deleteConfirm: { id: "laneB5.webhooks.delete.confirm", defaultMessage: "Remove webhook" },
+  deleteError: {
+    id: "laneB5.webhooks.delete.error",
+    defaultMessage: "We couldn''t remove that webhook. Please try again.",
+  },
   createTitle: { id: "laneB5.webhooks.create.title", defaultMessage: "Add webhook endpoint" },
   urlLabel: { id: "laneB5.webhooks.url.label", defaultMessage: "Endpoint URL" },
   urlHelp: {
@@ -479,7 +487,7 @@ export const meteringMsg = defineMessages({
   windowLabel: { id: "laneB5.metering.trend.window.label", defaultMessage: "Window" },
   windowOption: {
     id: "laneB5.metering.trend.window.option",
-    defaultMessage: "{count} months",
+    defaultMessage: "{count, plural, one {# month} other {# months}}",
   },
   trendEmptyTitle: { id: "laneB5.metering.trend.empty.title", defaultMessage: "No history yet" },
   trendEmptyBody: {
