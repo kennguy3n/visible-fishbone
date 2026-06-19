@@ -501,6 +501,12 @@ function StepIdentity({
   onNext: () => void;
 }) {
   const intl = useIntl();
+  // Read the latest intl from a ref inside the discovery effect so the effect
+  // doesn't take intl as a dependency: intl changes identity on every locale
+  // switch, and depending on it would re-run discovery and flash the spinner
+  // over an already-verified connection.
+  const intlRef = useRef(intl);
+  intlRef.current = intl;
   const cfg = runtimeConfig();
   const [discovery, setDiscovery] = useState<Record<string, unknown> | null>(
     null,
@@ -535,7 +541,9 @@ function StepIdentity({
         setError(
           e instanceof Error
             ? e.message
-            : intl.formatMessage({ id: "b1.onboard.identity.discoveryFailed" }),
+            : intlRef.current.formatMessage({
+                id: "b1.onboard.identity.discoveryFailed",
+              }),
         );
       })
       .finally(() => {
@@ -544,7 +552,7 @@ function StepIdentity({
     return () => {
       controller.abort();
     };
-  }, [cfg.authMode, cfg.oidcIssuer, reloadKey, intl]);
+  }, [cfg.authMode, cfg.oidcIssuer, reloadKey]);
 
   return (
     <Card

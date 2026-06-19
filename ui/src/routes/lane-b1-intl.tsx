@@ -12,8 +12,11 @@ import { laneMessagesFor } from "./lane-b1.messages";
 export function LaneB1Intl({ children }: { children: ReactNode }) {
   const { locale } = useLocale();
   const parent = useIntl();
-  // The parent catalog is pre-compiled to plain strings; merge the lane catalog
-  // over it so both the chrome and lane keys resolve through one provider.
+  // Merge the lane catalog over the chrome catalog so both resolve through one
+  // provider. `IntlShape.messages` is typed as string | MessageFormatElement[]
+  // values; this app ships plain-string catalogs (not @formatjs pre-compiled
+  // AST), so the cast to Record<string, string> is safe. If the chrome catalog
+  // ever switches to pre-compiled AST, this merge must be revisited.
   // Memoize so the merged object keeps a stable identity across re-renders —
   // IntlProvider compares messages by reference, so a fresh object every render
   // would needlessly re-render every useIntl() consumer in the subtree.
