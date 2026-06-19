@@ -1,7 +1,9 @@
 import { useId, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   useListRoles,
   useCreateRole,
+  getListRolesQueryKey,
 } from "@/api/generated/endpoints/rbac/rbac";
 import { RoleCreateRequestScope } from "@/api/generated/model";
 import type { Role } from "@/api/generated/model";
@@ -130,6 +132,7 @@ function RbacInner({ tenantId }: { tenantId: string }) {
 function CreateRole({ tenantId, onClose }: { tenantId: string; onClose: () => void }) {
   const t = useT();
   const create = useCreateRole();
+  const qc = useQueryClient();
   const formId = useId();
   const nameId = useId();
   const nameHelpId = useId();
@@ -160,7 +163,12 @@ function CreateRole({ tenantId, onClose }: { tenantId: string; onClose: () => vo
     if (name.trim() === "" || perms.size === 0) return;
     create.mutate(
       { tenantId, data: { name: name.trim(), scope, permissions: [...perms] } },
-      { onSuccess: onClose },
+      {
+        onSuccess: () => {
+          void qc.invalidateQueries({ queryKey: getListRolesQueryKey(tenantId) });
+          onClose();
+        },
+      },
     );
   };
 
