@@ -177,6 +177,7 @@ const en = {
   "verb.isolate": "Isolate",
   "verb.block": "Block",
   "verb.bypass": "Bypass",
+  "verb.suggest_only": "Suggest only",
 
   // --- Network policies -------------------------------------------------
   "net.title": "Network policies",

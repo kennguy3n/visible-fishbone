@@ -2,6 +2,12 @@ import { useRef, type ReactNode } from "react";
 import { Modal } from "@/components/Modal";
 import { useDialogA11y } from "./useDialogA11y";
 
+// Stable no-op so that, while a mutation is in flight, the `onClose` prop keeps
+// a constant identity across renders. Modal's Escape-handler effect depends on
+// `[onClose]`, so a fresh inline `() => {}` would needlessly re-subscribe it
+// every render during the request.
+const NOOP = () => {};
+
 /**
  * Safe-by-default confirmation for destructive actions in Lane B2.
  *
@@ -42,7 +48,7 @@ export function ConfirmDialog({
   return (
     <Modal
       title={title}
-      onClose={busy ? () => {} : onCancel}
+      onClose={busy ? NOOP : onCancel}
       footer={
         <>
           <button

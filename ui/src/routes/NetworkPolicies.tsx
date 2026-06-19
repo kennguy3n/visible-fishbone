@@ -72,6 +72,7 @@ const VERB_KEYS: Record<string, LaneB2Key> = {
   isolate: "verb.isolate",
   block: "verb.block",
   bypass: "verb.bypass",
+  suggest_only: "verb.suggest_only",
 };
 
 interface GraphRule {
