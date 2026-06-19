@@ -39,10 +39,11 @@ function TerraformInner({ tenantId }: { tenantId: string }) {
 
   const parseInput = (): ExportedConfig | null => {
     setErr(null);
-    // Clear any prior success/error from the last action so a stale "imported"
-    // message can't sit next to a fresh validation error.
-    importCfg.reset();
-    drift.reset();
+    // Clear the prior action's stale success/error so it can't sit next to a
+    // fresh validation error — but never reset a mutation that's still in
+    // flight, which would drop its pending UI and discard its eventual result.
+    if (!importCfg.isPending) importCfg.reset();
+    if (!drift.isPending) drift.reset();
     try {
       return JSON.parse(text) as ExportedConfig;
     } catch {
@@ -164,7 +165,8 @@ function TerraformInner({ tenantId }: { tenantId: string }) {
                     <div key={i} className="lane-drift__row">
                       {d.drift_type && <Badge tone="neutral">{d.drift_type}</Badge>}
                       <span className="mono">
-                        {d.resource_type ?? "resource"}/{d.resource_name ?? ""}
+                        {d.resource_type ?? intl.formatMessage(M.driftResourceFallback)}/
+                        {d.resource_name ?? ""}
                         {d.details ? ` — ${d.details}` : ""}
                       </span>
                     </div>

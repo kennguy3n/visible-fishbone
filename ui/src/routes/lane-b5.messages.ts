@@ -227,6 +227,10 @@ export const terraformMsg = defineMessages({
     defaultMessage:
       "{count, plural, one {# resource differs from the live config} other {# resources differ from the live config}}",
   },
+  driftResourceFallback: {
+    id: "laneB5.terraform.drift.resourceFallback",
+    defaultMessage: "resource",
+  },
 });
 
 export const playbooksMsg = defineMessages({
@@ -576,7 +580,6 @@ export const meteringMsg = defineMessages({
     id: "laneB5.metering.budget.aria.hard",
     defaultMessage: "{meter} hard limit",
   },
-  cancel: { id: "laneB5.metering.cancel", defaultMessage: "Cancel" },
 });
 
 // Display names for the meter enum. Kept as messages so the lane catalog owns
