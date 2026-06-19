@@ -147,6 +147,19 @@ function severityTone(sev: DlpSeverity): Tone {
   }
 }
 
+// True when a keystroke originates from a field the user is typing into, so a
+// global single-key shortcut shouldn't hijack it.
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  return (
+    tag === "INPUT" ||
+    tag === "TEXTAREA" ||
+    tag === "SELECT" ||
+    target.isContentEditable
+  );
+}
+
 // "dismissed" is a noise-disposal action, so render its state badge muted.
 function reviewStateTone(state: DlpReviewState): Tone {
   return state === "dismissed" ? "neutral" : statusTone(state);
@@ -186,18 +199,24 @@ function DlpReviewQueueInner({ tenantId }: { tenantId: string }) {
   const mutationFor = (d: Decision) =>
     d === "approve" ? approve : d === "block" ? block : dismiss;
 
-  const decide = (id: string, d: Decision) => {
+  // The three actions share one mutation observer each, so several rows can be
+  // in flight at once. `mutateAsync` gives every call its own promise that
+  // settles independently — `mutate`'s per-call callbacks would be dropped when
+  // the next click reuses the observer, stranding the earlier row as busy.
+  const decide = async (id: string, d: Decision) => {
     setBusyIds((prev) => new Set(prev).add(id));
-    mutationFor(d).mutate(id, {
-      onSuccess: () => toast.success(t(DECISION[d].toast), t("drq.toast.recorded")),
-      onError: () => toast.error(t("drq.toast.failed.title"), t("drq.toast.failed.body")),
-      onSettled: () =>
-        setBusyIds((prev) => {
-          const next = new Set(prev);
-          next.delete(id);
-          return next;
-        }),
-    });
+    try {
+      await mutationFor(d).mutateAsync(id);
+      toast.success(t(DECISION[d].toast), t("drq.toast.recorded"));
+    } catch {
+      toast.error(t("drq.toast.failed.title"), t("drq.toast.failed.body"));
+    } finally {
+      setBusyIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
+    }
   };
 
   const sevLabel = (s: DlpSeverity) => (SEVERITY_KEYS[s] ? t(SEVERITY_KEYS[s]) : titleCase(s));
@@ -233,21 +252,21 @@ function DlpReviewQueueInner({ tenantId }: { tenantId: string }) {
               <button
                 className="btn btn--sm b3-approve"
                 disabled={busyIds.has(e.id)}
-                onClick={() => decide(e.id, "approve")}
+                onClick={() => void decide(e.id, "approve")}
               >
                 {t("drq.action.approve")}
               </button>
               <button
                 className="btn btn--sm btn--danger"
                 disabled={busyIds.has(e.id)}
-                onClick={() => decide(e.id, "block")}
+                onClick={() => void decide(e.id, "block")}
               >
                 {t("drq.action.block")}
               </button>
               <button
                 className="btn btn--sm btn--ghost"
                 disabled={busyIds.has(e.id)}
-                onClick={() => decide(e.id, "dismiss")}
+                onClick={() => void decide(e.id, "dismiss")}
               >
                 {t("drq.action.dismiss")}
               </button>
@@ -528,12 +547,14 @@ function ReviewDetail({
 
   // Keyboard-first triage: A approve · B block · D dismiss, while the event is
   // pending and no decision is mid-flight. Modifier combos are ignored so app
-  // and browser shortcuts still work.
+  // and browser shortcuts still work, and keystrokes inside an editable field
+  // are left alone so a future notes/search input can't trigger a decision.
   useEffect(() => {
     if (!isPending) return;
     const onKey = (ev: KeyboardEvent) => {
       const { decide, deciding } = triageRef.current;
       if (ev.metaKey || ev.ctrlKey || ev.altKey || deciding) return;
+      if (isEditableTarget(ev.target)) return;
       const k = ev.key.toLowerCase();
       if (k === "a") decide("approve");
       else if (k === "b") decide("block");
