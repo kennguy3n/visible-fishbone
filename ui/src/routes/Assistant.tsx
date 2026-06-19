@@ -123,6 +123,7 @@ function AssistantInner({ tenantId }: { tenantId: string }) {
         <button
           className={mode === "troubleshoot" ? "active" : ""}
           aria-pressed={mode === "troubleshoot"}
+          disabled={busy}
           onClick={() => switchMode("troubleshoot")}
         >
           {intl.formatMessage(M.tabTroubleshoot)}
@@ -130,6 +131,7 @@ function AssistantInner({ tenantId }: { tenantId: string }) {
         <button
           className={mode === "policy" ? "active" : ""}
           aria-pressed={mode === "policy"}
+          disabled={busy}
           onClick={() => switchMode("policy")}
         >
           {intl.formatMessage(M.tabPolicy)}

@@ -297,3 +297,11 @@
 .lane-mr-auto {
   margin-right: auto;
 }
+
+/* Assistant: dim the mode tabs while a request is in flight (the frozen
+   `.pill-tabs button` has no disabled state) so the disabled affordance
+   matches the input and send button. */
+.lane-b5 .pill-tabs button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

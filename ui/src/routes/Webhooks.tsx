@@ -122,12 +122,16 @@ function WebhooksInner({ tenantId }: { tenantId: string }) {
           busyLabel={intl.formatMessage(M.removing)}
           tone="danger"
           busy={del.isPending}
-          onConfirm={() =>
+          onConfirm={() => {
+            const id = toDelete.id;
             del.mutate(
-              { tenantId, id: toDelete.id },
-              { onSuccess: () => setToDelete(null) },
-            )
-          }
+              { tenantId, id },
+              {
+                onSuccess: () =>
+                  setToDelete((cur) => (cur?.id === id ? null : cur)),
+              },
+            );
+          }}
           onClose={() => {
             del.reset();
             setToDelete(null);

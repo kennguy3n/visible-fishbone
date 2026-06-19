@@ -39,6 +39,10 @@ function TerraformInner({ tenantId }: { tenantId: string }) {
 
   const parseInput = (): ExportedConfig | null => {
     setErr(null);
+    // Clear any prior success/error from the last action so a stale "imported"
+    // message can't sit next to a fresh validation error.
+    importCfg.reset();
+    drift.reset();
     try {
       return JSON.parse(text) as ExportedConfig;
     } catch {
