@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { useIntl } from "react-intl";
 import {
   useListMSPs,
   useCreateMSP,
@@ -17,67 +18,92 @@ import {
   EmptyState,
   EmptyIllustration,
 } from "@/components/ui";
-import { Modal } from "@/components/Modal";
+import { useToast } from "@/components/Toast";
 import { titleCase } from "@/lib/format";
+import { useTenant } from "@/lib/tenant-context";
+import { M } from "./lane-b6.messages";
+import {
+  LanePage,
+  LaneModal,
+  ConfirmDialog,
+  PermissionDenied,
+  LabelText,
+} from "./_lane";
+import { isPermissionDenied } from "./lane-utils";
 
 export function MspHierarchy() {
+  const { formatMessage: fm } = useIntl();
   const list = useListMSPs(undefined);
   const [selected, setSelected] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
 
+  const newMspBtn = (
+    <button className="btn btn--primary" onClick={() => setShowCreate(true)}>
+      {fm(M.hierNew)}
+    </button>
+  );
+
   return (
-    <>
+    <LanePage>
       <PageHeader
-        title="MSP hierarchy"
-        subtitle="Managed service providers and the tenants they administer."
-        actions={
-          <button className="btn btn--primary" onClick={() => setShowCreate(true)}>
-            + New MSP
-          </button>
-        }
+        title={fm(M.hierTitle)}
+        subtitle={fm(M.hierSubtitle)}
+        actions={newMspBtn}
       />
       <div className="grid grid--2">
-        <Card title="Providers">
-          <AsyncBoundary
-            isLoading={list.isLoading}
-            error={list.error}
-            data={list.data}
-            isEmpty={(d) => (d.items?.length ?? 0) === 0}
-            empty={
-              <EmptyState
-                illustration={<EmptyIllustration kind="inbox" />}
-                title="No providers registered"
-                description="Managed service providers will appear here once registered."
-              />
-            }
-          >
-            {(d) => (
-              <div className="tree">
-                {(d.items ?? []).map((m) => (
-                  <MspNode
-                    key={m.id}
-                    msp={m}
-                    selected={selected === m.id}
-                    onSelect={() => setSelected(selected === m.id ? null : m.id)}
-                    onDeleted={(id) =>
-                      setSelected((cur) => (cur === id ? null : cur))
-                    }
-                  />
-                ))}
-              </div>
-            )}
-          </AsyncBoundary>
+        <Card title={fm(M.hierProviders)} subtitle={fm(M.hierProvidersSub)}>
+          {isPermissionDenied(list.error) ? (
+            <PermissionDenied />
+          ) : (
+            <AsyncBoundary
+              isLoading={list.isLoading}
+              error={list.error ? new Error(fm(M.retryHint)) : null}
+              data={list.data}
+              onRetry={() => void list.refetch()}
+              isEmpty={(d) => (d.items?.length ?? 0) === 0}
+              empty={
+                <EmptyState
+                  illustration={<EmptyIllustration kind="inbox" />}
+                  title={fm(M.hierEmptyTitle)}
+                  description={fm(M.hierEmptyBody)}
+                  action={newMspBtn}
+                />
+              }
+            >
+              {(d) => (
+                <div className="tree" role="list">
+                  {(d.items ?? []).map((m) => (
+                    <MspNode
+                      key={m.id}
+                      msp={m}
+                      selected={selected === m.id}
+                      onSelect={() =>
+                        setSelected(selected === m.id ? null : m.id)
+                      }
+                      onDeleted={(id) =>
+                        setSelected((cur) => (cur === id ? null : cur))
+                      }
+                    />
+                  ))}
+                </div>
+              )}
+            </AsyncBoundary>
+          )}
         </Card>
-        <Card title="Tenant bindings">
+        <Card title={fm(M.hierBindings)}>
           {selected ? (
             <MspTenants mspId={selected} />
           ) : (
-            <p className="muted">Select a provider to view its tenant cohort.</p>
+            <EmptyState
+              icon="←"
+              title={fm(M.hierPickPrompt)}
+              description={fm(M.hierPickBody)}
+            />
           )}
         </Card>
       </div>
       {showCreate && <CreateMsp onClose={() => setShowCreate(false)} />}
-    </>
+    </LanePage>
   );
 }
 
@@ -92,15 +118,20 @@ function MspNode({
   onSelect: () => void;
   onDeleted: (id: string) => void;
 }) {
+  const { formatMessage: fm } = useIntl();
+  const toast = useToast();
   const status = useUpdateMSPStatus();
   const del = useDeleteMSP();
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const isDeleted = msp.status === MSPStatus.deleted;
+
   return (
     <div
       className="tree__node"
+      role="listitem"
       style={{ borderColor: selected ? "var(--brand)" : "var(--border-soft)" }}
     >
-      <button className="tree__label" onClick={onSelect}>
+      <button className="tree__label" onClick={onSelect} aria-pressed={selected}>
         <span style={{ fontWeight: 700 }}>{msp.name}</span>
         <span className="mono muted"> {msp.slug}</span>
       </button>
@@ -110,21 +141,26 @@ function MspNode({
             (it clears tenants.msp_id across the whole cohort), so it is
             deliberately NOT offered here — mirroring the API's MSPCreateStatus,
             which omits it — to stop an operator soft-deleting an MSP with a
-            stray dropdown pick. Deletion goes through the confirm()-gated
-            Delete button, consistent with destructive actions elsewhere. */}
+            stray dropdown pick. Deletion goes through the guarded Delete
+            button, consistent with destructive actions elsewhere. */}
         <select
           value={msp.status}
           disabled={isDeleted || status.isPending}
+          aria-label={fm(M.hierStatusLabel, { name: msp.name })}
           onChange={(e) =>
-            status.mutate({
-              mspId: msp.id,
-              data: { status: e.target.value as MSPStatus },
-            })
+            status.mutate(
+              {
+                mspId: msp.id,
+                data: { status: e.target.value as MSPStatus },
+              },
+              {
+                onSuccess: () => toast.success(fm(M.hierStatusToast)),
+                onError: () => toast.error(fm(M.hierActionError)),
+              },
+            )
           }
           style={{ width: 130 }}
         >
-          {/* Keep a matching (but unselectable) option for a terminal status so
-              the controlled <select> stays consistent. */}
           {isDeleted && (
             <option value={msp.status} disabled>
               {titleCase(msp.status)}
@@ -139,43 +175,64 @@ function MspNode({
         <button
           className="btn btn--danger btn--sm"
           disabled={isDeleted || del.isPending}
-          onClick={() => {
-            if (
-              confirm(
-                `Delete MSP "${msp.name}"? This soft-deletes the provider and ` +
-                  `unassigns every tenant in its cohort. This cannot be undone.`,
-              )
-            ) {
-              del.mutate(
-                { mspId: msp.id },
-                { onSuccess: () => onDeleted(msp.id) },
-              );
-            }
-          }}
+          onClick={() => setConfirmDelete(true)}
         >
-          Delete
+          {fm(M.delete)}
         </button>
       </div>
+
+      {confirmDelete && (
+        <ConfirmDialog
+          title={fm(M.hierDeleteTitle, { name: msp.name })}
+          confirmLabel={fm(M.hierDeleteCta)}
+          tone="danger"
+          busy={del.isPending}
+          onClose={() => setConfirmDelete(false)}
+          onConfirm={() =>
+            del.mutate(
+              { mspId: msp.id },
+              {
+                onSuccess: () => {
+                  onDeleted(msp.id);
+                  setConfirmDelete(false);
+                  toast.success(fm(M.hierDeletedToast, { name: msp.name }));
+                },
+                onError: () => toast.error(fm(M.hierActionError)),
+              },
+            )
+          }
+        >
+          <p>{fm(M.hierDeleteBody)}</p>
+        </ConfirmDialog>
+      )}
     </div>
   );
 }
 
 function MspTenants({ mspId }: { mspId: string }) {
-  const tenants = useListMSPTenants(mspId, undefined);
-  if (tenants.isLoading) return <LoadingState />;
-  const items = tenants.data?.items ?? [];
+  const { formatMessage: fm } = useIntl();
+  const { tenants } = useTenant();
+  const tenantList = useListMSPTenants(mspId, undefined);
+  const nameById = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const t of tenants) map.set(t.id, t.name);
+    return map;
+  }, [tenants]);
+
+  if (tenantList.isLoading) return <LoadingState />;
+  const items = tenantList.data?.items ?? [];
   if (items.length === 0)
     return (
       <EmptyState
-        title="No tenants assigned"
-        description="This provider has no tenants assigned yet."
+        title={fm(M.hierTenantsEmptyTitle)}
+        description={fm(M.hierTenantsEmptyBody)}
       />
     );
   return (
     <ul className="tree tree--child">
       {items.map((b) => (
         <li key={b.tenant_id} className="tree__leaf">
-          <span className="mono">{b.tenant_id.slice(0, 12)}</span>
+          <span>{nameById.get(b.tenant_id) ?? b.tenant_id.slice(0, 12)}</span>
           <StatusBadge status={b.relationship} />
         </li>
       ))}
@@ -184,42 +241,62 @@ function MspTenants({ mspId }: { mspId: string }) {
 }
 
 function CreateMsp({ onClose }: { onClose: () => void }) {
+  const { formatMessage: fm } = useIntl();
+  const toast = useToast();
   const create = useCreateMSP();
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
 
   return (
-    <Modal
-      title="New MSP"
+    <LaneModal
+      title={fm(M.hierCreateTitle)}
       onClose={onClose}
       footer={
         <>
           <button className="btn" onClick={onClose}>
-            Cancel
+            {fm(M.cancel)}
           </button>
           <button
             className="btn btn--primary"
-            disabled={!name || !slug || create.isPending}
-            onClick={() => create.mutate({ data: { name, slug } }, { onSuccess: onClose })}
+            disabled={!name.trim() || !slug.trim() || create.isPending}
+            onClick={() =>
+              create.mutate(
+                { data: { name: name.trim(), slug: slug.trim() } },
+                {
+                  onSuccess: () => {
+                    toast.success(fm(M.hierCreatedToast, { name: name.trim() }));
+                    onClose();
+                  },
+                },
+              )
+            }
           >
-            {create.isPending ? "Creating…" : "Create"}
+            {create.isPending ? fm(M.creating) : fm(M.create)}
           </button>
         </>
       }
     >
       <label className="field">
-        <span>Name</span>
-        <input value={name} onChange={(e) => setName(e.target.value)} />
+        <LabelText>{fm(M.fieldName)}</LabelText>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          autoFocus
+        />
       </label>
       <label className="field">
-        <span>Slug</span>
-        <input value={slug} onChange={(e) => setSlug(e.target.value)} placeholder="acme-msp" />
+        <LabelText help={fm(M.fieldSlugHelp)}>{fm(M.fieldSlug)}</LabelText>
+        <input
+          value={slug}
+          onChange={(e) => setSlug(e.target.value)}
+          placeholder="acme-msp"
+        />
       </label>
       {create.isError && (
-        <p className="error-text">
-          {create.error instanceof Error ? create.error.message : "Failed"}
+        <p className="error-text" role="alert">
+          {fm(M.hierCreateError)}
         </p>
       )}
-    </Modal>
+    </LaneModal>
   );
 }

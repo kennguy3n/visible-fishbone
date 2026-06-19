@@ -1,0 +1,236 @@
+/*
+ * Lane B6 (MSP / multi-tenant management) — scoped styling.
+ *
+ * Everything here is namespaced under `.lane-b6` (applied by the LanePage
+ * wrapper) so it touches only this lane's screens and never the frozen WS0
+ * foundation. Two kinds of rules live here:
+ *
+ *  1. WS0 follow-up contrast fixes. A few shared tokens don't yet meet WCAG
+ *     2.2 AA (see the PR "WS0 follow-up" section). Until WS0 fixes the tokens,
+ *     this lane overrides the *consuming* selectors locally so its screens are
+ *     AA-clean in both themes. No tokens are edited.
+ *
+ *  2. Small lane-local component styles (scope banner, permission picker,
+ *     confirm checklist) built entirely from design-system tokens.
+ */
+
+/* --- 1. WS0 follow-up: local AA contrast fixes ----------------------------- */
+
+/* White text on `--brand` is ~3.6:1 in dark. `--brand-strong` reaches >=4.5:1
+   white in both themes, so anchor primary buttons to it lane-wide. */
+.lane-b6 .btn--primary {
+  background: var(--brand-strong);
+  border-color: var(--brand-strong);
+}
+.lane-b6 .btn--primary:hover:not(:disabled) {
+  background: var(--brand-strong);
+  border-color: var(--brand-strong);
+  box-shadow: 0 3px 12px rgba(var(--brand-rgb), 0.32),
+    inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  filter: brightness(0.94);
+}
+
+/* `--text-faint` on dark surfaces is ~3:1. Lift muted/subtitle text to
+   `--text-dim` (>=5:1 in both themes) so secondary copy stays readable. */
+.lane-b6 .muted,
+.lane-b6 .card__subtitle {
+  color: var(--text-dim);
+}
+
+/* `.badge--info` (brand text on a brand tint) is ~4:1 in dark. Keep the brand
+   tint but use `--text-dim` text for an AA-safe info/neutral chip. */
+.lane-b6 .badge--info {
+  color: var(--text-dim);
+}
+
+/* `table.data th` column headers use `--text-faint` on the header fill, which
+   is ~4.3:1 (light) / ~3.4:1 (dark) — under AA. Lift to `--text-dim`
+   (>=5:1 in both themes); the labels stay uppercase + bold. */
+.lane-b6 table.data th {
+  color: var(--text-dim);
+}
+
+/* Status tints (`--ok`, `--warn`) and the danger button label clear AA in dark
+   but fall short on their light-theme soft fills (axe: --ok 3.0:1, --warn
+   2.8:1, --danger 4.34:1 on a tinted card). Deepen only the light-theme
+   foregrounds via named lane tokens; the dark palette already passes, so it is
+   left untouched. */
+.lane-b6 {
+  --lb6-ok-ink: #065f46;
+  --lb6-warn-ink: #92400e;
+  --lb6-danger-ink: #b91c1c;
+}
+:root[data-theme="light"] .lane-b6 .badge--ok {
+  color: var(--lb6-ok-ink);
+}
+:root[data-theme="light"] .lane-b6 .badge--warn {
+  color: var(--lb6-warn-ink);
+}
+:root[data-theme="light"] .lane-b6 .btn--danger {
+  color: var(--lb6-danger-ink);
+}
+
+/* --- 2. Lane-local components (token-only) --------------------------------- */
+
+/* Scope banner — "which tenant / MSP am I acting on". Reuses `.banner`. */
+.lane-b6 .lb6-scope {
+  margin-bottom: 18px;
+}
+.lane-b6 .lb6-scope__icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  flex: none;
+  border-radius: var(--radius-sm);
+  background: var(--brand-soft);
+  color: var(--brand-strong);
+}
+.lane-b6 .lb6-scope__label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+.lane-b6 .lb6-scope__name {
+  font-weight: 700;
+  font-size: 15px;
+  line-height: 1.25;
+  margin-top: 1px;
+}
+.lane-b6 .lb6-scope__aside {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+/* Field label that carries an inline help affordance. */
+.lane-b6 .lb6-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* Permission picker — selectable rows with plain-language labels. */
+.lane-b6 .lb6-perms {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 8px;
+}
+.lane-b6 .lb6-perm {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: border-color var(--transition), background var(--transition);
+}
+.lane-b6 .lb6-perm:hover {
+  border-color: var(--brand);
+}
+.lane-b6 .lb6-perm:has(input:checked) {
+  border-color: var(--brand);
+  background: var(--brand-soft);
+}
+.lane-b6 .lb6-perm input {
+  width: auto;
+  margin: 2px 0 0;
+  flex: none;
+}
+.lane-b6 .lb6-perm__label {
+  font-weight: 600;
+  font-size: 13px;
+}
+.lane-b6 .lb6-perm__desc {
+  color: var(--text-dim);
+  font-size: 12px;
+  margin-top: 2px;
+}
+.lane-b6 .lb6-perm__code {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* Permission chip stack in the roles table. */
+.lane-b6 .lb6-chips {
+  display: flex;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+
+/* Confirm-dialog "exactly what will happen" checklist. */
+.lane-b6 .lb6-checklist {
+  list-style: none;
+  margin: 14px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.lane-b6 .lb6-checklist li {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  font-size: 13px;
+  line-height: 1.45;
+}
+.lane-b6 .lb6-checklist li::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  margin-top: 6px;
+  border-radius: 50%;
+  background: var(--brand);
+  flex: none;
+}
+
+/* Section sub-heading separating the guided flow from single-step helpers. */
+.lane-b6 .lb6-subhead {
+  margin: 26px 0 12px;
+}
+.lane-b6 .lb6-subhead h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+}
+.lane-b6 .lb6-subhead p {
+  margin: 2px 0 0;
+}
+
+/* Inline results summary above the cohort table. */
+.lane-b6 .lb6-summary {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+/* Template card footer meta. */
+.lane-b6 .lb6-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 14px;
+}
+.lane-b6 .lb6-card-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* Branding action row + inline confirmation. */
+.lane-b6 .lb6-actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
