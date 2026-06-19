@@ -178,6 +178,12 @@ export const en = {
   "apiKeys.revoke.body":
     "Anything using “{name}” will immediately lose access. This can’t be undone — but you can issue a new key any time.",
   "apiKeys.revoke.cta": "Revoke key",
+  "apiKeys.revoke.okTitle": "Key revoked",
+  "apiKeys.revoke.okBody":
+    "Anything using this key can no longer reach ShieldNet. You can issue a new key any time.",
+  "apiKeys.revoke.failTitle": "We couldn’t revoke that key",
+  "apiKeys.revoke.failBody":
+    "The key is still active. Please check your connection and try again.",
 
   // --- App registry ------------------------------------------------------
   "appReg.title": "App registry",

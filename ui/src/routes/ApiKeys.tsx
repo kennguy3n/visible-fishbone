@@ -17,6 +17,7 @@ import { DataTable, type Column } from "@/components/DataTable";
 import { Modal } from "@/components/Modal";
 import { RequireTenant } from "@/components/RequireTenant";
 import { HelpTooltip } from "@/components/HelpTooltip";
+import { useToast } from "@/components/Toast";
 import { formatDateTime, formatRelative } from "@/lib/format";
 import { LaneB4Screen, useT } from "./lane-b4-i18n";
 import { CopyField, isForbidden, PermissionDenied } from "./lane-b4-ui";
@@ -31,6 +32,7 @@ export function ApiKeys() {
 
 function ApiKeysInner({ tenantId }: { tenantId: string }) {
   const t = useT();
+  const toast = useToast();
   const list = useListApiKeys(tenantId);
   const del = useDeleteApiKey();
   const [showCreate, setShowCreate] = useState(false);
@@ -109,7 +111,13 @@ function ApiKeysInner({ tenantId }: { tenantId: string }) {
           onConfirm={() =>
             del.mutate(
               { tenantId, id: revokeTarget.id },
-              { onSettled: () => setRevokeTarget(null) },
+              {
+                onSuccess: () =>
+                  toast.success(t("apiKeys.revoke.okTitle"), t("apiKeys.revoke.okBody")),
+                onError: () =>
+                  toast.error(t("apiKeys.revoke.failTitle"), t("apiKeys.revoke.failBody")),
+                onSettled: () => setRevokeTarget(null),
+              },
             )
           }
           onClose={() => setRevokeTarget(null)}

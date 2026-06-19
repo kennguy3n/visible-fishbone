@@ -9,7 +9,7 @@
 // shared primitives the lane renders consume react-intl, so the nested
 // provider only affects this lane's strings.
 
-import type { ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 import { IntlProvider, useIntl } from "react-intl";
 import { useLocale } from "@/lib/i18n/locale-context";
 import { DEFAULT_LOCALE } from "@/lib/i18n/locales";
@@ -18,11 +18,12 @@ import "./lane-b4.css";
 
 export function LaneB4Screen({ children }: { children: ReactNode }) {
   const { locale } = useLocale();
+  const messages = useMemo(() => laneMessagesFor(locale), [locale]);
   return (
     <IntlProvider
       locale={locale}
       defaultLocale={DEFAULT_LOCALE}
-      messages={laneMessagesFor(locale)}
+      messages={messages}
     >
       <div className="lane-b4">{children}</div>
     </IntlProvider>
