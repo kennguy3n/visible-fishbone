@@ -8,28 +8,36 @@ import { useEffect, type RefObject } from "react";
  * the keyboard path (WCAG 2.1.2 No Keyboard Trap / 2.4.3 Focus Order), so this
  * lane-local hook adds them without touching the foundation.
  *
- * - `initialFocus`: element to focus on open (e.g. the Cancel button so the
- *   safe choice is the default). When omitted and `focusFirst` is set, the
- *   first control in the dialog body is used.
- * - On unmount, focus returns to whatever was focused before the dialog opened
- *   (the opener), unless that element has since left the DOM (e.g. the row it
- *   lived in was deleted), in which case the browser default applies.
+ * Pass `initialFocus`: a ref to the control that should receive focus on open
+ * (e.g. the Cancel button so the safe choice is the default, or a form's first
+ * field). The hook also uses it to locate *this* dialog's container, via
+ * `initialFocus.current.closest(".modal")`, so the Tab trap stays scoped to the
+ * right dialog even when another `.modal` is in the DOM — unlike a global
+ * `document.querySelector(".modal")`, which always returns the first one.
  *
- * Drive initial focus through this hook (`initialFocus`/`focusFirst`), NOT a
- * child's `autoFocus` attribute: React applies `autoFocus` during commit,
- * before this effect runs, so the opener would already be lost by the time we
- * capture `document.activeElement` and focus could not be restored on close.
+ * On unmount, focus returns to whatever was focused before the dialog opened
+ * (the opener), unless that element has since left the DOM (e.g. the row it
+ * lived in was deleted), in which case the browser default applies.
+ *
+ * Drive initial focus through this hook, NOT a child's `autoFocus` attribute:
+ * React applies `autoFocus` during commit, before this effect runs, so the
+ * opener would already be lost by the time we capture `document.activeElement`
+ * and focus could not be restored on close.
  */
 export function useDialogA11y(opts?: {
   initialFocus?: RefObject<HTMLElement | null>;
-  focusFirst?: boolean;
 }) {
   const initialFocus = opts?.initialFocus;
-  const focusFirst = opts?.focusFirst ?? false;
 
   useEffect(() => {
     const opener = document.activeElement as HTMLElement | null;
-    const dialog = document.querySelector<HTMLElement>(".modal");
+    // Scope to THIS dialog by climbing from the initial-focus target to its
+    // enclosing `.modal`, rather than grabbing the first `.modal` in the
+    // document. The global lookup is only a last-resort fallback for the
+    // unlikely case the ref isn't attached when this effect runs.
+    const dialog =
+      initialFocus?.current?.closest<HTMLElement>(".modal") ??
+      document.querySelector<HTMLElement>(".modal");
     const focusables = () =>
       dialog
         ? Array.from(
@@ -39,20 +47,7 @@ export function useDialogA11y(opts?: {
           )
         : [];
 
-    // For `focusFirst`, prefer the first control in the dialog body so focus
-    // lands on a meaningful element rather than the header's ✕ dismiss button,
-    // while still moving focus inside the dialog.
-    const firstInBody = () => {
-      const body = dialog?.querySelector<HTMLElement>(".modal__body");
-      const inBody = body
-        ?.querySelector<HTMLElement>(
-          'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        );
-      return inBody ?? focusables()[0];
-    };
-    const target =
-      initialFocus?.current ?? (focusFirst ? firstInBody() : undefined);
-    target?.focus?.();
+    initialFocus?.current?.focus?.();
 
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Tab" || !dialog) return;

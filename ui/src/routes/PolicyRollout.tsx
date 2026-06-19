@@ -16,7 +16,7 @@ import type {
   RolloutAction,
   RolloutStatus,
 } from "@/api/manual/types";
-import { LaneB2Intl, useT, type LaneB2Key } from "./lane-b2/i18n";
+import { LaneB2Intl, useT, type PlainLaneB2Key } from "./lane-b2/i18n";
 
 const ACTION_TONE: Record<RolloutAction, Tone> = {
   create: "info",
@@ -31,13 +31,13 @@ const STATUS_TONE: Record<RolloutStatus, Tone> = {
   cancelled: "warn",
 };
 
-const ACTION_LABEL: Record<RolloutAction, LaneB2Key> = {
+const ACTION_LABEL: Record<RolloutAction, PlainLaneB2Key> = {
   create: "rollout.action.create",
   update: "rollout.action.update",
   noop: "rollout.action.noop",
 };
 
-const STATUS_LABEL: Record<RolloutStatus, LaneB2Key> = {
+const STATUS_LABEL: Record<RolloutStatus, PlainLaneB2Key> = {
   applied: "rollout.status.applied",
   unchanged: "rollout.status.unchanged",
   failed: "rollout.status.failed",
@@ -156,84 +156,94 @@ function PolicyRolloutInner() {
     );
   }
 
-  const diffColumns: Column<RolloutTargetDiff>[] = [
-    {
-      header: t("rollout.col.tenant"),
-      cell: (row) => {
-        const tenant = tenants.find((x) => x.id === row.tenant_id);
-        return tenant ? (
-          tenant.name
-        ) : (
-          <span className="mono">{shortId(row.tenant_id)}</span>
-        );
+  const diffColumns: Column<RolloutTargetDiff>[] = useMemo(
+    () => [
+      {
+        header: t("rollout.col.tenant"),
+        cell: (row) => {
+          const tenant = tenants.find((x) => x.id === row.tenant_id);
+          return tenant ? (
+            tenant.name
+          ) : (
+            <span className="mono">{shortId(row.tenant_id)}</span>
+          );
+        },
       },
-    },
-    {
-      header: t("rollout.col.change"),
-      cell: (row) => (
-        <Badge tone={ACTION_TONE[row.action]}>{t(ACTION_LABEL[row.action])}</Badge>
-      ),
-    },
-    {
-      header: t("rollout.col.currentBaseline"),
-      cell: (row) =>
-        row.current ? (
-          <span>
-            {titleCase(row.current.industry)} · {row.current.country} ·{" "}
-            <span className="mono">{shortId(row.current.graph_hash)}</span>
-          </span>
-        ) : (
-          <span style={{ color: "var(--text-dim)" }}>
-            {t("rollout.current.none")}
-          </span>
+      {
+        header: t("rollout.col.change"),
+        cell: (row) => (
+          <Badge tone={ACTION_TONE[row.action]}>
+            {t(ACTION_LABEL[row.action])}
+          </Badge>
         ),
-    },
-  ];
+      },
+      {
+        header: t("rollout.col.currentBaseline"),
+        cell: (row) =>
+          row.current ? (
+            <span>
+              {titleCase(row.current.industry)} · {row.current.country} ·{" "}
+              <span className="mono">{shortId(row.current.graph_hash)}</span>
+            </span>
+          ) : (
+            <span style={{ color: "var(--text-dim)" }}>
+              {t("rollout.current.none")}
+            </span>
+          ),
+      },
+    ],
+    [t, tenants],
+  );
 
-  const outcomeColumns: Column<RolloutOutcome>[] = [
-    {
-      header: t("rollout.col.tenant"),
-      cell: (row) => {
-        const tenant = tenants.find((x) => x.id === row.tenant_id);
-        return tenant ? (
-          tenant.name
-        ) : (
-          <span className="mono">{shortId(row.tenant_id)}</span>
-        );
-      },
-    },
-    {
-      header: t("rollout.col.result"),
-      cell: (row) => (
-        <Badge tone={STATUS_TONE[row.status]}>{t(STATUS_LABEL[row.status])}</Badge>
-      ),
-    },
-    {
-      header: t("rollout.col.detail"),
-      cell: (row) => {
-        if (row.status === "failed") {
-          const detail = row.error ?? t("rollout.detail.failed.default");
-          return (
-            <span style={{ color: "var(--text-dim)" }}>
-              {row.rolled_back
-                ? t("rollout.detail.failed", { error: detail })
-                : t("rollout.detail.failed.norollback", { error: detail })}
-            </span>
+  const outcomeColumns: Column<RolloutOutcome>[] = useMemo(
+    () => [
+      {
+        header: t("rollout.col.tenant"),
+        cell: (row) => {
+          const tenant = tenants.find((x) => x.id === row.tenant_id);
+          return tenant ? (
+            tenant.name
+          ) : (
+            <span className="mono">{shortId(row.tenant_id)}</span>
           );
-        }
-        if (row.status === "cancelled") {
-          return (
-            <span style={{ color: "var(--text-dim)" }}>
-              {row.error
-                ? t("rollout.detail.cancelled", { error: row.error })
-                : t("rollout.detail.cancelled.default")}
-            </span>
-          );
-        }
-        return <span className="mono">{shortId(row.graph_hash)}</span>;
+        },
       },
-    },
-  ];
+      {
+        header: t("rollout.col.result"),
+        cell: (row) => (
+          <Badge tone={STATUS_TONE[row.status]}>
+            {t(STATUS_LABEL[row.status])}
+          </Badge>
+        ),
+      },
+      {
+        header: t("rollout.col.detail"),
+        cell: (row) => {
+          if (row.status === "failed") {
+            const detail = row.error ?? t("rollout.detail.failed.default");
+            return (
+              <span style={{ color: "var(--text-dim)" }}>
+                {row.rolled_back
+                  ? t("rollout.detail.failed", { error: detail })
+                  : t("rollout.detail.failed.norollback", { error: detail })}
+              </span>
+            );
+          }
+          if (row.status === "cancelled") {
+            return (
+              <span style={{ color: "var(--text-dim)" }}>
+                {row.error
+                  ? t("rollout.detail.cancelled", { error: row.error })
+                  : t("rollout.detail.cancelled.default")}
+              </span>
+            );
+          }
+          return <span className="mono">{shortId(row.graph_hash)}</span>;
+        },
+      },
+    ],
+    [t, tenants],
+  );
 
   return (
     <div>
