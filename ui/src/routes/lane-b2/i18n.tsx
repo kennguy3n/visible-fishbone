@@ -17,7 +17,7 @@
 // still supplies a working `intl`, so screens can use `useIntl()` /
 // `<FormattedMessage>` unconditionally.
 
-import { useCallback, useContext, type ReactNode } from "react";
+import { useCallback, useContext, useMemo, type ReactNode } from "react";
 import { IntlContext, IntlProvider, useIntl } from "react-intl";
 import { LOCALES, type Locale } from "@/lib/i18n/locales";
 import "./lane-b2.css";
@@ -122,6 +122,7 @@ const en = {
   "browser.col.action": "Action",
   "browser.col.rules": "Rules",
   "browser.col.status": "Status",
+  "browser.col.actions": "Actions",
   "browser.delete": "Delete",
   "browser.delete.aria": "Delete browser policy {name}",
   "browser.delete.title": "Delete this browser policy?",
@@ -427,14 +428,20 @@ function asLocale(loc: string | undefined): Locale {
  * own beyond a plain block element.
  */
 export function LaneB2Intl({ children }: { children: ReactNode }) {
-  const parent = useContext(IntlContext) as { locale?: string } | null;
+  const parent = useContext(IntlContext) as
+    | { locale?: string; messages?: Record<string, string> }
+    | null;
   const locale = asLocale(parent?.locale);
+  // Merge over the parent catalog (not replace it) so a shared primitive that
+  // resolves a global message id keeps working inside the lane, and memoise so
+  // the `messages` prop is referentially stable across renders — otherwise
+  // IntlProvider rebuilds its formatter cache every render.
+  const messages = useMemo(
+    () => ({ ...(parent?.messages ?? {}), ...laneB2MessagesFor(locale) }),
+    [parent?.messages, locale],
+  );
   return (
-    <IntlProvider
-      locale={locale}
-      defaultLocale={DEFAULT_LOCALE}
-      messages={laneB2MessagesFor(locale)}
-    >
+    <IntlProvider locale={locale} defaultLocale={DEFAULT_LOCALE} messages={messages}>
       <div className="lane-b2">{children}</div>
     </IntlProvider>
   );

@@ -621,12 +621,12 @@ function SimpleRules({
       >
         <div className="rule-table" role="table" aria-label={t("policy.simple.title")}>
           <div className="rule-row rule-row--head" role="row">
-            <span />
-            <span>{t("policy.col.source")}</span>
-            <span>{t("policy.col.action")}</span>
-            <span>{t("policy.col.dest")}</span>
-            <span>{t("policy.col.domain")}</span>
-            <span />
+            <span role="columnheader" aria-label={t("policy.dragHint")} />
+            <span role="columnheader">{t("policy.col.source")}</span>
+            <span role="columnheader">{t("policy.col.action")}</span>
+            <span role="columnheader">{t("policy.col.dest")}</span>
+            <span role="columnheader">{t("policy.col.domain")}</span>
+            <span role="columnheader" aria-label={t("common.remove")} />
           </div>
           {rows.map((row, i) => {
             const r = row.rule;
@@ -648,25 +648,25 @@ function SimpleRules({
               >
                 <span
                   className="rule-row__handle"
+                  role="cell"
                   title={t("policy.dragHint")}
-                  aria-hidden
                 >
-                  ⠿
+                  <span aria-hidden>⠿</span>
                 </span>
-                <span className="rule-row__src" title={src}>
+                <span className="rule-row__src" role="cell" title={src}>
                   <b>{i + 1}.</b> {src}
                   {r.description && (
                     <span className="rule-row__desc">{r.description}</span>
                   )}
                 </span>
-                <span>
+                <span role="cell">
                   <Badge tone={VERB_TONE[verb] ?? "neutral"}>
                     {verbLabel(t, r.verb)}
                   </Badge>
                 </span>
-                <span title={dst}>{dst}</span>
-                <span className="muted">{r.domain ?? "—"}</span>
-                <span>
+                <span role="cell" title={dst}>{dst}</span>
+                <span className="muted" role="cell">{r.domain ?? "—"}</span>
+                <span role="cell">
                   {row.status === "active" ? (
                     <button
                       className="btn btn--sm btn--danger"

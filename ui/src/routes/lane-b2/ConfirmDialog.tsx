@@ -9,6 +9,11 @@ import { Modal } from "@/components/Modal";
  * action that the bare `window.confirm()` calls elsewhere can't express.
  * Focus lands on Cancel so the non-destructive choice is the default, and
  * Modal already wires Escape-to-close and `role="dialog"`/`aria-modal`.
+ *
+ * While a mutation is in flight (`busy`) every dismissal path is neutralised —
+ * the footer buttons disable and `onClose` becomes a no-op so Escape, a
+ * backdrop click, or the ✕ can't abandon the dialog mid-request and leave the
+ * user unsure whether the destructive action actually ran.
  */
 export function ConfirmDialog({
   title,
@@ -36,7 +41,7 @@ export function ConfirmDialog({
   return (
     <Modal
       title={title}
-      onClose={onCancel}
+      onClose={busy ? () => {} : onCancel}
       footer={
         <>
           <button

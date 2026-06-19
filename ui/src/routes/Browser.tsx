@@ -63,7 +63,7 @@ function BrowserInner({ tenantId }: { tenantId: string }) {
       cell: (p) => <StatusBadge status={p.enabled ? "enabled" : "disabled"} />,
     },
     {
-      header: t("sites.col.actions"),
+      header: t("browser.col.actions"),
       cell: (p) => (
         <button
           className="btn btn--danger btn--sm"
