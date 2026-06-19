@@ -13,6 +13,29 @@ function cssVar(name: string, fallback: string): string {
   return v || fallback;
 }
 
+// Memoize the sequential ramp so repeated accesses return the same array
+// reference until a theme flip actually changes the resolved colors. The token
+// reads stay live (they still re-resolve every call), but the returned array is
+// only re-allocated when its contents differ — keeping `CHART.ramp` stable for
+// React dependency arrays / memoized chart components.
+let rampCache: string[] = [];
+let rampKey = "";
+function resolveRamp(): string[] {
+  const next = [
+    cssVar("--chart-1", "#91c5ff"),
+    cssVar("--chart-2", "#3a81f6"),
+    cssVar("--chart-3", "#2563ef"),
+    cssVar("--chart-4", "#1a4eda"),
+    cssVar("--chart-5", "#1f3fad"),
+  ];
+  const key = next.join("|");
+  if (key !== rampKey) {
+    rampKey = key;
+    rampCache = next;
+  }
+  return rampCache;
+}
+
 // Live palette: each access re-reads the token, so a component that reads these
 // at render time (the common case) always gets the active theme's color.
 export const CHART = {
@@ -24,6 +47,16 @@ export const CHART = {
   },
   get violet() {
     return cssVar("--chart-violet", "#a78bfa");
+  },
+
+  // Sequential blue data-viz ramp (ShieldNet 360). Use for quantitative /
+  // ordered scales (heatmaps, gauges, single-series gradients) so charts stay
+  // on-brand; categorical series keep using brand/accent/violet/ok/warn.
+  // Returns a stable array reference that only changes when the resolved token
+  // values change (e.g. on a theme flip), so it is safe to pass into React
+  // memoization / dependency arrays without forcing re-renders every access.
+  get ramp(): string[] {
+    return resolveRamp();
   },
   get ok() {
     return cssVar("--ok", "#34d399");
