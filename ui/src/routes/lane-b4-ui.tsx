@@ -1,7 +1,7 @@
 // Lane B4 shared screen helpers: a permission-denied state, a reveal/copy
 // field, and a 403 detector. All copy flows through the lane catalog (useT).
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import axios from "axios";
 import { Card, EmptyState, EmptyIllustration } from "@/components/ui";
 import { useT } from "./lane-b4-i18n";
@@ -43,12 +43,16 @@ export function CopyField({
 }) {
   const t = useT();
   const [copied, setCopied] = useState(false);
+  const resetTimer = useRef<number | undefined>(undefined);
+
+  useEffect(() => () => window.clearTimeout(resetTimer.current), []);
 
   const copy = async () => {
     try {
       await navigator.clipboard.writeText(value);
       setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
+      window.clearTimeout(resetTimer.current);
+      resetTimer.current = window.setTimeout(() => setCopied(false), 1600);
     } catch {
       // Clipboard access can be denied; the value stays visible to copy by hand.
     }

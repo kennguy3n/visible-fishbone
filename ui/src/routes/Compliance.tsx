@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import {
   useComplianceReports,
   useGenerateComplianceReport,
@@ -166,6 +166,9 @@ function GenerateModal({ tenantId, onClose }: { tenantId: string; onClose: () =>
   const t = useT();
   const toast = useToast();
   const gen = useGenerateComplianceReport(tenantId);
+  const formId = useId();
+  const frameworkId = useId();
+  const scopesErrId = useId();
   const [framework, setFramework] = useState(FRAMEWORKS[0].id);
   const [scopes, setScopes] = useState<Record<string, boolean>>({
     dlp: true,
@@ -203,7 +206,7 @@ function GenerateModal({ tenantId, onClose }: { tenantId: string; onClose: () =>
           <button
             className="btn btn--primary"
             type="submit"
-            form="compliance-gen-form"
+            form={formId}
             disabled={gen.isPending}
           >
             {gen.isPending ? t("compliance.generating") : t("compliance.generate.cta")}
@@ -212,16 +215,17 @@ function GenerateModal({ tenantId, onClose }: { tenantId: string; onClose: () =>
       }
     >
       <form
-        id="compliance-gen-form"
+        id={formId}
         onSubmit={(e) => {
           e.preventDefault();
           submit();
         }}
       >
-        <label className="field" htmlFor="compliance-framework">
+        <label className="field" htmlFor={frameworkId}>
           <span>{t("compliance.field.framework")}</span>
           <select
-            id="compliance-framework"
+            id={frameworkId}
+            autoFocus
             value={framework}
             onChange={(e) => setFramework(e.target.value)}
           >
@@ -235,7 +239,7 @@ function GenerateModal({ tenantId, onClose }: { tenantId: string; onClose: () =>
         <fieldset
           className="perm-grid"
           aria-invalid={scopesInvalid}
-          aria-describedby={scopesInvalid ? "compliance-scope-err" : undefined}
+          aria-describedby={scopesInvalid ? scopesErrId : undefined}
         >
           <legend>{t("compliance.field.scopes")}</legend>
           {SCOPES.map((s) => (
@@ -254,7 +258,7 @@ function GenerateModal({ tenantId, onClose }: { tenantId: string; onClose: () =>
           ))}
         </fieldset>
         {scopesInvalid && (
-          <span id="compliance-scope-err" className="field-help field-help--error" role="alert">
+          <span id={scopesErrId} className="field-help field-help--error" role="alert">
             {t("compliance.error.scopes")}
           </span>
         )}
