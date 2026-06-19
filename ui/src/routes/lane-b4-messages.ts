@@ -230,7 +230,9 @@ export const en = {
   "compliance.card.generated": "Generated {when} · {controls} controls",
   "compliance.download.cta": "Download evidence pack",
   "compliance.download.preparing": "Preparing…",
-  "compliance.download.ok": "Your evidence pack is downloading.",
+  "compliance.download.okTitle": "Your evidence pack is downloading.",
+  "compliance.download.okBody":
+    "Check your browser’s downloads for the ZIP — it’s ready to share with auditors.",
   "compliance.download.failTitle": "Download didn’t finish",
   "compliance.download.failBody":
     "We couldn’t prepare the evidence pack. Please try again.",
@@ -240,7 +242,9 @@ export const en = {
   "compliance.error.scopes": "Select at least one area to include.",
   "compliance.error.generate":
     "We couldn’t generate the report. Check the details and try again.",
-  "compliance.generate.ok": "Your compliance report is ready.",
+  "compliance.generate.okTitle": "Your compliance report is ready.",
+  "compliance.generate.okBody":
+    "It now appears at the top of your reports, with a downloadable evidence pack.",
   "compliance.generate.cta": "Generate report",
   "compliance.generating": "Generating…",
   "compliance.scope.dlp": "Data-loss prevention",

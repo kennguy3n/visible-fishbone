@@ -75,7 +75,7 @@ function ComplianceInner({ tenantId }: { tenantId: string }) {
       a.download = `evidence-${report.framework}-${report.id}.zip`;
       a.click();
       URL.revokeObjectURL(url);
-      toast.success(t("compliance.download.ok"));
+      toast.success(t("compliance.download.okTitle"), t("compliance.download.okBody"));
     } catch {
       toast.error(t("compliance.download.failTitle"), t("compliance.download.failBody"));
     } finally {
@@ -188,7 +188,7 @@ function GenerateModal({ tenantId, onClose }: { tenantId: string; onClose: () =>
     const body: GenerateReportRequest = { framework, ...scopes };
     gen.mutate(body, {
       onSuccess: () => {
-        toast.success(t("compliance.generate.ok"));
+        toast.success(t("compliance.generate.okTitle"), t("compliance.generate.okBody"));
         onClose();
       },
     });

@@ -9,7 +9,7 @@
 // shared primitives the lane renders consume react-intl, so the nested
 // provider only affects this lane's strings.
 
-import { useMemo, type ReactNode } from "react";
+import { useCallback, useMemo, type ReactNode } from "react";
 import { IntlProvider, useIntl } from "react-intl";
 import { useLocale } from "@/lib/i18n/locale-context";
 import { DEFAULT_LOCALE } from "@/lib/i18n/locales";
@@ -36,6 +36,9 @@ export type TValues = Record<string, string | number>;
 // eslint-disable-next-line react-refresh/only-export-components
 export function useT(): (key: LaneKey, values?: TValues) => string {
   const intl = useIntl();
-  return (key, values) =>
-    intl.formatMessage({ id: key }, values) as string;
+  return useCallback(
+    (key: LaneKey, values?: TValues) =>
+      intl.formatMessage({ id: key }, values) as string,
+    [intl],
+  );
 }
