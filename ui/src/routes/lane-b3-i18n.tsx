@@ -9,8 +9,9 @@
 // `lane-b3-i18n.test.ts` asserts every locale defines every key.
 
 import { IntlProvider, useIntl } from "react-intl";
-import type { ReactNode } from "react";
+import { useMemo, type ReactNode } from "react";
 import { useLocale } from "@/lib/i18n/locale-context";
+import { messagesFor } from "@/lib/i18n/messages";
 import type { Locale } from "@/lib/i18n/locales";
 
 export type B3Key =
@@ -166,6 +167,7 @@ export type B3Key =
   | "casb.enforcement.route"
   | "casb.enforcement.enforce"
   | "casb.verdict.applied"
+  | "casb.verdict.auto"
   | "casb.verdict.recommended"
   | "casb.verdict.detail"
   | "casb.connectors.title"
@@ -424,6 +426,7 @@ const en: B3Catalog = {
   "casb.enforcement.route": "Route privately",
   "casb.enforcement.enforce": "Block",
   "casb.verdict.applied": "Auto-applied",
+  "casb.verdict.auto": "Applies automatically",
   "casb.verdict.recommended": "Recommended",
   "casb.verdict.detail": "{state} · {confidence}% confident",
   "casb.connectors.title": "Connectors",
@@ -544,9 +547,16 @@ export { en as B3_EN };
 
 export function LaneB3Intl({ children }: { children: ReactNode }) {
   const { locale } = useLocale();
-  // Merge the locale catalog over English so any not-yet-translated key renders
-  // the English source rather than a raw message id.
-  const messages = { ...en, ...B3_MESSAGES[locale] };
+  // A nested IntlProvider replaces — not extends — the parent context, so fold
+  // the global catalog in first. The lane catalog is namespaced and wins on its
+  // own keys; carrying the global keys keeps any shared component that uses
+  // `useIntl()` working inside these screens. English is layered under the
+  // active locale so a not-yet-translated lane key renders the English source
+  // rather than a raw message id. Memoized so we don't reallocate every render.
+  const messages = useMemo(
+    () => ({ ...messagesFor(locale), ...en, ...B3_MESSAGES[locale] }),
+    [locale],
+  );
   return (
     <IntlProvider
       locale={locale}

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   useDlpReviewQueue,
   useDlpReviewEvent,
@@ -168,7 +168,10 @@ function DlpReviewQueueInner({ tenantId }: { tenantId: string }) {
   const [stateFilter, setStateFilter] = useState<DlpReviewState | "all">("pending");
   const [digestWindow, setDigestWindow] = useState<string>(DIGEST_WINDOWS[0].value);
   const [selectedId, setSelectedId] = useState<string | null>(null);
-  const [busyId, setBusyId] = useState<string | null>(null);
+  // Track in-flight rows as a set so overlapping inline decisions each keep
+  // their own busy state; a single value would clear a still-pending row's
+  // disabled state as soon as any other row settled.
+  const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set());
 
   const queue = useDlpReviewQueue(
     tenantId,
@@ -184,11 +187,16 @@ function DlpReviewQueueInner({ tenantId }: { tenantId: string }) {
     d === "approve" ? approve : d === "block" ? block : dismiss;
 
   const decide = (id: string, d: Decision) => {
-    setBusyId(id);
+    setBusyIds((prev) => new Set(prev).add(id));
     mutationFor(d).mutate(id, {
       onSuccess: () => toast.success(t(DECISION[d].toast), t("drq.toast.recorded")),
       onError: () => toast.error(t("drq.toast.failed.title"), t("drq.toast.failed.body")),
-      onSettled: () => setBusyId(null),
+      onSettled: () =>
+        setBusyIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        }),
     });
   };
 
@@ -224,21 +232,21 @@ function DlpReviewQueueInner({ tenantId }: { tenantId: string }) {
             <>
               <button
                 className="btn btn--sm b3-approve"
-                disabled={busyId === e.id}
+                disabled={busyIds.has(e.id)}
                 onClick={() => decide(e.id, "approve")}
               >
                 {t("drq.action.approve")}
               </button>
               <button
                 className="btn btn--sm btn--danger"
-                disabled={busyId === e.id}
+                disabled={busyIds.has(e.id)}
                 onClick={() => decide(e.id, "block")}
               >
                 {t("drq.action.block")}
               </button>
               <button
                 className="btn btn--sm btn--ghost"
-                disabled={busyId === e.id}
+                disabled={busyIds.has(e.id)}
                 onClick={() => decide(e.id, "dismiss")}
               >
                 {t("drq.action.dismiss")}
@@ -512,12 +520,19 @@ function ReviewDetail({
     });
   };
 
+  // The keydown listener is bound once per pending event, so route it through a
+  // ref that always holds the latest decide/deciding values. This avoids both a
+  // stale closure and re-subscribing on every render.
+  const triageRef = useRef({ decide, deciding });
+  triageRef.current = { decide, deciding };
+
   // Keyboard-first triage: A approve · B block · D dismiss, while the event is
   // pending and no decision is mid-flight. Modifier combos are ignored so app
   // and browser shortcuts still work.
   useEffect(() => {
     if (!isPending) return;
     const onKey = (ev: KeyboardEvent) => {
+      const { decide, deciding } = triageRef.current;
       if (ev.metaKey || ev.ctrlKey || ev.altKey || deciding) return;
       const k = ev.key.toLowerCase();
       if (k === "a") decide("approve");
@@ -526,8 +541,7 @@ function ReviewDetail({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isPending, deciding]);
+  }, [isPending]);
 
   return (
     <Modal

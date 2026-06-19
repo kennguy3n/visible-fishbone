@@ -94,11 +94,20 @@ function VerdictCell({ verdict }: { verdict?: CasbAppVerdict }) {
     ? t(ENFORCEMENT_KEYS[enforcement])
     : enforcement;
   const applied = action?.applied ?? false;
+  const auto = action?.mode === "auto";
+  // Three NoOps states: already auto-applied, will auto-apply (auto mode, not
+  // yet enforced), or a recommendation awaiting an operator. Only an applied
+  // verdict reads as active chrome; the rest stay neutral.
+  const stateLabel = applied
+    ? t("casb.verdict.applied")
+    : auto
+      ? t("casb.verdict.auto")
+      : t("casb.verdict.recommended");
   return (
     <span title={verdict.rationale} style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
       <Badge tone={applied ? "info" : "neutral"}>{label}</Badge>
       <span className="muted" style={{ fontSize: "0.8em" }}>
-        {applied ? t("casb.verdict.applied") : t("casb.verdict.recommended")} · {verdict.confidence}%
+        {stateLabel} · {verdict.confidence}%
       </span>
     </span>
   );
