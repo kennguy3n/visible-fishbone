@@ -1,58 +1,84 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
+import { useIntl, type MessageDescriptor } from "react-intl";
 import {
   useBulkApplyPolicyTemplate,
   useBulkProvisionSites,
   useBulkGenerateClaimTokens,
+  useListMSPs,
+  useListMSPTenants,
 } from "@/api/generated/endpoints/msps/msps";
 import { BulkProvisionSitesBodyTemplate } from "@/api/generated/model";
 import type { MSPBulkResult } from "@/api/generated/model";
 import { PageHeader, Card, Badge } from "@/components/ui";
 import { DataTable, type Column } from "@/components/DataTable";
 import { useToast } from "@/components/Toast";
-import { MspPicker } from "./MspPicker";
 import { shortId, titleCase } from "@/lib/format";
+import { MspPicker } from "./MspPicker";
+import { M } from "./lane-b6.messages";
+import { LanePage, MspScopeBanner, ConfirmDialog, LabelText } from "./_lane";
 
 export function MspBulkOps() {
+  const { formatMessage: fm } = useIntl();
   const [mspId, setMspId] = useState<string | null>(null);
+  const msps = useListMSPs(undefined);
+  const mspName = useMemo(
+    () => msps.data?.items?.find((m) => m.id === mspId)?.name ?? "",
+    [msps.data?.items, mspId],
+  );
 
   return (
-    <>
-      <PageHeader
-        title="MSP bulk operations"
-        subtitle="Fan out provisioning and policy actions across an MSP's tenant cohort."
-      />
+    <LanePage>
+      <PageHeader title={fm(M.bulkTitle)} subtitle={fm(M.bulkSubtitle)} />
       <Card>
         <MspPicker value={mspId} onChange={setMspId} />
       </Card>
       {mspId && (
-        // Key every operation on the MSP id so switching cohorts remounts them
-        // and clears prior results — otherwise one MSP's outcomes would linger
-        // on screen against another, which is especially misleading for the
-        // rich per-tenant onboarding table.
-        <>
-          <BulkOnboarding key={mspId} mspId={mspId} />
-          <h3 style={{ margin: "24px 0 8px", fontSize: 14 }}>
-            Individual operations
-          </h3>
-          <div className="grid grid--2">
-            <BulkProvision key={`${mspId}-provision`} mspId={mspId} />
-            <BulkClaimTokens key={`${mspId}-tokens`} mspId={mspId} />
-            <BulkPolicyTemplate key={`${mspId}-policy`} mspId={mspId} />
-          </div>
-        </>
+        // Key the cohort section on the MSP id so switching providers remounts
+        // it and clears prior results — otherwise one provider's outcomes would
+        // linger against another, which is especially misleading for the rich
+        // per-tenant onboarding table.
+        <CohortSection key={mspId} mspId={mspId} mspName={mspName} />
       )}
+    </LanePage>
+  );
+}
+
+function CohortSection({ mspId, mspName }: { mspId: string; mspName: string }) {
+  const { formatMessage: fm } = useIntl();
+  const cohort = useListMSPTenants(mspId, undefined);
+  const cohortCount = cohort.data?.items?.length ?? 0;
+
+  return (
+    <>
+      <MspScopeBanner
+        name={mspName || "—"}
+        aside={
+          <Badge tone="neutral">{fm(M.scopeMspCohort, { count: cohortCount })}</Badge>
+        }
+      />
+      <BulkOnboarding mspId={mspId} mspName={mspName} cohortCount={cohortCount} />
+
+      <div className="lb6-subhead">
+        <h3>{fm(M.bulkIndividual)}</h3>
+        <p className="muted">{fm(M.bulkIndividualSub)}</p>
+      </div>
+      <div className="grid grid--2">
+        <BulkProvision mspId={mspId} />
+        <BulkClaimTokens mspId={mspId} />
+        <BulkPolicyTemplate
+          mspId={mspId}
+          mspName={mspName}
+          cohortCount={cohortCount}
+        />
+      </div>
     </>
   );
 }
 
 function ResultBadge({ ok, error }: { ok: boolean; error: unknown }) {
-  if (error)
-    return (
-      <Badge tone="danger">
-        {error instanceof Error ? error.message : "Failed"}
-      </Badge>
-    );
-  if (ok) return <Badge tone="ok">Applied</Badge>;
+  const { formatMessage: fm } = useIntl();
+  if (error) return <Badge tone="danger">{fm(M.bulkOpFailed)}</Badge>;
+  if (ok) return <Badge tone="ok">{fm(M.bulkDone)}</Badge>;
   return null;
 }
 
@@ -75,17 +101,19 @@ interface CohortRow {
 
 type Phase = "site" | "policy" | "tokens";
 
-const PHASE_LABEL: Record<Phase, string> = {
-  site: "site provisioning",
-  policy: "policy template",
-  tokens: "claim tokens",
+const PHASE_MSG: Record<Phase, MessageDescriptor> = {
+  site: M.phaseSite,
+  policy: M.phasePolicy,
+  tokens: M.phaseTokens,
 };
 
 // Fold one phase's result into the per-tenant accumulator, keyed by tenant id.
+// `phaseLabel` is the already-localized phase name used in failure detail.
 function mergePhase(
   acc: Map<string, CohortRow>,
   phase: Phase,
   result: MSPBulkResult,
+  phaseLabel: string,
 ) {
   const row = (tenantId: string): CohortRow => {
     let r = acc.get(tenantId);
@@ -108,11 +136,20 @@ function mergePhase(
   }
   for (const o of result.failures) {
     const r = row(o.tenant_id);
-    r.errors.push(`${PHASE_LABEL[phase]}: ${o.error ?? "failed"}`);
+    r.errors.push(o.error ? `${phaseLabel}: ${o.error}` : phaseLabel);
   }
 }
 
-function BulkOnboarding({ mspId }: { mspId: string }) {
+function BulkOnboarding({
+  mspId,
+  mspName,
+  cohortCount,
+}: {
+  mspId: string;
+  mspName: string;
+  cohortCount: number;
+}) {
+  const { formatMessage: fm } = useIntl();
   const provision = useBulkProvisionSites();
   const applyPolicy = useBulkApplyPolicyTemplate();
   const genTokens = useBulkGenerateClaimTokens();
@@ -130,29 +167,39 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
 
   const [running, setRunning] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+  const [showConfirm, setShowConfirm] = useState(false);
   const [rows, setRows] = useState<CohortRow[] | null>(null);
   const [ranAt, setRanAt] = useState<string | null>(null);
 
-  const run = async () => {
-    setFormError(null);
+  const phaseLabel = (p: Phase) => fm(PHASE_MSG[p]);
 
+  // Validate inputs, then open the scope-preview confirm. The actual fan-out
+  // only runs once the operator confirms in the dialog.
+  const review = () => {
+    setFormError(null);
     if (!siteName.trim()) {
-      setFormError("Site name is required.");
+      setFormError(fm(M.bulkErrSiteName));
       return;
     }
     if (!Number.isInteger(tokensPerTenant) || tokensPerTenant < 1) {
-      setFormError("Tokens per tenant must be a whole number of at least 1.");
+      setFormError(fm(M.bulkErrTokens));
       return;
     }
-    let policyTemplate: Record<string, unknown> | null = null;
     if (withPolicy) {
       try {
-        policyTemplate = JSON.parse(policyText) as Record<string, unknown>;
+        JSON.parse(policyText);
       } catch {
-        setFormError("Policy template is not valid JSON.");
+        setFormError(fm(M.bulkErrJson));
         return;
       }
     }
+    setShowConfirm(true);
+  };
+
+  const run = async () => {
+    const policyTemplate: Record<string, unknown> | null = withPolicy
+      ? (JSON.parse(policyText) as Record<string, unknown>)
+      : null;
 
     setRunning(true);
     const acc = new Map<string, CohortRow>();
@@ -170,6 +217,7 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
           mspId,
           data: { name: siteName.trim(), template: siteTemplate },
         }),
+        phaseLabel("site"),
       );
       if (policyTemplate) {
         phase = "policy";
@@ -180,6 +228,7 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
             mspId,
             data: { template: policyTemplate },
           }),
+          phaseLabel("policy"),
         );
       }
       phase = "tokens";
@@ -190,6 +239,7 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
           mspId,
           data: { count: tokensPerTenant },
         }),
+        phaseLabel("tokens"),
       );
 
       const result = [...acc.values()].sort((a, b) =>
@@ -197,16 +247,17 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
       );
       setRows(result);
       setRanAt(new Date().toLocaleString());
+      setShowConfirm(false);
       const failed = result.filter((r) => r.errors.length > 0).length;
       if (failed === 0) {
         toast.success(
-          "Cohort onboarded",
-          `${result.length} tenant${result.length === 1 ? "" : "s"} provisioned.`,
+          fm(M.bulkDoneToast),
+          fm(M.bulkDoneToastBody, { count: result.length }),
         );
       } else {
         toast.error(
-          "Onboarding completed with errors",
-          `${failed} of ${result.length} tenant${result.length === 1 ? "" : "s"} had a failure.`,
+          fm(M.bulkPartialToast),
+          fm(M.bulkPartialToastBody, { failed, total: result.length }),
         );
       }
     } catch (e) {
@@ -219,21 +270,28 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
         setRows(partial);
         setRanAt(new Date().toLocaleString());
       }
+      setShowConfirm(false);
       // Name the phase that failed and exactly which later phases were skipped
-      // (not silently completed), matching the singular/plural to how many
-      // actually remained — the policy phase is absent when it was opted out.
-      const reason = e instanceof Error ? e.message : "request failed";
+      // (not silently completed), matching singular/plural to how many actually
+      // remained — the policy phase is absent when it was opted out.
+      const reason = e instanceof Error ? e.message : fm(M.bulkRequestFailed);
       const plan: Phase[] = policyTemplate
         ? ["site", "policy", "tokens"]
         : ["site", "tokens"];
       const remaining = plan.slice(plan.indexOf(phase) + 1);
       let detail = reason;
       if (remaining.length === 1) {
-        detail = `${reason}. The ${PHASE_LABEL[remaining[0]]} phase was not attempted.`;
+        detail = fm(M.bulkPhaseRemainingOne, {
+          reason,
+          phase: phaseLabel(remaining[0]),
+        });
       } else if (remaining.length > 1) {
-        detail = `${reason}. Phases after ${PHASE_LABEL[phase]} were not attempted.`;
+        detail = fm(M.bulkPhaseRemainingMany, {
+          reason,
+          phase: phaseLabel(phase),
+        });
       }
-      toast.error(`Bulk onboarding failed during ${PHASE_LABEL[phase]}`, detail);
+      toast.error(fm(M.bulkPhaseFailToast, { phase: phaseLabel(phase) }), detail);
     } finally {
       setRunning(false);
     }
@@ -241,11 +299,11 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
 
   const columns: Column<CohortRow>[] = [
     {
-      header: "Tenant",
+      header: fm(M.bulkColTenant),
       cell: (r) => <span className="mono">{shortId(r.tenantId)}</span>,
     },
     {
-      header: "Site",
+      header: fm(M.bulkColSite),
       cell: (r) =>
         r.siteId ? (
           <span className="mono">{shortId(r.siteId)}</span>
@@ -254,28 +312,28 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
         ),
     },
     {
-      header: "Policy",
+      header: fm(M.bulkColPolicy),
       cell: (r) =>
         r.policyVersion != null ? (
-          <Badge tone="info">v{r.policyVersion}</Badge>
+          <Badge tone="info">{fm(M.bulkPolicyVer, { v: r.policyVersion })}</Badge>
         ) : (
           <span className="muted">—</span>
         ),
     },
     {
-      header: "Tokens",
+      header: fm(M.bulkColTokens),
       cell: (r) =>
         r.tokenCount != null ? r.tokenCount : <span className="muted">—</span>,
     },
     {
-      header: "Status",
+      header: fm(M.bulkColStatus),
       cell: (r) =>
         r.errors.length === 0 ? (
-          <Badge tone="ok">OK</Badge>
+          <Badge tone="ok">{fm(M.bulkStatusOk)}</Badge>
         ) : (
           <span title={r.errors.join("; ")}>
             <Badge tone="danger">
-              {r.errors.length} error{r.errors.length === 1 ? "" : "s"}
+              {fm(M.bulkStatusErr, { count: r.errors.length })}
             </Badge>
           </span>
         ),
@@ -283,26 +341,29 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
   ];
 
   const okCount = rows?.filter((r) => r.errors.length === 0).length ?? 0;
+  const disabled =
+    !siteName.trim() ||
+    !Number.isInteger(tokensPerTenant) ||
+    tokensPerTenant < 1 ||
+    running;
 
   return (
     <Card
-      title="Bulk onboarding (full cohort)"
+      title={fm(M.bulkOnboardCard)}
       className="span-2"
       actions={
         <Badge tone="info">
-          provision · {withPolicy ? "policy · " : ""}enrol
+          {fm(M.bulkBadgeSummary, { withPolicy: withPolicy ? "true" : "false" })}
         </Badge>
       }
     >
       <p className="muted" style={{ marginTop: 0 }}>
-        Run the full onboarding sequence across every tenant this MSP owns:
-        provision a site, optionally apply a baseline policy template, and issue
-        enrolment tokens — in one pass.
+        {fm(M.bulkOnboardIntro)}
       </p>
 
       <div className="grid grid--2">
         <label className="field">
-          <span>Site name (per tenant)</span>
+          <LabelText>{fm(M.bulkSiteName)}</LabelText>
           <input
             value={siteName}
             onChange={(e) => setSiteName(e.target.value)}
@@ -310,7 +371,7 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
           />
         </label>
         <label className="field">
-          <span>Site template</span>
+          <LabelText>{fm(M.bulkSiteTemplate)}</LabelText>
           <select
             value={siteTemplate}
             onChange={(e) =>
@@ -325,7 +386,7 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
           </select>
         </label>
         <label className="field">
-          <span>Claim tokens per tenant</span>
+          <LabelText>{fm(M.bulkTokens)}</LabelText>
           <input
             type="number"
             min={1}
@@ -335,7 +396,7 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
           />
         </label>
         <div className="field">
-          <span>Baseline policy</span>
+          <LabelText>{fm(M.bulkBaselinePolicy)}</LabelText>
           <label
             style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 6 }}
           >
@@ -344,16 +405,14 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
               checked={withPolicy}
               onChange={(e) => setWithPolicy(e.target.checked)}
             />
-            <span style={{ fontWeight: 400 }}>
-              Apply a policy template to every tenant
-            </span>
+            <span style={{ fontWeight: 400 }}>{fm(M.bulkApplyPolicyLabel)}</span>
           </label>
         </div>
       </div>
 
       {withPolicy && (
         <label className="field">
-          <span>Policy template (JSON — same shape as the policy graph)</span>
+          <LabelText>{fm(M.bulkPolicyJson)}</LabelText>
           <textarea
             style={{ minHeight: 140, fontFamily: "var(--mono)" }}
             value={policyText}
@@ -362,63 +421,78 @@ function BulkOnboarding({ mspId }: { mspId: string }) {
         </label>
       )}
 
-      <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 8 }}>
-        <button
-          className="btn btn--primary"
-          disabled={
-            !siteName.trim() ||
-            !Number.isInteger(tokensPerTenant) ||
-            tokensPerTenant < 1 ||
-            running
-          }
-          onClick={run}
-        >
-          {running ? "Onboarding cohort…" : "Onboard entire cohort"}
+      <div className="lb6-actions">
+        <button className="btn btn--primary" disabled={disabled} onClick={review}>
+          {running ? fm(M.bulkRunning) : fm(M.bulkRun)}
         </button>
         <span className="muted" style={{ fontSize: 12.5 }}>
-          Tokens are issued once and never shown here — distribute them from the
-          per-tenant device pages.
+          {fm(M.bulkTokensNote)}
         </span>
       </div>
 
-      {formError && <p className="error-text">{formError}</p>}
+      {formError && (
+        <p className="error-text" role="alert">
+          {formError}
+        </p>
+      )}
 
       {rows && (
         <div style={{ marginTop: 16 }}>
-          <div
-            style={{
-              display: "flex",
-              gap: 8,
-              alignItems: "center",
-              marginBottom: 8,
-            }}
-          >
-            <Badge tone="ok">{okCount} succeeded</Badge>
+          <div className="lb6-summary">
+            <Badge tone="ok">{fm(M.bulkSucceeded, { count: okCount })}</Badge>
             {rows.length - okCount > 0 && (
-              <Badge tone="danger">{rows.length - okCount} failed</Badge>
+              <Badge tone="danger">
+                {fm(M.bulkFailed, { count: rows.length - okCount })}
+              </Badge>
             )}
             {ranAt && (
               <span className="muted" style={{ fontSize: 12 }}>
-                Ran {ranAt}
+                {fm(M.bulkRanAt, { when: ranAt })}
               </span>
             )}
           </div>
           {rows.length === 0 ? (
-            <p className="muted">This MSP has no tenants to onboard.</p>
+            <p className="muted">{fm(M.bulkConfirmNoTenants)}</p>
           ) : (
-            <DataTable
-              rows={rows}
-              columns={columns}
-              rowKey={(r) => r.tenantId}
-            />
+            <DataTable rows={rows} columns={columns} rowKey={(r) => r.tenantId} />
           )}
         </div>
+      )}
+
+      {showConfirm && (
+        <ConfirmDialog
+          title={fm(M.bulkConfirmTitle, { count: cohortCount })}
+          confirmLabel={fm(M.bulkConfirmCta)}
+          busy={running}
+          confirmDisabled={cohortCount === 0}
+          onConfirm={() => void run()}
+          onClose={() => (running ? undefined : setShowConfirm(false))}
+        >
+          {cohortCount === 0 ? (
+            <p>{fm(M.bulkConfirmNoTenants)}</p>
+          ) : (
+            <>
+              <p>{fm(M.bulkConfirmIntro, { msp: mspName || "—" })}</p>
+              <ul className="lb6-checklist">
+                <li>
+                  {fm(M.bulkConfirmSite, {
+                    site: siteName.trim(),
+                    template: titleCase(siteTemplate),
+                  })}
+                </li>
+                {withPolicy && <li>{fm(M.bulkConfirmPolicy)}</li>}
+                <li>{fm(M.bulkConfirmTokens, { count: tokensPerTenant })}</li>
+              </ul>
+            </>
+          )}
+        </ConfirmDialog>
       )}
     </Card>
   );
 }
 
 function BulkProvision({ mspId }: { mspId: string }) {
+  const { formatMessage: fm } = useIntl();
   const provision = useBulkProvisionSites();
   const [name, setName] = useState("");
   const [template, setTemplate] = useState<BulkProvisionSitesBodyTemplate>(
@@ -426,16 +500,22 @@ function BulkProvision({ mspId }: { mspId: string }) {
   );
 
   return (
-    <Card title="Provision sites across cohort">
+    <Card title={fm(M.bulkProvCard)}>
       <label className="field">
-        <span>Site name</span>
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Branch-01" />
+        <LabelText>{fm(M.bulkSiteName)}</LabelText>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Branch-01"
+        />
       </label>
       <label className="field">
-        <span>Template</span>
+        <LabelText>{fm(M.bulkSiteTemplate)}</LabelText>
         <select
           value={template}
-          onChange={(e) => setTemplate(e.target.value as BulkProvisionSitesBodyTemplate)}
+          onChange={(e) =>
+            setTemplate(e.target.value as BulkProvisionSitesBodyTemplate)
+          }
         >
           {Object.values(BulkProvisionSitesBodyTemplate).map((t) => (
             <option key={t} value={t}>
@@ -444,13 +524,15 @@ function BulkProvision({ mspId }: { mspId: string }) {
           ))}
         </select>
       </label>
-      <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 8 }}>
+      <div className="lb6-actions">
         <button
           className="btn btn--primary"
-          disabled={!name || provision.isPending}
-          onClick={() => provision.mutate({ mspId, data: { name, template } })}
+          disabled={!name.trim() || provision.isPending}
+          onClick={() =>
+            provision.mutate({ mspId, data: { name: name.trim(), template } })
+          }
         >
-          {provision.isPending ? "Provisioning…" : "Provision"}
+          {provision.isPending ? fm(M.bulkProvisioning) : fm(M.bulkProvision)}
         </button>
         <ResultBadge ok={provision.isSuccess} error={provision.error} />
       </div>
@@ -459,13 +541,14 @@ function BulkProvision({ mspId }: { mspId: string }) {
 }
 
 function BulkClaimTokens({ mspId }: { mspId: string }) {
+  const { formatMessage: fm } = useIntl();
   const gen = useBulkGenerateClaimTokens();
   const [count, setCount] = useState(10);
 
   return (
-    <Card title="Generate claim tokens">
+    <Card title={fm(M.bulkTokCard)}>
       <label className="field">
-        <span>Tokens per tenant</span>
+        <LabelText>{fm(M.bulkTokens)}</LabelText>
         <input
           type="number"
           min={1}
@@ -473,51 +556,101 @@ function BulkClaimTokens({ mspId }: { mspId: string }) {
           onChange={(e) => setCount(Number(e.target.value))}
         />
       </label>
-      <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 8 }}>
+      <div className="lb6-actions">
         <button
           className="btn btn--primary"
           disabled={count < 1 || gen.isPending}
           onClick={() => gen.mutate({ mspId, data: { count } })}
         >
-          {gen.isPending ? "Generating…" : "Generate"}
+          {gen.isPending ? fm(M.bulkGenerating) : fm(M.bulkGenerate)}
         </button>
         <ResultBadge ok={gen.isSuccess} error={gen.error} />
       </div>
+      <p className="muted" style={{ fontSize: 12, marginBottom: 0 }}>
+        {fm(M.bulkTokensNote)}
+      </p>
     </Card>
   );
 }
 
-function BulkPolicyTemplate({ mspId }: { mspId: string }) {
+function BulkPolicyTemplate({
+  mspId,
+  mspName,
+  cohortCount,
+}: {
+  mspId: string;
+  mspName: string;
+  cohortCount: number;
+}) {
+  const { formatMessage: fm } = useIntl();
+  const toast = useToast();
   const apply = useBulkApplyPolicyTemplate();
   const [text, setText] = useState('{\n  "nodes": [],\n  "edges": []\n}');
   const [err, setErr] = useState<string | null>(null);
+  const [showConfirm, setShowConfirm] = useState(false);
 
-  const run = () => {
+  const review = () => {
     setErr(null);
-    let parsed: Record<string, unknown>;
     try {
-      parsed = JSON.parse(text);
+      JSON.parse(text);
     } catch {
-      setErr("Template is not valid JSON.");
+      setErr(fm(M.bulkErrJson));
       return;
     }
-    apply.mutate({ mspId, data: { template: parsed } });
+    setShowConfirm(true);
+  };
+
+  const run = () => {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    apply.mutate(
+      { mspId, data: { template: parsed } },
+      {
+        onSuccess: () => {
+          setShowConfirm(false);
+          toast.success(fm(M.bulkDone));
+        },
+        onError: () => toast.error(fm(M.tplApplyError)),
+      },
+    );
   };
 
   return (
-    <Card title="Apply policy template to cohort" className="span-2">
-      <textarea
-        style={{ minHeight: 180, fontFamily: "var(--mono)" }}
-        value={text}
-        onChange={(e) => setText(e.target.value)}
-      />
-      <div style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 8 }}>
-        <button className="btn btn--primary" disabled={apply.isPending} onClick={run}>
-          {apply.isPending ? "Applying…" : "Apply to all tenants"}
+    <Card title={fm(M.bulkPolCard)} className="span-2">
+      <label className="field">
+        <LabelText>{fm(M.bulkPolicyJson)}</LabelText>
+        <textarea
+          style={{ minHeight: 180, fontFamily: "var(--mono)" }}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+        />
+      </label>
+      <div className="lb6-actions">
+        <button
+          className="btn btn--primary"
+          disabled={apply.isPending}
+          onClick={review}
+        >
+          {apply.isPending ? fm(M.bulkApplying) : fm(M.bulkApply)}
         </button>
         <ResultBadge ok={apply.isSuccess} error={apply.error} />
       </div>
-      {err && <p className="error-text">{err}</p>}
+      {err && (
+        <p className="error-text" role="alert">
+          {err}
+        </p>
+      )}
+
+      {showConfirm && (
+        <ConfirmDialog
+          title={fm(M.bulkPolicyConfirmTitle, { count: cohortCount })}
+          confirmLabel={fm(M.bulkApply)}
+          busy={apply.isPending}
+          onConfirm={run}
+          onClose={() => (apply.isPending ? undefined : setShowConfirm(false))}
+        >
+          <p>{fm(M.bulkPolicyConfirmBody, { msp: mspName || "—" })}</p>
+        </ConfirmDialog>
+      )}
     </Card>
   );
 }

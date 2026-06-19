@@ -1,13 +1,26 @@
-import { useEffect, useState } from "react";
-import { useBulkApplyPolicyTemplate } from "@/api/generated/endpoints/msps/msps";
-import { PageHeader, Card, Badge } from "@/components/ui";
+import { useEffect, useMemo, useState } from "react";
+import { useIntl } from "react-intl";
+import {
+  useBulkApplyPolicyTemplate,
+  useListMSPs,
+} from "@/api/generated/endpoints/msps/msps";
+import {
+  PageHeader,
+  Card,
+  Badge,
+  EmptyState,
+  EmptyIllustration,
+} from "@/components/ui";
 import { Modal } from "@/components/Modal";
+import { useToast } from "@/components/Toast";
 import { MspPicker } from "./MspPicker";
+import { M } from "./lane-b6.messages";
+import { LanePage, MspScopeBanner, ConfirmDialog, LabelText } from "./_lane";
 
-// Cross-tenant policy templates are authored once and pushed to an
-// MSP's entire tenant cohort. The library is persisted locally so
-// operators can curate reusable baselines; applying a template fans
-// out via the MSP bulk endpoint.
+// Cross-tenant policy templates are authored once and pushed to an MSP's
+// entire tenant cohort. The library is persisted locally so operators can
+// curate reusable baselines; applying a template fans out via the MSP bulk
+// endpoint.
 
 interface Template {
   id: string;
@@ -34,8 +47,6 @@ function load(): Template[] {
     const parsed: unknown = JSON.parse(
       localStorage.getItem(STORAGE_KEY) ?? "[]",
     );
-    // A corrupted or tampered entry must not flow through as Template[]:
-    // keep only well-shaped records and drop the rest.
     return Array.isArray(parsed) ? parsed.filter(isTemplate) : [];
   } catch {
     return [];
@@ -53,46 +64,50 @@ function persist(t: Template[]): boolean {
   }
 }
 
+/** Best-effort node/edge counts for the card meta; null if the graph won't parse. */
+function graphCounts(graph: string): { nodes: number; edges: number } | null {
+  try {
+    const g = JSON.parse(graph) as { nodes?: unknown; edges?: unknown };
+    return {
+      nodes: Array.isArray(g.nodes) ? g.nodes.length : 0,
+      edges: Array.isArray(g.edges) ? g.edges.length : 0,
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function MspTemplates() {
+  const { formatMessage: fm } = useIntl();
+  const toast = useToast();
+  const msps = useListMSPs(undefined);
   const [templates, setTemplates] = useState<Template[]>(load);
   const [mspId, setMspId] = useState<string | null>(null);
   const [editing, setEditing] = useState<Template | null>(null);
   const [showEditor, setShowEditor] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState<Template | null>(null);
+  const [confirmApply, setConfirmApply] = useState<Template | null>(null);
   const apply = useBulkApplyPolicyTemplate();
   // `appliedId` tracks the in-flight apply (for the spinner); `lastAppliedId`
   // is the template that last succeeded and is NOT cleared on settle, so the
-  // "Applied" badge is scoped to that one card. Using the shared
-  // `apply.isSuccess` flag instead would light up every card in the .map().
+  // "Applied" badge is scoped to that one card.
   const [appliedId, setAppliedId] = useState<string | null>(null);
   const [lastAppliedId, setLastAppliedId] = useState<string | null>(null);
 
-  // Persisting the library is a side effect, so it lives in an effect rather
-  // than inside the state updaters (which stay pure and are double-invoked
-  // under StrictMode). Updaters use the functional form so rapid successive
-  // edits compose off the freshest list instead of a stale closure snapshot.
-  // The effect writes whatever was committed and warns once if the write fails
-  // (e.g. quota exceeded). We skip the write when storage already holds this
-  // exact value: that covers both the initial mount (the state came straight
-  // from localStorage) and a value we just adopted from another tab's `storage`
-  // event — without this guard those two tabs would ping-pong setItem calls
-  // (each write fires a `storage` event in the other tab) forever.
+  const mspName = useMemo(
+    () => msps.data?.items?.find((m) => m.id === mspId)?.name ?? "",
+    [msps.data?.items, mspId],
+  );
+
   useEffect(() => {
     if (localStorage.getItem(STORAGE_KEY) === JSON.stringify(templates)) {
       return;
     }
     if (!persist(templates)) {
-      alert(
-        "Couldn't save the template library: browser storage is full. " +
-          "Delete some templates and try again.",
-      );
+      toast.error(fm(M.tplErrQuota));
     }
-  }, [templates]);
+  }, [templates, toast, fm]);
 
-  // Keep multiple admin tabs in sync. Without this, a second tab keeps its
-  // stale in-memory list and its next edit persists that stale list, silently
-  // clobbering templates the first tab added (last write wins, no merge). The
-  // `storage` event fires only in the *other* tabs, so we reload the committed
-  // library there; the persist effect above no-ops on the adopted value.
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
       if (e.key === STORAGE_KEY || e.key === null) setTemplates(load());
@@ -119,87 +134,119 @@ export function MspTemplates() {
     try {
       graph = JSON.parse(t.graph);
     } catch {
-      alert("Template graph is not valid JSON.");
+      toast.error(fm(M.tplErrJson));
       return;
     }
     setAppliedId(t.id);
     apply.mutate(
       { mspId, data: { template: graph } },
       {
-        onSuccess: () => setLastAppliedId(t.id),
+        onSuccess: () => {
+          setLastAppliedId(t.id);
+          setConfirmApply(null);
+          toast.success(fm(M.tplAppliedToast), fm(M.tplAppliedToastBody, { name: t.name }));
+        },
+        onError: () => toast.error(fm(M.tplApplyError)),
         onSettled: () => setAppliedId(null),
       },
     );
   };
 
+  const newTemplateBtn = (
+    <button
+      className="btn btn--primary"
+      onClick={() => {
+        setEditing(null);
+        setShowEditor(true);
+      }}
+    >
+      {fm(M.tplNew)}
+    </button>
+  );
+
   return (
-    <>
+    <LanePage>
       <PageHeader
-        title="Cross-tenant policy templates"
-        subtitle="Curate reusable policy baselines and roll them out to an MSP cohort."
-        actions={
-          <button
-            className="btn btn--primary"
-            onClick={() => {
-              setEditing(null);
-              setShowEditor(true);
-            }}
-          >
-            + New template
-          </button>
-        }
+        title={fm(M.tplTitle)}
+        subtitle={fm(M.tplSubtitle)}
+        actions={newTemplateBtn}
       />
       <Card>
         <MspPicker value={mspId} onChange={setMspId} />
       </Card>
+      {mspId && mspName && <MspScopeBanner name={mspName} />}
 
-      <div className="grid grid--2" style={{ marginTop: 16 }}>
-        {templates.length === 0 && (
+      {templates.length === 0 ? (
+        <div style={{ marginTop: 16 }}>
           <Card>
-            <p className="muted">
-              No templates yet. Create one to define a reusable policy baseline.
-            </p>
+            <EmptyState
+              illustration={<EmptyIllustration kind="policy" />}
+              title={fm(M.tplEmptyTitle)}
+              description={fm(M.tplEmptyBody)}
+              action={newTemplateBtn}
+            />
           </Card>
-        )}
-        {templates.map((t) => (
-          <Card
-            key={t.id}
-            title={t.name}
-            actions={
-              <div style={{ display: "flex", gap: 6 }}>
-                <button
-                  className="btn btn--sm"
-                  onClick={() => {
-                    setEditing(t);
-                    setShowEditor(true);
-                  }}
-                >
-                  Edit
-                </button>
-                <button className="btn btn--danger btn--sm" onClick={() => remove(t.id)}>
-                  Delete
-                </button>
-              </div>
-            }
-          >
-            <p className="muted" style={{ marginTop: 0 }}>
-              {t.description || "No description."}
-            </p>
-            <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
-              <button
-                className="btn btn--primary btn--sm"
-                disabled={!mspId || (apply.isPending && appliedId === t.id)}
-                onClick={() => applyTemplate(t)}
+        </div>
+      ) : (
+        <div className="grid grid--2" style={{ marginTop: 16 }}>
+          {templates.map((t) => {
+            const counts = graphCounts(t.graph);
+            return (
+              <Card
+                key={t.id}
+                title={t.name}
+                actions={
+                  <div className="lb6-card-actions">
+                    <button
+                      className="btn btn--sm"
+                      onClick={() => {
+                        setEditing(t);
+                        setShowEditor(true);
+                      }}
+                    >
+                      {fm(M.tplEdit)}
+                    </button>
+                    <button
+                      className="btn btn--danger btn--sm"
+                      onClick={() => setConfirmDelete(t)}
+                    >
+                      {fm(M.tplDelete)}
+                    </button>
+                  </div>
+                }
               >
-                {apply.isPending && appliedId === t.id ? "Applying…" : "Apply to cohort"}
-              </button>
-              {lastAppliedId === t.id && appliedId === null && (
-                <Badge tone="ok">Applied</Badge>
-              )}
-            </div>
-          </Card>
-        ))}
-      </div>
+                <p className="muted" style={{ marginTop: 0 }}>
+                  {t.description || fm(M.tplNoDescription)}
+                </p>
+                <div className="lb6-card-foot">
+                  {counts && (
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      {fm(M.tplNodesEdges, {
+                        nodes: counts.nodes,
+                        edges: counts.edges,
+                      })}
+                    </span>
+                  )}
+                  <div className="lb6-card-actions">
+                    {lastAppliedId === t.id && appliedId === null && (
+                      <Badge tone="ok">{fm(M.tplApplied)}</Badge>
+                    )}
+                    <button
+                      className="btn btn--primary btn--sm"
+                      disabled={!mspId || (apply.isPending && appliedId === t.id)}
+                      onClick={() => setConfirmApply(t)}
+                    >
+                      {apply.isPending && appliedId === t.id
+                        ? fm(M.tplApplying)
+                        : fm(M.tplApply)}
+                    </button>
+                  </div>
+                </div>
+              </Card>
+            );
+          })}
+        </div>
+      )}
 
       {showEditor && (
         <TemplateEditor
@@ -211,7 +258,34 @@ export function MspTemplates() {
           }}
         />
       )}
-    </>
+
+      {confirmDelete && (
+        <ConfirmDialog
+          title={fm(M.tplDeleteTitle, { name: confirmDelete.name })}
+          confirmLabel={fm(M.tplDeleteCta)}
+          tone="danger"
+          onClose={() => setConfirmDelete(null)}
+          onConfirm={() => {
+            remove(confirmDelete.id);
+            setConfirmDelete(null);
+          }}
+        >
+          <p>{fm(M.tplDeleteBody)}</p>
+        </ConfirmDialog>
+      )}
+
+      {confirmApply && (
+        <ConfirmDialog
+          title={fm(M.tplApplyConfirmTitle, { name: confirmApply.name })}
+          confirmLabel={fm(M.tplApplyConfirmCta)}
+          busy={apply.isPending}
+          onClose={() => (apply.isPending ? undefined : setConfirmApply(null))}
+          onConfirm={() => applyTemplate(confirmApply)}
+        >
+          <p>{fm(M.tplApplyConfirmBody, { msp: mspName })}</p>
+        </ConfirmDialog>
+      )}
+    </LanePage>
   );
 }
 
@@ -224,6 +298,7 @@ function TemplateEditor({
   onClose: () => void;
   onSave: (t: Template) => void;
 }) {
+  const { formatMessage: fm } = useIntl();
   const [name, setName] = useState(template?.name ?? "");
   const [description, setDescription] = useState(template?.description ?? "");
   const [graph, setGraph] = useState(
@@ -233,10 +308,14 @@ function TemplateEditor({
 
   const save = () => {
     setErr(null);
+    if (!name.trim()) {
+      setErr(fm(M.tplErrName));
+      return;
+    }
     try {
       JSON.parse(graph);
     } catch {
-      setErr("Graph must be valid JSON.");
+      setErr(fm(M.tplErrJson));
       return;
     }
     onSave({
@@ -249,36 +328,49 @@ function TemplateEditor({
 
   return (
     <Modal
-      title={template ? "Edit template" : "New template"}
+      title={template ? fm(M.tplEditTitle) : fm(M.tplCreateTitle)}
       onClose={onClose}
       footer={
         <>
           <button className="btn" onClick={onClose}>
-            Cancel
+            {fm(M.cancel)}
           </button>
-          <button className="btn btn--primary" disabled={!name} onClick={save}>
-            Save
+          <button
+            className="btn btn--primary"
+            disabled={!name.trim()}
+            onClick={save}
+          >
+            {fm(M.tplSave)}
           </button>
         </>
       }
     >
       <label className="field">
-        <span>Name</span>
-        <input value={name} onChange={(e) => setName(e.target.value)} />
+        <LabelText>{fm(M.tplName)}</LabelText>
+        <input value={name} onChange={(e) => setName(e.target.value)} autoFocus />
       </label>
       <label className="field">
-        <span>Description</span>
-        <input value={description} onChange={(e) => setDescription(e.target.value)} />
+        <LabelText help={fm(M.tplDescriptionHelp)}>
+          {fm(M.tplDescription)}
+        </LabelText>
+        <input
+          value={description}
+          onChange={(e) => setDescription(e.target.value)}
+        />
       </label>
       <label className="field">
-        <span>Policy graph (JSON)</span>
+        <LabelText help={fm(M.tplGraphHelp)}>{fm(M.tplGraph)}</LabelText>
         <textarea
           style={{ minHeight: 180, fontFamily: "var(--mono)" }}
           value={graph}
           onChange={(e) => setGraph(e.target.value)}
         />
       </label>
-      {err && <p className="error-text">{err}</p>}
+      {err && (
+        <p className="error-text" role="alert">
+          {err}
+        </p>
+      )}
     </Modal>
   );
 }
