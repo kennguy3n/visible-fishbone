@@ -3,15 +3,13 @@
 
    Everything here is scoped under `.lane-b3` so it only affects this lane's
    four screens (DLP, DLP review queue, CASB, Devices) and never the frozen
-   foundation or sibling lanes. Two jobs:
+   foundation or sibling lanes.
 
-   1. A small set of a11y / layout helpers the lane needs (visually-hidden
-      text, inline decision controls, key/value detail blocks).
-   2. AA-contrast overrides for the *known WS0-level token gaps* called out in
-      the brief (faint table/secondary text via `--text-faint`; white-on-brand
-      buttons in dark; warn/danger/info badge tints). These re-point to
-      higher-contrast tokens/values for this lane only. The underlying fix
-      belongs in the WS0 token layer — see the PR's "WS0 follow-up" section.
+   The AA-contrast overrides for known WS0-level token gaps (faint secondary
+   text, white-on-brand primary buttons in dark, warn/danger/info/ok badge
+   tints) are now fixed at the shared WS0 foundation, so those scoped overrides
+   have been removed. What remains are lane-local helpers and the contrast tone
+   for this lane's own custom control (the green-tinted "Approve" button).
    ========================================================================= */
 
 /* Visually hidden but available to assistive tech (no foundation utility). */
@@ -63,6 +61,13 @@
   background: var(--ok-soft);
   border-color: var(--ok-border);
 }
+/* In dark, the elevated button fill drops `--ok-strong` (#059669) green text
+   to ~4.3:1. Use the lighter `--ok` (#34d399, ~8.4:1) for this lane-local
+   control — the same token the foundation's success badge resolves to in
+   dark. */
+:root[data-theme="dark"] .lane-b3 .btn.b3-approve {
+  color: var(--ok);
+}
 
 /* Token / one-time secret presentation with a copy affordance. */
 .lane-b3 .b3-token {
@@ -81,52 +86,4 @@
   font-size: 12px;
   color: var(--text-dim);
   margin-top: 2px;
-}
-
-/* --- AA contrast overrides (scoped) — WS0 token-gap workarounds ----------- */
-
-/* WS0 gap: `--text-faint` (#6b7280 / #69748a) on table headers and secondary
-   text falls below 4.5:1. Re-point to `--text-dim`, which clears AA on every
-   lane surface in both themes. */
-.lane-b3 table.data th,
-.lane-b3 .muted,
-.lane-b3 .stat__label,
-.lane-b3 .card__subtitle,
-.lane-b3 .kv dt {
-  color: var(--text-dim);
-}
-
-/* WS0 gap: white text on the resting `--brand` (#4d83f0 in dark) is ~3.6:1.
-   Re-point the resting primary button to the darker `--brand-strong`
-   (#255fe5 → 5.4:1 with white); light brand already clears AA. The
-   foundation's `:hover` already uses `--brand-strong` (plus a glow shadow for
-   feedback), so it stays accessible and we leave it untouched. */
-:root[data-theme="dark"] .lane-b3 .btn--primary {
-  background: var(--brand-strong);
-  border-color: var(--brand-strong);
-}
-
-/* WS0 gap: warn/danger badge text on their soft fills is < 4.5:1 in light.
-   Re-point to the darker semantic tokens (warn has no `-strong` token yet —
-   flagged for WS0). */
-:root:not([data-theme="dark"]) .lane-b3 .badge--warn {
-  color: #92400e;
-}
-:root:not([data-theme="dark"]) .lane-b3 .badge--danger {
-  color: var(--danger-strong);
-}
-:root:not([data-theme="dark"]) .lane-b3 .badge--ok {
-  color: var(--ok-strong);
-}
-/* WS0 gap: `--brand` info-badge text on `--brand-soft` is ~3.6:1 in dark.
-   Lighten the lane's info-badge text to clear AA on the dark soft fill. */
-:root[data-theme="dark"] .lane-b3 .badge--info {
-  color: #aac7fb;
-}
-
-/* In dark, the elevated button fill makes `--ok-strong` (#059669) green text
-   on Approve fall to ~4.3:1. Use the lighter `--ok` (#34d399, ~8.4:1) — the
-   same token the foundation's success badge uses in dark. */
-:root[data-theme="dark"] .lane-b3 .btn.b3-approve {
-  color: var(--ok);
 }

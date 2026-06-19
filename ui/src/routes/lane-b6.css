@@ -1,76 +1,17 @@
 /*
- * Lane B6 (MSP / multi-tenant management) — scoped styling.
+ * Lane B6 (MSP / multi-tenant management) — lane-local component styles.
  *
  * Everything here is namespaced under `.lane-b6` (applied by the LanePage
  * wrapper) so it touches only this lane's screens and never the frozen WS0
- * foundation. Two kinds of rules live here:
+ * foundation.
  *
- *  1. WS0 follow-up contrast fixes. A few shared tokens don't yet meet WCAG
- *     2.2 AA (see the PR "WS0 follow-up" section). Until WS0 fixes the tokens,
- *     this lane overrides the *consuming* selectors locally so its screens are
- *     AA-clean in both themes. No tokens are edited.
- *
- *  2. Small lane-local component styles (scope banner, permission picker,
- *     confirm checklist) built entirely from design-system tokens.
+ * The WS0 follow-up contrast fixes this lane originally carried (white-on-
+ * `--brand` primary buttons in dark, faint muted/subtitle/table-header text,
+ * info-badge tint, and light-theme ok/warn/danger foregrounds) are now fixed
+ * at the shared WS0 foundation, so those scoped overrides have been removed.
+ * What remains are small lane-local component styles (scope banner, permission
+ * picker, confirm checklist) built entirely from design-system tokens.
  */
-
-/* --- 1. WS0 follow-up: local AA contrast fixes ----------------------------- */
-
-/* White text on `--brand` is ~3.6:1 in dark. `--brand-strong` reaches >=4.5:1
-   white in both themes, so anchor primary buttons to it lane-wide. */
-.lane-b6 .btn--primary {
-  background: var(--brand-strong);
-  border-color: var(--brand-strong);
-}
-.lane-b6 .btn--primary:hover:not(:disabled) {
-  background: var(--brand-strong);
-  border-color: var(--brand-strong);
-  box-shadow: 0 3px 12px rgba(var(--brand-rgb), 0.32),
-    inset 0 1px 0 rgba(255, 255, 255, 0.16);
-  filter: brightness(0.94);
-}
-
-/* `--text-faint` on dark surfaces is ~3:1. Lift muted/subtitle text to
-   `--text-dim` (>=5:1 in both themes) so secondary copy stays readable. */
-.lane-b6 .muted,
-.lane-b6 .card__subtitle {
-  color: var(--text-dim);
-}
-
-/* `.badge--info` (brand text on a brand tint) is ~4:1 in dark. Keep the brand
-   tint but use `--text-dim` text for an AA-safe info/neutral chip. */
-.lane-b6 .badge--info {
-  color: var(--text-dim);
-}
-
-/* `table.data th` column headers use `--text-faint` on the header fill, which
-   is ~4.3:1 (light) / ~3.4:1 (dark) — under AA. Lift to `--text-dim`
-   (>=5:1 in both themes); the labels stay uppercase + bold. */
-.lane-b6 table.data th {
-  color: var(--text-dim);
-}
-
-/* Status tints (`--ok`, `--warn`) and the danger button label clear AA in dark
-   but fall short on their light-theme soft fills (axe: --ok 3.0:1, --warn
-   2.8:1, --danger 4.34:1 on a tinted card). Deepen only the light-theme
-   foregrounds via named lane tokens; the dark palette already passes, so it is
-   left untouched. */
-.lane-b6 {
-  --lb6-ok-ink: #065f46;
-  --lb6-warn-ink: #92400e;
-  --lb6-danger-ink: #b91c1c;
-}
-:root[data-theme="light"] .lane-b6 .badge--ok {
-  color: var(--lb6-ok-ink);
-}
-:root[data-theme="light"] .lane-b6 .badge--warn {
-  color: var(--lb6-warn-ink);
-}
-:root[data-theme="light"] .lane-b6 .btn--danger {
-  color: var(--lb6-danger-ink);
-}
-
-/* --- 2. Lane-local components (token-only) --------------------------------- */
 
 /* Scope banner — "which tenant / MSP am I acting on". Reuses `.banner`. */
 .lane-b6 .lb6-scope {

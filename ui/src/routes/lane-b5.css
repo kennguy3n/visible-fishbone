@@ -1,76 +1,24 @@
 /* Lane B5 scoped styles — Integrations / Webhooks / Terraform / Playbooks /
    Assistant / Metering.
 
-   Two jobs only:
-   1. Lane-local layout utilities (`.lane-*`) so the screens carry zero
-      one-off inline styles while still composing the frozen ShieldNet 360
-      primitives.
-   2. A small set of AA contrast overrides, scoped under `.lane-b5`, that
-      raise known WS0-level token gaps to >=4.5:1 within this lane only.
-      The underlying token fixes belong in WS0 (see PR "WS0 follow-up");
-      nothing here edits the frozen foundation.
+   Lane-local layout utilities (`.lane-*`) so the screens carry zero one-off
+   inline styles while still composing the frozen ShieldNet 360 primitives.
 
-   Everything consumes design tokens via var(); the only literal colours are
-   the AA-safe badge text values below, exposed as lane-scoped custom
-   properties so call sites stay token-driven. */
+   The AA contrast overrides this lane originally scoped here for known
+   WS0-level token gaps (faint header/stat/subtitle text, tinted badge text,
+   white-on-`--brand` primary buttons in dark) are now fixed at the shared WS0
+   foundation, so those overrides have been removed. The one retained
+   lane-scoped colour token, `--lane-ok-text`, drives this lane's own inline
+   success confirmation (`.lane-success`), keeping that call site token-driven. */
 
 .lane-b5 {
-  /* AA-safe text colours for tinted badges, scoped to this lane. Light theme
-     defaults; dark overrides follow. */
-  --lane-warn-text: #8a4f00;
+  /* AA-safe green text for this lane's inline success confirmation. Light
+     theme default; the dark override follows. */
   --lane-ok-text: #047857;
-  --lane-danger-text: #b91c1c;
-  --lane-info-text: var(--brand);
 }
 
 [data-theme="dark"] .lane-b5 {
-  --lane-warn-text: var(--warn);
   --lane-ok-text: var(--ok);
-  --lane-danger-text: var(--danger);
-  --lane-info-text: #7aa5f5;
-}
-
-/* WS0 follow-up: faint header text (--text-faint) is ~3.6:1 on --surface-2.
-   Use the dimmer (darker/lighter) token, which clears AA in both themes. */
-.lane-b5 table.data th {
-  color: var(--text-dim);
-}
-
-/* WS0 follow-up: tinted badge text fails AA on its soft fill in light mode
-   (warn/ok/danger) and for info in dark mode. Re-colour the text only. */
-.lane-b5 .badge--warn {
-  color: var(--lane-warn-text);
-}
-.lane-b5 .badge--ok {
-  color: var(--lane-ok-text);
-}
-.lane-b5 .badge--danger {
-  color: var(--lane-danger-text);
-}
-.lane-b5 .badge--info {
-  color: var(--lane-info-text);
-}
-
-/* WS0 follow-up: white text on --brand in dark (#4d83f0) is ~3.6:1. Use the
-   darker brand token (--brand-strong = #255fe5) as the primary button fill in
-   dark only; white-on-#255fe5 is ~5.5:1. Still a ShieldNet brand token, so the
-   button reads as the same blue — just AA-legible. */
-[data-theme="dark"] .lane-b5 .btn--primary {
-  background: var(--brand-strong);
-  border-color: var(--brand-strong);
-}
-
-/* WS0 follow-up: stat labels use --text-faint, which is ~3.x:1 on dark card
-   surfaces. The dimmer token (--text-dim) clears AA while staying a muted
-   secondary label. */
-[data-theme="dark"] .lane-b5 .stat__label {
-  color: var(--text-dim);
-}
-
-/* WS0 follow-up: card subtitles use --text-faint, ~3.x:1 on dark card
-   surfaces. Lift to --text-dim within the lane for AA. */
-[data-theme="dark"] .lane-b5 .card__subtitle {
-  color: var(--text-dim);
 }
 
 /* --- Layout utilities --------------------------------------------------- */
