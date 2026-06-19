@@ -532,7 +532,11 @@ function StepIdentity({
       .catch((e) => {
         // An abort is our own cleanup, not a verification failure — ignore it.
         if (controller.signal.aborted) return;
-        setError(e instanceof Error ? e.message : "Discovery failed");
+        setError(
+          e instanceof Error
+            ? e.message
+            : intl.formatMessage({ id: "b1.onboard.identity.discoveryFailed" }),
+        );
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
@@ -540,7 +544,7 @@ function StepIdentity({
     return () => {
       controller.abort();
     };
-  }, [cfg.authMode, cfg.oidcIssuer, reloadKey]);
+  }, [cfg.authMode, cfg.oidcIssuer, reloadKey, intl]);
 
   return (
     <Card

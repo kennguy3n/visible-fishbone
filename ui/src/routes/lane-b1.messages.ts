@@ -36,7 +36,6 @@ export type LaneB1Key =
   | "b1.login.error.empty"
   | "b1.login.error.invalid"
   | "b1.login.error.oidc"
-  | "b1.login.error.title"
   // oidc callback
   | "b1.oidc.loading"
   | "b1.oidc.error.title"
@@ -156,6 +155,7 @@ export type LaneB1Key =
   | "b1.onboard.identity.scopes"
   | "b1.onboard.identity.verifying"
   | "b1.onboard.identity.verifyFailed"
+  | "b1.onboard.identity.discoveryFailed"
   | "b1.onboard.identity.verified"
   | "b1.onboard.identity.authorization"
   | "b1.onboard.identity.token"
@@ -291,7 +291,6 @@ const en: Catalog = {
   "b1.login.error.invalid":
     "That token isn't valid or has expired. Paste a current one to continue.",
   "b1.login.error.oidc": "We couldn't start single sign-on. Please try again.",
-  "b1.login.error.title": "We couldn't sign you in",
 
   "b1.oidc.loading": "Signing you in…",
   "b1.oidc.error.title": "We couldn't finish signing you in",
@@ -439,6 +438,7 @@ const en: Catalog = {
   "b1.onboard.identity.verifying": "Checking your provider…",
   "b1.onboard.identity.verifyFailed":
     "We couldn't reach your identity provider's settings: {detail}. Check the address and that it's reachable from this browser.",
+  "b1.onboard.identity.discoveryFailed": "the connection didn't complete",
   "b1.onboard.identity.verified":
     "Connection verified — single sign-on is ready.",
   "b1.onboard.identity.authorization": "Sign-in address",
@@ -597,7 +597,6 @@ const zhHans: PartialCatalog = {
   "b1.login.error.empty": "请输入访问令牌以继续。",
   "b1.login.error.invalid": "该令牌无效或已过期。请粘贴一个有效的令牌以继续。",
   "b1.login.error.oidc": "无法启动单点登录，请重试。",
-  "b1.login.error.title": "无法登录",
   "b1.oidc.loading": "正在为您登录…",
   "b1.oidc.error.title": "无法完成登录",
   "b1.oidc.error.unusable":
@@ -724,6 +723,7 @@ const zhHans: PartialCatalog = {
   "b1.onboard.identity.verifying": "正在检查您的提供商…",
   "b1.onboard.identity.verifyFailed":
     "无法访问您身份提供商的设置：{detail}。请检查地址以及浏览器能否访问。",
+  "b1.onboard.identity.discoveryFailed": "连接未完成",
   "b1.onboard.identity.verified": "连接已验证——单点登录已就绪。",
   "b1.onboard.identity.authorization": "登录地址",
   "b1.onboard.identity.token": "令牌地址",
@@ -866,7 +866,7 @@ const de: PartialCatalog = {
     "Dieses Token ist ungültig oder abgelaufen. Fügen Sie ein aktuelles ein, um fortzufahren.",
   "b1.login.error.oidc":
     "Single Sign-on konnte nicht gestartet werden. Bitte versuchen Sie es erneut.",
-  "b1.login.error.title": "Anmeldung nicht möglich",
+
   "b1.oidc.loading": "Sie werden angemeldet…",
   "b1.oidc.error.title": "Anmeldung konnte nicht abgeschlossen werden",
   "b1.oidc.error.unusable":
@@ -1011,6 +1011,7 @@ const de: PartialCatalog = {
   "b1.onboard.identity.verifying": "Anbieter wird geprüft…",
   "b1.onboard.identity.verifyFailed":
     "Die Einstellungen Ihres Identitätsanbieters waren nicht erreichbar: {detail}. Prüfen Sie die Adresse und ob sie aus diesem Browser erreichbar ist.",
+  "b1.onboard.identity.discoveryFailed": "die Verbindung wurde nicht abgeschlossen",
   "b1.onboard.identity.verified":
     "Verbindung bestätigt — Single Sign-on ist bereit.",
   "b1.onboard.identity.authorization": "Anmeldeadresse",
@@ -1175,7 +1176,7 @@ const fr: PartialCatalog = {
     "Ce jeton est invalide ou a expiré. Collez-en un valide pour continuer.",
   "b1.login.error.oidc":
     "Impossible de démarrer l'authentification unique. Veuillez réessayer.",
-  "b1.login.error.title": "Connexion impossible",
+
   "b1.oidc.loading": "Connexion en cours…",
   "b1.oidc.error.title": "Impossible de terminer la connexion",
   "b1.oidc.error.unusable":
@@ -1320,6 +1321,7 @@ const fr: PartialCatalog = {
   "b1.onboard.identity.verifying": "Vérification de votre fournisseur…",
   "b1.onboard.identity.verifyFailed":
     "Impossible d'atteindre les paramètres de votre fournisseur d'identité : {detail}. Vérifiez l'adresse et qu'elle est joignable depuis ce navigateur.",
+  "b1.onboard.identity.discoveryFailed": "la connexion n'a pas abouti",
   "b1.onboard.identity.verified":
     "Connexion vérifiée — l'authentification unique est prête.",
   "b1.onboard.identity.authorization": "Adresse de connexion",
