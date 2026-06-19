@@ -25,7 +25,7 @@ export function Stepper({
               : "b1.stepper.status.todo";
         return (
           <li
-            key={name}
+            key={i}
             className={`stepper__step stepper__step--${state}`}
             aria-current={state === "active" ? "step" : undefined}
           >

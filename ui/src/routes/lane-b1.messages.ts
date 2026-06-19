@@ -445,7 +445,7 @@ const en: Catalog = {
   "b1.onboard.identity.token": "Token address",
   "b1.onboard.identity.jwks": "Signing keys",
   "b1.onboard.identity.scimHint":
-    "To add users and groups automatically, set up directory sync on the {scim} page. Full sign-in details live on the {idp} page.",
+    "To add users and groups automatically, set up <scim>directory sync</scim>. Full sign-in details live on the <idp>identity provider</idp> page.",
   "b1.onboard.identity.devBadge": "Developer sign-in",
   "b1.onboard.identity.devBody":
     "This console is in developer sign-in mode, where it accepts a pasted operator token. To hand sign-in to your identity provider, switch on single sign-on in the deploy-time settings, then re-run this step to check the connection.",
@@ -729,7 +729,7 @@ const zhHans: PartialCatalog = {
   "b1.onboard.identity.token": "令牌地址",
   "b1.onboard.identity.jwks": "签名密钥",
   "b1.onboard.identity.scimHint":
-    "要自动添加用户和组，请在 {scim} 页面设置目录同步。完整登录详情见 {idp} 页面。",
+    "要自动添加用户和组，请配置<scim>目录同步</scim>。完整登录详情见<idp>身份提供商</idp>页面。",
   "b1.onboard.identity.devBadge": "开发者登录",
   "b1.onboard.identity.devBody":
     "本控制台处于开发者登录模式，接受粘贴的运营令牌。要将登录交给您的身份提供商，请在部署设置中开启单点登录，然后重新执行此步骤以检查连接。",
@@ -1017,7 +1017,7 @@ const de: PartialCatalog = {
   "b1.onboard.identity.token": "Token-Adresse",
   "b1.onboard.identity.jwks": "Signaturschlüssel",
   "b1.onboard.identity.scimHint":
-    "Um Benutzer und Gruppen automatisch hinzuzufügen, richten Sie die Verzeichnissynchronisierung auf der Seite {scim} ein. Vollständige Anmeldedetails finden Sie auf der Seite {idp}.",
+    "Um Benutzer und Gruppen automatisch hinzuzufügen, richten Sie die <scim>Verzeichnissynchronisierung</scim> ein. Vollständige Anmeldedetails finden Sie auf der Seite <idp>Identitätsanbieter</idp>.",
   "b1.onboard.identity.devBadge": "Entwickleranmeldung",
   "b1.onboard.identity.devBody":
     "Diese Konsole ist im Entwickleranmeldemodus und akzeptiert ein eingefügtes Betreiber-Token. Um die Anmeldung an Ihren Identitätsanbieter zu übergeben, aktivieren Sie Single Sign-on in den Bereitstellungseinstellungen und führen Sie diesen Schritt erneut aus, um die Verbindung zu prüfen.",
@@ -1326,7 +1326,7 @@ const fr: PartialCatalog = {
   "b1.onboard.identity.token": "Adresse du jeton",
   "b1.onboard.identity.jwks": "Clés de signature",
   "b1.onboard.identity.scimHint":
-    "Pour ajouter automatiquement utilisateurs et groupes, configurez la synchronisation d'annuaire sur la page {scim}. Les détails complets de connexion se trouvent sur la page {idp}.",
+    "Pour ajouter automatiquement utilisateurs et groupes, configurez la <scim>synchronisation d'annuaire</scim>. Les détails complets de connexion se trouvent sur la page <idp>fournisseur d'identité</idp>.",
   "b1.onboard.identity.devBadge": "Connexion développeur",
   "b1.onboard.identity.devBody":
     "Cette console est en mode connexion développeur, où elle accepte un jeton opérateur collé. Pour confier la connexion à votre fournisseur d'identité, activez l'authentification unique dans les paramètres de déploiement, puis relancez cette étape pour vérifier la connexion.",

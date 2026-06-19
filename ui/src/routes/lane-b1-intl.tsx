@@ -4,7 +4,7 @@
 // still resolving through the same locale, direction and error handling the
 // rest of the app uses.
 
-import { type ReactNode } from "react";
+import { type ReactNode, useMemo } from "react";
 import { IntlProvider, useIntl } from "react-intl";
 import { useLocale } from "@/lib/i18n/locale-context";
 import { laneMessagesFor } from "./lane-b1.messages";
@@ -14,10 +14,16 @@ export function LaneB1Intl({ children }: { children: ReactNode }) {
   const parent = useIntl();
   // The parent catalog is pre-compiled to plain strings; merge the lane catalog
   // over it so both the chrome and lane keys resolve through one provider.
-  const messages: Record<string, string> = {
-    ...(parent.messages as Record<string, string>),
-    ...laneMessagesFor(locale),
-  };
+  // Memoize so the merged object keeps a stable identity across re-renders —
+  // IntlProvider compares messages by reference, so a fresh object every render
+  // would needlessly re-render every useIntl() consumer in the subtree.
+  const messages = useMemo<Record<string, string>>(
+    () => ({
+      ...(parent.messages as Record<string, string>),
+      ...laneMessagesFor(locale),
+    }),
+    [parent.messages, locale],
+  );
 
   return (
     <IntlProvider
