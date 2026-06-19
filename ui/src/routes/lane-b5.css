@@ -1,0 +1,307 @@
+/* Lane B5 scoped styles — Integrations / Webhooks / Terraform / Playbooks /
+   Assistant / Metering.
+
+   Two jobs only:
+   1. Lane-local layout utilities (`.lane-*`) so the screens carry zero
+      one-off inline styles while still composing the frozen ShieldNet 360
+      primitives.
+   2. A small set of AA contrast overrides, scoped under `.lane-b5`, that
+      raise known WS0-level token gaps to >=4.5:1 within this lane only.
+      The underlying token fixes belong in WS0 (see PR "WS0 follow-up");
+      nothing here edits the frozen foundation.
+
+   Everything consumes design tokens via var(); the only literal colours are
+   the AA-safe badge text values below, exposed as lane-scoped custom
+   properties so call sites stay token-driven. */
+
+.lane-b5 {
+  /* AA-safe text colours for tinted badges, scoped to this lane. Light theme
+     defaults; dark overrides follow. */
+  --lane-warn-text: #8a4f00;
+  --lane-ok-text: #047857;
+  --lane-danger-text: #b91c1c;
+  --lane-info-text: var(--brand);
+}
+
+[data-theme="dark"] .lane-b5 {
+  --lane-warn-text: var(--warn);
+  --lane-ok-text: var(--ok);
+  --lane-danger-text: var(--danger);
+  --lane-info-text: #7aa5f5;
+}
+
+/* WS0 follow-up: faint header text (--text-faint) is ~3.6:1 on --surface-2.
+   Use the dimmer (darker/lighter) token, which clears AA in both themes. */
+.lane-b5 table.data th {
+  color: var(--text-dim);
+}
+
+/* WS0 follow-up: tinted badge text fails AA on its soft fill in light mode
+   (warn/ok/danger) and for info in dark mode. Re-colour the text only. */
+.lane-b5 .badge--warn {
+  color: var(--lane-warn-text);
+}
+.lane-b5 .badge--ok {
+  color: var(--lane-ok-text);
+}
+.lane-b5 .badge--danger {
+  color: var(--lane-danger-text);
+}
+.lane-b5 .badge--info {
+  color: var(--lane-info-text);
+}
+
+/* WS0 follow-up: white text on --brand in dark (#4d83f0) is ~3.6:1. Use the
+   darker brand token (--brand-strong = #255fe5) as the primary button fill in
+   dark only; white-on-#255fe5 is ~5.5:1. Still a ShieldNet brand token, so the
+   button reads as the same blue — just AA-legible. */
+[data-theme="dark"] .lane-b5 .btn--primary {
+  background: var(--brand-strong);
+  border-color: var(--brand-strong);
+}
+
+/* WS0 follow-up: stat labels use --text-faint, which is ~3.x:1 on dark card
+   surfaces. The dimmer token (--text-dim) clears AA while staying a muted
+   secondary label. */
+[data-theme="dark"] .lane-b5 .stat__label {
+  color: var(--text-dim);
+}
+
+/* WS0 follow-up: card subtitles use --text-faint, ~3.x:1 on dark card
+   surfaces. Lift to --text-dim within the lane for AA. */
+[data-theme="dark"] .lane-b5 .card__subtitle {
+  color: var(--text-dim);
+}
+
+/* --- Layout utilities --------------------------------------------------- */
+
+/* Vertical rhythm for stacked cards/sections within a page. */
+.lane-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Inline group of row actions (table cells, list rows). */
+.lane-actions {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+/* Form-level action row (sits under inputs). */
+.lane-actions-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 12px;
+}
+
+/* Wrapping group of small status/event tags. */
+.lane-tags {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+
+.lane-tags--empty {
+  color: var(--text-dim);
+}
+
+/* Help text under a field or below a card heading. */
+.lane-help {
+  color: var(--text-dim);
+  font-size: 12.5px;
+  margin: 0 0 12px;
+}
+
+/* Body copy inside a confirm dialog / modal. */
+.lane-prose {
+  margin: 0;
+  color: var(--text-dim);
+  max-width: 48ch;
+  line-height: 1.5;
+}
+
+/* Monospace document editor/viewer (config import/export). */
+.lane-code {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+/* Accessible fieldset that doesn't inherit the browser's default chrome. */
+.lane-fieldset {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+}
+.lane-fieldset > legend {
+  display: block;
+  padding: 0;
+  margin-bottom: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* Checklist of toggles (webhook event selection). */
+.lane-checklist {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 8px;
+}
+.lane-check {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+}
+.lane-check input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+/* Approval row: summary on the left, guarded actions on the right. */
+.lane-approval {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.lane-approval__title {
+  font-weight: 600;
+}
+.lane-approval__meta {
+  color: var(--text-dim);
+  font-size: 12.5px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 2px;
+}
+.lane-approval__actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Inline success confirmation (uses the AA-safe ok text token). */
+.lane-success {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  color: var(--lane-ok-text);
+  font-weight: 600;
+  font-size: 13px;
+  margin: 12px 0 0;
+}
+
+/* Assistant: example-prompt chips shown (centred) in the empty state. */
+.lane-suggest {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+.lane-suggest button {
+  width: auto;
+}
+
+/* Assistant: per-message role label above the bubble. Uses opacity (not a
+   fixed colour) so it dims correctly against both the light AI bubble and the
+   brand-coloured user bubble. */
+.lane-msg-role {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  opacity: 0.75;
+  margin-bottom: 4px;
+}
+.lane-msg-meta {
+  margin-top: 6px;
+}
+
+/* Assistant: empty-state intro shown before the first message. */
+.lane-empty-chat {
+  margin: auto;
+  text-align: center;
+  max-width: 42ch;
+  color: var(--text-dim);
+}
+.lane-empty-chat__title {
+  font-weight: 600;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+/* Reveal-once secret value (webhook signing secret). */
+.lane-secret {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+.lane-secret code {
+  flex: 1;
+  overflow-x: auto;
+  white-space: nowrap;
+  padding: 8px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 12.5px;
+}
+
+/* Drift result list. */
+.lane-drift {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 12px;
+}
+.lane-drift__row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12.5px;
+}
+
+/* Widen the budget column so the inline meter has room. */
+.lane-col-budget {
+  min-width: 160px;
+}
+
+/* Chart containers (fixed heights Recharts' ResponsiveContainer needs). */
+.lane-chart-line {
+  height: 320px;
+}
+.lane-chart-pie {
+  height: 240px;
+  flex: 1 1 280px;
+}
+
+/* Inline budget meter inside a table cell — drop the stacked margin. */
+.lane-b5 .lane-budgetbar {
+  margin-bottom: 0;
+}
+
+/* Push a modal footer message to the opposite edge of the buttons. */
+.lane-mr-auto {
+  margin-right: auto;
+}
+
+/* Assistant: dim the mode tabs while a request is in flight (the frozen
+   `.pill-tabs button` has no disabled state) so the disabled affordance
+   matches the input and send button. */
+.lane-b5 .pill-tabs button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

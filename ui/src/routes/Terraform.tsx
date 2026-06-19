@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useIntl } from "react-intl";
 import {
   useExportTenantConfig,
   useImportTenantConfig,
@@ -7,6 +8,8 @@ import {
 import type { ExportedConfig } from "@/api/generated/model";
 import { PageHeader, Card, Badge, ErrorState } from "@/components/ui";
 import { RequireTenant } from "@/components/RequireTenant";
+import { LanePage } from "./lane-b5";
+import { terraformMsg as M } from "./lane-b5.messages";
 
 export function Terraform() {
   return (
@@ -15,6 +18,7 @@ export function Terraform() {
 }
 
 function TerraformInner({ tenantId }: { tenantId: string }) {
+  const intl = useIntl();
   const exported = useExportTenantConfig(tenantId, { query: { retry: false } });
   const importCfg = useImportTenantConfig();
   const drift = useDetectConfigDrift();
@@ -35,10 +39,15 @@ function TerraformInner({ tenantId }: { tenantId: string }) {
 
   const parseInput = (): ExportedConfig | null => {
     setErr(null);
+    // Clear the prior action's stale success/error so it can't sit next to a
+    // fresh validation error — but never reset a mutation that's still in
+    // flight, which would drop its pending UI and discard its eventual result.
+    if (!importCfg.isPending) importCfg.reset();
+    if (!drift.isPending) drift.reset();
     try {
       return JSON.parse(text) as ExportedConfig;
     } catch {
-      setErr("Input is not valid JSON.");
+      setErr(intl.formatMessage(M.jsonError));
       return null;
     }
   };
@@ -54,88 +63,120 @@ function TerraformInner({ tenantId }: { tenantId: string }) {
   };
 
   // drift.data is typed as DriftReport; use its real field (`entries`) and
-  // sub-fields (resource_type/resource_name/drift_type/details) rather than
-  // casting to an invented shape that never matched the API response.
+  // sub-fields (resource_type/resource_name/drift_type/details).
   const driftItems = drift.data?.entries ?? [];
 
   return (
-    <>
+    <LanePage>
       <PageHeader
-        title="Terraform / config as code"
-        subtitle="Export the declarative tenant config, re-import it, or detect drift."
+        title={intl.formatMessage(M.title)}
+        subtitle={intl.formatMessage(M.subtitle)}
       />
 
       <div className="grid grid--2">
         <Card
-          title="Current configuration"
+          title={intl.formatMessage(M.exportTitle)}
           actions={
             <button className="btn btn--sm" onClick={download} disabled={!exported.data}>
-              Download JSON
+              {intl.formatMessage(M.download)}
             </button>
           }
         >
+          <p className="lane-help">{intl.formatMessage(M.exportHelp)}</p>
           {exported.isError ? (
-            <ErrorState error={exported.error} />
+            <ErrorState error={exported.error} onRetry={() => exported.refetch()} />
           ) : (
             <textarea
               readOnly
-              style={{ minHeight: 320, fontFamily: "var(--mono)" }}
-              value={exported.isLoading ? "Loading…" : exportedJson}
+              rows={16}
+              className="lane-code"
+              aria-label={intl.formatMessage(M.exportAria)}
+              value={exported.isLoading ? intl.formatMessage(M.loading) : exportedJson}
             />
           )}
         </Card>
 
-        <Card title="Import / drift detection">
-          <p className="muted" style={{ marginTop: 0 }}>
-            Paste an exported configuration document.
-          </p>
+        <Card title={intl.formatMessage(M.importTitle)}>
+          <p className="lane-help">{intl.formatMessage(M.importHelp)}</p>
           <textarea
-            style={{ minHeight: 220, fontFamily: "var(--mono)" }}
+            rows={12}
+            className="lane-code"
+            aria-label={intl.formatMessage(M.importAria)}
             value={text}
             onChange={(e) => setText(e.target.value)}
-            placeholder='{ "version": 1, "tenant_id": "…", "policies": [] }'
+            placeholder={intl.formatMessage(M.importPlaceholder)}
           />
-          <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <div className="lane-actions-row">
             <button
               className="btn btn--primary"
               disabled={!text.trim() || importCfg.isPending}
               onClick={runImport}
             >
-              {importCfg.isPending ? "Importing…" : "Import"}
+              {importCfg.isPending
+                ? intl.formatMessage(M.importing)
+                : intl.formatMessage(M.runImport)}
             </button>
             <button
               className="btn"
               disabled={!text.trim() || drift.isPending}
               onClick={runDrift}
             >
-              {drift.isPending ? "Comparing…" : "Detect drift"}
+              {drift.isPending
+                ? intl.formatMessage(M.comparing)
+                : intl.formatMessage(M.runDrift)}
             </button>
           </div>
-          {err && <p className="error-text">{err}</p>}
+
+          {err && (
+            <p className="error-text" role="alert">
+              {err}
+            </p>
+          )}
+          {importCfg.isError && (
+            <p className="error-text" role="alert">
+              {intl.formatMessage(M.importError)}
+            </p>
+          )}
+          {drift.isError && (
+            <p className="error-text" role="alert">
+              {intl.formatMessage(M.driftError)}
+            </p>
+          )}
           {importCfg.isSuccess && (
-            <p style={{ color: "var(--ok)" }}>Configuration imported.</p>
+            <p className="lane-success" role="status">
+              <span aria-hidden="true">✓</span>
+              {intl.formatMessage(M.importSuccess)}
+            </p>
           )}
           {drift.isSuccess && (
-            <div style={{ marginTop: 12 }}>
+            <div className="lane-drift" role="status">
               {driftItems.length === 0 ? (
-                <Badge tone="ok">No drift detected</Badge>
+                <Badge tone="ok" dot>
+                  {intl.formatMessage(M.driftNone)}
+                </Badge>
               ) : (
                 <>
-                  <Badge tone="warn">{driftItems.length} drifted resource(s)</Badge>
-                  <ul className="mono" style={{ fontSize: 12.5 }}>
-                    {driftItems.map((d, i) => (
-                      <li key={i}>
-                        {d.resource_type ?? "resource"}/{d.resource_name ?? ""}
-                        {d.drift_type ? ` [${d.drift_type}]` : ""} — {d.details ?? ""}
-                      </li>
-                    ))}
-                  </ul>
+                  <div>
+                    <Badge tone="warn" dot>
+                      {intl.formatMessage(M.driftSome, { count: driftItems.length })}
+                    </Badge>
+                  </div>
+                  {driftItems.map((d, i) => (
+                    <div key={i} className="lane-drift__row">
+                      {d.drift_type && <Badge tone="neutral">{d.drift_type}</Badge>}
+                      <span className="mono">
+                        {d.resource_type ?? intl.formatMessage(M.driftResourceFallback)}/
+                        {d.resource_name ?? ""}
+                        {d.details ? ` — ${d.details}` : ""}
+                      </span>
+                    </div>
+                  ))}
                 </>
               )}
             </div>
           )}
         </Card>
       </div>
-    </>
+    </LanePage>
   );
 }
