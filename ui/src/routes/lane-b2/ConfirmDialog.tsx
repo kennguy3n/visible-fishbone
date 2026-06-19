@@ -1,5 +1,6 @@
-import { useEffect, useRef, type ReactNode } from "react";
+import { useRef, type ReactNode } from "react";
 import { Modal } from "@/components/Modal";
+import { useDialogA11y } from "./useDialogA11y";
 
 /**
  * Safe-by-default confirmation for destructive actions in Lane B2.
@@ -34,9 +35,9 @@ export function ConfirmDialog({
 }) {
   const cancelRef = useRef<HTMLButtonElement>(null);
 
-  useEffect(() => {
-    cancelRef.current?.focus();
-  }, []);
+  // Focus lands on Cancel (safe default); the hook also traps Tab inside the
+  // dialog and returns focus to the opener on close.
+  useDialogA11y({ initialFocus: cancelRef });
 
   return (
     <Modal

@@ -21,6 +21,7 @@ import { RequireTenant } from "@/components/RequireTenant";
 import { formatDateTime } from "@/lib/format";
 import { LaneB2Intl, useT, type LaneB2Key } from "./lane-b2/i18n";
 import { ConfirmDialog } from "./lane-b2/ConfirmDialog";
+import { useDialogA11y } from "./lane-b2/useDialogA11y";
 
 type TemplateValue =
   (typeof SiteCreateRequestTemplate)[keyof typeof SiteCreateRequestTemplate];
@@ -176,6 +177,9 @@ function SiteWizard({
   );
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
+
+  // Move focus into the wizard on open, trap Tab, and restore it on close.
+  useDialogA11y({ focusFirst: true });
 
   const templates = Object.values(SiteCreateRequestTemplate) as TemplateValue[];
 

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import {
   useListBrowserPolicies,
   useCreateBrowserPolicy,
@@ -25,6 +25,7 @@ import { RequireTenant } from "@/components/RequireTenant";
 import { titleCase } from "@/lib/format";
 import { LaneB2Intl, useT } from "./lane-b2/i18n";
 import { ConfirmDialog } from "./lane-b2/ConfirmDialog";
+import { useDialogA11y } from "./lane-b2/useDialogA11y";
 
 export function Browser() {
   return (
@@ -162,6 +163,13 @@ function CreatePolicy({
   const [scope, setScope] = useState<BrowserPolicyCreateScope>(
     Object.values(BrowserPolicyCreateScope)[0] as BrowserPolicyCreateScope,
   );
+  const nameRef = useRef<HTMLInputElement>(null);
+
+  // Focus lands on the name field; the hook also traps Tab inside the dialog
+  // and returns focus to the opener on close. Initial focus is driven through
+  // the hook (not the input's `autoFocus`) so the opener is captured before
+  // focus moves into the dialog — otherwise restoration on close would fail.
+  useDialogA11y({ initialFocus: nameRef });
 
   return (
     <Modal
@@ -192,8 +200,8 @@ function CreatePolicy({
       <label className="field">
         <span>{t("browser.modal.name.label")}</span>
         <input
+          ref={nameRef}
           value={name}
-          autoFocus
           onChange={(e) => setName(e.target.value)}
           placeholder={t("browser.modal.name.placeholder")}
         />
