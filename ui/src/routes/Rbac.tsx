@@ -141,6 +141,8 @@ function CreateRole({ tenantId, onClose }: { tenantId: string; onClose: () => vo
   const permsErrId = useId();
 
   const [name, setName] = useState("");
+  // Default to the least-privilege scope so a role is never platform-wide unless
+  // the operator deliberately selects it.
   const [scope, setScope] = useState<RoleCreateRequestScope>(
     RoleCreateRequestScope.tenant,
   );
