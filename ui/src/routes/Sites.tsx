@@ -6,51 +6,84 @@ import {
 } from "@/api/generated/endpoints/sites/sites";
 import { SiteCreateRequestTemplate } from "@/api/generated/model";
 import type { Site } from "@/api/generated/model";
-import { PageHeader, Card, AsyncBoundary, Badge } from "@/components/ui";
+import {
+  PageHeader,
+  Card,
+  AsyncBoundary,
+  Badge,
+  EmptyState,
+  EmptyIllustration,
+} from "@/components/ui";
 import { DataTable, type Column } from "@/components/DataTable";
 import { Modal } from "@/components/Modal";
+import { HelpTooltip } from "@/components/HelpTooltip";
 import { RequireTenant } from "@/components/RequireTenant";
-import { formatDateTime, titleCase } from "@/lib/format";
+import { formatDateTime } from "@/lib/format";
+import { LaneB2Intl, useT, type LaneB2Key } from "./lane-b2/i18n";
+import { ConfirmDialog } from "./lane-b2/ConfirmDialog";
+import { useDialogA11y } from "./lane-b2/useDialogA11y";
 
 type TemplateValue =
   (typeof SiteCreateRequestTemplate)[keyof typeof SiteCreateRequestTemplate];
 
-const TEMPLATE_BLURB: Record<string, string> = {
-  branch: "Branch office with on-prem LAN, local breakout and a resilient tunnel pair.",
-  hub: "Regional aggregation hub terminating site-to-site tunnels and east-west policy.",
-  cloud_only: "Agentless cloud edge — SWG + ZTNA only, no physical site hardware.",
-  home_office: "Single-user remote worker site provisioned from the device agent.",
+const TEMPLATE_KEYS: Record<
+  TemplateValue,
+  { label: LaneB2Key; blurb: LaneB2Key }
+> = {
+  branch: { label: "sites.template.branch", blurb: "sites.template.branch.blurb" },
+  hub: { label: "sites.template.hub", blurb: "sites.template.hub.blurb" },
+  cloud_only: {
+    label: "sites.template.cloud_only",
+    blurb: "sites.template.cloud_only.blurb",
+  },
+  home_office: {
+    label: "sites.template.home_office",
+    blurb: "sites.template.home_office.blurb",
+  },
 };
 
 export function Sites() {
-  return <RequireTenant>{(tenantId) => <SitesInner tenantId={tenantId} />}</RequireTenant>;
+  return (
+    <LaneB2Intl>
+      <RequireTenant>
+        {(tenantId) => <SitesInner tenantId={tenantId} />}
+      </RequireTenant>
+    </LaneB2Intl>
+  );
 }
 
 function SitesInner({ tenantId }: { tenantId: string }) {
+  const t = useT();
   const list = useListSites(tenantId);
   const del = useDeleteSite();
   const [wizard, setWizard] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<Site | null>(null);
 
   const columns: Column<Site>[] = [
-    { header: "Name", cell: (s) => s.name },
-    { header: "Slug", cell: (s) => <span className="mono">{s.slug}</span> },
+    { header: t("sites.col.name"), cell: (s) => s.name },
     {
-      header: "Template",
-      cell: (s) => <Badge tone="info">{titleCase(s.template)}</Badge>,
+      header: t("sites.col.slug"),
+      cell: (s) => <span className="mono">{s.slug}</span>,
     },
-    { header: "Created", cell: (s) => formatDateTime(s.created_at) },
     {
-      header: "",
+      header: t("sites.col.template"),
+      cell: (s) => (
+        <Badge tone="info">
+          {t(TEMPLATE_KEYS[s.template as TemplateValue]?.label ?? "common.none")}
+        </Badge>
+      ),
+    },
+    { header: t("sites.col.created"), cell: (s) => formatDateTime(s.created_at) },
+    {
+      header: t("sites.col.actions"),
       cell: (s) => (
         <button
           className="btn btn--danger btn--sm"
+          aria-label={t("sites.delete.aria", { name: s.name })}
           disabled={del.isPending}
-          onClick={() => {
-            if (confirm(`Delete site "${s.name}"?`))
-              del.mutate({ tenantId, id: s.id });
-          }}
+          onClick={() => setPendingDelete(s)}
         >
-          Delete
+          {t("sites.delete")}
         </button>
       ),
     },
@@ -59,28 +92,71 @@ function SitesInner({ tenantId }: { tenantId: string }) {
   return (
     <>
       <PageHeader
-        title="Sites"
-        subtitle="Network sites and their enforcement templates."
+        title={t("sites.title")}
+        subtitle={t("sites.subtitle")}
         actions={
           <button className="btn btn--primary" onClick={() => setWizard(true)}>
-            + New site
+            {t("sites.new")}
           </button>
         }
       />
-      <Card>
+      <Card
+        title={t("sites.title")}
+        actions={
+          <HelpTooltip title={t("sites.help.title")} align="right">
+            {t("sites.help.body")}
+          </HelpTooltip>
+        }
+      >
         <AsyncBoundary
           isLoading={list.isLoading}
           error={list.error}
           data={list.data}
+          onRetry={() => list.refetch()}
           isEmpty={(d) => (d.items?.length ?? 0) === 0}
+          empty={
+            <EmptyState
+              illustration={<EmptyIllustration kind="shield" />}
+              title={t("sites.empty.title")}
+              description={t("sites.empty.body")}
+              action={
+                <button
+                  className="btn btn--primary"
+                  onClick={() => setWizard(true)}
+                >
+                  {t("sites.new")}
+                </button>
+              }
+            />
+          }
         >
           {(d) => (
-            <DataTable columns={columns} rows={d.items ?? []} rowKey={(s) => s.id} />
+            <DataTable
+              columns={columns}
+              rows={d.items ?? []}
+              rowKey={(s) => s.id}
+            />
           )}
         </AsyncBoundary>
       </Card>
       {wizard && (
         <SiteWizard tenantId={tenantId} onClose={() => setWizard(false)} />
+      )}
+      {pendingDelete && (
+        <ConfirmDialog
+          title={t("sites.delete.title")}
+          message={t("sites.delete.confirm", { name: pendingDelete.name })}
+          confirmLabel={t("sites.delete.cta")}
+          cancelLabel={t("common.cancel")}
+          busy={del.isPending}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={() =>
+            del.mutate(
+              { tenantId, id: pendingDelete.id },
+              { onSuccess: () => setPendingDelete(null) },
+            )
+          }
+        />
       )}
     </>
   );
@@ -93,6 +169,7 @@ function SiteWizard({
   tenantId: string;
   onClose: () => void;
 }) {
+  const t = useT();
   const create = useCreateSite();
   const [step, setStep] = useState<1 | 2>(1);
   const [template, setTemplate] = useState<TemplateValue>(
@@ -100,6 +177,9 @@ function SiteWizard({
   );
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
+
+  // Move focus into the wizard on open, trap Tab, and restore it on close.
+  useDialogA11y({ focusFirst: true });
 
   const templates = Object.values(SiteCreateRequestTemplate) as TemplateValue[];
 
@@ -112,73 +192,107 @@ function SiteWizard({
 
   return (
     <Modal
-      title={`New site · step ${step} of 2`}
+      title={t("sites.wizard.title", { step })}
       onClose={onClose}
       footer={
         step === 1 ? (
           <button className="btn btn--primary" onClick={() => setStep(2)}>
-            Next →
+            {t("common.next")}
           </button>
         ) : (
           <>
             <button className="btn" onClick={() => setStep(1)}>
-              ← Back
+              {t("common.back")}
             </button>
             <button
               className="btn btn--primary"
               disabled={!name || create.isPending}
               onClick={submit}
             >
-              {create.isPending ? "Provisioning…" : "Create site"}
+              {create.isPending
+                ? t("sites.wizard.creating")
+                : t("sites.wizard.create")}
             </button>
           </>
         )
       }
     >
       {step === 1 ? (
-        <div className="grid" style={{ gap: 10 }}>
-          <p className="muted">Choose a deployment template.</p>
-          {templates.map((t) => (
-            <button
-              key={t}
-              className="card"
-              style={{
-                textAlign: "left",
-                cursor: "pointer",
-                borderColor:
-                  template === t ? "var(--brand)" : "var(--border-soft)",
-              }}
-              onClick={() => setTemplate(t)}
-            >
-              <div style={{ fontWeight: 700 }}>{titleCase(t)}</div>
-              <div className="muted" style={{ fontSize: 12.5 }}>
-                {TEMPLATE_BLURB[t] ?? ""}
-              </div>
-            </button>
-          ))}
-        </div>
+        <>
+          <p className="muted" style={{ marginTop: 0 }}>
+            {t("sites.wizard.step1.help")}
+          </p>
+          <div
+            className="choice-grid"
+            role="group"
+            aria-label={t("sites.wizard.step1.legend")}
+            style={{ marginTop: 6 }}
+          >
+            {templates.map((tpl) => (
+              <button
+                key={tpl}
+                type="button"
+                className={`choice${template === tpl ? " choice--selected" : ""}`}
+                aria-pressed={template === tpl}
+                onClick={() => setTemplate(tpl)}
+              >
+                <div className="choice__name">
+                  {t(TEMPLATE_KEYS[tpl].label)}
+                </div>
+                <div className="choice__desc">
+                  {t(TEMPLATE_KEYS[tpl].blurb)}
+                </div>
+              </button>
+            ))}
+          </div>
+        </>
       ) : (
         <>
           <label className="field">
-            <span>Site name</span>
+            <span>{t("sites.wizard.name.label")}</span>
             <input
               value={name}
+              // `autoFocus` here is safe despite useDialogA11y's warning: the
+              // wizard always opens on step 1, so this step-2 input is not
+              // mounted when the hook captures the opener. It only moves focus
+              // to the first field when the user advances from step 1, which is
+              // the desired behaviour. If the wizard ever defaulted to step 2,
+              // switch this to a ref + `initialFocus` so restoration still works.
+              autoFocus
               onChange={(e) => setName(e.target.value)}
-              placeholder="HQ — San Francisco"
+              placeholder={t("sites.wizard.name.placeholder")}
             />
+            <small
+              className="muted"
+              style={{ display: "block", marginTop: 4 }}
+            >
+              {t("sites.wizard.name.hint")}
+            </small>
           </label>
           <label className="field">
-            <span>Slug (optional)</span>
-            <input value={slug} onChange={(e) => setSlug(e.target.value)} />
+            <span>
+              {t("sites.wizard.slug.label")}{" "}
+              <span className="muted">({t("sites.wizard.slug.optional")})</span>
+            </span>
+            <input
+              value={slug}
+              onChange={(e) => setSlug(e.target.value)}
+              placeholder={t("sites.wizard.slug.placeholder")}
+            />
+            <small
+              className="muted"
+              style={{ display: "block", marginTop: 4 }}
+            >
+              {t("sites.wizard.slug.hint")}
+            </small>
           </label>
           <p className="muted" style={{ fontSize: 12.5 }}>
-            Template: <Badge tone="info">{titleCase(template)}</Badge>
+            {t("sites.wizard.template.summary")}:{" "}
+            <Badge tone="info">{t(TEMPLATE_KEYS[template].label)}</Badge>
           </p>
           {create.isError && (
-            <p className="error-text">
-              {create.error instanceof Error
-                ? create.error.message
-                : "Failed to create site"}
+            <p className="error-text" role="alert">
+              {t("sites.wizard.error")}
             </p>
           )}
         </>

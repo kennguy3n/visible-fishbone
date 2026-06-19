@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { FormattedMessage } from "react-intl";
 import {
   ReactFlow,
   Background,
@@ -26,10 +27,36 @@ import {
 import { HelpTooltip } from "@/components/HelpTooltip";
 import { RequireTenant } from "@/components/RequireTenant";
 import { useToast } from "@/components/Toast";
+import { LaneB2Intl, useT, richBold, type LaneB2Key } from "./lane-b2/i18n";
+
+type TFunc = (id: LaneB2Key, values?: Record<string, string | number>) => string;
+
+const VERB_KEYS: Record<string, LaneB2Key> = {
+  allow: "verb.allow",
+  deny: "verb.deny",
+  inspect: "verb.inspect",
+  decrypt: "verb.decrypt",
+  log: "verb.log",
+  steer: "verb.steer",
+  isolate: "verb.isolate",
+  block: "verb.block",
+  bypass: "verb.bypass",
+  suggest_only: "verb.suggest_only",
+};
+
+function verbLabel(t: TFunc, v?: string): string {
+  if (!v) return "—";
+  const k = VERB_KEYS[v.toLowerCase()];
+  return k ? t(k) : v;
+}
 
 export function Policy() {
   return (
-    <RequireTenant>{(tenantId) => <PolicyInner tenantId={tenantId} />}</RequireTenant>
+    <LaneB2Intl>
+      <RequireTenant>
+        {(tenantId) => <PolicyInner tenantId={tenantId} />}
+      </RequireTenant>
+    </LaneB2Intl>
   );
 }
 
@@ -73,6 +100,8 @@ function toFlow(graph: RawGraph): { nodes: Node[]; edges: Edge[] } {
 }
 
 function PolicyInner({ tenantId }: { tenantId: string }) {
+  const t = useT();
+  const toast = useToast();
   const graphQuery = useGetPolicyGraph(tenantId, { query: { retry: false } });
   const update = useUpdatePolicyGraph();
   const compile = useCompilePolicyBundles();
@@ -95,7 +124,7 @@ function PolicyInner({ tenantId }: { tenantId: string }) {
     try {
       parsed = JSON.parse(jsonText);
     } catch {
-      setSaveErr("Graph is not valid JSON.");
+      setSaveErr(t("policy.json.invalid"));
       return;
     }
     update.mutate(
@@ -109,45 +138,62 @@ function PolicyInner({ tenantId }: { tenantId: string }) {
   return (
     <>
       <PageHeader
-        title="Policy editor"
-        subtitle="Visualize, edit and simulate the tenant policy graph."
+        title={t("policy.title")}
+        subtitle={t("policy.subtitle")}
         actions={
           <>
             <span className="muted" style={{ alignSelf: "center" }}>
               {graphQuery.data ? (
-                <>
-                  version <b>{graphQuery.data.version}</b>
-                </>
+                <FormattedMessage
+                  id="policy.version"
+                  values={{ version: <b>{graphQuery.data.version}</b> }}
+                />
               ) : null}
             </span>
             <button
               className="btn"
               disabled={compile.isPending}
-              onClick={() => compile.mutate({ tenantId })}
+              onClick={() =>
+                compile.mutate(
+                  { tenantId },
+                  {
+                    onSuccess: () =>
+                      toast.success(
+                        t("policy.compile.ok.title"),
+                        t("policy.compile.ok.body"),
+                      ),
+                    onError: (e) =>
+                      toast.error(
+                        t("policy.compile.err.title"),
+                        e instanceof Error ? e.message : undefined,
+                      ),
+                  },
+                )
+              }
             >
-              {compile.isPending ? "Compiling…" : "Compile bundles"}
+              {compile.isPending ? t("policy.compiling") : t("policy.compile")}
             </button>
           </>
         }
       />
 
-      <div className="mode-toggle">
+      <div className="mode-toggle" role="group" aria-label={t("policy.mode.label")}>
         <button
           className={mode === "simple" ? "active" : ""}
+          aria-pressed={mode === "simple"}
           onClick={() => setMode("simple")}
         >
-          Simple
+          {t("policy.mode.simple")}
         </button>
         <button
           className={mode === "advanced" ? "active" : ""}
+          aria-pressed={mode === "advanced"}
           onClick={() => setMode("advanced")}
         >
-          Advanced
+          {t("policy.mode.advanced")}
         </button>
-        <HelpTooltip title="Simple vs Advanced">
-          <b>Simple</b> shows your rules as a plain "who → can do what → to
-          where" list you can reorder and trim. <b>Advanced</b> exposes the raw
-          policy graph, JSON and the full change simulator.
+        <HelpTooltip title={t("policy.mode.help.title")}>
+          {t("policy.mode.help.body")}
         </HelpTooltip>
       </div>
 
@@ -160,38 +206,44 @@ function PolicyInner({ tenantId }: { tenantId: string }) {
       )}
 
       {mode === "advanced" && (
-      <div className="pill-tabs">
-        <button className={tab === "graph" ? "active" : ""} onClick={() => setTab("graph")}>
-          Graph
-        </button>
-        <button className={tab === "json" ? "active" : ""} onClick={() => setTab("json")}>
-          JSON
-        </button>
-        <button
-          className={tab === "simulate" ? "active" : ""}
-          onClick={() => setTab("simulate")}
-        >
-          Change simulation
-        </button>
-      </div>
+        <div className="pill-tabs" role="tablist" aria-label={t("policy.title")}>
+          <button
+            role="tab"
+            aria-selected={tab === "graph"}
+            className={tab === "graph" ? "active" : ""}
+            onClick={() => setTab("graph")}
+          >
+            {t("policy.tab.graph")}
+          </button>
+          <button
+            role="tab"
+            aria-selected={tab === "json"}
+            className={tab === "json" ? "active" : ""}
+            onClick={() => setTab("json")}
+          >
+            {t("policy.tab.json")}
+          </button>
+          <button
+            role="tab"
+            aria-selected={tab === "simulate"}
+            className={tab === "simulate" ? "active" : ""}
+            onClick={() => setTab("simulate")}
+          >
+            {t("policy.tab.simulate")}
+          </button>
+        </div>
       )}
 
       {mode === "advanced" && graphQuery.isError && (
         <Card>
-          <p className="muted">
-            No policy graph exists for this tenant yet. Use the JSON tab to
-            author one.
-          </p>
+          <p className="muted">{t("policy.advanced.noGraph")}</p>
         </Card>
       )}
 
       {mode === "advanced" && tab === "graph" && (
-        <Card title="Policy graph">
+        <Card title={t("policy.graph.title")}>
           {flow.nodes.length === 0 ? (
-            <p className="muted">
-              The graph has no renderable nodes. Switch to the JSON tab to
-              inspect the raw document.
-            </p>
+            <p className="muted">{t("policy.graph.empty")}</p>
           ) : (
             <div className="graph-canvas">
               <ReactFlow nodes={flow.nodes} edges={flow.edges} fitView>
@@ -204,10 +256,11 @@ function PolicyInner({ tenantId }: { tenantId: string }) {
       )}
 
       {mode === "advanced" && tab === "json" && (
-        <Card title="Raw policy document">
+        <Card title={t("policy.json.title")}>
           <textarea
             style={{ minHeight: 360 }}
             value={jsonText}
+            aria-label={t("policy.json.title")}
             onChange={(e) => setDraft(e.target.value)}
           />
           <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
@@ -216,27 +269,34 @@ function PolicyInner({ tenantId }: { tenantId: string }) {
               onClick={save}
               disabled={update.isPending || draft === null}
             >
-              {update.isPending ? "Saving…" : "Save graph"}
+              {update.isPending ? t("policy.json.saving") : t("policy.json.save")}
             </button>
             {draft !== null && (
               <button className="btn" onClick={() => setDraft(null)}>
-                Reset
+                {t("policy.json.reset")}
               </button>
             )}
           </div>
-          {saveErr && <p className="error-text">{saveErr}</p>}
+          {saveErr && (
+            <p className="error-text" role="alert">
+              {saveErr}
+            </p>
+          )}
           {update.isError && (
-            <p className="error-text">
+            <p className="error-text" role="alert">
               {update.error instanceof Error
                 ? update.error.message
-                : "Save failed"}
+                : t("policy.json.saveFailed.title")}
             </p>
           )}
         </Card>
       )}
 
       {mode === "advanced" && tab === "simulate" && (
-        <SimulationPanel tenantId={tenantId} baseGraph={graphQuery.data?.graph ?? EMPTY_GRAPH} />
+        <SimulationPanel
+          tenantId={tenantId}
+          baseGraph={graphQuery.data?.graph ?? EMPTY_GRAPH}
+        />
       )}
     </>
   );
@@ -249,6 +309,7 @@ function SimulationPanel({
   tenantId: string;
   baseGraph: unknown;
 }) {
+  const t = useT();
   const sim = useRunSimulation(tenantId);
   const [proposed, setProposed] = useState(() =>
     JSON.stringify(baseGraph, null, 2),
@@ -261,7 +322,7 @@ function SimulationPanel({
     try {
       parsed = JSON.parse(proposed);
     } catch {
-      setErr("Proposed graph is not valid JSON.");
+      setErr(t("policy.sim.invalid"));
       return;
     }
     sim.mutate({ proposed: parsed });
@@ -269,10 +330,11 @@ function SimulationPanel({
 
   return (
     <div className="grid grid--2">
-      <Card title="Proposed graph">
+      <Card title={t("policy.sim.proposed")}>
         <textarea
           style={{ minHeight: 320 }}
           value={proposed}
+          aria-label={t("policy.sim.proposed")}
           onChange={(e) => setProposed(e.target.value)}
         />
         <button
@@ -281,19 +343,20 @@ function SimulationPanel({
           onClick={run}
           disabled={sim.isPending}
         >
-          {sim.isPending ? "Replaying…" : "Run simulation"}
+          {sim.isPending ? t("policy.sim.running") : t("policy.sim.run")}
         </button>
-        {err && <p className="error-text">{err}</p>}
+        {err && (
+          <p className="error-text" role="alert">
+            {err}
+          </p>
+        )}
         {sim.isError && <ErrorState error={sim.error} />}
       </Card>
-      <Card title="Impact report">
+      <Card title={t("policy.sim.report")}>
         {sim.data ? (
           <SimulationResult report={sim.data} />
         ) : (
-          <p className="muted">
-            Replays recent traffic through the proposed graph and reports how
-            many verdicts would change. No simulation run yet.
-          </p>
+          <p className="muted">{t("policy.sim.intro")}</p>
         )}
       </Card>
     </div>
@@ -301,50 +364,49 @@ function SimulationPanel({
 }
 
 function SimulationResult({ report }: { report: SimulationResponse }) {
+  const t = useT();
   return (
     <>
       <div className="grid grid--stats" style={{ marginBottom: 14 }}>
         <div className="stat">
-          <div className="stat__label">Evaluated</div>
+          <div className="stat__label">{t("policy.sim.evaluated")}</div>
           <div className="stat__value">{report.total}</div>
         </div>
         <div className="stat">
-          <div className="stat__label">Changed</div>
+          <div className="stat__label">{t("policy.sim.changed")}</div>
           <div className="stat__value" style={{ color: "var(--warn)" }}>
             {report.changed}
           </div>
         </div>
         <div className="stat">
-          <div className="stat__label">Affected devices</div>
+          <div className="stat__label">{t("policy.sim.affected")}</div>
           <div className="stat__value">{report.affected_devices.length}</div>
         </div>
       </div>
-      <h4 style={{ margin: "4px 0 8px" }}>Verdict transitions</h4>
+      <h4 style={{ margin: "4px 0 8px" }}>{t("policy.sim.transitions")}</h4>
       {report.transitions.length === 0 ? (
-        <p className="muted">No verdict changes in the replay window.</p>
+        <p className="muted">{t("policy.sim.noTransitions")}</p>
       ) : (
         <table className="data">
           <thead>
             <tr>
-              <th>From</th>
-              <th>To</th>
-              <th>Count</th>
+              <th>{t("policy.sim.col.from")}</th>
+              <th>{t("policy.sim.col.to")}</th>
+              <th>{t("policy.sim.col.count")}</th>
             </tr>
           </thead>
           <tbody>
-            {report.transitions.map((t, i) => (
+            {report.transitions.map((tr, i) => (
               <tr key={i}>
                 <td>
-                  <Badge tone="neutral">{t.prev_verdict}</Badge>
+                  <Badge tone="neutral">{verbLabel(t, tr.prev_verdict)}</Badge>
                 </td>
                 <td>
-                  <Badge
-                    tone={t.next_verdict === "deny" ? "danger" : "ok"}
-                  >
-                    {t.next_verdict}
+                  <Badge tone={tr.next_verdict === "deny" ? "danger" : "ok"}>
+                    {verbLabel(t, tr.next_verdict)}
                   </Badge>
                 </td>
-                <td>{t.count}</td>
+                <td>{tr.count}</td>
               </tr>
             ))}
           </tbody>
@@ -384,21 +446,23 @@ const VERB_TONE: Record<string, "ok" | "warn" | "danger" | "neutral" | "info"> =
   suggest_only: "warn",
 };
 
-function describeSource(r: GraphRule): string {
+function describeSource(r: GraphRule, t: TFunc): string {
   const refs = r.subject_refs ?? [];
   const inline = (r.subjects ?? []).map((s) =>
     s.kind ? `${s.kind}:${s.name ?? "?"}` : (s.name ?? "?"),
   );
   const all = [...refs, ...inline];
-  return all.length ? all.join(", ") : "Anyone";
+  return all.length ? all.join(", ") : t("policy.describe.anyone");
 }
 
-function describeDest(r: GraphRule): string {
+function describeDest(r: GraphRule, t: TFunc): string {
   const refs = r.predicate_refs ?? [];
   const inline = (r.predicates ?? []).map((p) => p.name ?? "?");
   const all = [...refs, ...inline];
   if (all.length) return all.join(", ");
-  return r.domain ? `all ${r.domain.toUpperCase()} traffic` : "anything";
+  return r.domain
+    ? t("policy.describe.allDomain", { domain: r.domain.toUpperCase() })
+    : t("policy.describe.anything");
 }
 
 interface Row {
@@ -416,6 +480,7 @@ function SimpleRules({
   graph: GraphDoc;
   isError: boolean;
 }) {
+  const t = useT();
   const update = useUpdatePolicyGraph();
   const sim = useRunSimulation(tenantId);
   const toast = useToast();
@@ -515,6 +580,30 @@ function SimpleRules({
     setDragKey(null);
   };
 
+  // Keyboard-operable reorder: drag-and-drop alone leaves keyboard-only
+  // operators unable to change rule order, so the handle is a focusable button
+  // and the arrow keys swap a rule with its nearest active neighbour. Removed
+  // rows are skipped (they don't define the live order) and stay put, mirroring
+  // the drag behaviour. React keeps the same handle DOM node for a stable
+  // `row.key`, so focus rides along with the row as it moves.
+  const moveRow = (key: string, dir: -1 | 1) => {
+    setRows((prev) => {
+      const from = prev.findIndex((r) => r.key === key);
+      if (from < 0 || prev[from].status !== "active") return prev;
+      let to = -1;
+      for (let j = from + dir; j >= 0 && j < prev.length; j += dir) {
+        if (prev[j].status === "active") {
+          to = j;
+          break;
+        }
+      }
+      if (to < 0) return prev;
+      const next = [...prev];
+      [next[from], next[to]] = [next[to], next[from]];
+      return next;
+    });
+  };
+
   const test = () => {
     sim.mutate({ proposed: proposed() });
   };
@@ -523,10 +612,11 @@ function SimpleRules({
     update.mutate(
       { tenantId, data: proposed() as Record<string, unknown> },
       {
-        onSuccess: () => toast.success("Policy updated", "Your changes are live."),
+        onSuccess: () =>
+          toast.success(t("policy.save.ok.title"), t("policy.save.ok.body")),
         onError: (e) =>
           toast.error(
-            "Could not save policy",
+            t("policy.save.err.title"),
             e instanceof Error ? e.message : undefined,
           ),
       },
@@ -535,10 +625,10 @@ function SimpleRules({
 
   if (isError || rows.length === 0) {
     return (
-      <Card title="Rules">
+      <Card title={t("policy.simple.title")}>
         <EmptyState
-          title="No rules yet"
-          description="This tenant's policy has no rules. Switch to Advanced to author the policy graph, then come back here to manage rules in plain English."
+          title={t("policy.simple.empty.title")}
+          description={t("policy.simple.empty.body")}
         />
       </Card>
     );
@@ -547,23 +637,21 @@ function SimpleRules({
   return (
     <>
       <Card
-        title="Rules — who can do what, to where"
+        title={t("policy.simple.title")}
         actions={
-          <HelpTooltip title="Reordering rules" align="right">
-            Rules are evaluated top to bottom; the first match wins. Drag the ⠿
-            handle to reorder. Mark a rule for removal to preview deleting it,
-            then test the change before saving.
+          <HelpTooltip title={t("policy.simple.help.title")} align="right">
+            {t("policy.simple.help.body")}
           </HelpTooltip>
         }
       >
-        <div className="rule-table" role="table" aria-label="Policy rules">
+        <div className="rule-table" role="table" aria-label={t("policy.simple.title")}>
           <div className="rule-row rule-row--head" role="row">
-            <span />
-            <span>Source</span>
-            <span>Action</span>
-            <span>Destination</span>
-            <span>Domain</span>
-            <span />
+            <span role="columnheader" aria-label={t("policy.dragHint")} />
+            <span role="columnheader">{t("policy.col.source")}</span>
+            <span role="columnheader">{t("policy.col.action")}</span>
+            <span role="columnheader">{t("policy.col.dest")}</span>
+            <span role="columnheader">{t("policy.col.domain")}</span>
+            <span role="columnheader" aria-label={t("common.remove")} />
           </div>
           {rows.map((row, i) => {
             const r = row.rule;
@@ -571,6 +659,8 @@ function SimpleRules({
             const moved = row.status === "active" && movedKeys.has(row.key);
             const variant =
               row.status === "removed" ? "remove" : moved ? "draft" : "active";
+            const src = describeSource(r, t);
+            const dst = describeDest(r, t);
             return (
               <div
                 key={row.key}
@@ -581,30 +671,47 @@ function SimpleRules({
                 onDragOver={(e) => e.preventDefault()}
                 onDrop={() => onDrop(row.key)}
               >
-                <span
-                  className="rule-row__handle"
-                  title="Drag to reorder"
-                  aria-hidden
-                >
-                  ⠿
+                <span className="rule-row__handle" role="cell">
+                  {row.status === "active" ? (
+                    <button
+                      type="button"
+                      className="rule-row__reorder"
+                      aria-label={t("policy.row.reorder", { n: i + 1 })}
+                      title={t("policy.dragHint")}
+                      onKeyDown={(e) => {
+                        if (e.key === "ArrowUp") {
+                          e.preventDefault();
+                          moveRow(row.key, -1);
+                        } else if (e.key === "ArrowDown") {
+                          e.preventDefault();
+                          moveRow(row.key, 1);
+                        }
+                      }}
+                    >
+                      <span aria-hidden>⠿</span>
+                    </button>
+                  ) : (
+                    <span aria-hidden>⠿</span>
+                  )}
                 </span>
-                <span className="rule-row__src" title={describeSource(r)}>
-                  <b>{i + 1}.</b> {describeSource(r)}
+                <span className="rule-row__src" role="cell" title={src}>
+                  <b>{i + 1}.</b> {src}
                   {r.description && (
                     <span className="rule-row__desc">{r.description}</span>
                   )}
                 </span>
-                <span>
+                <span role="cell">
                   <Badge tone={VERB_TONE[verb] ?? "neutral"}>
-                    {r.verb ?? "—"}
+                    {verbLabel(t, r.verb)}
                   </Badge>
                 </span>
-                <span title={describeDest(r)}>{describeDest(r)}</span>
-                <span className="muted">{r.domain ?? "—"}</span>
-                <span>
+                <span role="cell" title={dst}>{dst}</span>
+                <span className="muted" role="cell">{r.domain ?? "—"}</span>
+                <span role="cell">
                   {row.status === "active" ? (
                     <button
                       className="btn btn--sm btn--danger"
+                      aria-label={t("policy.row.remove", { n: i + 1 })}
                       onClick={() =>
                         setRows((prev) =>
                           prev.map((x) =>
@@ -613,11 +720,12 @@ function SimpleRules({
                         )
                       }
                     >
-                      Remove
+                      {t("common.remove")}
                     </button>
                   ) : (
                     <button
                       className="btn btn--sm"
+                      aria-label={t("policy.row.undo", { n: i + 1 })}
                       onClick={() =>
                         setRows((prev) =>
                           prev.map((x) =>
@@ -626,7 +734,7 @@ function SimpleRules({
                         )
                       }
                     >
-                      Undo
+                      {t("common.undo")}
                     </button>
                   )}
                 </span>
@@ -636,9 +744,15 @@ function SimpleRules({
         </div>
 
         <div className="rule-legend">
-          <span><i className="dot dot--ok" /> Active</span>
-          <span><i className="dot dot--warn" /> Reordered (draft)</span>
-          <span><i className="dot dot--danger" /> Will be removed</span>
+          <span>
+            <i className="dot dot--ok" /> {t("policy.legend.active")}
+          </span>
+          <span>
+            <i className="dot dot--warn" /> {t("policy.legend.reordered")}
+          </span>
+          <span>
+            <i className="dot dot--danger" /> {t("policy.legend.removed")}
+          </span>
         </div>
 
         <div className="rule-actions">
@@ -647,14 +761,14 @@ function SimpleRules({
             onClick={test}
             disabled={sim.isPending || !dirty}
           >
-            {sim.isPending ? "Testing…" : "Test this change"}
+            {sim.isPending ? t("policy.testing") : t("policy.test")}
           </button>
           <button
             className="btn btn--primary"
             onClick={apply}
             disabled={update.isPending || !dirty}
           >
-            {update.isPending ? "Saving…" : "Save changes"}
+            {update.isPending ? t("policy.saving") : t("policy.save")}
           </button>
           {dirty && (
             <button
@@ -664,20 +778,24 @@ function SimpleRules({
                 sim.reset();
               }}
             >
-              Discard
+              {t("common.discard")}
             </button>
           )}
         </div>
       </Card>
 
       {(sim.isPending || sim.data || sim.isError) && (
-        <Card title="Impact of this change">
+        <Card title={t("policy.impact.title")}>
           {sim.isError ? (
             <ErrorState error={sim.error} />
           ) : sim.isPending ? (
-            <p className="muted">Replaying recent traffic…</p>
+            <p className="muted">{t("policy.impact.replaying")}</p>
           ) : sim.data ? (
-            <ImpactSummary report={sim.data} removed={removedCount} reordered={reordered} />
+            <ImpactSummary
+              report={sim.data}
+              removed={removedCount}
+              reordered={reordered}
+            />
           ) : null}
         </Card>
       )}
@@ -694,38 +812,45 @@ function ImpactSummary({
   removed: number;
   reordered: boolean;
 }) {
+  const t = useT();
   const edits: string[] = [];
-  if (removed > 0) edits.push(`${removed} rule${removed === 1 ? "" : "s"} removed`);
-  if (reordered) edits.push("rules reordered");
+  if (removed > 0) edits.push(t("policy.impact.removed", { removed }));
+  if (reordered) edits.push(t("policy.impact.reordered"));
 
   return (
     <>
       <p>
         {edits.length > 0 && <b>{edits.join(", ")}. </b>}
         {report.changed === 0 ? (
-          <>
-            Replaying the last {report.total} request
-            {report.total === 1 ? "" : "s"}, <b>nothing changes</b> — this edit
-            looks safe to apply.
-          </>
+          <FormattedMessage
+            id="policy.impact.safe"
+            values={{ total: report.total, ...richBold }}
+          />
         ) : (
           <>
-            Of the last {report.total} request{report.total === 1 ? "" : "s"},{" "}
-            <b>{report.changed}</b> would get a different outcome, affecting{" "}
-            <b>{report.affected_devices.length}</b> device
-            {report.affected_devices.length === 1 ? "" : "s"}.
+            <FormattedMessage
+              id="policy.impact.changed"
+              values={{ total: report.total, changed: report.changed, ...richBold }}
+            />{" "}
+            <FormattedMessage
+              id="policy.impact.affected"
+              values={{ devices: report.affected_devices.length }}
+            />
           </>
         )}
       </p>
       {report.transitions.length > 0 && (
         <ul className="impact-list">
-          {report.transitions.map((t, i) => (
+          {report.transitions.map((tr, i) => (
             <li key={i}>
-              <Badge tone="neutral">{t.prev_verdict}</Badge> →{" "}
-              <Badge tone={t.next_verdict === "deny" ? "danger" : "ok"}>
-                {t.next_verdict}
+              <Badge tone="neutral">{verbLabel(t, tr.prev_verdict)}</Badge> →{" "}
+              <Badge tone={tr.next_verdict === "deny" ? "danger" : "ok"}>
+                {verbLabel(t, tr.next_verdict)}
               </Badge>{" "}
-              for <b>{t.count}</b> request{t.count === 1 ? "" : "s"}
+              <FormattedMessage
+                id="policy.impact.forRequests"
+                values={{ count: tr.count }}
+              />
             </li>
           ))}
         </ul>

@@ -7,50 +7,70 @@ import {
   StatusBadge,
   Badge,
   EmptyState,
+  EmptyIllustration,
 } from "@/components/ui";
+import { HelpTooltip } from "@/components/HelpTooltip";
 import { titleCase } from "@/lib/format";
+import { LaneB2Intl, useT } from "./lane-b2/i18n";
 
 export function Pops() {
+  return (
+    <LaneB2Intl>
+      <PopsInner />
+    </LaneB2Intl>
+  );
+}
+
+function PopsInner() {
+  const t = useT();
   const list = useListPoPs();
 
   return (
     <>
-      <PageHeader
-        title="Points of presence"
-        subtitle="Global edge PoP fleet, capacity tiers and live health beacons."
-      />
-      <Card>
+      <PageHeader title={t("pops.title")} subtitle={t("pops.subtitle")} />
+      <Card
+        title={t("pops.title")}
+        actions={
+          <HelpTooltip title={t("pops.help.title")} align="right">
+            {t("pops.help.body")}
+          </HelpTooltip>
+        }
+      >
         <AsyncBoundary
           isLoading={list.isLoading}
           error={list.error}
           data={list.data}
+          onRetry={() => list.refetch()}
           isEmpty={(d) => (d.items?.length ?? 0) === 0}
           empty={
             <EmptyState
-              title="No PoPs registered"
-              description="Edge points of presence will appear here once they're provisioned."
+              illustration={<EmptyIllustration kind="inbox" />}
+              title={t("pops.empty.title")}
+              description={t("pops.empty.body")}
             />
           }
         >
           {(d) => (
-            <table className="data">
-              <thead>
-                <tr>
-                  <th>Region</th>
-                  <th>Provider</th>
-                  <th>Anycast IP</th>
-                  <th>Tier</th>
-                  <th>Enabled</th>
-                  <th>Health</th>
-                  <th>Load</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(d.items ?? []).map((p) => (
-                  <PopRow key={p.id} pop={p} />
-                ))}
-              </tbody>
-            </table>
+            <div className="table-wrap">
+              <table className="data">
+                <thead>
+                  <tr>
+                    <th>{t("pops.col.region")}</th>
+                    <th>{t("pops.col.provider")}</th>
+                    <th>{t("pops.col.anycast")}</th>
+                    <th>{t("pops.col.tier")}</th>
+                    <th>{t("pops.col.status")}</th>
+                    <th>{t("pops.col.health")}</th>
+                    <th>{t("pops.col.load")}</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(d.items ?? []).map((p) => (
+                    <PopRow key={p.id} pop={p} />
+                  ))}
+                </tbody>
+              </table>
+            </div>
           )}
         </AsyncBoundary>
       </Card>
@@ -59,6 +79,7 @@ export function Pops() {
 }
 
 function PopRow({ pop }: { pop: PoP }) {
+  const t = useT();
   const health = useGetPoPHealth(pop.id, { query: { retry: false } });
   const h = health.data;
   return (
@@ -74,19 +95,22 @@ function PopRow({ pop }: { pop: PoP }) {
       </td>
       <td>
         {health.isLoading ? (
-          "…"
+          <span className="muted">{t("pops.health.checking")}</span>
         ) : h ? (
           <StatusBadge
             status={h.overloaded ? "overloaded" : h.healthy ? "healthy" : "unhealthy"}
           />
         ) : (
-          <span className="muted">unknown</span>
+          <span className="muted">{t("pops.health.unknown")}</span>
         )}
       </td>
       <td className="mono">
         {h?.health
-          ? `${h.health.cpu_pct.toFixed(0)}% cpu · ${h.health.active_connections} conn`
-          : "—"}
+          ? t("pops.load.value", {
+              cpu: h.health.cpu_pct.toFixed(0),
+              conn: h.health.active_connections,
+            })
+          : t("pops.load.none")}
       </td>
     </tr>
   );

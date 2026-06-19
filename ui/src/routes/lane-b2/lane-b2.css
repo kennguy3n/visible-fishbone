@@ -1,0 +1,107 @@
+/* Lane B2 scoped accessibility overrides.
+ *
+ * The WS0 design-system foundation is frozen, so these rules live in this
+ * lane-local file and apply only inside the `.lane-b2` wrapper that
+ * `LaneB2Intl` renders. They re-point existing design tokens (never introduce
+ * new colours) so the seven Lane B2 screens clear WCAG 2.2 AA contrast where
+ * the foundation has known gaps. The underlying token fixes belong in WS0 —
+ * see the "WS0 follow-up" section of the lane PR.
+ *
+ * Rules are scoped per theme (`[data-theme="..."]` plus the no-JS
+ * prefers-colour-scheme fallbacks the foundation uses) so each theme is only
+ * touched where it actually misses AA.
+ */
+
+/* (1) Faint secondary text. `--text-faint` resolves to ~3.4:1 on dark surfaces
+ * and ~4.34:1 on the tinted light surfaces this lane uses (.muted, table
+ * headers, card subtitles, field labels, rule descriptions). Re-pointing it to
+ * `--text-dim` lifts every faint string in the lane to >5:1 in both themes, in
+ * one place, with no hard-coded colour. `--text-dim` is defined per theme, so
+ * this single declaration tracks whichever theme is active. */
+.lane-b2 {
+  --text-faint: var(--text-dim);
+}
+
+/* (2) White text on `--brand` is ~3.6:1 in dark mode. `--brand-strong` gives
+ * ~5.4:1 with white. The foundation's `.btn--primary:hover` already targets
+ * `--brand-strong`, so the hover glow still reads as a state change. (Light
+ * mode's `--brand` already clears AA with white, so this is dark-only.) */
+:root[data-theme="dark"] .lane-b2 .btn--primary,
+:root:not([data-theme="light"]):not([data-theme="dark"]) .lane-b2 .btn--primary {
+  background: var(--brand-strong);
+  border-color: var(--brand-strong);
+}
+
+/* (3) Tone badges paint a mid-tone colour token (`--ok` / `--danger` / `--brand`
+ * / `--warn`) on a translucent soft fill. Composited over white or the lane's
+ * tinted surfaces that lands at ~2.95-4.3:1 in light mode (and ~4.0:1 for the
+ * info badge in dark). Switching the *label* to the primary text colour clears
+ * >5:1 while the soft fill + tone border keep each badge's semantic identity. */
+:root[data-theme="light"] .lane-b2 .badge--ok,
+:root[data-theme="light"] .lane-b2 .badge--danger,
+:root[data-theme="light"] .lane-b2 .badge--warn,
+:root[data-theme="light"] .lane-b2 .badge--info,
+:root[data-theme="dark"] .lane-b2 .badge--info,
+:root:not([data-theme="light"]):not([data-theme="dark"]) .lane-b2 .badge--info {
+  color: var(--text);
+}
+
+/* StatusBadge draws a leading dot from `currentColor`; now that the label is
+ * neutralised, repaint the dot with its tone token so live state still reads at
+ * a glance (the 6px dot only needs the 3:1 non-text contrast, which it meets). */
+:root[data-theme="light"] .lane-b2 .badge--ok.badge--dot::before {
+  background: var(--ok);
+}
+:root[data-theme="light"] .lane-b2 .badge--danger.badge--dot::before {
+  background: var(--danger);
+}
+:root[data-theme="light"] .lane-b2 .badge--warn.badge--dot::before {
+  background: var(--warn);
+}
+:root[data-theme="light"] .lane-b2 .badge--info.badge--dot::before {
+  background: var(--brand);
+}
+
+/* (4) The outline danger button paints `--danger` text on a transparent fill;
+ * over the lane's tinted `--surface-2` (#eef3fd) that is ~4.34:1 in light mode.
+ * `--danger-strong` (#b91c1c) restores ~5.3:1 and still reads as the same red.
+ * (Dark mode already clears AA for this token.) */
+:root[data-theme="light"] .lane-b2 .btn--danger {
+  color: var(--danger-strong);
+}
+
+/* (5) React Flow paints an attribution watermark (".react-flow__attribution a",
+ * grey on a translucent panel, ~1.3:1) in the Policy graph in BOTH themes. It is
+ * third-party chrome, not WS0. We keep the attribution visible (per the library's
+ * request) but give it a solid token surface and a token text colour so it clears
+ * AA — no hard-coded colour, scoped to the lane. */
+.lane-b2 .react-flow__attribution {
+  background: var(--surface);
+  padding: 1px 5px;
+  border-radius: var(--radius-xs);
+}
+.lane-b2 .react-flow__attribution a {
+  color: var(--text-dim);
+}
+
+/* (6) The Policy rule handle is a real <button> so reordering is keyboard
+ * operable (arrow keys), not drag-only. Strip the native button chrome so it
+ * still reads as the ⠿ grip, but keep a >=24px hit target (WCAG 2.5.8) and let
+ * the foundation's :focus-visible ring show. No colour is hard-coded; it
+ * inherits the handle's token colour. */
+.lane-b2 .rule-row__reorder {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  min-height: 24px;
+  margin: -4px 0 -4px -4px;
+  padding: 0;
+  background: none;
+  border: 0;
+  border-radius: var(--radius-xs);
+  color: inherit;
+  font: inherit;
+  line-height: 1;
+  cursor: grab;
+}
