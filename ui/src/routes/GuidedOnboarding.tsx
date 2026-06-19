@@ -55,7 +55,9 @@ function GuidedOnboardingInner() {
   const previewBaseline = usePreviewPolicyTemplate(tenant?.id ?? "");
   const applyBaseline = useApplyPolicyTemplate(tenant?.id ?? "");
 
-  const steps = intl.formatMessage({ id: "b1.guided.steps" }).split(",");
+  // Steps are pipe-delimited (not comma) so a translated label can safely
+  // contain a comma without changing the number of steps.
+  const steps = intl.formatMessage({ id: "b1.guided.steps" }).split("|");
   const regimeForCountry = (c: string) =>
     (options.data?.countries ?? []).find((x) => x.country === c)?.regime;
 

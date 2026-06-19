@@ -45,7 +45,12 @@ function OidcCallbackInner() {
           setError("unusable");
         }
       })
-      .catch(() => setError("generic"));
+      .catch((err) => {
+        // The operator sees a plain-language message; the original error is
+        // kept in the console so support can diagnose the IdP exchange.
+        console.error("Single sign-on callback failed", err);
+        setError("generic");
+      });
   }, [setSession, navigate]);
 
   if (error) {

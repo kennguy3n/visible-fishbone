@@ -58,7 +58,9 @@ function OnboardingInner() {
     if (step > 1 && !selectedTenantId) setStep(1);
   }, [step, selectedTenantId]);
 
-  const steps = intl.formatMessage({ id: "b1.onboard.steps" }).split(",");
+  // Steps are pipe-delimited (not comma) so a translated label can safely
+  // contain a comma without changing the number of steps.
+  const steps = intl.formatMessage({ id: "b1.onboard.steps" }).split("|");
 
   return (
     <div className="onboard lane-b1">

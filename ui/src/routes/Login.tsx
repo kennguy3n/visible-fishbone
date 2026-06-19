@@ -50,7 +50,10 @@ function LoginInner() {
     setError(null);
     try {
       await loginWithOidc();
-    } catch {
+    } catch (err) {
+      // Keep the friendly message for the operator, but preserve the original
+      // error in the console so support can diagnose a misconfigured IdP.
+      console.error("Single sign-on failed to start", err);
       setError(intl.formatMessage({ id: "b1.login.error.oidc" }));
     }
   };
@@ -91,16 +94,16 @@ function LoginInner() {
               <span>
                 <FormattedMessage id="b1.login.jwt.label" />
               </span>
+              <textarea
+                id={tokenFieldId}
+                value={token}
+                onChange={(e) => setToken(e.target.value)}
+                placeholder={intl.formatMessage({ id: "b1.login.jwt.placeholder" })}
+                rows={4}
+                aria-invalid={error ? true : undefined}
+                aria-describedby={error ? `${errorId} ${helpId}` : helpId}
+              />
             </label>
-            <textarea
-              id={tokenFieldId}
-              value={token}
-              onChange={(e) => setToken(e.target.value)}
-              placeholder={intl.formatMessage({ id: "b1.login.jwt.placeholder" })}
-              rows={4}
-              aria-invalid={error ? true : undefined}
-              aria-describedby={error ? `${errorId} ${helpId}` : helpId}
-            />
             <button
               className="btn btn--primary"
               type="submit"

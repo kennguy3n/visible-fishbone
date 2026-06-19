@@ -41,7 +41,6 @@ export type LaneB1Key =
   | "b1.oidc.loading"
   | "b1.oidc.error.title"
   | "b1.oidc.error.unusable"
-  | "b1.oidc.error.notConfigured"
   | "b1.oidc.error.generic"
   | "b1.oidc.back"
   // settings
@@ -298,8 +297,6 @@ const en: Catalog = {
   "b1.oidc.error.title": "We couldn't finish signing you in",
   "b1.oidc.error.unusable":
     "Your identity provider returned a sign-in token this console can't read. ShieldNet needs a standard, unexpired token — ask your administrator to check the single sign-on token format and audience.",
-  "b1.oidc.error.notConfigured":
-    "Single sign-on isn't set up yet. Ask your administrator to finish connecting your identity provider, then try again.",
   "b1.oidc.error.generic":
     "Something interrupted sign-in before it finished. Please head back and try again.",
   "b1.oidc.back": "Back to sign in",
@@ -327,7 +324,7 @@ const en: Catalog = {
   "b1.guided.title": "Guided setup",
   "b1.guided.subtitle":
     "Create your workspace and turn on its first protection — in five quick steps.",
-  "b1.guided.steps": "Tenant,Data location,Industry,First policy,Done",
+  "b1.guided.steps": "Tenant|Data location|Industry|First policy|Done",
   "b1.guided.step.tenant.title": "Create the tenant",
   "b1.guided.step.tenant.desc":
     "A tenant is the private workspace that keeps one organization's people, devices and policies separate from everyone else's.",
@@ -368,7 +365,7 @@ const en: Catalog = {
   "b1.onboard.title": "Get protected",
   "b1.onboard.subtitle":
     "A short, five-step setup. Leave any time and pick up where you left off.",
-  "b1.onboard.steps": "Tenant,Site,Sign-in,Protection,Devices",
+  "b1.onboard.steps": "Tenant|Site|Sign-in|Protection|Devices",
   "b1.onboard.tenant.title": "Choose the tenant to set up",
   "b1.onboard.tenant.intro":
     "ShieldNet protects your business's internet traffic — blocking threats, stopping data leaks and keeping remote staff safe — without needing an IT team to run it. Everything in this setup applies to the tenant you pick here.",
@@ -605,8 +602,6 @@ const zhHans: PartialCatalog = {
   "b1.oidc.error.title": "无法完成登录",
   "b1.oidc.error.unusable":
     "您的身份提供商返回了本控制台无法读取的登录令牌。ShieldNet 需要标准且未过期的令牌——请让管理员检查单点登录的令牌格式和受众。",
-  "b1.oidc.error.notConfigured":
-    "尚未配置单点登录。请让管理员完成身份提供商的连接后再试。",
   "b1.oidc.error.generic": "登录在完成前被中断。请返回重试。",
   "b1.oidc.back": "返回登录",
   "b1.settings.title": "设置",
@@ -628,7 +623,7 @@ const zhHans: PartialCatalog = {
   "b1.settings.language.subtitle": "选择本控制台的语言。您的选择将保存在此设备上。",
   "b1.guided.title": "引导式设置",
   "b1.guided.subtitle": "创建您的租户并开启首项防护——仅需五个快捷步骤。",
-  "b1.guided.steps": "租户,数据所在地,行业,首个策略,完成",
+  "b1.guided.steps": "租户|数据所在地|行业|首个策略|完成",
   "b1.guided.step.tenant.title": "创建租户",
   "b1.guided.step.tenant.desc":
     "租户是一个私有工作区，将一个组织的人员、设备和策略与其他组织隔离开来。",
@@ -665,7 +660,7 @@ const zhHans: PartialCatalog = {
   "b1.guided.cta.fullSetup": "继续完整设置",
   "b1.onboard.title": "开启防护",
   "b1.onboard.subtitle": "简短的五步设置。可随时离开，稍后从中断处继续。",
-  "b1.onboard.steps": "租户,站点,登录,防护,设备",
+  "b1.onboard.steps": "租户|站点|登录|防护|设备",
   "b1.onboard.tenant.title": "选择要设置的租户",
   "b1.onboard.tenant.intro":
     "ShieldNet 保护您企业的互联网流量——拦截威胁、防止数据泄露并保障远程员工安全——无需 IT 团队运维。本设置中的所有内容都将应用于您在此选择的租户。",
@@ -876,8 +871,6 @@ const de: PartialCatalog = {
   "b1.oidc.error.title": "Anmeldung konnte nicht abgeschlossen werden",
   "b1.oidc.error.unusable":
     "Ihr Identitätsanbieter hat ein Anmelde-Token zurückgegeben, das diese Konsole nicht lesen kann. ShieldNet benötigt ein standardmäßiges, nicht abgelaufenes Token — bitten Sie Ihren Administrator, Tokenformat und Zielgruppe des Single Sign-on zu prüfen.",
-  "b1.oidc.error.notConfigured":
-    "Single Sign-on ist noch nicht eingerichtet. Bitten Sie Ihren Administrator, die Verbindung zu Ihrem Identitätsanbieter abzuschließen, und versuchen Sie es erneut.",
   "b1.oidc.error.generic":
     "Die Anmeldung wurde vor dem Abschluss unterbrochen. Bitte gehen Sie zurück und versuchen Sie es erneut.",
   "b1.oidc.back": "Zurück zur Anmeldung",
@@ -904,7 +897,7 @@ const de: PartialCatalog = {
   "b1.guided.title": "Geführte Einrichtung",
   "b1.guided.subtitle":
     "Erstellen Sie Ihren Mandanten und aktivieren Sie den ersten Schutz — in fünf schnellen Schritten.",
-  "b1.guided.steps": "Mandant,Datenstandort,Branche,Erste Richtlinie,Fertig",
+  "b1.guided.steps": "Mandant|Datenstandort|Branche|Erste Richtlinie|Fertig",
   "b1.guided.step.tenant.title": "Mandanten erstellen",
   "b1.guided.step.tenant.desc":
     "Ein Mandant ist der private Arbeitsbereich, der Personen, Geräte und Richtlinien einer Organisation von allen anderen trennt.",
@@ -944,7 +937,7 @@ const de: PartialCatalog = {
   "b1.onboard.title": "Schutz aktivieren",
   "b1.onboard.subtitle":
     "Eine kurze Einrichtung in fünf Schritten. Jederzeit verlassen und später fortsetzen.",
-  "b1.onboard.steps": "Mandant,Standort,Anmeldung,Schutz,Geräte",
+  "b1.onboard.steps": "Mandant|Standort|Anmeldung|Schutz|Geräte",
   "b1.onboard.tenant.title": "Mandanten zum Einrichten wählen",
   "b1.onboard.tenant.intro":
     "ShieldNet schützt den Internetverkehr Ihres Unternehmens — wehrt Bedrohungen ab, verhindert Datenlecks und schützt Remote-Mitarbeitende — ohne IT-Team. Alles in dieser Einrichtung gilt für den hier gewählten Mandanten.",
@@ -1187,8 +1180,6 @@ const fr: PartialCatalog = {
   "b1.oidc.error.title": "Impossible de terminer la connexion",
   "b1.oidc.error.unusable":
     "Votre fournisseur d'identité a renvoyé un jeton de connexion que cette console ne peut pas lire. ShieldNet a besoin d'un jeton standard et non expiré — demandez à votre administrateur de vérifier le format et l'audience du jeton d'authentification unique.",
-  "b1.oidc.error.notConfigured":
-    "L'authentification unique n'est pas encore configurée. Demandez à votre administrateur de finaliser la connexion à votre fournisseur d'identité, puis réessayez.",
   "b1.oidc.error.generic":
     "La connexion a été interrompue avant de se terminer. Revenez en arrière et réessayez.",
   "b1.oidc.back": "Retour à la connexion",
@@ -1215,7 +1206,7 @@ const fr: PartialCatalog = {
   "b1.guided.title": "Configuration guidée",
   "b1.guided.subtitle":
     "Créez votre locataire et activez sa première protection — en cinq étapes rapides.",
-  "b1.guided.steps": "Locataire,Emplacement des données,Secteur,Première politique,Terminé",
+  "b1.guided.steps": "Locataire|Emplacement des données|Secteur|Première politique|Terminé",
   "b1.guided.step.tenant.title": "Créer le locataire",
   "b1.guided.step.tenant.desc":
     "Un locataire est l'espace de travail privé qui sépare les personnes, appareils et politiques d'une organisation de toutes les autres.",
@@ -1255,7 +1246,7 @@ const fr: PartialCatalog = {
   "b1.onboard.title": "Activer la protection",
   "b1.onboard.subtitle":
     "Une configuration courte en cinq étapes. Quittez à tout moment et reprenez où vous en étiez.",
-  "b1.onboard.steps": "Locataire,Site,Connexion,Protection,Appareils",
+  "b1.onboard.steps": "Locataire|Site|Connexion|Protection|Appareils",
   "b1.onboard.tenant.title": "Choisir le locataire à configurer",
   "b1.onboard.tenant.intro":
     "ShieldNet protège le trafic internet de votre entreprise — en bloquant les menaces, en stoppant les fuites de données et en protégeant le personnel distant — sans équipe informatique. Tout dans cette configuration s'applique au locataire choisi ici.",
