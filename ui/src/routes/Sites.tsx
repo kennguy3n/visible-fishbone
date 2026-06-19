@@ -252,6 +252,12 @@ function SiteWizard({
             <span>{t("sites.wizard.name.label")}</span>
             <input
               value={name}
+              // `autoFocus` here is safe despite useDialogA11y's warning: the
+              // wizard always opens on step 1, so this step-2 input is not
+              // mounted when the hook captures the opener. It only moves focus
+              // to the first field when the user advances from step 1, which is
+              // the desired behaviour. If the wizard ever defaulted to step 2,
+              // switch this to a ref + `initialFocus` so restoration still works.
               autoFocus
               onChange={(e) => setName(e.target.value)}
               placeholder={t("sites.wizard.name.placeholder")}

@@ -619,6 +619,13 @@ function ImpactSummary({
   stale: boolean;
 }) {
   const t = useT();
+  // Translate server-returned verdict verbs (e.g. "allow") through the catalog
+  // so the impact summary reads "Allow → Deny", matching the Policy editor's
+  // transition list rather than showing raw lowercase server strings.
+  const verbLabel = (v: string): string => {
+    const k = VERB_KEYS[v.toLowerCase()];
+    return k ? t(k) : v;
+  };
   return (
     <>
       {stale && (
@@ -644,8 +651,8 @@ function ImpactSummary({
               <FormattedMessage
                 id="net.impact.transition"
                 values={{
-                  from: tr.prev_verdict,
-                  to: tr.next_verdict,
+                  from: verbLabel(tr.prev_verdict),
+                  to: verbLabel(tr.next_verdict),
                   count: tr.count,
                   ...richBold,
                 }}
