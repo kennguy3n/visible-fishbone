@@ -43,6 +43,33 @@
   color: var(--text-dim);
 }
 
+/* `table.data th` column headers use `--text-faint` on the header fill, which
+   is ~4.3:1 (light) / ~3.4:1 (dark) — under AA. Lift to `--text-dim`
+   (>=5:1 in both themes); the labels stay uppercase + bold. */
+.lane-b6 table.data th {
+  color: var(--text-dim);
+}
+
+/* Status tints (`--ok`, `--warn`) and the danger button label clear AA in dark
+   but fall short on their light-theme soft fills (axe: --ok 3.0:1, --warn
+   2.8:1, --danger 4.34:1 on a tinted card). Deepen only the light-theme
+   foregrounds via named lane tokens; the dark palette already passes, so it is
+   left untouched. */
+.lane-b6 {
+  --lb6-ok-ink: #065f46;
+  --lb6-warn-ink: #92400e;
+  --lb6-danger-ink: #b91c1c;
+}
+:root[data-theme="light"] .lane-b6 .badge--ok {
+  color: var(--lb6-ok-ink);
+}
+:root[data-theme="light"] .lane-b6 .badge--warn {
+  color: var(--lb6-warn-ink);
+}
+:root[data-theme="light"] .lane-b6 .btn--danger {
+  color: var(--lb6-danger-ink);
+}
+
 /* --- 2. Lane-local components (token-only) --------------------------------- */
 
 /* Scope banner — "which tenant / MSP am I acting on". Reuses `.banner`. */
