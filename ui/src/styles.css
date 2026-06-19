@@ -907,7 +907,7 @@ label.field > span {
 }
 .pill-tabs button.active {
   background: var(--brand-strong);
-  color: #fff;
+  color: var(--on-brand);
 }
 
 .chat {
@@ -933,7 +933,7 @@ label.field > span {
 .chat__msg--user {
   align-self: flex-end;
   background: var(--brand-strong);
-  color: #fff;
+  color: var(--on-brand);
   border-bottom-right-radius: 3px;
 }
 .chat__msg--ai {
@@ -1644,7 +1644,7 @@ label.field > span {
 .stepper__step--active .stepper__dot {
   background: var(--brand-strong);
   border-color: var(--brand-strong);
-  color: #fff;
+  color: var(--on-brand);
 }
 .stepper__step--done .stepper__dot {
   background: var(--ok);
@@ -2106,7 +2106,7 @@ label.field > span {
 }
 .mode-toggle button.active {
   background: var(--brand-strong);
-  color: #fff;
+  color: var(--on-brand);
 }
 
 /* --- Hamburger / mobile nav -------------------------------------------- */

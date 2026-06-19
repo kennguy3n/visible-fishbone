@@ -13,8 +13,12 @@ export function Modal({
   children: ReactNode;
   footer?: ReactNode;
   /** When an in-flight action is running, make dismissal inert: Escape and
-      backdrop clicks are ignored and the close button is disabled, so the
-      operator can't abandon the dialog mid-request. */
+      backdrop clicks are ignored and the header close button is disabled, so
+      the operator can't abandon the dialog mid-request.
+
+      Note: `footer` is an opaque node, so the Modal cannot disable controls
+      inside it. Callers must also disable their own footer dismissal buttons
+      (Cancel/Close) with the same `busy` flag to close that fourth path. */
   busy?: boolean;
 }) {
   useEffect(() => {
