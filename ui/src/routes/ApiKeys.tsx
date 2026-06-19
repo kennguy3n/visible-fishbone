@@ -181,7 +181,7 @@ function CreateKey({ tenantId, onClose }: { tenantId: string; onClose: () => voi
     if (name.trim() === "" || subject.trim() === "") return;
     create.mutate(
       { tenantId, data: { name: name.trim(), subject: subject.trim() } },
-      { onSuccess: (k) => setPlaintext(k.plaintext ?? "") },
+      { onSuccess: (k) => setPlaintext(k.plaintext ?? t("apiKeys.reveal.notReturned")) },
     );
   };
 

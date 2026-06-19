@@ -121,6 +121,7 @@ export const ms: LaneCatalog = {
   "apiKeys.reveal.warning": "Ini satu-satunya kali kami memaparkan kunci ini sepenuhnya. Simpan di tempat selamat — anda tidak akan dapat melihatnya semula.",
   "apiKeys.reveal.label": "Nilai kunci API",
   "apiKeys.reveal.copy": "Salin kunci",
+  "apiKeys.reveal.notReturned": "(tidak dikembalikan)",
   "apiKeys.revoke.title": "Tarik balik kunci API ini?",
   "apiKeys.revoke.body": "Apa-apa yang menggunakan “{name}” akan kehilangan akses serta-merta. Tindakan ini tidak boleh dibuat asal — tetapi anda boleh mengeluarkan kunci baharu pada bila-bila masa.",
   "apiKeys.revoke.cta": "Tarik balik kunci",

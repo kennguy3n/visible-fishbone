@@ -121,6 +121,7 @@ export const fr: LaneCatalog = {
   "apiKeys.reveal.warning": "C’est la seule fois où nous afficherons cette clé en entier. Conservez-la en lieu sûr — vous ne pourrez plus la revoir.",
   "apiKeys.reveal.label": "Valeur de la clé API",
   "apiKeys.reveal.copy": "Copier la clé",
+  "apiKeys.reveal.notReturned": "(non renvoyée)",
   "apiKeys.revoke.title": "Révoquer cette clé API ?",
   "apiKeys.revoke.body": "Tout ce qui utilise « {name} » perdra immédiatement l’accès. Cette action est irréversible — mais vous pouvez émettre une nouvelle clé à tout moment.",
   "apiKeys.revoke.cta": "Révoquer la clé",

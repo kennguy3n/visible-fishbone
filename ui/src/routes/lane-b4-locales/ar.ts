@@ -121,6 +121,7 @@ export const ar: LaneCatalog = {
   "apiKeys.reveal.warning": "هذه هي المرة الوحيدة التي نعرض فيها هذا المفتاح كاملاً. احفظه في مكان آمن — لن تتمكن من رؤيته مرة أخرى.",
   "apiKeys.reveal.label": "قيمة مفتاح API",
   "apiKeys.reveal.copy": "نسخ المفتاح",
+  "apiKeys.reveal.notReturned": "(لم يتم إرجاعها)",
   "apiKeys.revoke.title": "هل تريد إبطال مفتاح API هذا؟",
   "apiKeys.revoke.body": "سيفقد كل ما يستخدم «{name}» الوصول فورًا. لا يمكن التراجع عن هذا الإجراء — لكن يمكنك إصدار مفتاح جديد في أي وقت.",
   "apiKeys.revoke.cta": "إبطال المفتاح",

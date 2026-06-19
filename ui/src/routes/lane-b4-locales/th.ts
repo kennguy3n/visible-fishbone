@@ -121,6 +121,7 @@ export const th: LaneCatalog = {
   "apiKeys.reveal.warning": "นี่เป็นครั้งเดียวที่เราจะแสดงคีย์นี้แบบเต็ม จัดเก็บไว้ในที่ปลอดภัย คุณจะไม่สามารถดูได้อีก",
   "apiKeys.reveal.label": "ค่าของคีย์ API",
   "apiKeys.reveal.copy": "คัดลอกคีย์",
+  "apiKeys.reveal.notReturned": "(ไม่ได้ส่งคืน)",
   "apiKeys.revoke.title": "เพิกถอนคีย์ API นี้หรือไม่?",
   "apiKeys.revoke.body": "ทุกสิ่งที่ใช้ “{name}” จะสูญเสียสิทธิ์เข้าถึงทันที การดำเนินการนี้ไม่สามารถย้อนกลับได้ แต่คุณสามารถออกคีย์ใหม่ได้ทุกเมื่อ",
   "apiKeys.revoke.cta": "เพิกถอนคีย์",

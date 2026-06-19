@@ -121,6 +121,7 @@ export const vi: LaneCatalog = {
   "apiKeys.reveal.warning": "Đây là lần duy nhất chúng tôi hiển thị đầy đủ khóa này. Hãy lưu ở nơi an toàn — bạn sẽ không thể xem lại.",
   "apiKeys.reveal.label": "Giá trị khóa API",
   "apiKeys.reveal.copy": "Sao chép khóa",
+  "apiKeys.reveal.notReturned": "(không được trả về)",
   "apiKeys.revoke.title": "Thu hồi khóa API này?",
   "apiKeys.revoke.body": "Mọi thứ đang dùng “{name}” sẽ mất quyền truy cập ngay lập tức. Không thể hoàn tác hành động này — nhưng bạn có thể cấp khóa mới bất cứ lúc nào.",
   "apiKeys.revoke.cta": "Thu hồi khóa",

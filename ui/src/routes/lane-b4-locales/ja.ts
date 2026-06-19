@@ -121,6 +121,7 @@ export const ja: LaneCatalog = {
   "apiKeys.reveal.warning": "このキーの全体を表示するのはこれが最後です。安全な場所に保管してください——再度確認することはできません。",
   "apiKeys.reveal.label": "APIキーの値",
   "apiKeys.reveal.copy": "キーをコピー",
+  "apiKeys.reveal.notReturned": "（返されませんでした）",
   "apiKeys.revoke.title": "このAPIキーを失効しますか？",
   "apiKeys.revoke.body": "「{name}」を使用しているものは、すぐにアクセスできなくなります。この操作は元に戻せません——ただし、いつでも新しいキーを発行できます。",
   "apiKeys.revoke.cta": "キーを失効",

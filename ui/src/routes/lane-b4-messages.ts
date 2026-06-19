@@ -174,6 +174,7 @@ export const en = {
     "This is the only time we’ll show this key in full. Store it somewhere safe — you won’t be able to see it again.",
   "apiKeys.reveal.label": "API key value",
   "apiKeys.reveal.copy": "Copy key",
+  "apiKeys.reveal.notReturned": "(not returned)",
   "apiKeys.revoke.title": "Revoke this API key?",
   "apiKeys.revoke.body":
     "Anything using “{name}” will immediately lose access. This can’t be undone — but you can issue a new key any time.",

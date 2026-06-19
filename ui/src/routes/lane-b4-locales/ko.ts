@@ -121,6 +121,7 @@ export const ko: LaneCatalog = {
   "apiKeys.reveal.warning": "이 키의 전체를 표시하는 것은 이번이 마지막입니다. 안전한 곳에 보관하세요 — 다시 볼 수 없습니다.",
   "apiKeys.reveal.label": "API 키 값",
   "apiKeys.reveal.copy": "키 복사",
+  "apiKeys.reveal.notReturned": "(반환되지 않음)",
   "apiKeys.revoke.title": "이 API 키를 해지하시겠습니까?",
   "apiKeys.revoke.body": "“{name}”을(를) 사용하는 모든 것이 즉시 접근 권한을 잃습니다. 이 작업은 되돌릴 수 없습니다 — 하지만 언제든지 새 키를 발급할 수 있습니다.",
   "apiKeys.revoke.cta": "키 해지",

@@ -121,6 +121,7 @@ export const zhHant: LaneCatalog = {
   "apiKeys.reveal.warning": "這是我們唯一一次完整顯示此金鑰。請妥善保管——您將無法再次檢視。",
   "apiKeys.reveal.label": "API 金鑰值",
   "apiKeys.reveal.copy": "複製金鑰",
+  "apiKeys.reveal.notReturned": "（未返回）",
   "apiKeys.revoke.title": "撤銷此 API 金鑰？",
   "apiKeys.revoke.body": "任何使用「{name}」的內容都將立即失去存取權限。此操作無法復原——但您隨時可以簽發新金鑰。",
   "apiKeys.revoke.cta": "撤銷金鑰",
