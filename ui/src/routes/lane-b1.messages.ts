@@ -339,7 +339,7 @@ const en: Catalog = {
     "This sets where your data is stored and which compliance rules the first policy applies.",
   "b1.guided.field.country": "Country / data location",
   "b1.guided.field.country.placeholder": "Choose a country…",
-  "b1.guided.residency.regime": "Rules applied: {regime}",
+  "b1.guided.residency.regime": "Rules applied: <badge>{regime}</badge>",
   "b1.guided.step.industry.title": "What does the business do?",
   "b1.guided.step.industry.desc":
     "Your industry sets sensible defaults for acceptable use and the kinds of sensitive data we watch for.",
@@ -347,7 +347,7 @@ const en: Catalog = {
   "b1.guided.cta.previewing": "Preparing…",
   "b1.guided.toast.renderFailed": "We couldn't prepare the baseline",
   "b1.guided.step.review.title": "Review your first protection",
-  "b1.guided.review.summary": "{industry} · {country} · rules: {regime}",
+  "b1.guided.review.summary": "{industry} · {country} · <badge>{regime}</badge>",
   "b1.guided.review.composedFrom": "Built from",
   "b1.guided.review.fingerprint": "Policy fingerprint",
   "b1.guided.cta.apply": "Turn on protection",
@@ -514,7 +514,7 @@ const en: Catalog = {
   "b1.dash.score.none":
     "We haven't recorded a health check for this tenant yet.",
   "b1.dash.score.composite":
-    "Based on {count, plural, one {# operational check} other {# operational checks}}.",
+    "Based on {count, plural, =0 {your operational checks} one {# operational check} other {# operational checks}}.",
   "b1.dash.qa.title": "What to do next",
   "b1.dash.qa.help":
     "The most useful next steps, drawn from your live security — open alerts, weak areas, setup gaps and recommendations.",
@@ -637,14 +637,14 @@ const zhHans: PartialCatalog = {
   "b1.guided.step.residency.desc": "这将决定您的数据存储位置以及首个策略所适用的合规规则。",
   "b1.guided.field.country": "国家/数据所在地",
   "b1.guided.field.country.placeholder": "选择国家…",
-  "b1.guided.residency.regime": "适用规则：{regime}",
+  "b1.guided.residency.regime": "适用规则：<badge>{regime}</badge>",
   "b1.guided.step.industry.title": "该企业从事什么业务？",
   "b1.guided.step.industry.desc": "您的行业将为可接受使用以及我们监控的敏感数据类型设定合理默认值。",
   "b1.guided.cta.preview": "预览防护",
   "b1.guided.cta.previewing": "准备中…",
   "b1.guided.toast.renderFailed": "无法准备基线",
   "b1.guided.step.review.title": "查看您的首项防护",
-  "b1.guided.review.summary": "{industry} · {country} · 规则：{regime}",
+  "b1.guided.review.summary": "{industry} · {country} · <badge>{regime}</badge>",
   "b1.guided.review.composedFrom": "构建自",
   "b1.guided.review.fingerprint": "策略指纹",
   "b1.guided.cta.apply": "开启防护",
@@ -786,7 +786,7 @@ const zhHans: PartialCatalog = {
   "b1.dash.stat.clear": "一切正常",
   "b1.dash.score.title": "安全评分",
   "b1.dash.score.none": "我们尚未记录此租户的健康检查。",
-  "b1.dash.score.composite": "基于 {count} 项运营检查。",
+  "b1.dash.score.composite": "基于{count, plural, =0 {您的运营检查} other {#项运营检查}}。",
   "b1.dash.qa.title": "下一步该做什么",
   "b1.dash.qa.help":
     "最有用的后续步骤，来自您的实时安全状况——未处理告警、薄弱环节、设置缺口和建议。",
@@ -913,7 +913,7 @@ const de: PartialCatalog = {
     "Dies legt fest, wo Ihre Daten gespeichert werden und welche Compliance-Regeln die erste Richtlinie anwendet.",
   "b1.guided.field.country": "Land / Datenstandort",
   "b1.guided.field.country.placeholder": "Land wählen…",
-  "b1.guided.residency.regime": "Angewandte Regeln: {regime}",
+  "b1.guided.residency.regime": "Angewandte Regeln: <badge>{regime}</badge>",
   "b1.guided.step.industry.title": "Womit befasst sich das Unternehmen?",
   "b1.guided.step.industry.desc":
     "Ihre Branche legt sinnvolle Standardwerte für die zulässige Nutzung und die überwachten sensiblen Daten fest.",
@@ -921,7 +921,7 @@ const de: PartialCatalog = {
   "b1.guided.cta.previewing": "Wird vorbereitet…",
   "b1.guided.toast.renderFailed": "Baseline konnte nicht vorbereitet werden",
   "b1.guided.step.review.title": "Ersten Schutz prüfen",
-  "b1.guided.review.summary": "{industry} · {country} · Regeln: {regime}",
+  "b1.guided.review.summary": "{industry} · {country} · <badge>{regime}</badge>",
   "b1.guided.review.composedFrom": "Erstellt aus",
   "b1.guided.review.fingerprint": "Richtlinien-Fingerabdruck",
   "b1.guided.cta.apply": "Schutz aktivieren",
@@ -1088,7 +1088,7 @@ const de: PartialCatalog = {
   "b1.dash.score.none":
     "Für diesen Mandanten wurde noch keine Zustandsprüfung erfasst.",
   "b1.dash.score.composite":
-    "Basierend auf {count, plural, one {# Betriebsprüfung} other {# Betriebsprüfungen}}.",
+    "Basierend auf {count, plural, =0 {Ihren Betriebsprüfungen} one {# Betriebsprüfung} other {# Betriebsprüfungen}}.",
   "b1.dash.qa.title": "Nächste Schritte",
   "b1.dash.qa.help":
     "Die nützlichsten nächsten Schritte aus Ihrer aktuellen Sicherheitslage — offene Warnungen, schwache Bereiche, Einrichtungslücken und Empfehlungen.",
@@ -1223,7 +1223,7 @@ const fr: PartialCatalog = {
     "Cela définit où vos données sont stockées et quelles règles de conformité la première politique applique.",
   "b1.guided.field.country": "Pays / emplacement des données",
   "b1.guided.field.country.placeholder": "Choisir un pays…",
-  "b1.guided.residency.regime": "Règles appliquées : {regime}",
+  "b1.guided.residency.regime": "Règles appliquées : <badge>{regime}</badge>",
   "b1.guided.step.industry.title": "Que fait l'entreprise ?",
   "b1.guided.step.industry.desc":
     "Votre secteur définit des valeurs par défaut adaptées pour l'usage acceptable et les données sensibles surveillées.",
@@ -1231,7 +1231,7 @@ const fr: PartialCatalog = {
   "b1.guided.cta.previewing": "Préparation…",
   "b1.guided.toast.renderFailed": "Impossible de préparer la base",
   "b1.guided.step.review.title": "Vérifier votre première protection",
-  "b1.guided.review.summary": "{industry} · {country} · règles : {regime}",
+  "b1.guided.review.summary": "{industry} · {country} · <badge>{regime}</badge>",
   "b1.guided.review.composedFrom": "Construit à partir de",
   "b1.guided.review.fingerprint": "Empreinte de la politique",
   "b1.guided.cta.apply": "Activer la protection",
@@ -1399,7 +1399,7 @@ const fr: PartialCatalog = {
   "b1.dash.score.none":
     "Nous n'avons pas encore enregistré de contrôle d'état pour ce locataire.",
   "b1.dash.score.composite":
-    "Basé sur {count, plural, one {# contrôle opérationnel} other {# contrôles opérationnels}}.",
+    "Basé sur {count, plural, =0 {vos contrôles opérationnels} one {# contrôle opérationnel} other {# contrôles opérationnels}}.",
   "b1.dash.qa.title": "Que faire ensuite",
   "b1.dash.qa.help":
     "Les prochaines étapes les plus utiles, issues de votre sécurité en temps réel — alertes ouvertes, points faibles, lacunes de configuration et recommandations.",

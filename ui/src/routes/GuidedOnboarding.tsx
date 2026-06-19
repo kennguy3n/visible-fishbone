@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
 import { FormattedMessage, useIntl } from "react-intl";
@@ -110,12 +110,15 @@ function GuidedOnboardingInner() {
           </label>
           {country && (
             <p style={{ marginTop: 8 }}>
-              <Badge tone="info">
-                <FormattedMessage
-                  id="b1.guided.residency.regime"
-                  values={{ regime: regimeForCountry(country) }}
-                />
-              </Badge>
+              <FormattedMessage
+                id="b1.guided.residency.regime"
+                values={{
+                  regime: regimeForCountry(country),
+                  badge: (chunks: ReactNode) => (
+                    <Badge tone="info">{chunks}</Badge>
+                  ),
+                }}
+              />
             </p>
           )}
           <WizardNav
@@ -181,6 +184,9 @@ function GuidedOnboardingInner() {
                 industry: titleCase(industry),
                 country,
                 regime: preview.regime,
+                badge: (chunks: ReactNode) => (
+                  <Badge tone="info">{chunks}</Badge>
+                ),
               }}
             />
           </p>
