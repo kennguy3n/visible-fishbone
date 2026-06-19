@@ -1,8 +1,10 @@
 import { useId, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import {
   useListApiKeys,
   useCreateApiKey,
   useDeleteApiKey,
+  getListApiKeysQueryKey,
 } from "@/api/generated/endpoints/api-keys/api-keys";
 import type { APIKey } from "@/api/generated/model";
 import {
@@ -35,6 +37,7 @@ function ApiKeysInner({ tenantId }: { tenantId: string }) {
   const toast = useToast();
   const list = useListApiKeys(tenantId);
   const del = useDeleteApiKey();
+  const qc = useQueryClient();
   const [showCreate, setShowCreate] = useState(false);
   const [revokeTarget, setRevokeTarget] = useState<APIKey | null>(null);
 
@@ -112,8 +115,10 @@ function ApiKeysInner({ tenantId }: { tenantId: string }) {
             del.mutate(
               { tenantId, id: revokeTarget.id },
               {
-                onSuccess: () =>
-                  toast.success(t("apiKeys.revoke.okTitle"), t("apiKeys.revoke.okBody")),
+                onSuccess: () => {
+                  toast.success(t("apiKeys.revoke.okTitle"), t("apiKeys.revoke.okBody"));
+                  void qc.invalidateQueries({ queryKey: getListApiKeysQueryKey(tenantId) });
+                },
                 onError: () =>
                   toast.error(t("apiKeys.revoke.failTitle"), t("apiKeys.revoke.failBody")),
                 onSettled: () => setRevokeTarget(null),
@@ -162,6 +167,7 @@ function RevokeKey({
 function CreateKey({ tenantId, onClose }: { tenantId: string; onClose: () => void }) {
   const t = useT();
   const create = useCreateApiKey();
+  const qc = useQueryClient();
   const formId = useId();
   const nameId = useId();
   const nameHelpId = useId();
@@ -181,7 +187,12 @@ function CreateKey({ tenantId, onClose }: { tenantId: string; onClose: () => voi
     if (name.trim() === "" || subject.trim() === "") return;
     create.mutate(
       { tenantId, data: { name: name.trim(), subject: subject.trim() } },
-      { onSuccess: (k) => setPlaintext(k.plaintext ?? t("apiKeys.reveal.notReturned")) },
+      {
+        onSuccess: (k) => {
+          setPlaintext(k.plaintext ?? t("apiKeys.reveal.notReturned"));
+          void qc.invalidateQueries({ queryKey: getListApiKeysQueryKey(tenantId) });
+        },
+      },
     );
   };
 
