@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   useListSites,
   useCreateSite,
@@ -19,7 +19,7 @@ import { Modal } from "@/components/Modal";
 import { HelpTooltip } from "@/components/HelpTooltip";
 import { RequireTenant } from "@/components/RequireTenant";
 import { formatDateTime } from "@/lib/format";
-import { LaneB2Intl, useT, type LaneB2Key } from "./lane-b2/i18n";
+import { LaneB2Intl, useT, type PlainLaneB2Key } from "./lane-b2/i18n";
 import { ConfirmDialog } from "./lane-b2/ConfirmDialog";
 import { useDialogA11y } from "./lane-b2/useDialogA11y";
 
@@ -28,7 +28,7 @@ type TemplateValue =
 
 const TEMPLATE_KEYS: Record<
   TemplateValue,
-  { label: LaneB2Key; blurb: LaneB2Key }
+  { label: PlainLaneB2Key; blurb: PlainLaneB2Key }
 > = {
   branch: { label: "sites.template.branch", blurb: "sites.template.branch.blurb" },
   hub: { label: "sites.template.hub", blurb: "sites.template.hub.blurb" },
@@ -59,35 +59,41 @@ function SitesInner({ tenantId }: { tenantId: string }) {
   const [wizard, setWizard] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<Site | null>(null);
 
-  const columns: Column<Site>[] = [
-    { header: t("sites.col.name"), cell: (s) => s.name },
-    {
-      header: t("sites.col.slug"),
-      cell: (s) => <span className="mono">{s.slug}</span>,
-    },
-    {
-      header: t("sites.col.template"),
-      cell: (s) => (
-        <Badge tone="info">
-          {t(TEMPLATE_KEYS[s.template as TemplateValue]?.label ?? "common.none")}
-        </Badge>
-      ),
-    },
-    { header: t("sites.col.created"), cell: (s) => formatDateTime(s.created_at) },
-    {
-      header: t("sites.col.actions"),
-      cell: (s) => (
-        <button
-          className="btn btn--danger btn--sm"
-          aria-label={t("sites.delete.aria", { name: s.name })}
-          disabled={del.isPending}
-          onClick={() => setPendingDelete(s)}
-        >
-          {t("sites.delete")}
-        </button>
-      ),
-    },
-  ];
+  const columns: Column<Site>[] = useMemo(
+    () => [
+      { header: t("sites.col.name"), cell: (s) => s.name },
+      {
+        header: t("sites.col.slug"),
+        cell: (s) => <span className="mono">{s.slug}</span>,
+      },
+      {
+        header: t("sites.col.template"),
+        cell: (s) => (
+          <Badge tone="info">
+            {t(TEMPLATE_KEYS[s.template as TemplateValue]?.label ?? "common.none")}
+          </Badge>
+        ),
+      },
+      {
+        header: t("sites.col.created"),
+        cell: (s) => formatDateTime(s.created_at),
+      },
+      {
+        header: t("sites.col.actions"),
+        cell: (s) => (
+          <button
+            className="btn btn--danger btn--sm"
+            aria-label={t("sites.delete.aria", { name: s.name })}
+            disabled={del.isPending}
+            onClick={() => setPendingDelete(s)}
+          >
+            {t("sites.delete")}
+          </button>
+        ),
+      },
+    ],
+    [t, del.isPending],
+  );
 
   return (
     <>
@@ -149,7 +155,11 @@ function SitesInner({ tenantId }: { tenantId: string }) {
           confirmLabel={t("sites.delete.cta")}
           cancelLabel={t("common.cancel")}
           busy={del.isPending}
-          onCancel={() => setPendingDelete(null)}
+          error={del.isError ? t("sites.delete.error") : undefined}
+          onCancel={() => {
+            del.reset();
+            setPendingDelete(null);
+          }}
           onConfirm={() =>
             del.mutate(
               { tenantId, id: pendingDelete.id },
@@ -178,8 +188,11 @@ function SiteWizard({
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
 
-  // Move focus into the wizard on open, trap Tab, and restore it on close.
-  useDialogA11y({ focusFirst: true });
+  // Move focus into the wizard on open, trap Tab, and restore it on close. The
+  // ref to the first template choice both receives initial focus and anchors
+  // the hook to this dialog's `.modal` container.
+  const firstChoiceRef = useRef<HTMLButtonElement>(null);
+  useDialogA11y({ initialFocus: firstChoiceRef });
 
   const templates = Object.values(SiteCreateRequestTemplate) as TemplateValue[];
 
@@ -228,9 +241,10 @@ function SiteWizard({
             aria-label={t("sites.wizard.step1.legend")}
             style={{ marginTop: 6 }}
           >
-            {templates.map((tpl) => (
+            {templates.map((tpl, i) => (
               <button
                 key={tpl}
+                ref={i === 0 ? firstChoiceRef : undefined}
                 type="button"
                 className={`choice${template === tpl ? " choice--selected" : ""}`}
                 aria-pressed={template === tpl}

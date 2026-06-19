@@ -17,8 +17,19 @@
 // still supplies a working `intl`, so screens can use `useIntl()` /
 // `<FormattedMessage>` unconditionally.
 
-import { useCallback, useContext, useMemo, type ReactNode } from "react";
-import { IntlContext, IntlProvider, useIntl } from "react-intl";
+import {
+  useCallback,
+  useContext,
+  useMemo,
+  type ComponentProps,
+  type ReactNode,
+} from "react";
+import {
+  FormattedMessage,
+  IntlContext,
+  IntlProvider,
+  useIntl,
+} from "react-intl";
 import { LOCALES, type Locale } from "@/lib/i18n/locales";
 import "./lane-b2.css";
 
@@ -56,6 +67,7 @@ const en = {
   "sites.delete.cta": "Delete site",
   "sites.delete.confirm":
     "Deleting “{name}” stops protecting the devices and tunnels that rely on it, and can’t be undone.",
+  "sites.delete.error": "We couldn’t delete this site. Please try again.",
   "sites.empty.title": "Connect your first site",
   "sites.empty.body":
     "Sites are the offices, data centres and cloud edges ShieldNet protects. Add one to start enforcing policy on its traffic.",
@@ -129,6 +141,7 @@ const en = {
   "browser.delete.cta": "Delete policy",
   "browser.delete.confirm":
     "Deleting “{name}” means the activity it controls falls back to your default policy.",
+  "browser.delete.error": "We couldn’t delete this policy. Please try again.",
   "browser.empty.title": "Add your first browser policy",
   "browser.empty.body":
     "Browser policies isolate risky sites and control downloads and clipboard use. Create one to start protecting web activity.",
@@ -404,6 +417,24 @@ const en = {
 
 export type LaneB2Key = keyof typeof en;
 
+// Catalog keys whose values embed ICU rich-text (`<b>`) tags. They render
+// correctly only through `<FormattedMessage values={{ ...richBold }}>`; routing
+// one through the plain-string `useT()` formatter would print literal `<b>`
+// markup. The `extends LaneB2Key` constraint keeps this list honest — a typo or
+// a key that leaves the catalog is a compile error.
+type EnsureKey<T extends LaneB2Key> = T;
+export type RichLaneB2Key = EnsureKey<
+  | "net.impact.safe"
+  | "net.impact.changed"
+  | "net.impact.transition"
+  | "net.impact.errors"
+  | "policy.impact.safe"
+  | "policy.impact.changed"
+>;
+
+/** Catalog keys safe to format to a plain string through `useT()`. */
+export type PlainLaneB2Key = Exclude<LaneB2Key, RichLaneB2Key>;
+
 type Catalog = Record<LaneB2Key, string>;
 
 // Translations land here as they're produced; any key a locale omits falls
@@ -450,11 +481,15 @@ export function LaneB2Intl({ children }: { children: ReactNode }) {
   );
 }
 
-/** Typed `formatMessage` for plain (tag-free) catalog strings. */
+/**
+ * Typed `formatMessage` for plain (tag-free) catalog strings. The key type is
+ * narrowed to `PlainLaneB2Key`, so passing a rich (`<b>`-bearing) key is a
+ * compile error — those must go through `<FormattedMessage values={richBold}>`.
+ */
 export function useT() {
   const intl = useIntl();
   return useCallback(
-    (id: LaneB2Key, values?: Record<string, string | number>): string =>
+    (id: PlainLaneB2Key, values?: Record<string, string | number>): string =>
       intl.formatMessage({ id }, values),
     [intl],
   );
@@ -462,3 +497,21 @@ export function useT() {
 
 /** Bold render function for ICU `<b>` chunks in rich messages. */
 export const richBold = { b: (chunks: ReactNode) => <b>{chunks}</b> };
+
+/**
+ * Renders a rich (`<b>`-bearing) catalog message. The `id` is constrained to
+ * `RichLaneB2Key` — so a plain key, a typo, or a key that has left the catalog
+ * is a compile error — and the `b` chunk renderer is injected automatically, so
+ * every rich string is bolded consistently without each call site re-spreading
+ * `richBold`. This is the rich-text counterpart to `useT()`, which only formats
+ * the plain (tag-free) keys.
+ */
+export function RichMessage({
+  id,
+  values,
+}: {
+  id: RichLaneB2Key;
+  values?: ComponentProps<typeof FormattedMessage>["values"];
+}) {
+  return <FormattedMessage id={id} values={{ ...values, ...richBold }} />;
+}

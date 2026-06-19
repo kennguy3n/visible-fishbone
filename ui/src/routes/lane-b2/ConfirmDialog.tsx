@@ -21,6 +21,11 @@ const NOOP = () => {};
  * the footer buttons disable and `onClose` becomes a no-op so Escape, a
  * backdrop click, or the ✕ can't abandon the dialog mid-request and leave the
  * user unsure whether the destructive action actually ran.
+ *
+ * If the action fails, pass plain-language recovery copy as `error`: the dialog
+ * stays open, re-enables its buttons, and shows the message inline (announced
+ * via `role="alert"`) so the user can read what went wrong and retry, instead
+ * of the failure vanishing with a dismissed dialog.
  */
 export function ConfirmDialog({
   title,
@@ -28,6 +33,7 @@ export function ConfirmDialog({
   confirmLabel,
   cancelLabel,
   busy = false,
+  error,
   onConfirm,
   onCancel,
 }: {
@@ -36,6 +42,7 @@ export function ConfirmDialog({
   confirmLabel: string;
   cancelLabel: string;
   busy?: boolean;
+  error?: ReactNode;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -70,6 +77,11 @@ export function ConfirmDialog({
       }
     >
       <p style={{ margin: 0, lineHeight: 1.6 }}>{message}</p>
+      {error ? (
+        <p className="error-text" role="alert">
+          {error}
+        </p>
+      ) : null}
     </Modal>
   );
 }

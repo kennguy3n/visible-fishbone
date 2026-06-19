@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import {
   useListBrowserPolicies,
   useCreateBrowserPolicy,
@@ -44,39 +44,42 @@ function BrowserInner({ tenantId }: { tenantId: string }) {
   const [showCreate, setShowCreate] = useState(false);
   const [pendingDelete, setPendingDelete] = useState<BrowserPolicy | null>(null);
 
-  const cols: Column<BrowserPolicy>[] = [
-    { header: t("browser.col.name"), cell: (p) => p.name },
-    {
-      header: t("browser.col.scope"),
-      cell: (p) => <Badge tone="neutral">{titleCase(p.scope)}</Badge>,
-    },
-    {
-      header: t("browser.col.action"),
-      cell: (p) => (
-        <Badge tone={p.action === "block" ? "danger" : "info"}>
-          {titleCase(p.action)}
-        </Badge>
-      ),
-    },
-    { header: t("browser.col.rules"), cell: (p) => p.rules?.length ?? 0 },
-    {
-      header: t("browser.col.status"),
-      cell: (p) => <StatusBadge status={p.enabled ? "enabled" : "disabled"} />,
-    },
-    {
-      header: t("browser.col.actions"),
-      cell: (p) => (
-        <button
-          className="btn btn--danger btn--sm"
-          aria-label={t("browser.delete.aria", { name: p.name })}
-          disabled={del.isPending}
-          onClick={() => setPendingDelete(p)}
-        >
-          {t("browser.delete")}
-        </button>
-      ),
-    },
-  ];
+  const cols: Column<BrowserPolicy>[] = useMemo(
+    () => [
+      { header: t("browser.col.name"), cell: (p) => p.name },
+      {
+        header: t("browser.col.scope"),
+        cell: (p) => <Badge tone="neutral">{titleCase(p.scope)}</Badge>,
+      },
+      {
+        header: t("browser.col.action"),
+        cell: (p) => (
+          <Badge tone={p.action === "block" ? "danger" : "info"}>
+            {titleCase(p.action)}
+          </Badge>
+        ),
+      },
+      { header: t("browser.col.rules"), cell: (p) => p.rules?.length ?? 0 },
+      {
+        header: t("browser.col.status"),
+        cell: (p) => <StatusBadge status={p.enabled ? "enabled" : "disabled"} />,
+      },
+      {
+        header: t("browser.col.actions"),
+        cell: (p) => (
+          <button
+            className="btn btn--danger btn--sm"
+            aria-label={t("browser.delete.aria", { name: p.name })}
+            disabled={del.isPending}
+            onClick={() => setPendingDelete(p)}
+          >
+            {t("browser.delete")}
+          </button>
+        ),
+      },
+    ],
+    [t, del.isPending],
+  );
 
   return (
     <>
@@ -134,7 +137,11 @@ function BrowserInner({ tenantId }: { tenantId: string }) {
           confirmLabel={t("browser.delete.cta")}
           cancelLabel={t("common.cancel")}
           busy={del.isPending}
-          onCancel={() => setPendingDelete(null)}
+          error={del.isError ? t("browser.delete.error") : undefined}
+          onCancel={() => {
+            del.reset();
+            setPendingDelete(null);
+          }}
           onConfirm={() =>
             del.mutate(
               { tenantId, id: pendingDelete.id },

@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import {
   useRunTroubleshootDiagnostics,
   useListTroubleshootKBEntries,
@@ -34,6 +35,15 @@ function TroubleshootInner({ tenantId }: { tenantId: string }) {
 
   const results = diagnostics.data?.results ?? [];
   const run = () => diagnostics.mutate({ tenantId });
+
+  // The user sees plain-language recovery copy (the ErrorState below); also log
+  // the underlying failure so operators can diagnose it from the browser
+  // console without the raw error reaching the UI.
+  useEffect(() => {
+    if (diagnostics.isError) {
+      console.error("Troubleshoot diagnostics failed", diagnostics.error);
+    }
+  }, [diagnostics.isError, diagnostics.error]);
 
   return (
     <>

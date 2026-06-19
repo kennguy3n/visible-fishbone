@@ -19,7 +19,12 @@ import {
 import { HelpTooltip } from "@/components/HelpTooltip";
 import { RequireTenant } from "@/components/RequireTenant";
 import { useToast } from "@/components/Toast";
-import { LaneB2Intl, useT, richBold, type LaneB2Key } from "./lane-b2/i18n";
+import {
+  LaneB2Intl,
+  RichMessage,
+  useT,
+  type PlainLaneB2Key,
+} from "./lane-b2/i18n";
 
 // Each network-security domain is a lens over the one unified tenant policy
 // graph (the same `rules` the Policy editor authors). A rule's `domain` field
@@ -29,7 +34,7 @@ const DOMAINS = ["ngfw", "swg", "dns", "ztna", "sdwan"] as const;
 
 type DomainKey = (typeof DOMAINS)[number];
 
-const DOMAIN_LABEL: Record<DomainKey, LaneB2Key> = {
+const DOMAIN_LABEL: Record<DomainKey, PlainLaneB2Key> = {
   ngfw: "net.domain.ngfw",
   swg: "net.domain.swg",
   dns: "net.domain.dns",
@@ -37,7 +42,7 @@ const DOMAIN_LABEL: Record<DomainKey, LaneB2Key> = {
   sdwan: "net.domain.sdwan",
 };
 
-const DOMAIN_BLURB: Record<DomainKey, LaneB2Key> = {
+const DOMAIN_BLURB: Record<DomainKey, PlainLaneB2Key> = {
   ngfw: "net.domain.ngfw.blurb",
   swg: "net.domain.swg.blurb",
   dns: "net.domain.dns.blurb",
@@ -62,7 +67,7 @@ const VERB_TONE: Record<string, "ok" | "danger" | "warn" | "info" | "neutral"> =
   log: "neutral",
 };
 
-const VERB_KEYS: Record<string, LaneB2Key> = {
+const VERB_KEYS: Record<string, PlainLaneB2Key> = {
   allow: "verb.allow",
   deny: "verb.deny",
   inspect: "verb.inspect",
@@ -636,26 +641,22 @@ function ImpactSummary({
       )}
       <div className="impact-summary">
         {report.changed === 0 ? (
-          <FormattedMessage
-            id="net.impact.safe"
-            values={{ total: report.total, ...richBold }}
-          />
+          <RichMessage id="net.impact.safe" values={{ total: report.total }} />
         ) : (
-          <FormattedMessage
+          <RichMessage
             id="net.impact.changed"
-            values={{ total: report.total, changed: report.changed, ...richBold }}
+            values={{ total: report.total, changed: report.changed }}
           />
         )}
         <ul className="impact-list">
           {report.transitions.map((tr, i) => (
             <li key={i}>
-              <FormattedMessage
+              <RichMessage
                 id="net.impact.transition"
                 values={{
                   from: verbLabel(tr.prev_verdict),
                   to: verbLabel(tr.next_verdict),
                   count: tr.count,
-                  ...richBold,
                 }}
               />
             </li>
@@ -678,12 +679,11 @@ function ImpactSummary({
           )}
           {report.next_errors !== report.prev_errors && (
             <li>
-              <FormattedMessage
+              <RichMessage
                 id="net.impact.errors"
                 values={{
                   prev: report.prev_errors,
                   next: report.next_errors,
-                  ...richBold,
                 }}
               />
             </li>

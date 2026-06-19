@@ -27,11 +27,19 @@ import {
 import { HelpTooltip } from "@/components/HelpTooltip";
 import { RequireTenant } from "@/components/RequireTenant";
 import { useToast } from "@/components/Toast";
-import { LaneB2Intl, useT, richBold, type LaneB2Key } from "./lane-b2/i18n";
+import {
+  LaneB2Intl,
+  RichMessage,
+  useT,
+  type PlainLaneB2Key,
+} from "./lane-b2/i18n";
 
-type TFunc = (id: LaneB2Key, values?: Record<string, string | number>) => string;
+type TFunc = (
+  id: PlainLaneB2Key,
+  values?: Record<string, string | number>,
+) => string;
 
-const VERB_KEYS: Record<string, LaneB2Key> = {
+const VERB_KEYS: Record<string, PlainLaneB2Key> = {
   allow: "verb.allow",
   deny: "verb.deny",
   inspect: "verb.inspect",
@@ -822,15 +830,12 @@ function ImpactSummary({
       <p>
         {edits.length > 0 && <b>{edits.join(", ")}. </b>}
         {report.changed === 0 ? (
-          <FormattedMessage
-            id="policy.impact.safe"
-            values={{ total: report.total, ...richBold }}
-          />
+          <RichMessage id="policy.impact.safe" values={{ total: report.total }} />
         ) : (
           <>
-            <FormattedMessage
+            <RichMessage
               id="policy.impact.changed"
-              values={{ total: report.total, changed: report.changed, ...richBold }}
+              values={{ total: report.total, changed: report.changed }}
             />{" "}
             <FormattedMessage
               id="policy.impact.affected"
