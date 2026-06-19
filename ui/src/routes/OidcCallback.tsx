@@ -1,13 +1,30 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
+import { FormattedMessage, useIntl } from "react-intl";
 import { completeOidcLogin } from "@/auth/oidc";
 import { useAuth } from "@/auth/auth-context";
-import { LoadingState, ErrorState } from "@/components/ui";
+import { LoadingState } from "@/components/ui";
+import { LaneB1Intl } from "./lane-b1-intl";
+import "./lane-b1.css";
+
+// The callback can fail in two operator-meaningful ways: the identity provider
+// returned a token the console can't use, or sign-in was interrupted before it
+// finished. Both map to plain-language guidance rather than a raw error string.
+type CallbackError = "unusable" | "generic";
 
 export function OidcCallback() {
+  return (
+    <LaneB1Intl>
+      <OidcCallbackInner />
+    </LaneB1Intl>
+  );
+}
+
+function OidcCallbackInner() {
+  const intl = useIntl();
   const { setSession } = useAuth();
   const navigate = useNavigate();
-  const [error, setError] = useState<unknown>(null);
+  const [error, setError] = useState<CallbackError | null>(null);
   const ran = useRef(false);
 
   useEffect(() => {
@@ -23,43 +40,57 @@ export function OidcCallback() {
           navigate({ to: "/" });
         } else {
           // setSession only rejects a token it can't decode as a JWT or that
-          // is already expired. The common real-world cause is an IdP issuing
-          // an opaque access token — which SNG's JWT-bearer API can't use
-          // either — so the message points operators at token format/audience.
-          setError(
-            new Error(
-              "The identity provider returned an access token the console can't use. " +
-                "SNG requires an unexpired JWT access token (opaque tokens aren't supported) — " +
-                "check the OIDC client's token format and audience.",
-            ),
-          );
+          // is already expired — usually an IdP issuing an opaque access token
+          // the JWT-bearer API can't use either.
+          setError("unusable");
         }
       })
-      .catch(setError);
+      .catch((err) => {
+        // The operator sees a plain-language message; the original error is
+        // kept in the console so support can diagnose the IdP exchange.
+        console.error("Single sign-on callback failed", err);
+        setError("generic");
+      });
   }, [setSession, navigate]);
 
   if (error) {
     return (
-      <div className="login">
-        <div className="login__card">
-          <ErrorState error={error} />
+      <div className="login lane-b1">
+        <main className="login__card">
+          <div className="state" role="alert">
+            <div className="state__icon" style={{ color: "var(--danger)" }} aria-hidden>
+              ⚠
+            </div>
+            <p style={{ fontWeight: 600, color: "var(--text)" }}>
+              <FormattedMessage id="b1.oidc.error.title" />
+            </p>
+            <p>
+              <FormattedMessage
+                id={
+                  error === "unusable"
+                    ? "b1.oidc.error.unusable"
+                    : "b1.oidc.error.generic"
+                }
+              />
+            </p>
+          </div>
           <button
-            className="btn"
-            style={{ width: "100%", justifyContent: "center" }}
+            className="btn btn--primary"
+            style={{ width: "100%", justifyContent: "center", marginTop: 14 }}
             onClick={() => navigate({ to: "/login" })}
           >
-            Back to sign in
+            <FormattedMessage id="b1.oidc.back" />
           </button>
-        </div>
+        </main>
       </div>
     );
   }
 
   return (
-    <div className="login">
-      <div className="login__card">
-        <LoadingState label="Completing sign-in…" />
-      </div>
+    <div className="login lane-b1">
+      <main className="login__card">
+        <LoadingState label={intl.formatMessage({ id: "b1.oidc.loading" })} />
+      </main>
     </div>
   );
 }

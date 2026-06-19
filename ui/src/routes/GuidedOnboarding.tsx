@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
+import { FormattedMessage, useIntl } from "react-intl";
 import {
   useCreateTenant,
   getListTenantsQueryKey,
@@ -17,17 +18,27 @@ import {
   useApplyPolicyTemplate,
 } from "@/api/manual/hooks";
 import type { PolicyTemplatePreview } from "@/api/manual/types";
+import { LaneB1Intl } from "./lane-b1-intl";
+import { Stepper } from "./lane-b1-stepper";
+import "./lane-b1.css";
 
 type TierValue =
   (typeof TenantCreateRequestTier)[keyof typeof TenantCreateRequestTier];
-
-const STEPS = ["Tenant", "Residency", "Industry", "First policy", "Done"] as const;
 
 // Guided onboarding wizard — mirrors what the seed harness does over the API:
 // create a tenant, choose its data-residency country, pick an industry, render
 // and apply the first baseline policy, then finish. Each step validates before
 // it lets the operator advance.
 export function GuidedOnboarding() {
+  return (
+    <LaneB1Intl>
+      <GuidedOnboardingInner />
+    </LaneB1Intl>
+  );
+}
+
+function GuidedOnboardingInner() {
+  const intl = useIntl();
   const navigate = useNavigate();
   const { setSelectedTenantId } = useTenant();
   const toast = useToast();
@@ -44,29 +55,20 @@ export function GuidedOnboarding() {
   const previewBaseline = usePreviewPolicyTemplate(tenant?.id ?? "");
   const applyBaseline = useApplyPolicyTemplate(tenant?.id ?? "");
 
+  // Steps are pipe-delimited (not comma) so a translated label can safely
+  // contain a comma without changing the number of steps.
+  const steps = intl.formatMessage({ id: "b1.guided.steps" }).split("|");
   const regimeForCountry = (c: string) =>
     (options.data?.countries ?? []).find((x) => x.country === c)?.regime;
 
   return (
-    <div className="onboard">
+    <div className="onboard lane-b1">
       <PageHeader
-        title="Guided onboarding"
-        subtitle="Stand up a new tenant and its first security baseline in five steps."
+        title={intl.formatMessage({ id: "b1.guided.title" })}
+        subtitle={intl.formatMessage({ id: "b1.guided.subtitle" })}
       />
 
-      <ol className="stepper" aria-label="Onboarding progress">
-        {STEPS.map((name, i) => {
-          const n = i + 1;
-          const state = n === step ? "active" : n < step ? "done" : "todo";
-          return (
-            <li key={name} className={`stepper__step stepper__step--${state}`}>
-              <span className="stepper__dot">{n < step ? "✓" : n}</span>
-              <span className="stepper__name">{name}</span>
-              {i < STEPS.length - 1 && <span className="stepper__bar" />}
-            </li>
-          );
-        })}
-      </ol>
+      <Stepper steps={steps} current={step} />
 
       {step === 1 && (
         <StepTenant
@@ -78,19 +80,27 @@ export function GuidedOnboarding() {
       )}
 
       {step === 2 && tenant && (
-        <Card title={`Where does ${tenant.name} operate?`}>
+        <Card
+          title={intl.formatMessage(
+            { id: "b1.guided.step.residency.title" },
+            { name: tenant.name },
+          )}
+        >
           <p>
-            The country sets the data-residency region and the compliance regime
-            the baseline enforces.
+            <FormattedMessage id="b1.guided.step.residency.desc" />
           </p>
-          <label className="field" style={{ maxWidth: 320 }}>
-            <span>Country / data residency</span>
+          <label className="field field--narrow">
+            <span>
+              <FormattedMessage id="b1.guided.field.country" />
+            </span>
             <select
               value={country}
               disabled={options.isLoading}
               onChange={(e) => setCountry(e.target.value)}
             >
-              <option value="">Select a country…</option>
+              <option value="">
+                {intl.formatMessage({ id: "b1.guided.field.country.placeholder" })}
+              </option>
               {(options.data?.countries ?? []).map((c) => (
                 <option key={c.country} value={c.country}>
                   {c.country} — {c.regime}
@@ -100,7 +110,15 @@ export function GuidedOnboarding() {
           </label>
           {country && (
             <p style={{ marginTop: 8 }}>
-              Regime: <Badge tone="info">{regimeForCountry(country)}</Badge>
+              <FormattedMessage
+                id="b1.guided.residency.regime"
+                values={{
+                  regime: regimeForCountry(country),
+                  badge: (chunks: ReactNode) => (
+                    <Badge tone="info">{chunks}</Badge>
+                  ),
+                }}
+              />
             </p>
           )}
           <WizardNav
@@ -112,8 +130,10 @@ export function GuidedOnboarding() {
       )}
 
       {step === 3 && tenant && (
-        <Card title="What does the business do?">
-          <p>The industry sets the acceptable-use posture and any sector DLP detectors.</p>
+        <Card title={intl.formatMessage({ id: "b1.guided.step.industry.title" })}>
+          <p>
+            <FormattedMessage id="b1.guided.step.industry.desc" />
+          </p>
           <div className="choice-grid">
             {(options.data?.industries ?? []).map((i) => (
               <button
@@ -139,26 +159,41 @@ export function GuidedOnboarding() {
                   },
                   onError: (e) =>
                     toast.error(
-                      "Could not render the baseline",
+                      intl.formatMessage({ id: "b1.guided.toast.renderFailed" }),
                       e instanceof Error ? e.message : undefined,
                     ),
                 },
               );
             }}
             nextDisabled={!industry || previewBaseline.isPending}
-            nextLabel={previewBaseline.isPending ? "Rendering…" : "Preview policy"}
+            nextLabel={intl.formatMessage({
+              id: previewBaseline.isPending
+                ? "b1.guided.cta.previewing"
+                : "b1.guided.cta.preview",
+            })}
           />
         </Card>
       )}
 
       {step === 4 && tenant && preview && (
-        <Card title="Review the first baseline policy">
+        <Card title={intl.formatMessage({ id: "b1.guided.step.review.title" })}>
           <p>
-            {titleCase(industry)} · {country} ·{" "}
-            <Badge tone="info">{preview.regime}</Badge>
+            <FormattedMessage
+              id="b1.guided.review.summary"
+              values={{
+                industry: titleCase(industry),
+                country,
+                regime: preview.regime,
+                badge: (chunks: ReactNode) => (
+                  <Badge tone="info">{chunks}</Badge>
+                ),
+              }}
+            />
           </p>
           <div className="field">
-            <span>Composed from templates</span>
+            <span>
+              <FormattedMessage id="b1.guided.review.composedFrom" />
+            </span>
             <ul style={{ margin: "6px 0" }}>
               {preview.template_ids.map((id) => (
                 <li key={id} className="mono">
@@ -168,7 +203,8 @@ export function GuidedOnboarding() {
             </ul>
           </div>
           <p style={{ color: "var(--text-dim)" }}>
-            Policy-Graph hash: <span className="mono">{preview.graph_hash}</span>
+            <FormattedMessage id="b1.guided.review.fingerprint" />:{" "}
+            <span className="mono">{preview.graph_hash}</span>
           </p>
           <WizardNav
             onBack={() => setStep(3)}
@@ -177,30 +213,42 @@ export function GuidedOnboarding() {
                 { industry, country },
                 {
                   onSuccess: () => {
-                    toast.success("Baseline applied", `${tenant.name} is protected.`);
+                    toast.success(
+                      intl.formatMessage({ id: "b1.guided.toast.applied.title" }),
+                      intl.formatMessage(
+                        { id: "b1.guided.toast.applied.body" },
+                        { name: tenant.name },
+                      ),
+                    );
                     setStep(5);
                   },
                   onError: (e) =>
                     toast.error(
-                      "Could not apply the baseline",
+                      intl.formatMessage({ id: "b1.guided.toast.applyFailed" }),
                       e instanceof Error ? e.message : undefined,
                     ),
                 },
               );
             }}
             nextDisabled={applyBaseline.isPending}
-            nextLabel={applyBaseline.isPending ? "Applying…" : "Apply baseline"}
+            nextLabel={intl.formatMessage({
+              id: applyBaseline.isPending
+                ? "b1.guided.cta.applying"
+                : "b1.guided.cta.apply",
+            })}
           />
         </Card>
       )}
 
       {step === 5 && tenant && (
-        <Card title="You're all set">
+        <Card title={intl.formatMessage({ id: "b1.guided.step.done.title" })}>
           <p>
-            <strong>{tenant.name}</strong> has its first security baseline applied.
-            You can now add sites, enrol devices, or refine the policy.
+            <FormattedMessage
+              id="b1.guided.step.done.desc"
+              values={{ name: <strong>{tenant.name}</strong> }}
+            />
           </p>
-          <div style={{ display: "flex", gap: 10, marginTop: 12 }}>
+          <div style={{ display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" }}>
             <button
               className="btn btn--primary"
               onClick={() => {
@@ -208,10 +256,10 @@ export function GuidedOnboarding() {
                 navigate({ to: "/" });
               }}
             >
-              Go to dashboard
+              <FormattedMessage id="b1.guided.cta.goDashboard" />
             </button>
             <Link className="btn" to="/onboarding">
-              Continue full setup
+              <FormattedMessage id="b1.guided.cta.fullSetup" />
             </Link>
           </div>
         </Card>
@@ -222,6 +270,7 @@ export function GuidedOnboarding() {
 
 // --- Step 1: create the tenant ---------------------------------------------
 function StepTenant({ onCreated }: { onCreated: (t: TenantResponse) => void }) {
+  const intl = useIntl();
   const toast = useToast();
   const qc = useQueryClient();
   const [name, setName] = useState("");
@@ -232,12 +281,15 @@ function StepTenant({ onCreated }: { onCreated: (t: TenantResponse) => void }) {
     mutation: {
       onSuccess: async (t: TenantResponse) => {
         await qc.invalidateQueries({ queryKey: getListTenantsQueryKey() });
-        toast.success("Tenant created", `${t.name} is ready to configure.`);
+        toast.success(
+          intl.formatMessage({ id: "b1.guided.toast.created.title" }),
+          intl.formatMessage({ id: "b1.guided.toast.created.body" }, { name: t.name }),
+        );
         onCreated(t);
       },
       onError: (e) =>
         toast.error(
-          "Could not create tenant",
+          intl.formatMessage({ id: "b1.guided.toast.createFailed" }),
           e instanceof Error ? e.message : undefined,
         ),
     },
@@ -245,18 +297,26 @@ function StepTenant({ onCreated }: { onCreated: (t: TenantResponse) => void }) {
 
   const trimmed = name.trim();
   return (
-    <Card title="Create the tenant">
-      <p>A tenant is the isolated workspace everything else hangs off.</p>
-      <label className="field" style={{ maxWidth: 320 }}>
-        <span>Business name</span>
+    <Card title={intl.formatMessage({ id: "b1.guided.step.tenant.title" })}>
+      <p>
+        <FormattedMessage id="b1.guided.step.tenant.desc" />
+      </p>
+      <label className="field field--narrow">
+        <span>
+          <FormattedMessage id="b1.guided.field.businessName" />
+        </span>
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder="Acme Ltd"
+          placeholder={intl.formatMessage({
+            id: "b1.guided.field.businessName.placeholder",
+          })}
         />
       </label>
-      <label className="field" style={{ maxWidth: 320 }}>
-        <span>Plan</span>
+      <label className="field field--narrow">
+        <span>
+          <FormattedMessage id="b1.guided.field.plan" />
+        </span>
         <select value={tier} onChange={(e) => setTier(e.target.value as TierValue)}>
           {tiers.map((t) => (
             <option key={t} value={t}>
@@ -271,7 +331,11 @@ function StepTenant({ onCreated }: { onCreated: (t: TenantResponse) => void }) {
           disabled={!trimmed || create.isPending}
           onClick={() => create.mutate({ data: { name: trimmed, tier } })}
         >
-          {create.isPending ? <Spinner /> : "Create tenant"}
+          {create.isPending ? (
+            <Spinner />
+          ) : (
+            <FormattedMessage id="b1.guided.cta.create" />
+          )}
         </button>
       </div>
     </Card>
@@ -282,20 +346,21 @@ function WizardNav({
   onBack,
   onNext,
   nextDisabled,
-  nextLabel = "Next",
+  nextLabel,
 }: {
   onBack: () => void;
   onNext: () => void;
   nextDisabled?: boolean;
   nextLabel?: string;
 }) {
+  const intl = useIntl();
   return (
     <div style={{ display: "flex", gap: 10, marginTop: 16 }}>
       <button className="btn" onClick={onBack}>
-        Back
+        <FormattedMessage id="b1.common.back" />
       </button>
       <button className="btn btn--primary" disabled={nextDisabled} onClick={onNext}>
-        {nextLabel}
+        {nextLabel ?? intl.formatMessage({ id: "b1.common.next" })}
       </button>
     </div>
   );

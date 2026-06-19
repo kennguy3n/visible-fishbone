@@ -1,12 +1,27 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { useNavigate } from "@tanstack/react-router";
+import { FormattedMessage, useIntl } from "react-intl";
 import { useAuth } from "@/auth/auth-context";
+import { LaneB1Intl } from "./lane-b1-intl";
+import "./lane-b1.css";
 
 export function Login() {
+  return (
+    <LaneB1Intl>
+      <LoginInner />
+    </LaneB1Intl>
+  );
+}
+
+function LoginInner() {
+  const intl = useIntl();
   const { authMode, loginWithToken, loginWithOidc, isAuthenticated } = useAuth();
   const navigate = useNavigate();
   const [token, setToken] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const tokenFieldId = useId();
+  const helpId = useId();
+  const errorId = useId();
 
   // Redirect away from the login screen once authenticated. Navigation is a
   // side effect, so it must run in an effect rather than during render.
@@ -21,13 +36,13 @@ export function Login() {
     setError(null);
     const trimmed = token.trim();
     if (!trimmed) {
-      setError("Paste a bearer token to continue.");
+      setError(intl.formatMessage({ id: "b1.login.error.empty" }));
       return;
     }
     // On success the isAuthenticated effect handles the redirect; on failure
     // we surface feedback instead of bouncing to "/" and silently back.
     if (!loginWithToken(trimmed)) {
-      setError("That token is invalid or expired. Paste a current bearer token.");
+      setError(intl.formatMessage({ id: "b1.login.error.invalid" }));
     }
   };
 
@@ -36,21 +51,26 @@ export function Login() {
     try {
       await loginWithOidc();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "OIDC login failed");
+      // Keep the friendly message for the operator, but preserve the original
+      // error in the console so support can diagnose a misconfigured IdP.
+      console.error("Single sign-on failed to start", err);
+      setError(intl.formatMessage({ id: "b1.login.error.oidc" }));
     }
   };
 
   return (
-    <div className="login">
-      <div className="login__card">
+    <div className="login lane-b1">
+      <main className="login__card">
         <div className="login__brand">
-          <span className="sidebar__logo" style={{ width: 36, height: 36 }}>
+          <span className="sidebar__logo" style={{ width: 36, height: 36 }} aria-hidden>
             S
           </span>
           <div>
-            <div style={{ fontWeight: 700, fontSize: 18 }}>ShieldNet Gateway</div>
+            <h1 style={{ fontWeight: 700, fontSize: 18, margin: 0 }}>
+              <FormattedMessage id="b1.login.brand" />
+            </h1>
             <div className="muted" style={{ fontSize: 12 }}>
-              Operator console
+              <FormattedMessage id="b1.login.subtitle" />
             </div>
           </div>
         </div>
@@ -58,43 +78,50 @@ export function Login() {
         {authMode === "oidc" ? (
           <>
             <p className="muted">
-              Sign in with your organization identity provider.
+              <FormattedMessage id="b1.login.oidc.intro" />
             </p>
             <button
               className="btn btn--primary"
               style={{ width: "100%", justifyContent: "center" }}
               onClick={onOidc}
             >
-              Continue with SSO
+              <FormattedMessage id="b1.login.oidc.cta" />
             </button>
           </>
         ) : (
-          <form onSubmit={onJwtSubmit}>
-            <label className="field">
-              <span>Bearer JWT (development)</span>
+          <form onSubmit={onJwtSubmit} noValidate>
+            <label className="field" htmlFor={tokenFieldId}>
+              <span>
+                <FormattedMessage id="b1.login.jwt.label" />
+              </span>
               <textarea
+                id={tokenFieldId}
                 value={token}
                 onChange={(e) => setToken(e.target.value)}
-                placeholder="eyJhbGciOiJIUzI1NiІ..."
+                placeholder={intl.formatMessage({ id: "b1.login.jwt.placeholder" })}
                 rows={4}
+                aria-invalid={error ? true : undefined}
+                aria-describedby={error ? `${errorId} ${helpId}` : helpId}
               />
             </label>
             <button
               className="btn btn--primary"
               type="submit"
-              style={{ width: "100%", justifyContent: "center" }}
+              style={{ width: "100%", justifyContent: "center", marginTop: 4 }}
             >
-              Sign in
+              <FormattedMessage id="b1.login.jwt.cta" />
             </button>
-            <p className="muted" style={{ fontSize: 12, marginTop: 12 }}>
-              The control plane verifies the HMAC-signed operator JWT
-              (config <code>Auth.JWTSecret</code>). In production this screen
-              switches to the OIDC redirect flow.
+            <p id={helpId} className="muted" style={{ fontSize: 12, marginTop: 12 }}>
+              <FormattedMessage id="b1.login.jwt.help" />
             </p>
           </form>
         )}
-        {error && <p className="error-text">{error}</p>}
-      </div>
+        {error && (
+          <p id={errorId} className="error-text" role="alert">
+            {error}
+          </p>
+        )}
+      </main>
     </div>
   );
 }

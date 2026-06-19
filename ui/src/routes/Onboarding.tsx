@@ -1,6 +1,7 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useQueryClient } from "@tanstack/react-query";
+import { FormattedMessage, useIntl } from "react-intl";
 import { useListSites, useCreateSite } from "@/api/generated/endpoints/sites/sites";
 import {
   useCreateTenant,
@@ -23,37 +24,28 @@ import { useTenant } from "@/lib/tenant-context";
 import { useToast } from "@/components/Toast";
 import { runtimeConfig } from "@/lib/runtime-config";
 import { titleCase } from "@/lib/format";
+import { LaneB1Intl } from "./lane-b1-intl";
+import { Stepper } from "./lane-b1-stepper";
+import "./lane-b1.css";
 
 type TemplateValue =
   (typeof SiteCreateRequestTemplate)[keyof typeof SiteCreateRequestTemplate];
 type TierValue =
   (typeof TenantCreateRequestTier)[keyof typeof TenantCreateRequestTier];
 
-const SITE_TEMPLATE_BLURB: Record<string, string> = {
-  branch: "A physical office with its own network — staff on-site share one internet breakout.",
-  hub: "A central location that other sites connect back through.",
-  cloud_only: "No hardware — protect cloud apps and remote staff only.",
-  home_office: "A single remote worker, set up from their device.",
-};
-
-const TIER_BLURB: Record<string, string> = {
-  starter: "Small teams getting started — core protection, sensible defaults.",
-  professional: "Growing businesses — full policy control and integrations.",
-  enterprise: "Large or regulated organisations — advanced controls and scale.",
-};
-
 // The wizard mirrors the operator's natural setup order: pick the tenant they
 // are configuring, give it a site to route traffic through, federate identity,
 // apply a baseline policy, then hand out the artefacts needed to deploy.
-const STEPS = [
-  "Tenant",
-  "Site",
-  "Identity",
-  "Policy template",
-  "Deploy",
-] as const;
-
 export function Onboarding() {
+  return (
+    <LaneB1Intl>
+      <OnboardingInner />
+    </LaneB1Intl>
+  );
+}
+
+function OnboardingInner() {
+  const intl = useIntl();
   const navigate = useNavigate();
   const [step, setStep] = useState(1);
   const { selectedTenantId } = useTenant();
@@ -66,26 +58,18 @@ export function Onboarding() {
     if (step > 1 && !selectedTenantId) setStep(1);
   }, [step, selectedTenantId]);
 
+  // Steps are pipe-delimited (not comma) so a translated label can safely
+  // contain a comma without changing the number of steps.
+  const steps = intl.formatMessage({ id: "b1.onboard.steps" }).split("|");
+
   return (
-    <div className="onboard">
+    <div className="onboard lane-b1">
       <PageHeader
-        title="Get protected"
-        subtitle="A five-step guided setup. You can leave and resume any time."
+        title={intl.formatMessage({ id: "b1.onboard.title" })}
+        subtitle={intl.formatMessage({ id: "b1.onboard.subtitle" })}
       />
 
-      <ol className="stepper" aria-label="Onboarding progress">
-        {STEPS.map((name, i) => {
-          const n = i + 1;
-          const state = n === step ? "active" : n < step ? "done" : "todo";
-          return (
-            <li key={name} className={`stepper__step stepper__step--${state}`}>
-              <span className="stepper__dot">{n < step ? "✓" : n}</span>
-              <span className="stepper__name">{name}</span>
-              {i < STEPS.length - 1 && <span className="stepper__bar" />}
-            </li>
-          );
-        })}
-      </ol>
+      <Stepper steps={steps} current={step} />
 
       {step === 1 && <StepTenant onNext={() => setStep(2)} />}
       {step === 2 && selectedTenantId && (
@@ -119,6 +103,7 @@ export function Onboarding() {
 // --- Step 1: Tenant --------------------------------------------------------
 
 function StepTenant({ onNext }: { onNext: () => void }) {
+  const intl = useIntl();
   const { tenants, selectedTenantId, setSelectedTenantId, isLoading } =
     useTenant();
   const toast = useToast();
@@ -136,12 +121,18 @@ function StepTenant({ onNext }: { onNext: () => void }) {
         // across the whole invalidate-then-select window with no extra latch.
         await qc.invalidateQueries({ queryKey: getListTenantsQueryKey() });
         setSelectedTenantId(tenant.id);
-        toast.success("Tenant created", `${tenant.name} is now active.`);
+        toast.success(
+          intl.formatMessage({ id: "b1.onboard.toast.tenantCreated.title" }),
+          intl.formatMessage(
+            { id: "b1.onboard.toast.tenantCreated.body" },
+            { name: tenant.name },
+          ),
+        );
         onNext();
       },
       onError: (e) =>
         toast.error(
-          "Could not create tenant",
+          intl.formatMessage({ id: "b1.onboard.toast.tenantFailed" }),
           e instanceof Error ? e.message : undefined,
         ),
     },
@@ -149,19 +140,22 @@ function StepTenant({ onNext }: { onNext: () => void }) {
   const busy = create.isPending;
 
   return (
-    <Card title="Choose the tenant to set up">
+    <Card title={intl.formatMessage({ id: "b1.onboard.tenant.title" })}>
       <p>
-        ShieldNet protects your business's internet traffic — blocking threats,
-        stopping data leaks and keeping remote staff safe — without needing an
-        IT team to run it. Everything in this wizard applies to the tenant you
-        pick here.
+        <FormattedMessage id="b1.onboard.tenant.intro" />
       </p>
       <div className="overview-anim" aria-hidden>
-        <div className="overview-anim__node overview-anim__node--user">Staff</div>
+        <div className="overview-anim__node overview-anim__node--user">
+          <FormattedMessage id="b1.onboard.anim.staff" />
+        </div>
         <div className="overview-anim__flow" />
-        <div className="overview-anim__node overview-anim__node--sng">ShieldNet</div>
+        <div className="overview-anim__node overview-anim__node--sng">
+          <FormattedMessage id="b1.onboard.anim.sng" />
+        </div>
         <div className="overview-anim__flow" />
-        <div className="overview-anim__node overview-anim__node--net">Internet</div>
+        <div className="overview-anim__node overview-anim__node--net">
+          <FormattedMessage id="b1.onboard.anim.internet" />
+        </div>
       </div>
 
       {isLoading ? (
@@ -169,7 +163,9 @@ function StepTenant({ onNext }: { onNext: () => void }) {
       ) : tenants.length > 0 ? (
         <>
           <div className="field">
-            <span>Existing tenants</span>
+            <span>
+              <FormattedMessage id="b1.onboard.tenant.existing" />
+            </span>
             <div className="choice-grid" style={{ marginTop: 6 }}>
               {tenants.map((t) => (
                 <button
@@ -196,13 +192,13 @@ function StepTenant({ onNext }: { onNext: () => void }) {
               style={{ marginTop: 12 }}
               onClick={() => setCreating(true)}
             >
-              + Create a new tenant instead
+              + <FormattedMessage id="b1.onboard.tenant.createInstead" />
             </button>
           )}
         </>
       ) : (
         <p className="muted">
-          You don't have any tenants yet. Create your first one to begin.
+          <FormattedMessage id="b1.onboard.tenant.none" />
         </p>
       )}
 
@@ -220,7 +216,7 @@ function StepTenant({ onNext }: { onNext: () => void }) {
           onClick={onNext}
           disabled={!selectedTenantId || busy}
         >
-          Continue →
+          <FormattedMessage id="b1.onboard.cta.continue" />
         </button>
       </div>
     </Card>
@@ -241,6 +237,7 @@ function NewTenantForm({
     tier: TierValue;
   }) => void;
 }) {
+  const intl = useIntl();
   const [name, setName] = useState("");
   const [slug, setSlug] = useState("");
   const [region, setRegion] = useState("");
@@ -255,51 +252,54 @@ function NewTenantForm({
         borderTop: "1px solid var(--border-soft)",
       }}
     >
-      <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>New tenant</h3>
+      <h3 style={{ margin: "0 0 10px", fontSize: 14 }}>
+        <FormattedMessage id="b1.onboard.newTenant.title" />
+      </h3>
       <label className="field">
         <span>
-          Business name{" "}
-          <HelpTooltip title="Business name">
-            The organisation this tenant represents, e.g. "Acme Ltd". Shown
-            throughout the console.
+          <FormattedMessage id="b1.onboard.field.businessName" />{" "}
+          <HelpTooltip title={intl.formatMessage({ id: "b1.onboard.field.businessName" })}>
+            <FormattedMessage id="b1.onboard.field.businessName.help" />
           </HelpTooltip>
         </span>
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder="e.g. Acme Ltd"
+          placeholder={intl.formatMessage({
+            id: "b1.onboard.field.businessName.placeholder",
+          })}
         />
       </label>
       <label className="field">
         <span>
-          Slug (optional){" "}
-          <HelpTooltip title="Slug">
-            A short, lowercase identifier used in URLs and configs. Leave blank
-            and we'll generate one from the name.
+          <FormattedMessage id="b1.onboard.field.slug" />{" "}
+          <HelpTooltip title={intl.formatMessage({ id: "b1.onboard.field.slug" })}>
+            <FormattedMessage id="b1.onboard.field.slug.help" />
           </HelpTooltip>
         </span>
         <input
           value={slug}
           onChange={(e) => setSlug(e.target.value)}
-          placeholder="acme"
+          placeholder={intl.formatMessage({ id: "b1.onboard.field.slug.placeholder" })}
         />
       </label>
       <label className="field">
         <span>
-          Region (optional){" "}
-          <HelpTooltip title="Region">
-            Where this tenant's data is processed. Leave blank to use the
-            platform default.
+          <FormattedMessage id="b1.onboard.field.region" />{" "}
+          <HelpTooltip title={intl.formatMessage({ id: "b1.onboard.field.region" })}>
+            <FormattedMessage id="b1.onboard.field.region.help" />
           </HelpTooltip>
         </span>
         <input
           value={region}
           onChange={(e) => setRegion(e.target.value)}
-          placeholder="e.g. eu-west-1"
+          placeholder={intl.formatMessage({ id: "b1.onboard.field.region.placeholder" })}
         />
       </label>
       <div className="field">
-        <span>Plan tier</span>
+        <span>
+          <FormattedMessage id="b1.onboard.field.planTier" />
+        </span>
         <div className="choice-grid" style={{ marginTop: 6 }}>
           {tiers.map((t) => (
             <button
@@ -309,7 +309,9 @@ function NewTenantForm({
               aria-pressed={tier === t}
             >
               <div className="choice__name">{titleCase(t)}</div>
-              <div className="choice__desc">{TIER_BLURB[t] ?? ""}</div>
+              <div className="choice__desc">
+                <FormattedMessage id={`b1.onboard.tier.${t}.blurb`} />
+              </div>
             </button>
           ))}
         </div>
@@ -327,11 +329,15 @@ function NewTenantForm({
             })
           }
         >
-          {busy ? "Creating…" : "Create tenant →"}
+          {busy ? (
+            <FormattedMessage id="b1.onboard.cta.creating" />
+          ) : (
+            <FormattedMessage id="b1.onboard.cta.createTenant" />
+          )}
         </button>
         {onCancel && (
           <button className="btn" onClick={onCancel} disabled={busy}>
-            Cancel
+            <FormattedMessage id="b1.common.cancel" />
           </button>
         )}
       </div>
@@ -350,6 +356,7 @@ function StepSite({
   onBack: () => void;
   onNext: () => void;
 }) {
+  const intl = useIntl();
   const sites = useListSites(tenantId);
   const create = useCreateSite();
   const toast = useToast();
@@ -370,12 +377,18 @@ function StepSite({
       },
       {
         onSuccess: () => {
-          toast.success("Site created", `${name.trim()} is now connected.`);
+          toast.success(
+            intl.formatMessage({ id: "b1.onboard.toast.siteCreated.title" }),
+            intl.formatMessage(
+              { id: "b1.onboard.toast.siteCreated.body" },
+              { name: name.trim() },
+            ),
+          );
           onNext();
         },
         onError: (e) =>
           toast.error(
-            "Could not create site",
+            intl.formatMessage({ id: "b1.onboard.toast.siteFailed" }),
             e instanceof Error ? e.message : undefined,
           ),
       },
@@ -383,47 +396,43 @@ function StepSite({
   };
 
   return (
-    <Card title="Add your first site">
+    <Card title={intl.formatMessage({ id: "b1.onboard.site.title" })}>
       {existing > 0 && (
         <p className="muted">
-          You already have {existing} site{existing === 1 ? "" : "s"}. Add
-          another or continue.
+          <FormattedMessage id="b1.onboard.site.existing" values={{ count: existing }} />
         </p>
       )}
       <label className="field">
         <span>
-          Site name{" "}
-          <HelpTooltip title="Site name">
-            A friendly name for this location, e.g. "London HQ" or "Warehouse".
-            It's just for you to recognise it.
+          <FormattedMessage id="b1.onboard.field.siteName" />{" "}
+          <HelpTooltip title={intl.formatMessage({ id: "b1.onboard.field.siteName" })}>
+            <FormattedMessage id="b1.onboard.field.siteName.help" />
           </HelpTooltip>
         </span>
         <input
           value={name}
           onChange={(e) => setName(e.target.value)}
-          placeholder="e.g. London HQ"
+          placeholder={intl.formatMessage({ id: "b1.onboard.field.siteName.placeholder" })}
         />
       </label>
       <label className="field">
         <span>
-          Slug (optional){" "}
-          <HelpTooltip title="Slug">
-            A short, lowercase identifier used in URLs and configs. Leave blank
-            and we'll generate one from the name.
+          <FormattedMessage id="b1.onboard.field.slug" />{" "}
+          <HelpTooltip title={intl.formatMessage({ id: "b1.onboard.field.slug" })}>
+            <FormattedMessage id="b1.onboard.field.siteSlug.help" />
           </HelpTooltip>
         </span>
         <input
           value={slug}
           onChange={(e) => setSlug(e.target.value)}
-          placeholder="london-hq"
+          placeholder={intl.formatMessage({ id: "b1.onboard.field.siteSlug.placeholder" })}
         />
       </label>
       <div className="field">
         <span>
-          Deployment type{" "}
-          <HelpTooltip title="Deployment type">
-            How this location connects. Most offices are a "Branch". Choose
-            "Cloud only" if there's no physical network to protect.
+          <FormattedMessage id="b1.onboard.field.deployment" />{" "}
+          <HelpTooltip title={intl.formatMessage({ id: "b1.onboard.field.deployment" })}>
+            <FormattedMessage id="b1.onboard.field.deployment.help" />
           </HelpTooltip>
         </span>
         <div className="choice-grid" style={{ marginTop: 6 }}>
@@ -435,19 +444,21 @@ function StepSite({
               aria-pressed={template === t}
             >
               <div className="choice__name">{titleCase(t)}</div>
-              <div className="choice__desc">{SITE_TEMPLATE_BLURB[t] ?? ""}</div>
+              <div className="choice__desc">
+                <FormattedMessage id={`b1.onboard.template.${t}.blurb`} />
+              </div>
             </button>
           ))}
         </div>
       </div>
       <div className="onboard__actions">
         <button className="btn" onClick={onBack}>
-          ← Back
+          <FormattedMessage id="b1.common.back" />
         </button>
         <div style={{ display: "flex", gap: 10 }}>
           {existing > 0 && (
             <button className="btn" onClick={onNext} disabled={create.isPending}>
-              Skip →
+              <FormattedMessage id="b1.onboard.cta.skip" />
             </button>
           )}
           <button
@@ -455,7 +466,11 @@ function StepSite({
             onClick={submit}
             disabled={!name.trim() || create.isPending}
           >
-            {create.isPending ? "Creating…" : "Create site →"}
+            {create.isPending ? (
+              <FormattedMessage id="b1.onboard.cta.creatingSite" />
+            ) : (
+              <FormattedMessage id="b1.onboard.cta.createSite" />
+            )}
           </button>
         </div>
       </div>
@@ -485,6 +500,13 @@ function StepIdentity({
   onBack: () => void;
   onNext: () => void;
 }) {
+  const intl = useIntl();
+  // Read the latest intl from a ref inside the discovery effect so the effect
+  // doesn't take intl as a dependency: intl changes identity on every locale
+  // switch, and depending on it would re-run discovery and flash the spinner
+  // over an already-verified connection.
+  const intlRef = useRef(intl);
+  intlRef.current = intl;
   const cfg = runtimeConfig();
   const [discovery, setDiscovery] = useState<Record<string, unknown> | null>(
     null,
@@ -516,7 +538,13 @@ function StepIdentity({
       .catch((e) => {
         // An abort is our own cleanup, not a verification failure — ignore it.
         if (controller.signal.aborted) return;
-        setError(e instanceof Error ? e.message : "Discovery failed");
+        setError(
+          e instanceof Error
+            ? e.message
+            : intlRef.current.formatMessage({
+                id: "b1.onboard.identity.discoveryFailed",
+              }),
+        );
       })
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
@@ -528,102 +556,119 @@ function StepIdentity({
 
   return (
     <Card
-      title="Connect your identity provider"
+      title={intl.formatMessage({ id: "b1.onboard.identity.title" })}
       actions={
-        <HelpTooltip title="Single sign-on" align="right">
-          ShieldNet federates sign-in to your identity provider (Okta, Entra ID,
-          Google Workspace, …) over OIDC, and can sync users and groups via
-          SCIM. SSO is configured when the console is deployed; here we verify
-          it's live.
+        <HelpTooltip
+          title={intl.formatMessage({ id: "b1.onboard.identity.enabled" })}
+          align="right"
+        >
+          <FormattedMessage id="b1.onboard.identity.help" />
         </HelpTooltip>
       }
     >
       {cfg.authMode === "oidc" ? (
         <>
           <div style={{ marginBottom: 12 }}>
-            <Badge tone="ok">OIDC / SSO enabled</Badge>
+            <Badge tone="ok">
+              <FormattedMessage id="b1.onboard.identity.enabled" />
+            </Badge>
           </div>
           <dl className="kv">
-            <dt>Issuer</dt>
+            <dt>
+              <FormattedMessage id="b1.onboard.identity.issuer" />
+            </dt>
             <dd className="mono">{cfg.oidcIssuer || "—"}</dd>
-            <dt>Client ID</dt>
+            <dt>
+              <FormattedMessage id="b1.onboard.identity.clientId" />
+            </dt>
             <dd className="mono">{cfg.oidcClientId || "—"}</dd>
-            <dt>Scopes</dt>
+            <dt>
+              <FormattedMessage id="b1.onboard.identity.scopes" />
+            </dt>
             <dd className="mono">{cfg.oidcScope}</dd>
           </dl>
           <div style={{ marginTop: 12 }}>
             {loading ? (
-              <div
-                style={{ display: "flex", gap: 8, alignItems: "center" }}
-              >
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                 <Spinner />
-                <span className="muted">Verifying issuer…</span>
+                <span className="muted">
+                  <FormattedMessage id="b1.onboard.identity.verifying" />
+                </span>
               </div>
             ) : error ? (
               <>
-                <p className="error-text">
-                  Could not reach the issuer's discovery document: {error}.
-                  Check the issuer URL and that it's reachable from the browser.
+                <p className="error-text" role="alert">
+                  <FormattedMessage
+                    id="b1.onboard.identity.verifyFailed"
+                    values={{ detail: error }}
+                  />
                 </p>
                 <button
                   className="btn"
                   style={{ marginTop: 8 }}
                   onClick={() => setReloadKey((k) => k + 1)}
                 >
-                  Retry verification
+                  <FormattedMessage id="b1.common.retry" />
                 </button>
               </>
             ) : discovery ? (
               <>
                 <p style={{ color: "var(--ok)", fontSize: 13 }}>
-                  ✓ Discovery document verified — single sign-on is ready.
+                  ✓ <FormattedMessage id="b1.onboard.identity.verified" />
                 </p>
                 <dl className="kv">
-                  <dt>Authorization</dt>
+                  <dt>
+                    <FormattedMessage id="b1.onboard.identity.authorization" />
+                  </dt>
                   <dd className="mono">
                     {String(discovery.authorization_endpoint ?? "—")}
                   </dd>
-                  <dt>Token</dt>
+                  <dt>
+                    <FormattedMessage id="b1.onboard.identity.token" />
+                  </dt>
                   <dd className="mono">
                     {String(discovery.token_endpoint ?? "—")}
                   </dd>
-                  <dt>JWKS</dt>
+                  <dt>
+                    <FormattedMessage id="b1.onboard.identity.jwks" />
+                  </dt>
                   <dd className="mono">{String(discovery.jwks_uri ?? "—")}</dd>
                 </dl>
               </>
             ) : null}
           </div>
           <p className="muted" style={{ fontSize: 12.5, marginTop: 12 }}>
-            To provision users and groups automatically, configure SCIM on the{" "}
-            <Link to="/scim">directory sync</Link> page. Full federation details
-            live on the <Link to="/idp">identity provider</Link> page.
+            <FormattedMessage
+              id="b1.onboard.identity.scimHint"
+              values={{
+                scim: (chunks: ReactNode) => <Link to="/scim">{chunks}</Link>,
+                idp: (chunks: ReactNode) => <Link to="/idp">{chunks}</Link>,
+              }}
+            />
           </p>
         </>
       ) : (
         <>
           <div style={{ marginBottom: 12 }}>
-            <Badge tone="info">JWT bearer (development)</Badge>
+            <Badge tone="info">
+              <FormattedMessage id="b1.onboard.identity.devBadge" />
+            </Badge>
           </div>
           <p>
-            This console is running in development authentication mode, where it
-            accepts a pasted HMAC-signed JWT. To federate sign-in to your
-            identity provider, set <span className="mono">auth_mode=oidc</span>{" "}
-            with the issuer and client ID in the deploy-time runtime config, then
-            re-run this step to verify the connection.
+            <FormattedMessage id="b1.onboard.identity.devBody" />
           </p>
           <p className="muted" style={{ fontSize: 12.5 }}>
-            You can still continue and finish onboarding — SSO can be enabled
-            later without redoing the rest of the setup.
+            <FormattedMessage id="b1.onboard.identity.devNote" />
           </p>
         </>
       )}
 
       <div className="onboard__actions">
         <button className="btn" onClick={onBack}>
-          ← Back
+          <FormattedMessage id="b1.common.back" />
         </button>
         <button className="btn btn--primary" onClick={onNext}>
-          Continue →
+          <FormattedMessage id="b1.onboard.cta.continue" />
         </button>
       </div>
     </Card>
@@ -641,6 +686,7 @@ function StepPolicyTemplate({
   onBack: () => void;
   onNext: () => void;
 }) {
+  const intl = useIntl();
   const templates = useDlpTemplates(tenantId);
   const apply = useApplyDlpTemplate(tenantId);
   const toast = useToast();
@@ -656,14 +702,14 @@ function StepPolicyTemplate({
     apply.mutate(selected, {
       onSuccess: () => {
         toast.success(
-          "Protection applied",
-          "Your data-loss policy is now active.",
+          intl.formatMessage({ id: "b1.onboard.toast.protectionApplied.title" }),
+          intl.formatMessage({ id: "b1.onboard.toast.protectionApplied.body" }),
         );
         onNext();
       },
       onError: (e) =>
         toast.error(
-          "Could not apply template",
+          intl.formatMessage({ id: "b1.onboard.toast.policyFailed" }),
           e instanceof Error ? e.message : undefined,
         ),
     });
@@ -671,12 +717,13 @@ function StepPolicyTemplate({
 
   return (
     <Card
-      title="Apply a policy template"
+      title={intl.formatMessage({ id: "b1.onboard.policy.title" })}
       actions={
-        <HelpTooltip title="Policy templates" align="right">
-          These are pre-built data-loss prevention (DLP) policies. They decide
-          what sensitive information — card numbers, ID numbers, secrets —
-          ShieldNet watches for and blocks. You can fine-tune everything later.
+        <HelpTooltip
+          title={intl.formatMessage({ id: "b1.onboard.policy.title" })}
+          align="right"
+        >
+          <FormattedMessage id="b1.onboard.policy.help" />
         </HelpTooltip>
       }
     >
@@ -684,8 +731,7 @@ function StepPolicyTemplate({
         <div className="skeleton" style={{ height: 120 }} />
       ) : items.length === 0 ? (
         <p className="muted">
-          No policy templates are published for this tenant yet. You can skip
-          this step and configure DLP later from the DLP page.
+          <FormattedMessage id="b1.onboard.policy.none" />
         </p>
       ) : (
         <div className="choice-grid">
@@ -699,7 +745,12 @@ function StepPolicyTemplate({
               <div className="choice__name">{titleCase(t.name)}</div>
               <div className="choice__desc">{t.description}</div>
               <div style={{ marginTop: 8 }}>
-                <Badge tone="info">{t.rules?.length ?? 0} rules</Badge>
+                <Badge tone="info">
+                  <FormattedMessage
+                    id="b1.onboard.policy.rules"
+                    values={{ count: t.rules?.length ?? 0 }}
+                  />
+                </Badge>
               </div>
             </button>
           ))}
@@ -707,18 +758,20 @@ function StepPolicyTemplate({
       )}
       <div className="onboard__actions">
         <button className="btn" onClick={onBack}>
-          ← Back
+          <FormattedMessage id="b1.common.back" />
         </button>
         <button
           className="btn btn--primary"
           onClick={applyAndContinue}
           disabled={apply.isPending}
         >
-          {apply.isPending
-            ? "Applying…"
-            : selected
-              ? "Apply & continue →"
-              : "Skip for now →"}
+          {apply.isPending ? (
+            <FormattedMessage id="b1.onboard.cta.applyingPolicy" />
+          ) : selected ? (
+            <FormattedMessage id="b1.onboard.cta.applyContinue" />
+          ) : (
+            <FormattedMessage id="b1.onboard.cta.skipForNow" />
+          )}
         </button>
       </div>
     </Card>
@@ -736,6 +789,7 @@ function StepDeploy({
   onBack: () => void;
   onFinish: () => void;
 }) {
+  const intl = useIntl();
   const create = useCreateClaimToken();
   const devices = useListDevices(tenantId, undefined);
   const toast = useToast();
@@ -761,7 +815,7 @@ function StepDeploy({
         onSuccess: setToken,
         onError: (e) =>
           toast.error(
-            "Could not generate token",
+            intl.formatMessage({ id: "b1.onboard.toast.tokenFailed" }),
             e instanceof Error ? e.message : undefined,
           ),
       },
@@ -773,24 +827,28 @@ function StepDeploy({
     try {
       await navigator.clipboard.writeText(token.token);
       setCopied(true);
-      toast.success("Copied", "Claim token copied to your clipboard.");
+      toast.success(
+        intl.formatMessage({ id: "b1.onboard.toast.copied.title" }),
+        intl.formatMessage({ id: "b1.onboard.toast.copied.body" }),
+      );
       if (copyTimer.current) clearTimeout(copyTimer.current);
       copyTimer.current = setTimeout(() => setCopied(false), 2000);
     } catch {
-      toast.error("Copy failed", "Select the token and copy it manually.");
+      toast.error(
+        intl.formatMessage({ id: "b1.onboard.toast.copyFailed.title" }),
+        intl.formatMessage({ id: "b1.onboard.toast.copyFailed.body" }),
+      );
     }
   };
 
   return (
-    <Card title="Deploy & enrol your first device">
+    <Card title={intl.formatMessage({ id: "b1.onboard.deploy.title" })}>
       <p className="muted">
-        A claim token lets a device join this tenant securely. Generate one,
-        then install the ShieldNet agent on the device and paste the token (or
-        scan the QR) when it asks.
+        <FormattedMessage id="b1.onboard.deploy.intro" />
       </p>
       {enrolled > 0 && (
         <p className="muted">
-          {enrolled} device{enrolled === 1 ? "" : "s"} already enrolled.
+          <FormattedMessage id="b1.onboard.deploy.enrolled" values={{ count: enrolled }} />
         </p>
       )}
 
@@ -800,34 +858,44 @@ function StepDeploy({
           onClick={generate}
           disabled={create.isPending}
         >
-          {create.isPending ? "Generating…" : "Generate claim token"}
+          {create.isPending ? (
+            <FormattedMessage id="b1.onboard.cta.generating" />
+          ) : (
+            <FormattedMessage id="b1.onboard.cta.generateToken" />
+          )}
         </button>
       ) : (
         <div className="grid grid--2" style={{ marginTop: 4 }}>
           <div>
             <label className="field">
-              <span>Claim token (shown once)</span>
+              <span>
+                <FormattedMessage id="b1.onboard.deploy.tokenLabel" />
+              </span>
               <div className="copy-field">
                 <input readOnly value={token.token} className="mono" />
                 <button className="btn" onClick={copy}>
-                  {copied ? "Copied ✓" : "Copy"}
+                  {copied ? (
+                    <FormattedMessage id="b1.onboard.cta.copied" />
+                  ) : (
+                    <FormattedMessage id="b1.onboard.cta.copy" />
+                  )}
                 </button>
               </div>
             </label>
             <p className="muted" style={{ fontSize: 12 }}>
-              Expires {new Date(token.expires_at).toLocaleString()}. Generate a
-              fresh token if it lapses.
+              <FormattedMessage
+                id="b1.onboard.deploy.expires"
+                values={{ date: new Date(token.expires_at).toLocaleString() }}
+              />
             </p>
             <p style={{ fontSize: 13 }}>
-              On the device, install the ShieldNet agent and choose{" "}
-              <b>Enrol with token</b>, then paste the value above. Mobile agents
-              can scan the QR instead.
+              <FormattedMessage id="b1.onboard.deploy.instructions" />
             </p>
           </div>
           <div style={{ display: "grid", placeItems: "center" }}>
             <QrCode value={token.token} size={168} />
             <span className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-              Scan with the mobile agent
+              <FormattedMessage id="b1.onboard.deploy.scanHint" />
             </span>
           </div>
         </div>
@@ -841,36 +909,45 @@ function StepDeploy({
         }}
       >
         <h3 style={{ margin: "0 0 6px", fontSize: 14 }}>
-          You're protected 🎉
+          <FormattedMessage id="b1.onboard.deploy.doneTitle" />
         </h3>
         <p className="muted" style={{ fontSize: 13 }}>
-          ShieldNet is now watching this tenant's traffic. Here's where to go
-          next:
+          <FormattedMessage id="b1.onboard.deploy.doneSub" />
         </p>
         <ul className="done-links">
           <li>
-            <Link to="/">Dashboard</Link> — your security posture at a glance.
+            <FormattedMessage
+              id="b1.onboard.deploy.link.dashboard"
+              values={{ link: (chunks: ReactNode) => <Link to="/">{chunks}</Link> }}
+            />
           </li>
           <li>
-            <Link to="/alerts">Alerts</Link> — anomalies and threats as they're
-            detected.
+            <FormattedMessage
+              id="b1.onboard.deploy.link.alerts"
+              values={{ link: (chunks: ReactNode) => <Link to="/alerts">{chunks}</Link> }}
+            />
           </li>
           <li>
-            <Link to="/policy">Policy</Link> — review and fine-tune what's
-            allowed.
+            <FormattedMessage
+              id="b1.onboard.deploy.link.policy"
+              values={{ link: (chunks: ReactNode) => <Link to="/policy">{chunks}</Link> }}
+            />
           </li>
           <li>
-            <Link to="/devices">Devices</Link> — enrol more devices any time.
+            <FormattedMessage
+              id="b1.onboard.deploy.link.devices"
+              values={{ link: (chunks: ReactNode) => <Link to="/devices">{chunks}</Link> }}
+            />
           </li>
         </ul>
       </div>
 
       <div className="onboard__actions">
         <button className="btn" onClick={onBack}>
-          ← Back
+          <FormattedMessage id="b1.common.back" />
         </button>
         <button className="btn btn--primary" onClick={onFinish}>
-          Go to dashboard →
+          <FormattedMessage id="b1.onboard.cta.goDashboard" />
         </button>
       </div>
     </Card>

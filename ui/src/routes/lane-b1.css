@@ -1,0 +1,84 @@
+/* Lane B1 (Gateway console front door) — scoped style overrides.
+ *
+ * Styles ONLY the six Lane B1 screens (Login, OidcCallback, Onboarding,
+ * GuidedOnboarding, Dashboard, Settings). Each renders inside a `.lane-b1`
+ * wrapper, so every rule here is namespaced and cannot leak into other lanes.
+ *
+ * This file never edits the frozen WS0 foundation. Instead it RE-SCOPES a few
+ * design tokens locally so the lane clears WCAG 2.2 AA where the shared tokens
+ * currently fall short. Each underlying token gap is listed under the
+ * "WS0 follow-up" heading in the PR description so WS0 can fix them centrally
+ * and these scoped overrides can later be removed.
+ */
+
+/* 1. Faint text → dim text.
+ *    `--text-faint` (#6b7280 light / #69748a dark) drops below 4.5:1 on the
+ *    elevated bluish surface (~4.3:1) and on dark surfaces (~3.7:1). Aliasing
+ *    it to `--text-dim` clears AA on every surface in both themes, covering all
+ *    `.muted` copy, card subtitles, stat labels and table meta in the lane. */
+.lane-b1 {
+  --text-faint: var(--text-dim);
+}
+
+/* 2. Semantic colours used as TEXT in the light theme.
+ *    `--ok` (#059669, ~3.8:1) and `--warn` (#d97706, ~3.2:1) fail AA as text on
+ *    white / near-white surfaces. Re-scope them to AA-passing shades — the
+ *    existing `--ok-strong` token, and `--warn` darkened toward `--text` via
+ *    color-mix (token-derived, no literal colour). The dark-theme values are
+ *    bright-on-dark and already pass, so they are intentionally left untouched. */
+:root[data-theme="light"] .lane-b1 {
+  --ok: var(--ok-strong);
+  --warn: color-mix(in srgb, var(--warn) 68%, var(--text));
+}
+
+/* 3. Primary button in the dark theme.
+ *    White text on `--brand` (#4d83f0) is ~3.6:1 in dark. Swap the lane's
+ *    primary-button fill to `--brand-strong` (#255fe5 → ~5.5:1). Hover darkens
+ *    slightly so the affordance stays visible while contrast only improves. */
+:root[data-theme="dark"] .lane-b1 .btn--primary {
+  background: var(--brand-strong);
+  border-color: var(--brand-strong);
+}
+:root[data-theme="dark"] .lane-b1 .btn--primary:hover {
+  background: var(--brand-strong);
+  border-color: var(--brand-strong);
+  filter: brightness(0.92);
+}
+
+/* Same fix for the no-JS / pre-paint fallback path, where the OS prefers dark
+ * and no explicit data-theme has been stamped yet. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]):not([data-theme="dark"]) .lane-b1 .btn--primary {
+    background: var(--brand-strong);
+    border-color: var(--brand-strong);
+  }
+  :root:not([data-theme="light"]):not([data-theme="dark"]) .lane-b1 .btn--primary:hover {
+    filter: brightness(0.92);
+  }
+}
+
+/* Visually-hidden helper for screen-reader-only labels (the foundation has no
+ * such utility). Used for stepper state announcements and icon-only controls. */
+.lane-b1 .sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* 4. Lane-local layout helpers (design-system aligned; no new colours).
+ *    A constrained column for the simple single-field preference forms in
+ *    Settings, and a footnote row that keeps inline guidance readable. */
+.lane-b1 .field--narrow {
+  max-width: 340px;
+}
+.lane-b1 .lane-note {
+  margin-top: 14px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
