@@ -24,8 +24,16 @@ export const integrationsMsg = defineMessages({
   colLastTest: { id: "laneB5.integrations.col.lastTest", defaultMessage: "Last test" },
   colActions: { id: "laneB5.integrations.col.actions", defaultMessage: "Actions" },
   test: { id: "laneB5.integrations.test", defaultMessage: "Test" },
+  testAria: {
+    id: "laneB5.integrations.test.aria",
+    defaultMessage: "Test the {name} connection",
+  },
   testing: { id: "laneB5.integrations.testing", defaultMessage: "Testing…" },
   remove: { id: "laneB5.integrations.remove", defaultMessage: "Remove" },
+  removeAria: {
+    id: "laneB5.integrations.remove.aria",
+    defaultMessage: "Remove the {name} connector",
+  },
   neverTested: { id: "laneB5.integrations.neverTested", defaultMessage: "Not tested yet" },
   emptyTitle: {
     id: "laneB5.integrations.empty.title",
@@ -95,6 +103,10 @@ export const webhooksMsg = defineMessages({
   colCreated: { id: "laneB5.webhooks.col.created", defaultMessage: "Added" },
   colActions: { id: "laneB5.webhooks.col.actions", defaultMessage: "Actions" },
   remove: { id: "laneB5.webhooks.remove", defaultMessage: "Remove" },
+  removeAria: {
+    id: "laneB5.webhooks.remove.aria",
+    defaultMessage: "Remove the endpoint {url}",
+  },
   removing: { id: "laneB5.webhooks.removing", defaultMessage: "Removing…" },
   emptyTitle: { id: "laneB5.webhooks.empty.title", defaultMessage: "No webhook endpoints yet" },
   emptyBody: {
@@ -130,6 +142,12 @@ export const webhooksMsg = defineMessages({
     id: "laneB5.webhooks.create.error",
     defaultMessage:
       "We couldn''t create that webhook. Check the URL and selected events, then try again.",
+  },
+  createdTitle: { id: "laneB5.webhooks.created.title", defaultMessage: "Webhook added" },
+  createdBody: {
+    id: "laneB5.webhooks.created.body",
+    defaultMessage:
+      "Your endpoint is ready and will start receiving the events you selected.",
   },
   secretTitle: { id: "laneB5.webhooks.secret.title", defaultMessage: "Save your signing secret" },
   secretBody: {
@@ -234,7 +252,15 @@ export const playbooksMsg = defineMessages({
     defaultMessage: "Awaiting approval",
   },
   approve: { id: "laneB5.playbooks.approve", defaultMessage: "Approve & run" },
+  approveAria: {
+    id: "laneB5.playbooks.approve.aria",
+    defaultMessage: "Approve and run playbook {id}",
+  },
   reject: { id: "laneB5.playbooks.reject", defaultMessage: "Decline" },
+  rejectAria: {
+    id: "laneB5.playbooks.reject.aria",
+    defaultMessage: "Decline playbook {id}",
+  },
   playbooksTitle: { id: "laneB5.playbooks.list.title", defaultMessage: "Playbooks" },
   pbColName: { id: "laneB5.playbooks.list.col.name", defaultMessage: "Name" },
   pbColTrigger: { id: "laneB5.playbooks.list.col.trigger", defaultMessage: "Runs when" },
@@ -334,6 +360,7 @@ export const assistantMsg = defineMessages({
   },
   heuristic: { id: "laneB5.assistant.meta.heuristic", defaultMessage: "heuristic" },
   deterministic: { id: "laneB5.assistant.meta.deterministic", defaultMessage: "deterministic" },
+  evaluated: { id: "laneB5.assistant.meta.evaluated", defaultMessage: "evaluated" },
   errorMeta: { id: "laneB5.assistant.meta.error", defaultMessage: "Couldn''t answer" },
   errorGeneric: {
     id: "laneB5.assistant.error.generic",
@@ -491,7 +518,8 @@ export const meteringMsg = defineMessages({
   fleetTitle: { id: "laneB5.metering.fleet.title", defaultMessage: "Fleet cost & margin" },
   fleetSubtitle: {
     id: "laneB5.metering.fleet.subtitle",
-    defaultMessage: "{count} tenants — platform-wide cost report.",
+    defaultMessage:
+      "{count, plural, one {# tenant} other {# tenants}} — platform-wide cost report.",
   },
   fleetEmptyTitle: { id: "laneB5.metering.fleet.empty.title", defaultMessage: "No tenants yet" },
   fleetEmptyBody: {

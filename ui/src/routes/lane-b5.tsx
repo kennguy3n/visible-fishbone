@@ -44,14 +44,23 @@ export function ConfirmDialog({
       onClose={onClose}
       footer={
         <>
-          <button className="btn" onClick={onClose} disabled={busy}>
+          {/* For destructive dialogs, initial focus lands on the safe option
+              (Cancel) per the WAI-ARIA alert-dialog pattern, so a stray Enter
+              can't trigger the irreversible action. Confirmatory (primary)
+              dialogs focus the confirm button for fast keyboard completion. */}
+          <button
+            className="btn"
+            onClick={onClose}
+            disabled={busy}
+            autoFocus={tone === "danger"}
+          >
             {cancelLabel}
           </button>
           <button
             className={`btn ${tone === "danger" ? "btn--danger" : "btn--primary"}`}
             onClick={onConfirm}
             disabled={busy}
-            autoFocus
+            autoFocus={tone !== "danger"}
           >
             {busy && busyLabel ? busyLabel : confirmLabel}
           </button>

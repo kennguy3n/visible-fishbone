@@ -64,7 +64,11 @@ function WebhooksInner({ tenantId }: { tenantId: string }) {
     {
       header: intl.formatMessage(M.colActions),
       cell: (w) => (
-        <button className="btn btn--danger btn--sm" onClick={() => setToDelete(w)}>
+        <button
+          className="btn btn--danger btn--sm"
+          onClick={() => setToDelete(w)}
+          aria-label={intl.formatMessage(M.removeAria, { url: w.url })}
+        >
           {intl.formatMessage(M.remove)}
         </button>
       ),
@@ -135,7 +139,8 @@ function CreateWebhook({ tenantId, onClose }: { tenantId: string; onClose: () =>
   const create = useCreateWebhook();
   const [url, setUrl] = useState("");
   const [events, setEvents] = useState<Set<string>>(new Set(["alert.created"]));
-  const [secret, setSecret] = useState<string | null>(null);
+  const [created, setCreated] = useState(false);
+  const [secret, setSecret] = useState("");
   const [copied, setCopied] = useState(false);
 
   const toggle = (e: string) =>
@@ -158,11 +163,15 @@ function CreateWebhook({ tenantId, onClose }: { tenantId: string; onClose: () =>
 
   return (
     <Modal
-      title={secret ? intl.formatMessage(M.secretTitle) : intl.formatMessage(M.createTitle)}
+      title={
+        created
+          ? intl.formatMessage(secret ? M.secretTitle : M.createdTitle)
+          : intl.formatMessage(M.createTitle)
+      }
       onClose={onClose}
       footer={
-        secret ? (
-          <button className="btn btn--primary" onClick={onClose}>
+        created ? (
+          <button className="btn btn--primary" onClick={onClose} autoFocus>
             {intl.formatMessage(M.done)}
           </button>
         ) : (
@@ -176,7 +185,12 @@ function CreateWebhook({ tenantId, onClose }: { tenantId: string; onClose: () =>
               onClick={() =>
                 create.mutate(
                   { tenantId, data: { url, events: [...events] } },
-                  { onSuccess: (w) => setSecret(w.secret ?? "") },
+                  {
+                    onSuccess: (w) => {
+                      setSecret(w.secret ?? "");
+                      setCreated(true);
+                    },
+                  },
                 )
               }
             >
@@ -188,16 +202,20 @@ function CreateWebhook({ tenantId, onClose }: { tenantId: string; onClose: () =>
         )
       }
     >
-      {secret ? (
-        <>
-          <p className="lane-prose">{intl.formatMessage(M.secretBody)}</p>
-          <div className="lane-secret">
-            <code>{secret}</code>
-            <button className="btn btn--sm" onClick={copySecret}>
-              {copied ? intl.formatMessage(M.copied) : intl.formatMessage(M.copy)}
-            </button>
-          </div>
-        </>
+      {created ? (
+        secret ? (
+          <>
+            <p className="lane-prose">{intl.formatMessage(M.secretBody)}</p>
+            <div className="lane-secret">
+              <code>{secret}</code>
+              <button className="btn btn--sm" onClick={copySecret}>
+                {copied ? intl.formatMessage(M.copied) : intl.formatMessage(M.copy)}
+              </button>
+            </div>
+          </>
+        ) : (
+          <p className="lane-prose">{intl.formatMessage(M.createdBody)}</p>
+        )
       ) : (
         <>
           <label className="field">

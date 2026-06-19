@@ -83,7 +83,7 @@ function AssistantInner({ tenantId }: { tenantId: string }) {
           {
             role: "ai",
             text: `${intl.formatMessage(M.verdict)}: ${res.verdict}\n\n${res.explanation}${matched}`,
-            meta: `${res.evaluation_mode ?? ""} · ${source}`.replace(/^ · /, ""),
+            meta: `${res.evaluation_mode ?? intl.formatMessage(M.evaluated)} · ${source}`,
           },
         ]);
       }

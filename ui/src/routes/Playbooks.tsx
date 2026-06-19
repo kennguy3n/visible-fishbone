@@ -121,6 +121,9 @@ function PlaybooksInner({ tenantId }: { tenantId: string }) {
                         className="btn btn--primary btn--sm"
                         disabled={decide.isPending}
                         onClick={() => decide.mutate({ id: a.id, decision: "approve" })}
+                        aria-label={intl.formatMessage(M.approveAria, {
+                          id: a.playbook_id.slice(0, 8),
+                        })}
                       >
                         {intl.formatMessage(M.approve)}
                       </button>
@@ -128,6 +131,9 @@ function PlaybooksInner({ tenantId }: { tenantId: string }) {
                         className="btn btn--danger btn--sm"
                         disabled={decide.isPending}
                         onClick={() => decide.mutate({ id: a.id, decision: "reject" })}
+                        aria-label={intl.formatMessage(M.rejectAria, {
+                          id: a.playbook_id.slice(0, 8),
+                        })}
                       >
                         {intl.formatMessage(M.reject)}
                       </button>

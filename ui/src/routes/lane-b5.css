@@ -201,12 +201,16 @@
   margin: 12px 0 0;
 }
 
-/* Assistant: example-prompt chips shown in the empty state. */
+/* Assistant: example-prompt chips shown (centred) in the empty state. */
 .lane-suggest {
   display: flex;
   flex-wrap: wrap;
+  justify-content: center;
   gap: 8px;
   margin-top: 14px;
+}
+.lane-suggest button {
+  width: auto;
 }
 
 /* Assistant: per-message role label above the bubble. Uses opacity (not a
@@ -235,12 +239,6 @@
   font-weight: 600;
   color: var(--text);
   margin-bottom: 6px;
-}
-.lane-suggest {
-  justify-content: center;
-}
-.lane-suggest button {
-  width: auto;
 }
 
 /* Reveal-once secret value (webhook signing secret). */

@@ -79,12 +79,14 @@ function IntegrationsInner({ tenantId }: { tenantId: string }) {
             className="btn btn--sm"
             disabled={test.isPending}
             onClick={() => test.mutate({ tenantId, id: c.id })}
+            aria-label={intl.formatMessage(M.testAria, { name: c.name })}
           >
             {intl.formatMessage(M.test)}
           </button>
           <button
             className="btn btn--danger btn--sm"
             onClick={() => setToDelete(c)}
+            aria-label={intl.formatMessage(M.removeAria, { name: c.name })}
           >
             {intl.formatMessage(M.remove)}
           </button>
