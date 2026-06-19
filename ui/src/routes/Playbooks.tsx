@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useIntl, FormattedMessage } from "react-intl";
 import {
   usePlaybooks,
   usePlaybookExecutions,
@@ -20,6 +21,8 @@ import { Modal } from "@/components/Modal";
 import { RequireTenant } from "@/components/RequireTenant";
 import { formatRelative } from "@/lib/format";
 import type { Playbook, PlaybookExecution, PlaybookApproval } from "@/api/manual/types";
+import { LanePage } from "./lane-b5";
+import { playbooksMsg as M } from "./lane-b5.messages";
 
 export function Playbooks() {
   return (
@@ -28,6 +31,7 @@ export function Playbooks() {
 }
 
 function PlaybooksInner({ tenantId }: { tenantId: string }) {
+  const intl = useIntl();
   const playbooks = usePlaybooks(tenantId);
   const executions = usePlaybookExecutions(tenantId);
   const approvals = usePendingApprovals(tenantId);
@@ -35,126 +39,152 @@ function PlaybooksInner({ tenantId }: { tenantId: string }) {
   const [showCreate, setShowCreate] = useState(false);
 
   const pbCols: Column<Playbook>[] = [
-    { header: "Name", cell: (p) => p.name },
-    { header: "Trigger", cell: (p) => <span className="mono">{p.trigger_condition}</span> },
-    { header: "Enabled", cell: (p) => <StatusBadge status={p.enabled ? "enabled" : "disabled"} /> },
+    { header: intl.formatMessage(M.pbColName), cell: (p) => p.name },
+    {
+      header: intl.formatMessage(M.pbColTrigger),
+      cell: (p) => <span className="mono">{p.trigger_condition}</span>,
+    },
+    {
+      header: intl.formatMessage(M.pbColEnabled),
+      cell: (p) => <StatusBadge status={p.enabled ? "enabled" : "disabled"} />,
+    },
   ];
 
   const exCols: Column<PlaybookExecution>[] = [
-    { header: "Playbook", cell: (e) => <span className="mono">{e.playbook_id.slice(0, 8)}</span> },
-    { header: "Status", cell: (e) => <StatusBadge status={e.status} /> },
-    { header: "Started", cell: (e) => formatRelative(e.started_at) },
-    { header: "Finished", cell: (e) => (e.finished_at ? formatRelative(e.finished_at) : "—") },
+    {
+      header: intl.formatMessage(M.exColPlaybook),
+      cell: (e) => <span className="mono">{e.playbook_id.slice(0, 8)}</span>,
+    },
+    { header: intl.formatMessage(M.exColStatus), cell: (e) => <StatusBadge status={e.status} /> },
+    { header: intl.formatMessage(M.exColStarted), cell: (e) => formatRelative(e.started_at) },
+    {
+      header: intl.formatMessage(M.exColFinished),
+      cell: (e) => (e.finished_at ? formatRelative(e.finished_at) : "—"),
+    },
   ];
 
+  const addButton = (
+    <button className="btn btn--primary" onClick={() => setShowCreate(true)}>
+      {intl.formatMessage(M.add)}
+    </button>
+  );
+
   return (
-    <>
+    <LanePage>
       <PageHeader
-        title="Playbooks"
-        subtitle="Automated response runbooks with human-in-the-loop approval."
-        actions={
-          <button className="btn btn--primary" onClick={() => setShowCreate(true)}>
-            + Playbook
-          </button>
-        }
+        title={intl.formatMessage(M.title)}
+        subtitle={intl.formatMessage(M.subtitle)}
+        actions={addButton}
       />
 
-      <Card title="Pending approvals">
-        <AsyncBoundary
-          isLoading={approvals.isLoading}
-          error={approvals.error}
-          data={approvals.data}
-          isEmpty={(d) => (d.items?.length ?? 0) === 0}
-          empty={
-            <EmptyState
-              illustration={<EmptyIllustration kind="inbox" />}
-              title="No approvals waiting"
-              description="Playbook runs that need sign-off will appear here."
-            />
-          }
-        >
-          {(d) => (
-            <div className="grid" style={{ gap: 10 }}>
-              {(d.items ?? []).map((a: PlaybookApproval) => (
-                <div
-                  key={a.id}
-                  className="card"
-                  style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}
-                >
-                  <div>
-                    <div style={{ fontWeight: 700 }}>
-                      Playbook <span className="mono">{a.playbook_id.slice(0, 8)}</span>
-                    </div>
-                    <div className="muted" style={{ fontSize: 12.5 }}>
-                      Requested by {a.requested_by} · {formatRelative(a.requested_at)} ·{" "}
-                      <Badge tone="warn">{a.status}</Badge>
-                    </div>
-                  </div>
-                  <div style={{ display: "flex", gap: 8 }}>
-                    <button
-                      className="btn btn--primary btn--sm"
-                      disabled={decide.isPending}
-                      onClick={() => decide.mutate({ id: a.id, decision: "approve" })}
-                    >
-                      Approve
-                    </button>
-                    <button
-                      className="btn btn--danger btn--sm"
-                      disabled={decide.isPending}
-                      onClick={() => decide.mutate({ id: a.id, decision: "reject" })}
-                    >
-                      Reject
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </AsyncBoundary>
-      </Card>
-
-      <div className="grid grid--2" style={{ marginTop: 16 }}>
-        <Card title="Playbooks">
+      <div className="lane-stack">
+        <Card title={intl.formatMessage(M.approvalsTitle)}>
           <AsyncBoundary
-            isLoading={playbooks.isLoading}
-            error={playbooks.error}
-            data={playbooks.data}
+            isLoading={approvals.isLoading}
+            error={approvals.error}
+            data={approvals.data}
             isEmpty={(d) => (d.items?.length ?? 0) === 0}
+            onRetry={() => approvals.refetch()}
             empty={
               <EmptyState
-                illustration={<EmptyIllustration kind="policy" />}
-                title="No playbooks yet"
-                description="Define an automated response playbook to remediate incidents with one click."
+                illustration={<EmptyIllustration kind="shield" />}
+                title={intl.formatMessage(M.approvalsEmptyTitle)}
+                description={intl.formatMessage(M.approvalsEmptyBody)}
               />
             }
           >
-            {(d) => <DataTable columns={pbCols} rows={d.items ?? []} rowKey={(p) => p.id} />}
+            {(d) => (
+              <div className="lane-stack">
+                {(d.items ?? []).map((a: PlaybookApproval) => (
+                  <div key={a.id} className="card lane-approval">
+                    <div>
+                      <div className="lane-approval__title">
+                        <FormattedMessage
+                          {...M.approvalHeading}
+                          values={{
+                            id: <span className="mono">{a.playbook_id.slice(0, 8)}</span>,
+                          }}
+                        />
+                      </div>
+                      <div className="lane-approval__meta">
+                        {intl.formatMessage(M.approvalRequestedBy, {
+                          who: a.requested_by,
+                          when: formatRelative(a.requested_at),
+                        })}
+                        <Badge tone="warn" dot>
+                          {intl.formatMessage(M.approvalPending)}
+                        </Badge>
+                      </div>
+                    </div>
+                    <div className="lane-approval__actions">
+                      <button
+                        className="btn btn--primary btn--sm"
+                        disabled={decide.isPending}
+                        onClick={() => decide.mutate({ id: a.id, decision: "approve" })}
+                      >
+                        {intl.formatMessage(M.approve)}
+                      </button>
+                      <button
+                        className="btn btn--danger btn--sm"
+                        disabled={decide.isPending}
+                        onClick={() => decide.mutate({ id: a.id, decision: "reject" })}
+                      >
+                        {intl.formatMessage(M.reject)}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </AsyncBoundary>
         </Card>
 
-        <Card title="Recent executions">
-          <AsyncBoundary
-            isLoading={executions.isLoading}
-            error={executions.error}
-            data={executions.data}
-            isEmpty={(d) => (d.items?.length ?? 0) === 0}
-            empty={
-              <EmptyState
-                illustration={<EmptyIllustration kind="inbox" />}
-                title="No executions yet"
-                description="Playbook runs and their outcomes will be listed here."
-              />
-            }
-          >
-            {(d) => <DataTable columns={exCols} rows={d.items ?? []} rowKey={(e) => e.id} />}
-          </AsyncBoundary>
-        </Card>
+        <div className="grid grid--2">
+          <Card title={intl.formatMessage(M.playbooksTitle)}>
+            <AsyncBoundary
+              isLoading={playbooks.isLoading}
+              error={playbooks.error}
+              data={playbooks.data}
+              isEmpty={(d) => (d.items?.length ?? 0) === 0}
+              onRetry={() => playbooks.refetch()}
+              empty={
+                <EmptyState
+                  illustration={<EmptyIllustration kind="policy" />}
+                  title={intl.formatMessage(M.pbEmptyTitle)}
+                  description={intl.formatMessage(M.pbEmptyBody)}
+                  action={addButton}
+                />
+              }
+            >
+              {(d) => <DataTable columns={pbCols} rows={d.items ?? []} rowKey={(p) => p.id} />}
+            </AsyncBoundary>
+          </Card>
+
+          <Card title={intl.formatMessage(M.execTitle)}>
+            <AsyncBoundary
+              isLoading={executions.isLoading}
+              error={executions.error}
+              data={executions.data}
+              isEmpty={(d) => (d.items?.length ?? 0) === 0}
+              onRetry={() => executions.refetch()}
+              empty={
+                <EmptyState
+                  illustration={<EmptyIllustration kind="inbox" />}
+                  title={intl.formatMessage(M.execEmptyTitle)}
+                  description={intl.formatMessage(M.execEmptyBody)}
+                />
+              }
+            >
+              {(d) => <DataTable columns={exCols} rows={d.items ?? []} rowKey={(e) => e.id} />}
+            </AsyncBoundary>
+          </Card>
+        </div>
       </div>
 
       {showCreate && (
         <CreatePlaybookModal tenantId={tenantId} onClose={() => setShowCreate(false)} />
       )}
-    </>
+    </LanePage>
   );
 }
 
@@ -165,6 +195,7 @@ function CreatePlaybookModal({
   tenantId: string;
   onClose: () => void;
 }) {
+  const intl = useIntl();
   const create = useCreatePlaybook(tenantId);
   const [name, setName] = useState("");
   const [trigger, setTrigger] = useState("alert.severity == 'critical'");
@@ -179,7 +210,7 @@ function CreatePlaybookModal({
     try {
       parsedSteps = JSON.parse(steps);
     } catch {
-      setErr("Steps must be valid JSON.");
+      setErr(intl.formatMessage(M.stepsError));
       return;
     }
     create.mutate(
@@ -190,43 +221,59 @@ function CreatePlaybookModal({
 
   return (
     <Modal
-      title="New playbook"
+      title={intl.formatMessage(M.createTitle)}
       onClose={onClose}
       footer={
         <>
-          <button className="btn" onClick={onClose}>
-            Cancel
+          <button className="btn" onClick={onClose} disabled={create.isPending}>
+            {intl.formatMessage(M.cancel)}
           </button>
           <button
             className="btn btn--primary"
             disabled={!name || create.isPending}
             onClick={submit}
           >
-            {create.isPending ? "Creating…" : "Create"}
+            {create.isPending ? intl.formatMessage(M.creating) : intl.formatMessage(M.create)}
           </button>
         </>
       }
     >
       <label className="field">
-        <span>Name</span>
-        <input value={name} onChange={(e) => setName(e.target.value)} />
+        <span>{intl.formatMessage(M.nameLabel)}</span>
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder={intl.formatMessage(M.namePlaceholder)}
+          autoFocus
+        />
       </label>
       <label className="field">
-        <span>Trigger condition</span>
-        <input value={trigger} onChange={(e) => setTrigger(e.target.value)} />
+        <span>{intl.formatMessage(M.triggerLabel)}</span>
+        <input
+          className="mono"
+          value={trigger}
+          onChange={(e) => setTrigger(e.target.value)}
+        />
       </label>
+      <p className="lane-help">{intl.formatMessage(M.triggerHelp)}</p>
       <label className="field">
-        <span>Steps (JSON)</span>
+        <span>{intl.formatMessage(M.stepsLabel)}</span>
         <textarea
-          style={{ minHeight: 140 }}
+          rows={8}
+          className="lane-code"
           value={steps}
           onChange={(e) => setSteps(e.target.value)}
         />
       </label>
-      {err && <p className="error-text">{err}</p>}
+      <p className="lane-help">{intl.formatMessage(M.stepsHelp)}</p>
+      {err && (
+        <p className="error-text" role="alert">
+          {err}
+        </p>
+      )}
       {create.isError && (
-        <p className="error-text">
-          {create.error instanceof Error ? create.error.message : "Failed"}
+        <p className="error-text" role="alert">
+          {intl.formatMessage(M.createError)}
         </p>
       )}
     </Modal>

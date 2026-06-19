@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import { useIntl, type IntlShape, type MessageDescriptor } from "react-intl";
 import {
   LineChart,
   Line,
@@ -50,25 +51,28 @@ import {
   type Tone,
 } from "@/lib/format";
 import { CHART, CHART_TOOLTIP } from "@/lib/chart-theme";
+import { LanePage } from "./lane-b5";
+import { meteringMsg as M, meterMsg } from "./lane-b5.messages";
 
 const TOOLTIP = CHART_TOOLTIP;
 
 // Display labels for the meter enum (titleCase mangles the LLM/URL/S3
 // initialisms). Falls back to titleCase for anything unmapped so a new
 // backend meter still renders sensibly without a UI change.
-const METER_LABELS: Record<string, string> = {
-  llm_tokens_used: "LLM tokens",
-  llm_calls: "LLM calls",
-  url_cat_lookups: "URL categorisation",
-  malware_scans: "Malware scans",
-  clickhouse_rows_written: "ClickHouse rows",
-  s3_bytes_archived: "S3 bytes archived",
-  bandwidth_proxied_bytes: "Bandwidth proxied",
-  policy_evaluations: "Policy evaluations",
+const METER_KEYS: Record<string, MessageDescriptor> = {
+  llm_tokens_used: meterMsg.llm_tokens_used,
+  llm_calls: meterMsg.llm_calls,
+  url_cat_lookups: meterMsg.url_cat_lookups,
+  malware_scans: meterMsg.malware_scans,
+  clickhouse_rows_written: meterMsg.clickhouse_rows_written,
+  s3_bytes_archived: meterMsg.s3_bytes_archived,
+  bandwidth_proxied_bytes: meterMsg.bandwidth_proxied_bytes,
+  policy_evaluations: meterMsg.policy_evaluations,
 };
 
-function meterLabel(meter: string): string {
-  return METER_LABELS[meter] ?? titleCase(meter);
+function meterLabel(intl: IntlShape, meter: string): string {
+  const key = METER_KEYS[meter];
+  return key ? intl.formatMessage(key) : titleCase(meter);
 }
 
 // Margin floor below which a tenant is rendered as loss-risk (red). Per
@@ -83,6 +87,7 @@ export function Metering() {
 }
 
 function MeteringInner({ tenantId }: { tenantId: string }) {
+  const intl = useIntl();
   const [months, setMonths] = useState(6);
   const [budgetOpen, setBudgetOpen] = useState(false);
 
@@ -98,10 +103,10 @@ function MeteringInner({ tenantId }: { tenantId: string }) {
   const usageLines = usage.data?.lines ?? [];
 
   return (
-    <>
+    <LanePage>
       <PageHeader
-        title="Metering & cost"
-        subtitle="Usage against soft/hard budgets, projected spend, and infrastructure cost drivers."
+        title={intl.formatMessage(M.title)}
+        subtitle={intl.formatMessage(M.subtitle)}
         actions={
           <div className="toolbar">
             <button
@@ -109,21 +114,21 @@ function MeteringInner({ tenantId }: { tenantId: string }) {
               onClick={() => setBudgetOpen(true)}
               disabled={usageLines.length === 0}
             >
-              Edit budgets
+              {intl.formatMessage(M.editBudgets)}
             </button>
           </div>
         }
       />
 
-      <SummaryCards
-        usageLines={usageLines}
-        usageLoading={usage.isLoading}
-        report={costReport.data}
-        reportLoading={costReport.isLoading}
-        isPlatformAdmin={isPlatformAdmin}
-      />
+      <div className="lane-stack">
+        <SummaryCards
+          usageLines={usageLines}
+          usageLoading={usage.isLoading}
+          report={costReport.data}
+          reportLoading={costReport.isLoading}
+          isPlatformAdmin={isPlatformAdmin}
+        />
 
-      <div style={{ marginTop: 16 }}>
         <UsageByMeterTable
           usage={usageLines}
           report={costReport.data}
@@ -132,9 +137,7 @@ function MeteringInner({ tenantId }: { tenantId: string }) {
           hasData={usage.data !== undefined}
           onRetry={() => usage.refetch()}
         />
-      </div>
 
-      <div style={{ marginTop: 16 }}>
         <UsageTrendChart
           tenantId={tenantId}
           months={months}
@@ -145,28 +148,18 @@ function MeteringInner({ tenantId }: { tenantId: string }) {
           hasData={history.data !== undefined}
           onRetry={() => history.refetch()}
         />
-      </div>
 
-      <div style={{ marginTop: 16 }}>
         <InfraCostBreakdown
           data={cost.data}
           isLoading={cost.isLoading}
           error={cost.error}
           onRetry={() => cost.refetch()}
         />
+
+        {isPlatformAdmin && platform.data && <FleetTable report={platform.data} />}
+
+        <p className="page-footnote">{intl.formatMessage(M.footnote)}</p>
       </div>
-
-      {isPlatformAdmin && platform.data && (
-        <div style={{ marginTop: 16 }}>
-          <FleetTable report={platform.data} />
-        </div>
-      )}
-
-      <p className="page-footnote">
-        All monetary values are USD estimates for cost/margin analysis — not
-        invoices. NATS/S3 figures are point-in-time storage gauges; ClickHouse
-        is a projected monthly write flow.
-      </p>
 
       {budgetOpen && (
         <BudgetEditor
@@ -175,7 +168,7 @@ function MeteringInner({ tenantId }: { tenantId: string }) {
           onClose={() => setBudgetOpen(false)}
         />
       )}
-    </>
+    </LanePage>
   );
 }
 
@@ -194,6 +187,8 @@ function SummaryCards({
   reportLoading: boolean;
   isPlatformAdmin: boolean;
 }) {
+  const intl = useIntl();
+
   if (usageLoading || reportLoading) {
     return (
       <div className="grid grid--stats">
@@ -210,10 +205,10 @@ function SummaryCards({
   const healthTone: Tone = overHard > 0 ? "danger" : overSoft > 0 ? "warn" : "ok";
   const healthLabel =
     overHard > 0
-      ? `${overHard} over hard limit`
+      ? intl.formatMessage(M.healthOverHard, { count: overHard })
       : overSoft > 0
-        ? `${overSoft} over soft limit`
-        : "All within budget";
+        ? intl.formatMessage(M.healthOverSoft, { count: overSoft })
+        : intl.formatMessage(M.healthAllOk);
 
   // Top cost driver: the meter with the largest cost share this period.
   const lines = report?.lines ?? [];
@@ -222,8 +217,7 @@ function SummaryCards({
     (top, l) => (top === null || l.cost_usd > top.cost_usd ? l : top),
     null,
   );
-  const topShare =
-    topDriver && totalCost > 0 ? topDriver.cost_usd / totalCost : 0;
+  const topShare = topDriver && totalCost > 0 ? topDriver.cost_usd / totalCost : 0;
 
   const marginTone: Tone =
     report == null
@@ -238,11 +232,13 @@ function SummaryCards({
     <div className="grid grid--stats">
       <Card>
         <Stat
-          label="Projected monthly cost"
+          label={intl.formatMessage(M.projectedLabel)}
           value={formatUSD(report?.projected_monthly_cost_usd ?? 0)}
           delta={
             <span className="stat__hint">
-              {formatUSD(report?.total_cost_usd ?? 0)} so far this period
+              {intl.formatMessage(M.projectedHint, {
+                amount: formatUSD(report?.total_cost_usd ?? 0),
+              })}
             </span>
           }
         />
@@ -250,12 +246,15 @@ function SummaryCards({
 
       <Card>
         <Stat
-          label="Budget health"
-          value={<Badge tone={healthTone} dot>{healthLabel}</Badge>}
+          label={intl.formatMessage(M.healthLabel)}
+          value={
+            <Badge tone={healthTone} dot>
+              {healthLabel}
+            </Badge>
+          }
           delta={
             <span className="stat__hint">
-              {usageLines.length} metered dimension
-              {usageLines.length === 1 ? "" : "s"}
+              {intl.formatMessage(M.healthHint, { count: usageLines.length })}
             </span>
           }
         />
@@ -264,15 +263,13 @@ function SummaryCards({
       {isPlatformAdmin && (
         <Card>
           <Stat
-            label="Margin"
-            value={
-              <Badge tone={marginTone}>
-                {formatPct(report?.margin_pct, 1)}
-              </Badge>
-            }
+            label={intl.formatMessage(M.marginLabel)}
+            value={<Badge tone={marginTone}>{formatPct(report?.margin_pct, 1)}</Badge>}
             delta={
               <span className="stat__hint">
-                {formatUSD(report?.margin_usd ?? 0)} /mo
+                {intl.formatMessage(M.marginHint, {
+                  amount: formatUSD(report?.margin_usd ?? 0),
+                })}
               </span>
             }
           />
@@ -281,13 +278,16 @@ function SummaryCards({
 
       <Card>
         <Stat
-          label="Top cost driver"
-          value={topDriver ? meterLabel(topDriver.meter) : "—"}
+          label={intl.formatMessage(M.topDriverLabel)}
+          value={topDriver ? meterLabel(intl, topDriver.meter) : "—"}
           delta={
             <span className="stat__hint">
               {topDriver
-                ? `${formatPct(topShare)} of ${formatUSD(totalCost)}`
-                : "No cost recorded yet"}
+                ? intl.formatMessage(M.topDriverHint, {
+                    pct: formatPct(topShare),
+                    amount: formatUSD(totalCost),
+                  })
+                : intl.formatMessage(M.topDriverNone)}
             </span>
           }
         />
@@ -313,6 +313,8 @@ function UsageByMeterTable({
   hasData: boolean;
   onRetry: () => void;
 }) {
+  const intl = useIntl();
+
   // Join the cost report onto the usage rows by meter so each row can
   // show its projected spend and budget utilisation alongside raw usage.
   const costByMeter = useMemo(() => {
@@ -322,10 +324,7 @@ function UsageByMeterTable({
   }, [report]);
 
   return (
-    <Card
-      title="Usage by meter"
-      subtitle="Current-period consumption, projected run rate, and cost per meter."
-    >
+    <Card title={intl.formatMessage(M.tableTitle)} subtitle={intl.formatMessage(M.tableSubtitle)}>
       <AsyncBoundary
         isLoading={isLoading}
         error={error}
@@ -334,8 +333,8 @@ function UsageByMeterTable({
         onRetry={onRetry}
         empty={
           <EmptyState
-            title="No usage recorded yet this period"
-            description="Metered consumption appears here as the tenant's traffic is processed."
+            title={intl.formatMessage(M.tableEmptyTitle)}
+            description={intl.formatMessage(M.tableEmptyBody)}
           />
         }
       >
@@ -344,15 +343,15 @@ function UsageByMeterTable({
             <table className="data">
               <thead>
                 <tr>
-                  <th>Meter</th>
-                  <th>Period</th>
-                  <th>Used</th>
-                  <th>Soft</th>
-                  <th>Hard</th>
-                  <th>Projected</th>
-                  <th>Cost</th>
-                  <th style={{ minWidth: 160 }}>Budget</th>
-                  <th>Status</th>
+                  <th>{intl.formatMessage(M.colMeter)}</th>
+                  <th>{intl.formatMessage(M.colPeriod)}</th>
+                  <th>{intl.formatMessage(M.colUsed)}</th>
+                  <th>{intl.formatMessage(M.colSoft)}</th>
+                  <th>{intl.formatMessage(M.colHard)}</th>
+                  <th>{intl.formatMessage(M.colProjected)}</th>
+                  <th>{intl.formatMessage(M.colCost)}</th>
+                  <th className="lane-col-budget">{intl.formatMessage(M.colBudget)}</th>
+                  <th>{intl.formatMessage(M.colStatus)}</th>
                 </tr>
               </thead>
               <tbody>
@@ -365,7 +364,7 @@ function UsageByMeterTable({
                       : undefined;
                   return (
                     <tr key={l.meter} className={rowClass}>
-                      <td>{meterLabel(l.meter)}</td>
+                      <td>{meterLabel(intl, l.meter)}</td>
                       <td>
                         <Badge tone="neutral">{titleCase(l.period)}</Badge>
                       </td>
@@ -419,13 +418,14 @@ function BudgetBar({
   utilization: number;
   hasLimit: boolean;
 }) {
-  if (!hasLimit) return <span className="text-dim">Unbounded</span>;
+  const intl = useIntl();
+  if (!hasLimit) return <span className="text-dim">{intl.formatMessage(M.budgetUnbounded)}</span>;
   const pct = Math.max(0, utilization);
   const width = Math.min(100, pct * 100);
   const tone =
     pct >= 1 ? "meter__fill--danger" : pct >= 0.8 ? "meter__fill--warn" : "meter__fill--ok";
   return (
-    <div className="meter" style={{ marginBottom: 0 }}>
+    <div className="meter lane-budgetbar">
       <div className="meter__head">
         <span className="text-dim">{formatPct(pct)}</span>
       </div>
@@ -474,6 +474,7 @@ function UsageTrendChart({
   hasData: boolean;
   onRetry: () => void;
 }) {
+  const intl = useIntl();
   const [hidden, setHidden] = useState<Set<string>>(new Set());
 
   // Pivot the long-format history (one row per meter per month) into a
@@ -517,18 +518,15 @@ function UsageTrendChart({
 
   return (
     <Card
-      title="Usage trend"
-      subtitle="Completed-month totals per meter. Click a meter to toggle its series."
+      title={intl.formatMessage(M.trendTitle)}
+      subtitle={intl.formatMessage(M.trendSubtitle)}
       actions={
         <label className="field-inline">
-          <span>Window</span>
-          <select
-            value={months}
-            onChange={(e) => onMonthsChange(Number(e.target.value))}
-          >
+          <span>{intl.formatMessage(M.windowLabel)}</span>
+          <select value={months} onChange={(e) => onMonthsChange(Number(e.target.value))}>
             {MONTHS_OPTIONS.map((m) => (
               <option key={m} value={m}>
-                {m} months
+                {intl.formatMessage(M.windowOption, { count: m })}
               </option>
             ))}
           </select>
@@ -543,8 +541,8 @@ function UsageTrendChart({
         onRetry={onRetry}
         empty={
           <EmptyState
-            title="No history available"
-            description="Historical usage appears after the first completed billing period."
+            title={intl.formatMessage(M.trendEmptyTitle)}
+            description={intl.formatMessage(M.trendEmptyBody)}
           />
         }
       >
@@ -562,16 +560,13 @@ function UsageTrendChart({
                     onClick={() => toggle(m)}
                     aria-pressed={on}
                   >
-                    <span
-                      className="legend-chip__dot"
-                      style={{ background: color }}
-                    />
-                    {meterLabel(m)}
+                    <span className="legend-chip__dot" style={{ background: color }} />
+                    {meterLabel(intl, m)}
                   </button>
                 );
               })}
             </div>
-            <div style={{ height: 320 }}>
+            <div className="lane-chart-line">
               <ResponsiveContainer width="100%" height="100%">
                 <LineChart data={data} margin={{ top: 8, right: 16, bottom: 0, left: 4 }}>
                   <CartesianGrid stroke={CHART.border} />
@@ -585,11 +580,11 @@ function UsageTrendChart({
                     contentStyle={TOOLTIP}
                     formatter={(v: number, name: string) => [
                       formatNumber(v),
-                      meterLabel(name),
+                      meterLabel(intl, name),
                     ]}
                   />
                   <Legend
-                    formatter={(value: string) => meterLabel(value)}
+                    formatter={(value: string) => meterLabel(intl, value)}
                     onClick={(e) => toggle(String(e.dataKey ?? e.value))}
                   />
                   {meters.map((m, i) => (
@@ -628,6 +623,7 @@ function InfraCostBreakdown({
   error: unknown;
   onRetry: () => void;
 }) {
+  const intl = useIntl();
   const segments = useMemo(() => {
     if (!data) return [];
     return [
@@ -635,7 +631,9 @@ function InfraCostBreakdown({
         name: "ClickHouse",
         value: data.clickhouse_monthly_usd,
         color: CHART.brand,
-        detail: `${formatNumber(data.clickhouse_projected_rows)} rows projected`,
+        detail: intl.formatMessage(M.infraRows, {
+          rows: formatNumber(data.clickhouse_projected_rows),
+        }),
       },
       {
         name: "NATS",
@@ -647,23 +645,24 @@ function InfraCostBreakdown({
         // zero so the always-$0 slice isn't read as a real cost of zero.
         detail:
           data.nats_stream_bytes > 0
-            ? `${formatNumber(Math.round(bytesToGB(data.nats_stream_bytes)))} GB resident`
-            : "not attributed per-tenant",
+            ? intl.formatMessage(M.infraResident, {
+                gb: formatNumber(Math.round(bytesToGB(data.nats_stream_bytes))),
+              })
+            : intl.formatMessage(M.infraUnattributed),
       },
       {
         name: "S3 archive",
         value: data.s3_monthly_usd,
         color: CHART.violet,
-        detail: `${formatNumber(Math.round(bytesToGB(data.s3_archive_bytes)))} GB resident`,
+        detail: intl.formatMessage(M.infraResident, {
+          gb: formatNumber(Math.round(bytesToGB(data.s3_archive_bytes))),
+        }),
       },
     ];
-  }, [data]);
+  }, [data, intl]);
 
   return (
-    <Card
-      title="Infrastructure cost breakdown"
-      subtitle="Projected monthly infrastructure spend by backend driver."
-    >
+    <Card title={intl.formatMessage(M.infraTitle)} subtitle={intl.formatMessage(M.infraSubtitle)}>
       <AsyncBoundary
         isLoading={isLoading}
         error={error}
@@ -673,14 +672,17 @@ function InfraCostBreakdown({
         loading={<SkeletonCard lines={4} />}
         empty={
           <EmptyState
-            title="No infrastructure cost yet"
-            description="Infrastructure cost is projected once the tenant accrues telemetry storage and write volume."
+            title={intl.formatMessage(M.infraEmptyTitle)}
+            description={intl.formatMessage(M.infraEmptyBody)}
           />
         }
       >
         {(proj) => (
           <div className="infra-breakdown">
-            <div style={{ height: 240, flex: "1 1 280px" }}>
+            {/* The donut is a visual aid only; the adjacent legend list below
+                conveys every segment's name, cost and detail as text, so hide
+                the decorative SVG from assistive tech. */}
+            <div className="lane-chart-pie" aria-hidden="true">
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie
@@ -690,6 +692,7 @@ function InfraCostBreakdown({
                     innerRadius={60}
                     outerRadius={95}
                     paddingAngle={2}
+                    rootTabIndex={-1}
                   >
                     {segments.map((s) => (
                       <Cell key={s.name} fill={s.color} />
@@ -707,18 +710,13 @@ function InfraCostBreakdown({
             </div>
             <div className="infra-breakdown__legend">
               <div className="infra-breakdown__total">
-                <span className="stat__label">Total / month</span>
-                <span className="cost-amount">
-                  {formatUSD(proj.total_monthly_usd)}
-                </span>
+                <span className="stat__label">{intl.formatMessage(M.infraTotal)}</span>
+                <span className="cost-amount">{formatUSD(proj.total_monthly_usd)}</span>
               </div>
               <ul>
                 {segments.map((s) => (
                   <li key={s.name}>
-                    <span
-                      className="legend-chip__dot"
-                      style={{ background: s.color }}
-                    />
+                    <span className="legend-chip__dot" style={{ background: s.color }} />
                     <span className="infra-breakdown__name">{s.name}</span>
                     <span className="mono">{formatUSD(s.value)}</span>
                     <span className="infra-breakdown__detail">{s.detail}</span>
@@ -751,6 +749,7 @@ function BudgetEditor({
   lines: UsageLine[];
   onClose: () => void;
 }) {
+  const intl = useIntl();
   const mutation = useUpdateBudgets(tenantId);
   const [rows, setRows] = useState<BudgetRow[]>(() =>
     lines.map((l) => ({
@@ -777,7 +776,7 @@ function BudgetEditor({
       const soft = r.soft === "" ? 0 : Number(r.soft);
       const hard = r.hard === "" ? 0 : Number(r.hard);
       if (hard > 0 && soft > 0 && soft > hard) {
-        next[r.meter] = "Soft limit must not exceed hard limit.";
+        next[r.meter] = intl.formatMessage(M.budgetSoftHardError);
       }
       overrides.push({
         meter: r.meter,
@@ -798,44 +797,41 @@ function BudgetEditor({
 
   return (
     <Modal
-      title="Edit budgets"
+      title={intl.formatMessage(M.budgetTitle)}
       onClose={onClose}
       footer={
         <>
           {mutation.isError && (
-            <span className="form-error" style={{ marginRight: "auto" }}>
-              {mutation.error instanceof Error
-                ? mutation.error.message
-                : "Could not save budgets."}
+            <span className="form-error lane-mr-auto" role="alert">
+              {intl.formatMessage(M.budgetSaveError)}
             </span>
           )}
           <button className="btn btn--ghost" onClick={onClose} disabled={mutation.isPending}>
-            Cancel
+            {intl.formatMessage(M.budgetCancel)}
           </button>
           <button className="btn btn--primary" onClick={onSave} disabled={mutation.isPending}>
-            {mutation.isPending ? "Saving…" : "Save budgets"}
+            {mutation.isPending
+              ? intl.formatMessage(M.budgetSaving)
+              : intl.formatMessage(M.budgetSave)}
           </button>
         </>
       }
     >
-      <p className="text-dim" style={{ marginTop: 0 }}>
-        Set per-meter soft and hard limits. Leave a field blank (or 0) for
-        unbounded. Hard must be ≥ soft when both are set.
-      </p>
+      <p className="lane-prose">{intl.formatMessage(M.budgetIntro)}</p>
       <div className="table-wrap">
         <table className="data">
           <thead>
             <tr>
-              <th>Meter</th>
-              <th>Period</th>
-              <th>Soft limit</th>
-              <th>Hard limit</th>
+              <th>{intl.formatMessage(M.budgetColMeter)}</th>
+              <th>{intl.formatMessage(M.budgetColPeriod)}</th>
+              <th>{intl.formatMessage(M.budgetColSoft)}</th>
+              <th>{intl.formatMessage(M.budgetColHard)}</th>
             </tr>
           </thead>
           <tbody>
             {rows.map((r) => (
               <tr key={r.meter}>
-                <td>{meterLabel(r.meter)}</td>
+                <td>{meterLabel(intl, r.meter)}</td>
                 <td>
                   <Badge tone="neutral">{titleCase(r.period)}</Badge>
                 </td>
@@ -846,7 +842,9 @@ function BudgetEditor({
                     value={r.soft}
                     placeholder="0"
                     onChange={(e) => update(r.meter, "soft", e.target.value)}
-                    aria-label={`${meterLabel(r.meter)} soft limit`}
+                    aria-label={intl.formatMessage(M.budgetSoftAria, {
+                      meter: meterLabel(intl, r.meter),
+                    })}
                   />
                 </td>
                 <td>
@@ -856,10 +854,14 @@ function BudgetEditor({
                     value={r.hard}
                     placeholder="0"
                     onChange={(e) => update(r.meter, "hard", e.target.value)}
-                    aria-label={`${meterLabel(r.meter)} hard limit`}
+                    aria-label={intl.formatMessage(M.budgetHardAria, {
+                      meter: meterLabel(intl, r.meter),
+                    })}
                   />
                   {errors[r.meter] && (
-                    <div className="form-error">{errors[r.meter]}</div>
+                    <div className="form-error" role="alert">
+                      {errors[r.meter]}
+                    </div>
                   )}
                 </td>
               </tr>
@@ -876,6 +878,7 @@ function BudgetEditor({
 type SortDir = "asc" | "desc";
 
 function FleetTable({ report }: { report: PlatformCostReport }) {
+  const intl = useIntl();
   // Default sort: margin ascending (worst-first) so an MSP spots
   // loss-making tenants immediately.
   const [dir, setDir] = useState<SortDir>("asc");
@@ -883,42 +886,51 @@ function FleetTable({ report }: { report: PlatformCostReport }) {
   const tenants = useMemo(() => {
     const list = [...report.tenants];
     list.sort((a, b) =>
-      dir === "asc"
-        ? a.margin_pct - b.margin_pct
-        : b.margin_pct - a.margin_pct,
+      dir === "asc" ? a.margin_pct - b.margin_pct : b.margin_pct - a.margin_pct,
     );
     return list;
   }, [report.tenants, dir]);
 
   if (report.tenants.length === 0) {
     return (
-      <Card title="Fleet cost & margin" subtitle="Platform-wide per-tenant cost report.">
-        <EmptyState title="No tenants" description="No tenants in the cost report yet." />
+      <Card
+        title={intl.formatMessage(M.fleetTitle)}
+        subtitle={intl.formatMessage(M.fleetSubtitle, { count: report.tenant_count })}
+      >
+        <EmptyState
+          title={intl.formatMessage(M.fleetEmptyTitle)}
+          description={intl.formatMessage(M.fleetEmptyBody)}
+        />
       </Card>
     );
   }
 
   return (
     <Card
-      title="Fleet cost & margin"
-      subtitle={`${report.tenant_count} tenants — platform-wide cost report.`}
+      title={intl.formatMessage(M.fleetTitle)}
+      subtitle={intl.formatMessage(M.fleetSubtitle, { count: report.tenant_count })}
     >
       <div className="table-wrap">
         <table className="data">
           <thead>
             <tr>
-              <th>Tenant</th>
-              <th>Tier</th>
-              <th>Projected cost</th>
-              <th>Revenue</th>
-              <th>Margin</th>
+              <th>{intl.formatMessage(M.fleetColTenant)}</th>
+              <th>{intl.formatMessage(M.fleetColTier)}</th>
+              <th>{intl.formatMessage(M.fleetColCost)}</th>
+              <th>{intl.formatMessage(M.fleetColRevenue)}</th>
+              <th>{intl.formatMessage(M.fleetColMargin)}</th>
               <th
                 className="th-sortable"
                 onClick={() => setDir((d) => (d === "asc" ? "desc" : "asc"))}
                 role="button"
-                aria-label={`Sort by margin ${dir === "asc" ? "descending" : "ascending"}`}
+                aria-label={intl.formatMessage(M.fleetSortMargin, {
+                  dir:
+                    dir === "asc"
+                      ? intl.formatMessage(M.sortDescending)
+                      : intl.formatMessage(M.sortAscending),
+                })}
               >
-                Margin % {dir === "asc" ? "▲" : "▼"}
+                {intl.formatMessage(M.fleetColMarginPct)} {dir === "asc" ? "▲" : "▼"}
               </th>
             </tr>
           </thead>
@@ -949,7 +961,7 @@ function FleetTable({ report }: { report: PlatformCostReport }) {
           <tfoot>
             <tr>
               <td colSpan={2}>
-                <b>Total</b>
+                <b>{intl.formatMessage(M.fleetTotal)}</b>
               </td>
               <td className="mono">
                 <b>{formatUSD(report.projected_monthly_cost_usd)}</b>
