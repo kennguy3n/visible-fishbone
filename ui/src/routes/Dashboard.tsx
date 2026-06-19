@@ -1,5 +1,6 @@
 import { useMemo } from "react";
 import { Link } from "@tanstack/react-router";
+import { FormattedMessage, useIntl } from "react-intl";
 import { Icon } from "@/components/Icon";
 import { CHART, CHART_TOOLTIP } from "@/lib/chart-theme";
 import {
@@ -35,6 +36,8 @@ import { REGION_COORDS, type ThreatPoint } from "@/components/threat-regions";
 import { DataTable, type Column } from "@/components/DataTable";
 import { formatNumber, formatRelative, titleCase } from "@/lib/format";
 import type { Alert } from "@/api/generated/model";
+import { LaneB1Intl } from "./lane-b1-intl";
+import "./lane-b1.css";
 
 // Midpoint of ShieldNet's published $5–12 / user list pricing. Used only for
 // the at-a-glance cost projection; the disclaimer + tooltip make the
@@ -59,6 +62,15 @@ interface QuickAction {
 }
 
 export function Dashboard() {
+  return (
+    <LaneB1Intl>
+      <DashboardInner />
+    </LaneB1Intl>
+  );
+}
+
+function DashboardInner() {
+  const intl = useIntl();
   const { tenants, selectedTenantId, selectedTenant } = useTenant();
   const tenantId = selectedTenantId ?? "";
   const enabled = { query: { enabled: !!tenantId } };
@@ -99,49 +111,58 @@ export function Dashboard() {
   if (sitesCount === 0)
     derived.push({
       id: "add-site",
-      title: "Add your first site",
-      desc: "Connect a location so traffic starts flowing through the gateway.",
+      title: intl.formatMessage({ id: "b1.dash.qa.addSite.title" }),
+      desc: intl.formatMessage({ id: "b1.dash.qa.addSite.desc" }),
       to: "/onboarding",
       tone: "warn",
-      cta: "Set up",
+      cta: intl.formatMessage({ id: "b1.dash.qa.addSite.cta" }),
     });
   if (devicesCount === 0)
     derived.push({
       id: "enroll-device",
-      title: "Enrol your first device",
-      desc: "Install the agent and claim a device to begin protection.",
+      title: intl.formatMessage({ id: "b1.dash.qa.enrolDevice.title" }),
+      desc: intl.formatMessage({ id: "b1.dash.qa.enrolDevice.desc" }),
       to: "/onboarding",
       tone: "warn",
-      cta: "Enrol",
+      cta: intl.formatMessage({ id: "b1.dash.qa.enrolDevice.cta" }),
     });
   if (openCritical.length > 0)
     derived.push({
       id: "critical-alerts",
-      title: `Resolve ${openCritical.length} critical alert${openCritical.length > 1 ? "s" : ""}`,
-      desc: "Critical anomalies are open and need triage.",
+      title: intl.formatMessage(
+        { id: "b1.dash.qa.critical.title" },
+        { count: openCritical.length },
+      ),
+      desc: intl.formatMessage({ id: "b1.dash.qa.critical.desc" }),
       to: "/alerts",
       tone: "danger",
-      cta: "Review",
+      cta: intl.formatMessage({ id: "b1.dash.qa.critical.cta" }),
     });
   const hardExceeded = (usage.data?.lines ?? []).filter((l) => l.hard_exceeded);
   if (hardExceeded.length > 0)
     derived.push({
       id: "usage-limit",
-      title: "Usage over a hard limit",
-      desc: `${hardExceeded.map((l) => titleCase(l.meter)).join(", ")} exceeded its cap.`,
+      title: intl.formatMessage({ id: "b1.dash.qa.usage.title" }),
+      desc: intl.formatMessage(
+        { id: "b1.dash.qa.usage.desc" },
+        { meters: hardExceeded.map((l) => titleCase(l.meter)).join(", ") },
+      ),
       to: "/metering",
       tone: "danger",
-      cta: "Open",
+      cta: intl.formatMessage({ id: "b1.dash.qa.usage.cta" }),
     });
   const weakest = componentScores.find((c) => c.score < 70);
   if (weakest)
     derived.push({
       id: `weak-${weakest.key}`,
-      title: `Improve ${weakest.label} (${weakest.score}/100)`,
-      desc: "This operational component is dragging your security score down.",
+      title: intl.formatMessage(
+        { id: "b1.dash.qa.weak.title" },
+        { label: weakest.label, score: weakest.score },
+      ),
+      desc: intl.formatMessage({ id: "b1.dash.qa.weak.desc" }),
       to: "/policy",
       tone: weakest.score < 50 ? "danger" : "warn",
-      cta: "Tune",
+      cta: intl.formatMessage({ id: "b1.dash.qa.weak.cta" }),
     });
 
   const recommendations = posture.data?.recommendations ?? [];
@@ -150,7 +171,7 @@ export function Dashboard() {
     title: r,
     to: "/policy",
     tone: "info",
-    cta: "Review",
+    cta: intl.formatMessage({ id: "b1.dash.qa.review" }),
   }));
   const quickActions = [...derived, ...recActions].slice(0, 3);
 
@@ -233,22 +254,31 @@ export function Dashboard() {
       : "flat";
 
   const alertColumns: Column<Alert>[] = [
-    { header: "Severity", cell: (a) => <StatusBadge status={a.severity} /> },
-    { header: "Kind", cell: (a) => <span className="mono">{a.kind}</span> },
-    { header: "Dimension", cell: (a) => a.dimension },
-    { header: "Z-score", cell: (a) => a.z_score?.toFixed(2) },
-    { header: "State", cell: (a) => <StatusBadge status={a.state} /> },
-    { header: "When", cell: (a) => formatRelative(a.created_at) },
+    {
+      header: intl.formatMessage({ id: "b1.dash.col.severity" }),
+      cell: (a) => <StatusBadge status={a.severity} />,
+    },
+    {
+      header: intl.formatMessage({ id: "b1.dash.col.kind" }),
+      cell: (a) => <span className="mono">{a.kind}</span>,
+    },
+    { header: intl.formatMessage({ id: "b1.dash.col.dimension" }), cell: (a) => a.dimension },
+    { header: intl.formatMessage({ id: "b1.dash.col.zscore" }), cell: (a) => a.z_score?.toFixed(2) },
+    {
+      header: intl.formatMessage({ id: "b1.dash.col.state" }),
+      cell: (a) => <StatusBadge status={a.state} />,
+    },
+    { header: intl.formatMessage({ id: "b1.dash.col.when" }), cell: (a) => formatRelative(a.created_at) },
   ];
 
   return (
-    <>
+    <div className="lane-b1">
       <PageHeader
-        title="Dashboard"
+        title={intl.formatMessage({ id: "b1.dash.title" })}
         subtitle={
           selectedTenant
-            ? `Security posture for ${selectedTenant.name}`
-            : "Security posture at a glance"
+            ? intl.formatMessage({ id: "b1.dash.subtitle.tenant" }, { name: selectedTenant.name })
+            : intl.formatMessage({ id: "b1.dash.subtitle.default" })
         }
       />
 
@@ -258,37 +288,49 @@ export function Dashboard() {
             <Icon name="rocket" size={26} />
           </div>
           <div className="banner__body">
-            <div className="banner__title">Let's get you protected</div>
+            <div className="banner__title">
+              <FormattedMessage id="b1.dash.banner.title" />
+            </div>
             <div className="banner__sub">
-              This tenant has no sites or devices yet. The guided setup walks
-              you through protection in about 5 minutes.
+              <FormattedMessage id="b1.dash.banner.sub" />
             </div>
           </div>
           <Link to="/onboarding" className="btn btn--primary">
-            Get started →
+            <FormattedMessage id="b1.dash.banner.cta" /> →
           </Link>
         </div>
       )}
 
       <div className="grid grid--stats" style={{ marginBottom: 16 }}>
-        <Stat label="Tenants" value={tenants.length} />
+        <Stat label={intl.formatMessage({ id: "b1.dash.stat.tenants" })} value={tenants.length} />
         <Stat
-          label="Sites"
+          label={intl.formatMessage({ id: "b1.dash.stat.sites" })}
           value={sites.isLoading ? "—" : sitesCount}
-          delta={selectedTenant ? `tier: ${selectedTenant.tier}` : undefined}
+          delta={
+            selectedTenant
+              ? intl.formatMessage(
+                  { id: "b1.dash.stat.sites.tier" },
+                  { tier: titleCase(selectedTenant.tier) },
+                )
+              : undefined
+          }
         />
         <Stat
-          label="Devices"
+          label={intl.formatMessage({ id: "b1.dash.stat.devices" })}
           value={devices.isLoading ? "—" : devicesCount}
         />
         <Stat
-          label="Open alerts"
+          label={intl.formatMessage({ id: "b1.dash.stat.openAlerts" })}
           value={alerts.isLoading ? "—" : openAlerts.length}
           delta={
             openAlerts.length > 0 ? (
-              <span style={{ color: "var(--warn)" }}>needs attention</span>
+              <span style={{ color: "var(--warn)" }}>
+                <FormattedMessage id="b1.dash.stat.attention" />
+              </span>
             ) : (
-              <span style={{ color: "var(--ok)" }}>all clear</span>
+              <span style={{ color: "var(--ok)" }}>
+                <FormattedMessage id="b1.dash.stat.clear" />
+              </span>
             )
           }
         />
@@ -299,20 +341,21 @@ export function Dashboard() {
         {ops.isLoading ? (
           <SkeletonCard lines={4} />
         ) : (
-          <Card title="Security score">
+          <Card title={intl.formatMessage({ id: "b1.dash.score.title" })}>
             <div className="hero">
               <CircularScore value={healthScore} />
               <div className="hero__body">
                 {healthScore == null ? (
                   <p className="muted">
-                    No operational health snapshot has been recorded for this
-                    tenant yet.
+                    <FormattedMessage id="b1.dash.score.none" />
                   </p>
                 ) : (
                   <>
                     <p className="hero__sub">
-                      Composite of {componentScores.length || "your"}{" "}
-                      operational components.
+                      <FormattedMessage
+                        id="b1.dash.score.composite"
+                        values={{ count: componentScores.length }}
+                      />
                     </p>
                     <div className="hero__chips">
                       {componentScores.slice(0, 4).map((c) => (
@@ -335,17 +378,16 @@ export function Dashboard() {
 
         {/* Quick actions */}
         <Card
-          title="Quick actions"
+          title={intl.formatMessage({ id: "b1.dash.qa.title" })}
           actions={
-            <HelpTooltip title="Quick actions" align="right">
-              The most impactful next steps, derived from your live posture —
-              open alerts, weak components, setup gaps and AI recommendations.
+            <HelpTooltip title={intl.formatMessage({ id: "b1.dash.qa.title" })} align="right">
+              <FormattedMessage id="b1.dash.qa.help" />
             </HelpTooltip>
           }
         >
           {quickActions.length === 0 ? (
             <p className="muted">
-              Nothing needs your attention right now. Nicely done.
+              <FormattedMessage id="b1.dash.qa.none" />
             </p>
           ) : (
             <div className="qa-list">
@@ -370,14 +412,13 @@ export function Dashboard() {
 
         {/* Cost estimate */}
         <Card
-          title="Estimated monthly cost"
+          title={intl.formatMessage({ id: "b1.dash.cost.title" })}
           actions={
-            <HelpTooltip title="How this is estimated" align="right">
-              Counts each of your {seats} enrolled device{seats === 1 ? "" : "s"}{" "}
-              as one seat at the ${PRICE_PER_SEAT}/seat list price (published
-              range $5–12). If a person uses more than one device this
-              over-estimates seats — connect billing for exact, contracted
-              figures.
+            <HelpTooltip title={intl.formatMessage({ id: "b1.dash.cost.title" })} align="right">
+              <FormattedMessage
+                id="b1.dash.cost.help"
+                values={{ count: seats, price: PRICE_PER_SEAT }}
+              />
             </HelpTooltip>
           }
         >
@@ -385,13 +426,18 @@ export function Dashboard() {
             {seats > 0 ? `$${formatNumber(monthlyCost)}` : "—"}
             <span className="muted" style={{ fontSize: 14, fontWeight: 400 }}>
               {" "}
-              / mo
+              <FormattedMessage id="b1.dash.cost.perMo" />
             </span>
           </div>
           <div className="muted" style={{ fontSize: 12.5, marginTop: 4 }}>
-            {seats > 0
-              ? `${seats} device${seats === 1 ? "" : "s"} × $${PRICE_PER_SEAT}/seat/mo`
-              : "Enrol devices to project a cost."}
+            {seats > 0 ? (
+              <FormattedMessage
+                id="b1.dash.cost.basis"
+                values={{ count: seats, price: PRICE_PER_SEAT }}
+              />
+            ) : (
+              <FormattedMessage id="b1.dash.cost.enrol" />
+            )}
           </div>
           <div style={{ marginTop: 12 }}>
             <span className={`trend trend--${trend}`}>
@@ -414,30 +460,31 @@ export function Dashboard() {
                   <path d="M2 6h8" />
                 )}
               </svg>{" "}
-              {trend === "up"
-                ? "Usage trending up"
-                : trend === "down"
-                  ? "Usage trending down"
-                  : "Usage stable"}
+              <FormattedMessage
+                id={
+                  trend === "up"
+                    ? "b1.dash.cost.trend.up"
+                    : trend === "down"
+                      ? "b1.dash.cost.trend.down"
+                      : "b1.dash.cost.trend.stable"
+                }
+              />
             </span>
           </div>
         </Card>
 
         {/* Policy coverage */}
         <Card
-          title="Policy coverage"
+          title={intl.formatMessage({ id: "b1.dash.coverage.title" })}
           actions={
-            <HelpTooltip title="Policy coverage" align="right">
-              How much of your operational surface is actively governed by
-              policy. Component scores come from the latest ops-health snapshot;
-              overall coverage comes from the AI posture report.
+            <HelpTooltip title={intl.formatMessage({ id: "b1.dash.coverage.title" })} align="right">
+              <FormattedMessage id="b1.dash.coverage.help" />
             </HelpTooltip>
           }
         >
           {coveragePct == null && componentScores.length === 0 ? (
             <p className="muted">
-              Coverage data appears once a posture report or ops-health snapshot
-              exists.
+              <FormattedMessage id="b1.dash.coverage.none" />
             </p>
           ) : (
             <>
@@ -445,11 +492,14 @@ export function Dashboard() {
                 <div className="meter">
                   <div className="meter__head">
                     <span>
-                      Overall coverage
+                      <FormattedMessage id="b1.dash.coverage.overall" />
                       {activePolicies != null && totalPolicies != null && (
                         <span className="muted">
                           {" "}
-                          · {activePolicies}/{totalPolicies} policies active
+                          <FormattedMessage
+                            id="b1.dash.coverage.policies"
+                            values={{ active: activePolicies, total: totalPolicies }}
+                          />
                         </span>
                       )}
                     </span>
@@ -483,14 +533,11 @@ export function Dashboard() {
 
         {/* Threat map */}
         <Card
-          title="Threat activity by region"
+          title={intl.formatMessage({ id: "b1.dash.threat.title" })}
           className="span-2"
           actions={
-            <HelpTooltip title="Threat activity" align="right">
-              Plots the tenant's deployment region, sized by currently-open
-              threats. Per-origin geo-IP attribution isn't available from the
-              control plane, so this reflects where your protected traffic is
-              served from.
+            <HelpTooltip title={intl.formatMessage({ id: "b1.dash.threat.title" })} align="right">
+              <FormattedMessage id="b1.dash.threat.help" />
             </HelpTooltip>
           }
         >
@@ -500,11 +547,10 @@ export function Dashboard() {
 
       {/* Activity over the last 24h */}
       <Card
-        title="Security activity (last 24h)"
+        title={intl.formatMessage({ id: "b1.dash.activity.title" })}
         actions={
-          <HelpTooltip title="Security activity" align="right">
-            Hourly count of detected anomalies over the last 24 hours, stacked
-            by severity. Sourced from the live alert stream.
+          <HelpTooltip title={intl.formatMessage({ id: "b1.dash.activity.title" })} align="right">
+            <FormattedMessage id="b1.dash.activity.help" />
           </HelpTooltip>
         }
       >
@@ -513,8 +559,8 @@ export function Dashboard() {
         ) : activityTotal === 0 ? (
           <EmptyState
             illustration={<EmptyIllustration kind="shield" />}
-            title="All clear"
-            description="No anomalies detected in the last 24 hours."
+            title={intl.formatMessage({ id: "b1.dash.activity.clear.title" })}
+            description={intl.formatMessage({ id: "b1.dash.activity.clear.desc" })}
           />
         ) : (
           <div style={{ height: 240 }}>
@@ -569,26 +615,26 @@ export function Dashboard() {
         )}
       </Card>
 
-      <Card title="Recent alerts" className="" >
+      <Card title={intl.formatMessage({ id: "b1.dash.alerts.title" })}>
         {alerts.isLoading ? (
           <div className="skeleton" style={{ height: 120 }} />
         ) : recentAlerts.length === 0 ? (
           <EmptyState
             illustration={<EmptyIllustration kind="shield" />}
-            title="No alerts"
-            description="Nothing needs your attention right now."
+            title={intl.formatMessage({ id: "b1.dash.alerts.none.title" })}
+            description={intl.formatMessage({ id: "b1.dash.alerts.none.desc" })}
           />
         ) : (
           <>
             <DataTable columns={alertColumns} rows={recentAlerts} rowKey={(a) => a.id} />
             <div style={{ marginTop: 12 }}>
               <Link to="/alerts" className="btn btn--sm">
-                View all alerts →
+                <FormattedMessage id="b1.dash.alerts.viewAll" /> →
               </Link>
             </div>
           </>
         )}
       </Card>
-    </>
+    </div>
   );
 }
