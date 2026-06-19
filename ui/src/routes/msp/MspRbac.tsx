@@ -219,13 +219,13 @@ function CreateMspRole({
               create.mutate(
                 {
                   tenantId,
-                  data: { name, scope, permissions: [...perms] },
+                  data: { name: name.trim(), scope, permissions: [...perms] },
                 },
                 {
                   onSuccess: () => {
                     toast.success(
                       fm(M.rbacCreatedTitle),
-                      fm(M.rbacCreatedBody, { name }),
+                      fm(M.rbacCreatedBody, { name: name.trim() }),
                     );
                     onClose();
                   },

@@ -178,6 +178,30 @@ export const M = defineMessages({
     id: "laneB6.tenants.delete.cta",
     defaultMessage: "Delete permanently",
   },
+  suspendedToast: {
+    id: "laneB6.tenants.suspended.toast",
+    defaultMessage: "{name} is suspended. Resume it anytime to restore access.",
+  },
+  suspendErrorTitle: {
+    id: "laneB6.tenants.suspend.error.title",
+    defaultMessage: "Couldn’t suspend tenant",
+  },
+  suspendErrorBody: {
+    id: "laneB6.tenants.suspend.error.body",
+    defaultMessage: "Something went wrong suspending {name}. Please try again.",
+  },
+  deletedToast: {
+    id: "laneB6.tenants.deleted.toast",
+    defaultMessage: "{name} was deleted.",
+  },
+  deleteErrorTitle: {
+    id: "laneB6.tenants.delete.error.title",
+    defaultMessage: "Couldn’t delete tenant",
+  },
+  deleteErrorBody: {
+    id: "laneB6.tenants.delete.error.body",
+    defaultMessage: "Something went wrong deleting {name}. Please try again.",
+  },
   typeToConfirm: {
     id: "laneB6.confirm.type",
     defaultMessage: "Type {name} to confirm",

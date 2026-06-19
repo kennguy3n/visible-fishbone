@@ -261,10 +261,10 @@ function CreateMsp({ onClose }: { onClose: () => void }) {
             disabled={!name.trim() || !slug.trim() || create.isPending}
             onClick={() =>
               create.mutate(
-                { data: { name, slug } },
+                { data: { name: name.trim(), slug: slug.trim() } },
                 {
                   onSuccess: () => {
-                    toast.success(fm(M.hierCreatedToast, { name }));
+                    toast.success(fm(M.hierCreatedToast, { name: name.trim() }));
                     onClose();
                   },
                 },

@@ -170,7 +170,19 @@ export function Tenants() {
           onConfirm={() =>
             suspend.mutate(
               { tenantId: confirmTarget.tenant.id },
-              { onSuccess: () => setConfirmTarget(null) },
+              {
+                onSuccess: () => {
+                  toast.success(
+                    fm(M.suspendedToast, { name: confirmTarget.tenant.name }),
+                  );
+                  setConfirmTarget(null);
+                },
+                onError: () =>
+                  toast.error(
+                    fm(M.suspendErrorTitle),
+                    fm(M.suspendErrorBody, { name: confirmTarget.tenant.name }),
+                  ),
+              },
             )
           }
         >
@@ -186,7 +198,19 @@ export function Tenants() {
           onConfirm={() =>
             del.mutate(
               { tenantId: confirmTarget.tenant.id },
-              { onSuccess: () => setConfirmTarget(null) },
+              {
+                onSuccess: () => {
+                  toast.success(
+                    fm(M.deletedToast, { name: confirmTarget.tenant.name }),
+                  );
+                  setConfirmTarget(null);
+                },
+                onError: () =>
+                  toast.error(
+                    fm(M.deleteErrorTitle),
+                    fm(M.deleteErrorBody, { name: confirmTarget.tenant.name }),
+                  ),
+              },
             )
           }
         />
@@ -248,18 +272,19 @@ function CreateTenantModal({
 
   const submit = (e: React.FormEvent) => {
     e.preventDefault();
+    const trimmed = name.trim();
     create.mutate(
       {
         data: {
-          name,
-          slug: slug || undefined,
-          region: region || undefined,
+          name: trimmed,
+          slug: slug.trim() || undefined,
+          region: region.trim() || undefined,
           tier,
         },
       },
       {
         onSuccess: () => {
-          onCreated(name);
+          onCreated(trimmed);
           onClose();
         },
       },
