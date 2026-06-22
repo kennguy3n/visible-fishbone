@@ -1,0 +1,12 @@
+{
+  "name": "sng-blog-screenshots",
+  "private": true,
+  "type": "module",
+  "description": "CDP capture harness for the ShieldNet Gateway blog screenshots. Drives the live admin console against the seeded fleet and writes PNGs into blog/artifacts/screenshots.",
+  "scripts": {
+    "capture": "node capture.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.48.0"
+  }
+}
