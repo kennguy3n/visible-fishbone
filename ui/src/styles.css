@@ -277,14 +277,25 @@ a:hover {
   letter-spacing: 0.2px;
 }
 .sidebar__logo {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background: var(--brand-solid);
-  display: grid;
-  place-items: center;
-  color: var(--on-brand);
-  font-weight: 800;
+  height: 25px;
+  width: auto;
+  flex-shrink: 0;
+}
+/* Two logo variants: white wordmark for dark sidebar backgrounds, brand-blue
+   wordmark for light. Show/hide via CSS so the swap is theme-driven and
+   both stay in the DOM for accessibility (the dark one carries the alt text). */
+.sidebar__logo--light {
+  display: none;
+}
+:root:not([data-theme="dark"]) .sidebar__logo--dark {
+  display: none;
+}
+:root:not([data-theme="dark"]) .sidebar__logo--light {
+  display: block;
+}
+.sidebar__subtitle {
+  display: flex;
+  flex-direction: column;
 }
 .sidebar__brand small {
   display: block;
@@ -2149,6 +2160,14 @@ label.field > span {
   .sidebar__brand {
     justify-content: center;
     padding: 18px 0 14px;
+  }
+  /* Collapsed rail: crop the wordmark to just the shield icon (first
+     ~28px of the 136px-wide SVG) so the brand mark stays visible. */
+  .sidebar__logo {
+    clip-path: inset(0 108px 0 0);
+  }
+  .sidebar__logo--light {
+    clip-path: inset(0 108px 0 0);
   }
   .nav-link {
     justify-content: center;

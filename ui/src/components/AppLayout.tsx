@@ -49,9 +49,21 @@ function Sidebar() {
   return (
     <aside className="sidebar">
       <div className="sidebar__brand">
-        <span className="sidebar__logo">S</span>
-        <span>
-          ShieldNet
+        <img
+          className="sidebar__logo sidebar__logo--dark"
+          src="/shieldnet360-logo-white.svg"
+          alt="ShieldNet 360"
+          width={120}
+          height={25}
+        />
+        <img
+          className="sidebar__logo sidebar__logo--light"
+          src="/shieldnet360-logo.svg"
+          alt=""
+          width={120}
+          height={25}
+        />
+        <span className="sidebar__subtitle">
           <small>
             <FormattedMessage id="app.subtitle" />
           </small>
