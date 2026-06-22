@@ -1,7 +1,7 @@
 {
   "items": [
     {
-      "id": "12daa0f8-c952-41dc-b037-38560f0ecdda",
+      "id": "b650549a-a25b-4fde-bd9d-31c8a06f3a0f",
       "tenant_id": "92112770-7c0a-410b-b0f4-09dde70e063a",
       "kind": "dem.experience_degraded",
       "severity": "critical",
@@ -10,8 +10,8 @@
       "baseline_mean": 0,
       "baseline_stddev": 0,
       "z_score": 0,
-      "window_start": "2026-06-18T12:31:08.203Z",
-      "window_end": "2026-06-18T12:31:19.203Z",
+      "window_start": "2026-06-22T15:03:53.587+07:00",
+      "window_end": "2026-06-22T15:04:04.587+07:00",
       "window_seconds": 300,
       "summary": "Experience degraded for Zoom: score 30, availability 50%",
       "evidence": {
@@ -25,8 +25,8 @@
         "baseline_samples": 0
       },
       "state": "open",
-      "created_at": "2026-06-18T12:31:20.250542Z",
-      "updated_at": "2026-06-18T12:31:20.250542Z"
+      "created_at": "2026-06-22T15:04:05.892715+07:00",
+      "updated_at": "2026-06-22T15:04:05.892715+07:00"
     }
   ]
 }

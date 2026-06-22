@@ -1,20 +1,20 @@
 {
   "enabled": true,
-  "generated_at": "2026-06-18T12:46:50.631443427Z",
+  "generated_at": "2026-06-22T15:04:08.645537700+07:00",
   "bundle": {
-    "serial": 1781786719,
+    "serial": 1782113759,
     "schema_version": 1,
-    "generated_at": "2026-06-18T12:45:19.981504000Z",
+    "generated_at": "2026-06-22T14:35:59.824276000+07:00",
     "key_id": "sng-managed-threat-content",
     "algorithm": "ed25519",
-    "indicator_count": 76432,
-    "size_bytes": 26145119,
-    "digest": "ee79836a0b22d942952ad1c25800f5699d2121114ad8b8cb8ca47f89b74e6361",
+    "indicator_count": 74751,
+    "size_bytes": 24893503,
+    "digest": "5a906a2bbf19315d55945edcb00c4890c0df54b03cd2cdac52420653d7e85f65",
     "counts_by_type": {
-      "domain": 570,
-      "hash": 802,
+      "domain": 428,
+      "hash": 579,
       "ip": 5,
-      "url": 75055
+      "url": 73739
     }
   },
   "sources": [
@@ -25,8 +25,8 @@
       "weight": 0.9,
       "enabled": true,
       "indicator_count": 5,
-      "last_success_at": "2026-06-18T12:45:57.361905000Z",
-      "last_attempt_at": "2026-06-18T12:45:57.361905000Z",
+      "last_success_at": "2026-06-22T14:35:59.824276000+07:00",
+      "last_attempt_at": "2026-06-22T14:35:59.824276000+07:00",
       "consecutive_failures": 0,
       "stale": false
     },
@@ -36,9 +36,9 @@
       "kind": "hash",
       "weight": 0.8,
       "enabled": true,
-      "indicator_count": 802,
-      "last_success_at": "2026-06-18T12:45:57.361905000Z",
-      "last_attempt_at": "2026-06-18T12:45:57.361905000Z",
+      "indicator_count": 579,
+      "last_success_at": "2026-06-22T14:35:59.824276000+07:00",
+      "last_attempt_at": "2026-06-22T14:35:59.824276000+07:00",
       "consecutive_failures": 0,
       "stale": false
     },
@@ -48,9 +48,9 @@
       "kind": "url",
       "weight": 0.85,
       "enabled": true,
-      "indicator_count": 74755,
-      "last_success_at": "2026-06-18T12:45:57.361905000Z",
-      "last_attempt_at": "2026-06-18T12:45:57.361905000Z",
+      "indicator_count": 73439,
+      "last_success_at": "2026-06-22T14:35:59.824276000+07:00",
+      "last_attempt_at": "2026-06-22T14:35:59.824276000+07:00",
       "consecutive_failures": 0,
       "stale": false
     },
@@ -60,9 +60,9 @@
       "kind": "domain",
       "weight": 0.8,
       "enabled": true,
-      "indicator_count": 570,
-      "last_success_at": "2026-06-18T12:45:57.361905000Z",
-      "last_attempt_at": "2026-06-18T12:45:57.361905000Z",
+      "indicator_count": 428,
+      "last_success_at": "2026-06-22T14:35:59.824276000+07:00",
+      "last_attempt_at": "2026-06-22T14:35:59.824276000+07:00",
       "consecutive_failures": 0,
       "stale": false
     },
@@ -73,8 +73,8 @@
       "weight": 0.7,
       "enabled": true,
       "indicator_count": 300,
-      "last_success_at": "2026-06-18T12:45:57.361905000Z",
-      "last_attempt_at": "2026-06-18T12:45:57.361905000Z",
+      "last_success_at": "2026-06-22T14:35:59.824276000+07:00",
+      "last_attempt_at": "2026-06-22T14:35:59.824276000+07:00",
       "consecutive_failures": 0,
       "stale": false
     }

@@ -1,12 +1,12 @@
 {
   "versions": [
     {
-      "serial": 1781785825,
+      "serial": 1782113759,
       "schema_version": 1,
       "app_count": 215,
-      "checksum": "84f4906593cab475e9b14e7da79b769e0d78c9c30865881325cc9e78a5976337",
+      "checksum": "10c75c381942203a4d395d65eb2d9f7b6894e125f6421b9bdfa78db1337a3406",
       "note": "initial seed",
-      "generated_at": "2026-06-18T12:30:25.684524000Z"
+      "generated_at": "2026-06-22T14:35:59.618358000+07:00"
     }
   ]
 }
