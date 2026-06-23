@@ -24,7 +24,7 @@ conflict-check together rather than living in six subsystems:
 | --- | --- | --- | --- | --- |
 | 1 | **route** | send this out that link | SD-WAN steering policy | policy graph compile |
 | 2 | **allow** | let this identity reach this app | ZTNA grant + NGFW allow | `ztna` 100% (Post 4) |
-| 3 | **block** | stop this category/signature/match | NGFW/SWG/IPS/DLP deny | `firewall`/`swg`/`dlp` 100% |
+| 3 | **block** | stop this category/signature/match | NGFW/SWG/IPS/DLP deny, plus SWG inline DLP / AI governance / RBI verdicts | `firewall`/`swg`/`dlp` 100%, add-on crate tests PASS |
 | 4 | **prioritise** | give this app the good queue | QoS / steering class | policy graph compile |
 | 5 | **throttle** | cap this noisy thing | rate-limit policy | margin autopilot (Post 8) |
 | 6 | **threat-protection** | catch the bad thing | IPS + malware + DNS-intel | `malware`/`dns`/`ips` (Post 4) |
@@ -66,11 +66,12 @@ margin, one deliberate loss-maker the margin autopilot surfaces.
 
 SNG compiles one typed policy graph per tenant into a signed bundle a software
 edge enforces at 5–28 Gbps; it detects at 100% on curated corpora and tells you
-the honest 90% when traffic is wild; and — the load-bearing point — it runs 5,000
-mostly-dormant SME tenants by tiering background work 10×, hibernating the truly
-idle to near-zero, pooling one AI model 3,696× more efficiently than per-tenant,
-and operating itself through three guardrailed autopilots. Every number here
-came from this VM.
+the honest 90% when traffic is wild; it now adds SWG inline DLP, AI governance,
+RBI, clientless ZTNA, and default-off DEM to the same graph; and — the load-bearing
+point — it runs 5,000 mostly-dormant SME tenants by tiering background work 10×,
+hibernating the truly idle to near-zero, pooling one AI model 3,696× more
+efficiently than per-tenant, and operating itself through three guardrailed
+autopilots. Every number here came from this VM.
 
 ## Where it falls short
 

@@ -66,13 +66,14 @@ the persona, the business outcome, the UI surfaces, and the evidence source.
 - **Measurable here?** Yes — control-plane runs locally; API-latency + policy-compile
   + postgres-scale benches are Go and run unprivileged.
 
-### S2 — "One typed policy graph lights up a branch: NGFW + IPS + SWG + DNS + SD-WAN"
+### S2 — "One typed policy graph lights up a branch: NGFW + IPS + SWG + DNS + SD-WAN + DEM"
 - **Persona:** Devraj (SME). **Outcome:** one policy model, not five consoles.
 - **Capabilities:** unified policy graph + compiler, NGFW (`sng-fw`), IPS (`sng-ips`),
-  SWG (`sng-swg`), DNS security, SD-WAN six-class steering, optional in-kernel
-  eBPF/XDP fast path (tail-call split pipeline, LRU verdict cache, bounded IPv6
-  extension-header walk) with multi-queue forwarding throughput benchmarks.
-  Policy predicates are application-aware: a signed, versioned
+  SWG (`sng-swg`) with add-on inline DLP, AI governance, and RBI verdict stages,
+  DNS security, SD-WAN six-class steering, default-off Digital Experience Monitoring
+  (`sng-dem`), optional in-kernel eBPF/XDP fast path (tail-call split pipeline, LRU
+  verdict cache, bounded IPv6 extension-header walk) with multi-queue forwarding
+  throughput benchmarks. Policy predicates are application-aware: a signed, versioned
   application-identification catalog (`crates/sng-appid`, 215 apps / 17
   categories) replaces a closed set of hand-coded protocols. A
   policy-recommendation engine (`internal/service/policyrec`) proposes
@@ -104,9 +105,11 @@ the persona, the business outcome, the UI surfaces, and the evidence source.
 ### S4 — "Retire the VPN: zero-trust access to private apps"
 - **Persona:** Devraj (SME). **Outcome:** least-privilege access, no flat VPN.
 - **Capabilities:** ZTNA brokering (`sng-ztna`: device + identity + app + posture),
-  IdP federation, posture checks, and **lightweight digital-experience monitoring**
-  (`crates/sng-dem` + `internal/service/dem`) — ZDX-style per-target availability +
-  latency scores with degradation alerts.
+  agent-based and **clientless browser** access (OIDC IdP + sharded session store +
+  reverse-proxy routing), IdP federation, posture checks, and **lightweight
+  digital-experience monitoring** (`crates/sng-dem` as a default-off edge subsystem +
+  `internal/service/dem`) — ZDX-style per-target availability + latency scores with
+  degradation alerts.
 - **UI surfaces:** Policy (ZTNA rules), Devices (posture), IdP, RBAC.
 - **Evidence:** ZTNA block-rate from [`bench/efficacy`](../../bench/efficacy)
   (real `ZtnaService::evaluate`); access-decision payloads (allow/deny + reason);
@@ -115,11 +118,13 @@ the persona, the business outcome, the UI surfaces, and the evidence source.
 
 ### S5 — "Keep regulated data from leaving: DLP + CASB + browser isolation"
 - **Persona:** Lena (SOC) / Tom (compliance). **Outcome:** prevent exfiltration.
-- **Capabilities:** on-device DLP (ML classifier), data classification, CASB,
-  remote browser isolation (RBI action), edge-driven DLP wake
-  (inotify file-write + X11 clipboard monitors classify on-write rather than
-  polling). The on-device classifier also reads **image-borne data via OCR** and
-  matches **document identity via fingerprinting** (`crates/sng-dlp/{ocr,idm}`).
+- **Capabilities:** on-device DLP (ML classifier), **SWG inline DLP** on the
+  ext-authz path (regex / MIP-label / content-fingerprint), data classification,
+  CASB, **AI governance** for generative-AI apps, remote browser isolation (RBI
+  action), edge-driven DLP wake (inotify file-write + X11 clipboard monitors
+  classify on-write rather than polling). The on-device classifier also reads
+  **image-borne data via OCR** and matches **document identity via fingerprinting**
+  (`crates/sng-dlp/{ocr,idm}`).
 - **UI surfaces:** DLP, CASB, Browser protection — all wired to Postgres repos.
 - **Evidence:** DLP policy + match-event screenshots; classifier input→label
   examples; the repo-wiring fix narrative (why they 404'd, the proper fix).
@@ -165,11 +170,11 @@ the persona, the business outcome, the UI surfaces, and the evidence source.
 | Policy recommendation engine | S2, S6 |
 | NGFW (`sng-fw`) | S2, S3 |
 | IPS (`sng-ips`) | S2, S3 |
-| SWG (`sng-swg`) + malware (yara-x) | S2, S3 |
+| SWG (`sng-swg`) + malware (yara-x) + inline DLP + AI governance + RBI | S2, S3, S5 |
 | DNS security + threat intel | S2, S3 |
 | Managed threat content (signed bundle) | S3 |
 | SD-WAN six-class steering | S2 |
-| ZTNA (`sng-ztna`) | S4 |
+| ZTNA (`sng-ztna`) — agent-based + clientless browser | S4 |
 | DLP + data classification (incl. OCR + IDM) | S5 |
 | CASB | S5 |
 | Browser isolation (RBI) | S5 |

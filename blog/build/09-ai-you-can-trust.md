@@ -34,6 +34,12 @@ Two more trust mechanisms:
   AI app, the default action is to *coach*, with a human review queue, not to
   silently block — and the OCR/ML hooks can only ever *escalate* a verdict, never
   weaken one. The human stays in the loop where judgement matters.
+- **SWG AI governance** (`sng-swg/src/ai_governance.rs`): on the ext-authz path,
+  the SWG classifies generative-AI destinations (curated apps like ChatGPT,
+  Claude, Copilot, Gemini, plus heuristic long-tail detection) and applies
+  per-app, per-category, default, or suspected-app rules. Verdicts are
+  deterministic: allow, monitor, block, or redirect to RBI. Suspected heuristic
+  matches default to allow so the long tail never blocks on its own.
 - **A shared inference pool** (`internal/service/ai`): one pooled model serves the
   whole fleet (~3,696× less memory than per-tenant, Post 8), with fair queueing up
   to a concurrency cap and a **degrade-to-template fallback** when the pool is

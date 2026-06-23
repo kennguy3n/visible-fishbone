@@ -26,11 +26,13 @@ SNG splits cleanly:
   (state + isolation, Post 4), NATS JetStream (config distribution), and
   ClickHouse (telemetry).
 - **The edge is Rust** (`crates/`: `sng-fw`, `sng-ips`, `sng-swg`, `sng-dns`,
-  `sng-ztna`, `sng-dlp`, and the shared `sng-policy-eval`). The data plane needs
+  `sng-ztna`, `sng-dlp`, `sng-dem`, and the shared `sng-policy-eval`). The data plane needs
   predictable latency, no GC pauses in the packet path, and memory safety while
   doing genuinely dangerous things (parsing hostile input at speed). Rust gives
   all three. The edge consumes the *compiled, signed* bundle the control plane
-  emits — it never re-derives policy.
+  emits — it never re-derives policy. Add-on SWG verdict stages (inline DLP,
+  AI governance, RBI), clientless ZTNA, and the default-off DEM subsystem all live
+  in their own crate boundaries so the core data plane stays composable.
 
 The two planes meet at exactly one contract: **a signed policy bundle.** The
 control plane compiles intent → bundle → signs it; the edge verifies the

@@ -128,8 +128,8 @@ single node
              └─ + Keeper cluster   (HA coordination for multi-replica shards)
 ```
 
-The hot path writes one row per telemetry event across the **7 event
-classes** (`flow, dns, http, ips, ztna, sdwan, agent`). Rows are buffered
+The hot path writes one row per telemetry event across the **8 event
+classes** (`flow, dns, http, ips, ztna, sdwan, agent, dem`). Rows are buffered
 and flushed in batches of `CLICKHOUSE_BATCH_SIZE` (default **1024**) or
 every `CLICKHOUSE_FLUSH_INTERVAL` (default **2s**), whichever comes
 first.

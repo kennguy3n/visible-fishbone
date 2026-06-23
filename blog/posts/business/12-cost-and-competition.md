@@ -48,9 +48,12 @@ which is what makes a trial-heavy fleet profitable.
 Measured on the live stack ([`efficacy-report.json`](../../artifacts/efficacy-report.json)):
 100% catch / 0% false-positives across the gating set (firewall, web gateway,
 ZTNA, structured DLP, malware, DNS, IPS), with the unstructured ML classifier at
-97.4%. And the honest caveat Tom should hear from any vendor: on *wild,* noisy
-traffic the malware classifier drops to **90.1% catch with a 9.6% false-positive
-rate** — which is why that capability runs monitor-first, not block-first.
+97.4%. The add-on capabilities are covered by their crate unit tests: AI
+governance (24 tests), inline DLP (22 tests), RBI (16 tests), clientless ZTNA (11
+tests), and DEM (10 tests) — all run in the standard `cargo test` flow. And the
+honest caveat Tom should hear from any vendor: on *wild,* noisy traffic the
+malware classifier drops to **90.1% catch with a 9.6% false-positive rate** — which
+is why that capability runs monitor-first, not block-first.
 
 ## The competitive read (honest)
 

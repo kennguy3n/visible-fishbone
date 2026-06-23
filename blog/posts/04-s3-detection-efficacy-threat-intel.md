@@ -11,7 +11,10 @@ enforcement code over real corpora, and if the false-positive rate is printed
 right next to it. The efficacy harness (`bench/efficacy`) drives the actual Rust
 crates — `sng-fw`, `sng-ips` (real Suricata), `sng-swg` (real yara-x),
 `sng-dlp` (real ONNX ML-NER), `sng-dns` — over known-bad/known-good, adversarial,
-and noisy "wild" corpora, and emits one signed report.
+and noisy "wild" corpora, and emits one signed report. The add-on capabilities
+are additionally covered by crate unit tests: AI governance (24 tests), inline
+DLP (22 tests), RBI (16 tests), clientless ZTNA (11 tests), and DEM (10 tests) —
+all run in the standard `cargo test` flow.
 
 ## The matrix
 

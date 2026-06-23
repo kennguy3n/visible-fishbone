@@ -12,14 +12,19 @@
 
 Staff paste customer data into ChatGPT. That's the reality Lena manages. The
 brute-force fix — block every AI tool — drives the behaviour underground and
-makes Lena the enemy. SNG's DLP is built around a softer, more effective default:
-**coach the user, log the event, and escalate only the cases that need a human.**
+makes Lena the enemy. SNG's answer has two halves: **AI governance** for the SWG
+lets operators allow, monitor, block, or redirect generative-AI traffic to RBI
+without a control-plane review cycle; and **DLP** is built around a softer, more
+effective default: **coach the user, log the event, and escalate only the cases
+that need a human.**
 
 ## It catches the data that matters
 
 SNG's DLP runs two engines: a structured detector for the things with shape
 (card numbers, national IDs, IBANs) and an on-device ML classifier for
-unstructured PII. Measured on the live stack
+unstructured PII. The edge SWG also runs **inline DLP** on the ext-authz path for
+bodies the proxy forwards, so the same classification reaches web and SaaS traffic
+without an endpoint agent. Measured on the live stack
 ([`efficacy-report.json`](../../artifacts/efficacy-report.json)):
 
 - **Structured DLP: 100% catch, 0% false positives** on a 3,800/3,800 corpus.

@@ -19,7 +19,7 @@ screenshots and captured API/DB evidence (no fabricated screenshots).
 | 0 | [Business series intro + evidence contract](00-business-series-intro.md) | — | — | — |
 | 1 | [The NoOps trial that costs almost nothing](08-noops-dormant-trials.md) | Mara (MSP) | Trials that don't bleed money | Dormancy tiering + hibernation |
 | 2 | [Shadow-IT discovery without the noise](09-shadow-it-noops.md) | Sam (IT lead) | See + act on unknown apps | CASB NoOps |
-| 3 | [PII at the AI edge: coach, don't block](10-ai-dlp-coaching.md) | Lena (analyst) | Stop AI leaks, keep staff happy | AI-app DLP + HITL |
+| 3 | [PII at the AI edge: coach, don't block](10-ai-dlp-coaching.md) | Lena (analyst) | Stop AI leaks, keep staff happy | AI-app DLP + inline SWG DLP + AI governance + HITL |
 | 4 | [Compliance baselines in minutes](11-compliance-templates.md) | Mara (MSP) | Onboard to a safe default fast | Smart-default templates + continuous evidence |
 | 5 | [Prove the spend, prove the posture](12-cost-and-competition.md) | Tom (CFO) | Sign-off + honest comparison | Shared AI + metering + critique |
 

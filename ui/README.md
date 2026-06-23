@@ -2,9 +2,10 @@
 
 A Vite + React + TypeScript single-page app for the SNG control plane. It
 covers the full admin surface (tenants, sites, devices, policy, DLP, CASB,
-browser protection, alerts, compliance, playbooks, integrations, metering,
-audit, etc.) and the MSP portal (hierarchy, bulk operations, white-label
-branding, policy templates, MSP-scoped RBAC).
+browser protection / RBI, AI governance, ZTNA (agent + clientless), DEM,
+alerts, compliance, playbooks, integrations, metering, audit, etc.) and the
+MSP portal (hierarchy, bulk operations, white-label branding, policy
+templates, MSP-scoped RBAC).
 
 ## Stack
 

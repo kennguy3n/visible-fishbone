@@ -29,7 +29,10 @@ product:
 - **Efficacy** (`bench/efficacy`) — drives the actual enforcement crates against
   labelled corpora and emits
   [`efficacy-report.json`](../artifacts/efficacy-report.json) (16 functions,
-  verdict PASS).
+  verdict PASS). The add-on capabilities are additionally covered by crate unit
+  tests: AI governance (24 tests), inline DLP (22 tests), RBI (16 tests),
+  clientless ZTNA (11 tests), and DEM (10 tests) — all run in the standard
+  `cargo test` flow.
 - **Performance** (`bench/`) — emits the floor-and-ceiling throughput artifacts
   ([`multiqueue-micro.json`](../artifacts/multiqueue-micro.json)).
 - **Capacity plan** (`bench/controlplane`) — emits the 5,000-tenant model

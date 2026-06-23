@@ -58,12 +58,39 @@ strict subset that makes sense on a user device. Every crate is
 - **Secure Web Gateway.** An Envoy ext-authz handler with URL
   categorization, a malware-verdict API, per-tenant rate limiting, and
   a bypass list. (`crates/sng-swg`.)
+- **SWG inline DLP.** Regex (PII/PCI/PHI), MIP-label header inspection,
+  and content-fingerprint matching on the synchronous ext-authz path.
+  Block short-circuits to deny; log/redact verdicts are carried
+  forward so a later malware or category deny can still win. Engine
+  policy is hot-swapped via `ArcSwap`; a bounded `scan_ceiling_bytes`
+  cap prevents pathological bodies from blocking the verdict path.
+  (`crates/sng-swg/src/dlp_inline.rs`.)
+- **SWG AI governance.** Destination classification and policy
+  enforcement for generative-AI apps (ChatGPT, Claude, Copilot, Gemini,
+  and long-tail heuristic detection) on the ext-authz path. Supports
+  per-app, per-category, default, and suspected-app actions: allow,
+  monitor, block, or redirect to RBI. Suspected heuristic matches
+  default to allow so the long tail never blocks on its own.
+  (`crates/sng-swg/src/ai_governance.rs`.)
+- **SWG RBI.** Remote browser isolation policy engine that redirects
+  risky browsing to an RBI proxy. Trigger rules cover explicit
+  isolation, explicit bypass, and isolation of uncategorised sites.
+  Runs after DLP and before category deny so the isolation redirect
+  wins over a category block. (`crates/sng-swg/src/rbi.rs`.)
 - **DNS security.** Reputation feed, category filter, and sinkhole on
   both the edge and the endpoint. (`crates/sng-dns`.)
 - **SD-WAN.** Overlay tunnels, health probes, path scoring, and
   app-aware steering. (`crates/sng-sdwan`.)
+- **DEM (Digital Experience Monitoring).** Bounded synthetic probes
+  (DNS, TCP, HTTP/HTTPS) against critical SaaS targets, with
+  configurable sweep interval, concurrency, timeout, jitter, and
+  max-target limits. Probe results are serialized to structured JSON
+  matching the Go control-plane DTOs. Default-off; the subsystem is
+  inert when disabled. (`crates/sng-dem`, `crates/sng-edge/src/subsystems/dem.rs`.)
 - **ZTNA.** mTLS device identities, posture binding, and a per-app
-  access broker. (`crates/sng-ztna`.)
+  access broker. Clientless browser access adds an OIDC-based
+  browser path with sharded session store, host matching, and reverse
+  proxy routing to internal web apps. (`crates/sng-ztna`.)
 - **VPN replacement.** A WireGuard-class tunnel with short-lived keys
   and no implicit whole-network access. (`crates/sng-pal` tunnel
   backends.)
@@ -150,8 +177,10 @@ with a documented rationale.
   catalog and a data-classification taxonomy. Endpoint DLP adds native
   per-OS file-write, clipboard, print, and USB-transfer interception in
   `sng-pal`, each falling back to a bounded portable watcher when its
-  kernel hook is unavailable. (`internal/service/dlp/`,
-  `crates/sng-pal/src/dlp/`, `crates/sng-dlp`.)
+  kernel hook is unavailable. The edge SWG now also runs inline DLP
+  directly on the ext-authz verdict path for bodies the proxy forwards.
+  (`internal/service/dlp/`, `crates/sng-pal/src/dlp/`, `crates/sng-dlp`,
+  `crates/sng-swg/src/dlp_inline.rs`.)
 - **Browser protection.** A unified policy engine for download, upload,
   clipboard, print, screenshot, and URL-category controls.
   (`internal/service/browser/`.)
@@ -178,6 +207,11 @@ free-running. (`internal/service/ai/`,
 - **Policy tightening.** Unused / shadowed / overly-permissive rule
   detection; every suggestion compiles through the deterministic
   verifier before it can be applied.
+- **AI governance for SWG.** Inline enforcement on the ext-authz path
+  that classifies generative-AI destinations and applies per-app,
+  per-category, default, or suspected-app actions. Operators can block,
+  monitor, allow, or redirect AI-app traffic to RBI without waiting for
+  a control-plane review cycle.
 - **Enhanced AI.** Alert correlation, natural-language policy query,
   posture reports, threat-intel enrichment, and guardrails.
 - **Autonomous troubleshooting.** A RAG assistant over a knowledge base
@@ -211,6 +245,9 @@ the running stack by the harnesses under
 [`blog/harness/`](./blog/harness) (seed → usage → anomalies → capture →
 CASB → new-capability payloads) and the Rust benches under
 [`bench/`](./bench) (efficacy with ML-NER, multi-queue throughput,
-capacity planning, 8B LLM validation). Run order, environment, and the
-full payload index are documented in
+capacity planning, 8B LLM validation). The add-on capabilities are
+covered by crate unit tests: AI governance (24 tests), inline DLP (22
+tests), RBI (16 tests), clientless ZTNA (11 tests), and DEM (10 tests)
+— all run in the standard `cargo test` flow. Run order, environment, and
+the full payload index are documented in
 [`blog/artifacts/EVIDENCE_MANIFEST.md`](./blog/artifacts/EVIDENCE_MANIFEST.md).

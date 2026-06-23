@@ -32,6 +32,11 @@ may reach a specific application**.
   policy → return `AccessDecision` (`Allow`, `Deny`,
   `DenyPosture`, `DenyMfaStale`, …) with a structured
   reason for the audit log.
+* `clientless` — browser-based access to internal web apps without
+  an endpoint agent. OIDC authentication, sharded session store,
+  host-to-app matching, reverse-proxy target routing, and cookie
+  management. The clientless evaluator reuses the same
+  `ZtnaService` for policy decisions.
 * `stats` — counter surface; relaxed-ordering snapshot per
   the same per-counter contract as `sng-sdwan` and `sng-swg`.
 

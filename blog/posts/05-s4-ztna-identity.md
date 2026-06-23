@@ -15,6 +15,12 @@ broker is a node type in the same policy graph (Post 1): an `allow` edge from an
 identity to an app, scoped by device posture, compiles to a broker grant the edge
 enforces per-connection.
 
+> **Add-on update:** ZTNA now also supports **clientless browser access**. A user
+> without the `sng-agent` endpoint can authenticate through an OIDC IdP and reach
+> internal web apps via the edge's reverse-proxy path. The clientless evaluator
+> adds a sharded session store, host matching, and proxy-target routing to the same
+> `sng-ztna` policy engine.
+
 ## The decision is the graph
 
 There's no separate "ZTNA policy language." A grant is `identity → app` with
@@ -77,6 +83,12 @@ with numbers. Every tenant gets **six experience targets auto-provisioned** —
 GitHub, Google Workspace, Microsoft 365, Salesforce, Slack, and Zoom
 ([`dem-acme-targets.json`](../artifacts/payloads/dem-acme-targets.json)) — and
 the engine turns probe samples into a 0–100 experience score per target.
+
+> **Add-on update:** DEM is now a first-class **edge subsystem** (`sng-dem`). The
+> edge runs bounded DNS / TCP / HTTP(S) synthetic probes against configured SaaS
+> targets with configurable sweep interval, concurrency, timeout, jitter, and
+> max-target limits. The subsystem is default-off and inert when disabled, so it
+> adds zero overhead until an operator turns it on.
 
 The scoring is deliberately simple and explainable: a blended
 **availability (60%) + latency (40%)** score, smoothed with an EWMA, where

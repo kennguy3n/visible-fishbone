@@ -13,7 +13,7 @@ real harness output, each screenshot is a real CDP capture of the live console.
 | Host | 8 vCPU AMD EPYC 7763 (AVX2/FMA, no AVX-512/VNNI), 31 GiB RAM, CPU-only |
 | Runtime role | `sng_app` (non-superuser) — row-level security is enforced on every captured payload |
 | Fleet | 9 tenants under one MSP, seven countries / eight industries (see §3) |
-| Feature flags | optional NoOps levers (`HIBERNATION_ENABLED`, `CLICKHOUSE_TIER_SAMPLING_ENABLED`, `ROLLOUT_AUTOPILOT_ENABLED`, `CAPACITY_AUTOPILOT_ENABLED`, `METERING_AUTOPILOT_ENABLED`, `AI_INFERENCE_POOL_ENABLED`, `IDP_DIRECTORY_SYNC_ENABLED`) exercised where a post needs them |
+| Feature flags | optional NoOps levers (`HIBERNATION_ENABLED`, `CLICKHOUSE_TIER_SAMPLING_ENABLED`, `ROLLOUT_AUTOPILOT_ENABLED`, `CAPACITY_AUTOPILOT_ENABLED`, `METERING_AUTOPILOT_ENABLED`, `AI_INFERENCE_POOL_ENABLED`, `IDP_DIRECTORY_SYNC_ENABLED`, `DEM_ENABLED`) exercised where a post needs them |
 
 All payloads flow through the real operator API (JWT auth, RLS tenant scoping,
 policy compilation, audit log) — the seed/usage/capture/newcaps harnesses drive
@@ -34,6 +34,9 @@ enforcement-path-authentic.
 - **Informational (wild, never gates):** `malware_wild` catch **90.1%** / FPR
   **9.6%** (WARN — honest misses on packed/novel); `malware_fpr_load` FPR 9.6%
   (WARN); `dlp_wild` 100% / 0% FPR; `dlp_fpr_load` 100% / 0% FPR; `ips_wild` 100%.
+- **Add-on capabilities** are additionally covered by their crate unit tests,
+  all run in the standard `cargo test` flow: AI governance (24), inline DLP (22),
+  RBI (16), clientless ZTNA (11), and DEM (10).
 
 ### 1.2 Multi-queue throughput — `multiqueue-micro.json`, `multi-queue-branch-large.json`
 - **Source:** `sng-bench multi-queue --mode full-stack --backend nftables`.
@@ -94,11 +97,15 @@ experience-probe batch, and reads every surface back.
 | Application identification | `appid-acme-catalog-current.json`, `appid-admin-catalog-versions.json`, `appid-acme-catalog-bundle.json` | **215 apps / 17 categories**, signed catalog with a monotonic serial; matcher ranks most-specific-suffix-first |
 | Managed threat content | `threatcontent-acme-posture.json` | **76,432 indicators** across 5 built-in feeds, **ed25519-signed** bundle (digest `ee79836a…`), counts by type (domain / hash / ip / url); no per-tenant config |
 | Continuous compliance | `complianceauto-acme-posture.json`, `complianceauto-{acme,globex,maple}-collect-response.json`, `complianceauto-acme-evidence-pack-{soc2,iso27001}.json`, `…-soc2.csv` | **16 controls (10 SOC 2 + 6 ISO 27001)**, 3 collectors; on a bare dev stack Acme scores **SOC 2 6/10**, **ISO 27001 4/6** (the failing controls are real un-wired-service gaps) |
+| SWG inline DLP | (code) `crates/sng-swg/src/dlp_inline.rs` | **22 unit tests** covering regex, MIP-label, and fingerprint classification; bounded `scan_ceiling_bytes` on the ext-authz path |
+| SWG AI governance | (code) `crates/sng-swg/src/ai_governance.rs` | **24 unit tests** covering per-app / per-category / default / suspected-app actions; allow, monitor, block, redirect-to-RBI |
+| SWG RBI | (code) `crates/sng-swg/src/rbi.rs` | **16 unit tests** covering explicit isolate, bypass, and uncategorised-site triggers |
+| Clientless ZTNA | (code) `crates/sng-ztna/src/clientless.rs` | **11 unit tests** covering OIDC session, host matching, and reverse-proxy access decisions |
 | Digital-experience monitoring | `dem-acme-ingest-result-response.json`, `dem-acme-scores.json`, `dem-acme-targets.json`, `dem-acme-alerts.json` | ingest **HTTP 202** (72 samples), 6 auto-provisioned targets; 5 healthy targets score **100**, Zoom degrades to **30** (availability 50%, p50/p95 3,100 ms), firing **one critical `dem.experience_degraded` alert on Zoom** (below the degrade floor of 70) |
 | Active/active work distributor | (code) `internal/service/workshard` | **1,024 shards**, lease TTL 20 s / 7 s safety margin — periodic work spreads across replicas, not one leader |
 | Policy recommendation engine | `policyrec-acme-generate-response.json`, `policyrec-acme-list.json` | honest **HTTP 503** on a stack without the telemetry hot tier configured (`unavailable`); the recommendation list is empty until the hot tier is wired |
 
-> The six backend capabilities above have **no dedicated console page**, so they
+> The backend capabilities above have **no dedicated console page**, so they
 > are evidenced by verbatim payloads + measured numbers + code rather than by
 > screenshots. This follows the same treatment the repo already gives `/scim` and
 > `/pops`.

@@ -23,7 +23,9 @@ not tenant count.
 
 **2. Hibernation / scale-to-zero.** A genuinely dormant trial winds down to
 near-zero resident cost and wakes on activity. The dormant tenant stops being a
-line item until it is real.
+line item until it is real. Default-off subsystems extend the same idea to
+features: **DEM** (`sng-dem`) constructs no engine and does no work when disabled,
+so it adds zero cost until an operator turns it on.
 
 **3. A shared AI inference pool.** One pooled model serves the whole fleet
 instead of one model per tenant: **~3,696× less memory** (4.6 GB shared vs ~17,000

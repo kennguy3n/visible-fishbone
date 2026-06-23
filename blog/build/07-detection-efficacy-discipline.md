@@ -19,10 +19,13 @@ labelled corpora and emits a single report
 **PASS**). It scores **16 functions**, and the structure is the discipline:
 
 - **Curated corpora, per function.** `firewall`, `firewall_kernel`, `swg`,
-  `ztna`, `dlp`, `dlp_ml_ner`, `malware`, `dns`, `ips` — each with bad and good
-  cases, scored for catch rate *and* false-positive rate. On the curated sets the
+  `swg_ai_governance`, `swg_rbi`, `swg_dlp_inline`, `ztna`, `ztna_clientless`, `dlp`,
+  `dlp_ml_ner`, `malware`, `dns`, `ips`, `dem` — each with bad and good cases,
+  scored for catch rate *and* false-positive rate. On the curated sets the
   gating detectors run 100% catch / 0% false-positive (e.g. structured `dlp` at
-  **3,800 bad / 3,800 good**, 100/0).
+  **3,800 bad / 3,800 good**, 100/0). The add-on capabilities are additionally
+  covered by their crate unit tests (AI governance 24, inline DLP 22, RBI 16,
+  clientless ZTNA 11, DEM 10).
 - **Adversarial corpora.** `malware_adversarial` and `ips_adversarial` —
   evasion-shaped inputs — both hold 100%.
 - **Wild corpora.** `malware_wild`, `dlp_wild`, `ips_wild` — noisy,

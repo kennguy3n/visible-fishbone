@@ -13,9 +13,10 @@ Most SASE products are a pile of independent feature toggles: a firewall tab, a
 web-filter tab, a DLP tab, a ZTNA tab — each with its own model, its own
 precedence rules, its own way to be wrong. SNG's central design decision is the
 opposite: **one typed policy graph per tenant** that every enforcement surface
-compiles from. NGFW, SWG, DNS, IPS, ZTNA, DLP, SD-WAN steering, and CASB are all
-*nodes and edges* in the same graph, type-checked at compile time, signed, and
-distributed to the edge as one bundle.
+compiles from. NGFW, SWG, DNS, IPS, ZTNA, DLP, SD-WAN steering, CASB, inline DLP,
+AI governance, RBI, clientless ZTNA, and DEM are all *nodes and edges* in the same
+graph, type-checked at compile time, signed, and distributed to the edge as one
+bundle.
 
 ## Why a graph, not a rule list
 
@@ -23,9 +24,10 @@ A rule list answers "what happens to this packet?" in document order. A graph
 answers "what is this tenant's intent?" and lets the compiler reject
 contradictions before they ship. The node types are the SASE primitives —
 `site`, `device`, `identity`, `app`, `network-policy`, `dlp-policy`,
-`threat-policy`, `steering-policy` — and edges express scope and precedence. The
-compiler walks the graph, resolves precedence deterministically, and emits a
-signed bundle with a content hash the edge verifies before loading.
+`threat-policy`, `steering-policy`, `ai-governance-policy`, `rbi-policy` — and
+edges express scope and precedence. The compiler walks the graph, resolves
+precedence deterministically, and emits a signed bundle with a content hash the
+edge verifies before loading.
 
 The captured graph for Acme is verbatim from
 [`GET /api/v1/tenants/{id}/policy`](../artifacts/payloads/s2-acme-policy-graph.json):

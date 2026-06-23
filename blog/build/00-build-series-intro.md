@@ -31,7 +31,10 @@ technical choice that follows:
   per-tenant databases — because 5,000 cheap tenants cannot each carry the cost
   of a dedicated datastore.
 - A software edge composed from Rust crates with a kernel fast path (Posts 2, 5)
-  instead of custom silicon — because the economics only work on commodity x86.
+  instead of custom silicon — because the economics only work on commodity x86. The
+  edge now also carries add-on SWG verdict stages for **inline DLP**, **AI governance**,
+  and **RBI**, plus **clientless ZTNA** and a default-off **DEM** subsystem, each as a
+  separate crate so the core stays composable.
 - A signed, versioned App-ID catalog (Post 6) instead of a hard-coded protocol
   set — because you cannot ship a new product build every time an app appears.
 - Detection efficacy as a measured discipline with published false-positive

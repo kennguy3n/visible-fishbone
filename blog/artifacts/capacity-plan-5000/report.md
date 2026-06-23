@@ -10,9 +10,9 @@
 
 > Fortinet (FortiManager) and Palo Alto (Panorama) numbers are management-plane / ASIC-appliance figures, NOT apples-to-apples with a multi-tenant SaaS control plane. Zscaler (cloud-native) is the most directly comparable. Treat the cross-vendor column as directional only.
 
-### Capacity plan @ 5000 tenants × 7 telemetry classes
+### Capacity plan @ 5000 tenants × 8 telemetry classes
 
-Telemetry classes: `agent`, `dns`, `flow`, `http`, `ips`, `sdwan`, `ztna`
+Telemetry classes: `agent`, `dns`, `flow`, `http`, `ips`, `sdwan`, `ztna`, `dem`
 
 **Postgres connection-pool pressure**
 

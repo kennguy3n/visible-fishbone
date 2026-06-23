@@ -15,8 +15,10 @@ harness:
 | `fw` | [`sng-fw`](../sng-fw) | L3-L7 firewall, NAT, deterministic nftables script via `ShellNftables` |
 | `ips` | [`sng-ips`](../sng-ips) | Suricata supervisor via `ShellSuricata` |
 | `swg` | [`sng-swg`](../sng-swg) | Envoy supervisor + ext-authz handler via `ShellEnvoy` |
-| `ztna` | [`sng-ztna`](../sng-ztna) | Per-app access broker |
+| `extauthz` | [`sng-swg`](../sng-swg) | Verdict pipeline handler (URL category, DLP, RBI, AI governance) |
+| `ztna` | [`sng-ztna`](../sng-ztna) | Per-app access broker; agent-based + clientless browser paths |
 | `sdwan` | [`sng-sdwan`](../sng-sdwan) | Underlay path selection per probe + policy |
+| `dem` | [`sng-dem`](../sng-dem) | Default-off Digital Experience Monitoring subsystem |
 | `updater` | [`sng-updater`](../sng-updater) | Signed manifest install + dual-bank rollback |
 
 ## Library / binary split

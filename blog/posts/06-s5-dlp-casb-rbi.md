@@ -16,6 +16,11 @@ content), **CASB** (which SaaS apps it's flowing to), and **browser isolation**
 (rendering risky web content away from the endpoint). All three are policy-graph
 nodes, backed by a broad detector and SaaS-API catalog.
 
+> **Add-on update:** The edge SWG now also runs **inline DLP** directly on the
+> ext-authz verdict path for forwarded bodies, and **AI governance** for SWG
+> lets operators block, monitor, allow, or redirect generative-AI traffic to RBI
+> without a control-plane review cycle.
+
 ## DLP: structured detection + an on-device ML classifier
 
 DLP runs two complementary engines. A **structured detector** matches the things

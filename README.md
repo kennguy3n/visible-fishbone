@@ -5,8 +5,9 @@
 
 ShieldNet Gateway (SNG) is the network-layer product in the **SN360
 family**, alongside [ShieldNet Defense] and [ShieldNet Access]
-(ZTNA + PAM). SNG delivers NGFW, IDS/IPS, SWG, DNS security, ZTNA,
-VPN replacement, SD-WAN, telemetry, and unified policy orchestration
+(ZTNA + PAM). SNG delivers NGFW, IDS/IPS, SWG with inline DLP / AI governance / RBI,
+DNS security, SD-WAN, DEM, ZTNA (agent-based and clientless), VPN
+replacement, telemetry, and unified policy orchestration
 as a SaaS-managed, multi-tenant platform with edge enforcement —
 one console, one policy model, one lightweight endpoint client, one
 branch edge image, one telemetry fabric, one support path.
@@ -17,7 +18,7 @@ Alto-grade management discipline."**
 This repository is the SNG monorepo: it contains both the Rust
 **enforcement plane** (`crates/sng-*` — the branch / site edge
 appliance binary `sng-edge`, the cross-platform endpoint client
-binary `sng-agent`, and the twelve library crates they compose)
+binary `sng-agent`, and the library crates they compose)
 and the SNG-specific Go **control plane** (`cmd/sng-control`,
 `cmd/sng-migrate`, `internal/`, `migrations/`, `api/openapi.yaml`)
 that issues signed policy bundles, signed update manifests, and
@@ -37,9 +38,13 @@ plane, policy model, and telemetry fabric.
 |---|---|---|
 | **NGFW + IDS/IPS** — L3-L7 policy, NAT, app awareness, TLS policy, Suricata inline | Implemented | Edge appliance (`sng-edge`) |
 | **SWG** — Envoy-based forward proxy with URL categorization + malware verdict API | Implemented | Edge appliance |
+| **SWG inline DLP** — regex (PII/PCI/PHI), MIP-label, and content-fingerprint classification on the ext-authz hot path | Implemented | Edge appliance |
+| **SWG AI governance** — per-app / per-category rules for ChatGPT, Claude, Copilot, Gemini, and heuristic AI-app detection; allow, monitor, block, or redirect to RBI | Implemented | Edge appliance |
+| **SWG RBI** — remote browser isolation triggers (explicit isolate, explicit bypass, uncategorised) redirect risky browsing to an RBI proxy | Implemented | Edge appliance |
 | **DNS security** — reputation feed, category filter, sinkhole | Implemented | Edge appliance + endpoint |
 | **SD-WAN** — overlay tunnels, health probes, path scoring, app-aware steering | Implemented | Edge appliance |
-| **ZTNA** — mTLS device identities, posture binding, per-app access | Implemented | Edge appliance + endpoint client (`sng-agent`) |
+| **DEM** — Digital Experience Monitoring with bounded DNS / TCP / HTTP(S) synthetic probes and structured probe results | Implemented | Edge appliance |
+| **ZTNA** — mTLS device identities, posture binding, per-app access, and clientless browser access via OIDC + reverse proxy | Implemented | Edge appliance + endpoint client (`sng-agent`) |
 | **VPN replacement** — WireGuard-class tunnel, short-lived keys, no implicit "whole-network" access | Implemented | Endpoint client |
 | **Dual-bank self-update** — Ed25519-signed manifests, A/B install, rollback-safe health window | Implemented | Edge appliance + endpoint client |
 | **Local policy evaluator** — verified policy bundles, hot-swap, fail-closed | Implemented | Edge appliance + endpoint client |
@@ -139,7 +144,7 @@ performance-sensitive edge component.
 
 ## Workspace Layout
 
-The workspace is two binaries plus twelve library crates. The Rust
+The workspace is two binaries plus the library crates under `crates/`. The Rust
 `sng-` prefix matches the family pattern (`sda-` desktop, `vma-`
 VM, `ska-` Kubernetes, `sng-` gateway). The lib / bin split mirrors
 [`sn360-agent-k8s`](https://github.com/kennguy3n/sn360-agent-k8s)
@@ -154,12 +159,17 @@ and [`sn360-desktop-agent`](https://github.com/kennguy3n/sn360-desktop-agent).
 | [`sng-policy-eval`](./crates/sng-policy-eval) | lib | Local policy evaluation engine — verified bundles, hot-swap, sub-microsecond per-flow verdict |
 | [`sng-comms`](./crates/sng-comms) | lib | SN360 native protocol client — TLS 1.3, MessagePack, HTTP/2, batching, replay-safe ack, bounded spool |
 | [`sng-telemetry`](./crates/sng-telemetry) | lib | Local telemetry collection, normalization, dedup, metadata-first redaction, egress |
-| [`sng-swg`](./crates/sng-swg) | lib | Envoy ext-authz handler — URL categorization, malware verdict, per-tenant rate-limit, bypass list |
+| [`sng-swg`](./crates/sng-swg) | lib | Envoy ext-authz handler — URL categorization, malware verdict, inline DLP, AI governance, RBI, per-tenant rate-limit, bypass list |
 | [`sng-dns`](./crates/sng-dns) | lib | DNS security resolver and filter (reputation, category, sinkhole) |
-| [`sng-ztna`](./crates/sng-ztna) | lib | Zero Trust Network Access — mTLS device identities, posture binding, app access broker |
+| [`sng-ztna`](./crates/sng-ztna) | lib | Zero Trust Network Access — mTLS device identities, posture binding, app access broker, clientless browser access |
 | [`sng-sdwan`](./crates/sng-sdwan) | lib | SD-WAN overlay tunnels, path scoring, health probes, app-aware steering |
 | [`sng-ips`](./crates/sng-ips) | lib | Suricata wrapper — rule sync, alert normalization, supervisor + signal lifecycle |
 | [`sng-fw`](./crates/sng-fw) | lib | Firewall — L3-L7 policy, NAT, app awareness, deterministic nftables rule set |
+| [`sng-dlp`](./crates/sng-dlp) | lib | On-device ML classifier + coach-first AI-app DLP (OCR + document fingerprinting) |
+| [`sng-dem`](./crates/sng-dem) | lib | Default-off Digital Experience Monitoring — bounded DNS / TCP / HTTP(S) synthetic probes |
+| [`sng-appid`](./crates/sng-appid) | lib | Signed, versioned application-identification catalog (215 apps / 17 categories) |
+| [`sng-ebpf`](./crates/sng-ebpf) | lib | eBPF/XDP fast path — tail-call-split pipeline with LRU verdict cache |
+| [`sng-ha`](./crates/sng-ha) | lib | Control-plane leader election / fencing-token primitives |
 | [`sng-updater`](./crates/sng-updater) | lib | Self-update with signed manifests (Ed25519), dual-bank image install, rollback |
 | [`sng-mobile-core`](./crates/sng-mobile-core) | lib | Platform-agnostic mobile agent brain — lifecycle, enrolment, posture, telemetry, ZTNA; pure Rust, driven through a UniFFI binding layer |
 | [`sng-oidc`](./crates/sng-oidc) | lib | Pure-Rust OIDC client (discovery, PKCE, token exchange, ID-token validation) + the `AuthSurface` browser-presentation trait |

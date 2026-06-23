@@ -30,7 +30,7 @@ cost-effective enforcement points is different in each case.
 | `trusted_direct` | DNS verification + cert-pin + IP-range binding. **No** TLS decryption, **no** proxy. | Metadata only (5-tuple, bytes, SNI, app id, verdict) | 35-50% |
 | `trusted_media_bypass` | DNS verification + cert-pin. Same as `trusted_direct` but tuned for high-bandwidth media/CDN flows that would saturate the proxy. | Metadata only; coarse-grained sampling | 20-30% |
 | `inspect_lite` | DNS verification + URL category lookup. **No** TLS decryption. Used for top-Alexa domains, well-known CDNs, banking. | Metadata + URL-cat verdict | 10-20% |
-| `inspect_full` | Full SWG: TLS decrypt, URL-cat, malware verdict, AV scan, IPS, DLP, content filtering. | Metadata + (optionally) decrypted payload, when tenant policy opts in. | 10-20% |
+| `inspect_full` | Full SWG: TLS decrypt, URL-cat, malware verdict, AV scan, IPS, inline DLP, AI governance, RBI, content filtering. | Metadata + (optionally) decrypted payload, when tenant policy opts in. | 10-20% |
 | `tunnel_private` | mTLS overlay to a tenant-private destination (ZTNA app, internal LOB system). No inspection — point-to-point encrypted. | Metadata + ZTNA decision record | 1-5% |
 | `block` | Connection refused at the earliest possible enforcement point (DNS sink, edge drop, agent block). | Block event with reason | < 5% |
 
@@ -49,8 +49,8 @@ deployment mode determines *where that protection is enforced*.
 | `trusted_direct` | Edge ASIC fast-path. NGFW logs metadata, IPS skipped, SWG bypassed. | Same as branch when traffic terminates at hub. | Endpoint stub → direct internet egress. Agent verifies cert pin locally. | Direct internet egress from the host NIC; agent verifies cert pin + IP range. |
 | `trusted_media_bypass` | Same as `trusted_direct` but logged at sampled rate to control telemetry cost. | Same as branch. | Direct egress, sampled telemetry. | Direct egress, sampled telemetry. |
 | `inspect_lite` | Edge SWG: URL-cat hit only, no TLS-MITM, no AV scan. | Forwarded to spoke branch for SWG. | Endpoint sends DNS to cloud DNS proxy for category lookup; HTTPS itself goes direct. | Same as `cloud_only`. |
-| `inspect_full` | Edge SWG: full TLS decrypt + AV + IPS. CPU stays on the customer's VM. | Forwarded to spoke branch (full SWG runs at the spoke). | Endpoint tunnels HTTPS to the regional cloud PoP for full inspection. | Same as `cloud_only`. This is the **only** class that pays full cloud-egress + decrypt cost. |
-| `tunnel_private` | Edge SD-WAN overlay tunnel to the private destination. | Same as branch; hub may relay if the destination sits at another site. | Endpoint runs ZTNA client to the private destination directly. | Same as `cloud_only`. |
+| `inspect_full` | Edge SWG: full TLS decrypt + AV + IPS + inline DLP + AI governance + RBI. CPU stays on the customer's VM. | Forwarded to spoke branch (full SWG runs at the spoke). | Endpoint tunnels HTTPS to the regional cloud PoP for full inspection. | Same as `cloud_only`. This is the **only** class that pays full cloud-egress + decrypt cost. |
+| `tunnel_private` | Edge SD-WAN overlay tunnel to the private destination. | Same as branch; hub may relay if the destination sits at another site. | Endpoint runs ZTNA client or clientless browser path to the private destination directly. | Same as `cloud_only`. |
 | `block` | Dropped at NGFW / DNS sink before the flow leaves the LAN. | Dropped at hub. | DNS sink at the endpoint resolver; if it bypasses DNS, edge / cloud agent drops the TCP SYN. | Same as `cloud_only`. |
 
 The compiler emits one steering rule set per (deployment-mode,

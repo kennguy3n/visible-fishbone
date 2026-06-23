@@ -55,6 +55,14 @@ assistant above.
 
 ## The model is real, and measured
 
+The "propose → verify" contract is not limited to the console assistant. The SWG
+also runs **AI governance** deterministically on the ext-authz path: it classifies
+generative-AI destinations (curated apps like ChatGPT, Claude, Copilot, Gemini,
+plus heuristic long-tail detection) and applies per-app, per-category, default,
+or suspected-app rules. Verdicts are allow, monitor, block, or redirect to RBI — no
+LLM on the hot path, so the decision is fast, inspectable, and cannot drift with
+model versions.
+
 The self-hosted model is **Ternary-Bonsai-8B Q2_0** (custom AVX2-repack kernels),
 validated by `blog/harness/llm_validation`
 ([`quality_report.md`](../artifacts/llm_validation/quality_report.md)). On this

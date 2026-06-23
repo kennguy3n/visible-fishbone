@@ -96,7 +96,7 @@ capacity plan:
 | Detection | 100% curated / 0% FP; 90.1% wild malware (WARN) | Mature vendors have larger signature/intel sets; SNG's honesty (publishing wild FPR) is the differentiator, not raw breadth. |
 | Cost at scale | 10× dormancy dividend + hibernation + 3,696× AI-memory reduction | This is SNG's actual edge — *dormant-trial economics* nobody else monetises well. |
 | Self-operation | 3 guardrailed autopilots (promote/capacity/margin) | Competitors have rich ops tooling; SNG's bet is automating the *decisions*, not just the dashboards. |
-| Breadth | broadened IdP/IGA, threat-intel (JA3/Suricata/retro-hunt), CASB SaaS-API + DLP catalog | Still behind Netskope (CASB) / Palo Alto (intel) on sheer catalog size; closing, not closed. |
+| Breadth | broadened IdP/IGA, threat-intel (JA3/Suricata/retro-hunt), CASB SaaS-API + DLP catalog, **SWG inline DLP + AI governance + RBI**, **clientless ZTNA**, **DEM** | Still behind Netskope (CASB) / Palo Alto (intel) on sheer catalog size; closing, not closed. |
 
 The competitive thesis is narrow and defensible: SNG is **not** trying to
 out-ASIC Fortinet or out-catalog Netskope. It's trying to be the platform that

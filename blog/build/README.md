@@ -10,8 +10,10 @@ It is written for two readers at once:
 
 - **The engineer** who wants the real architecture: the control-plane/edge
   split, the typed policy graph and its compiler, Postgres row-level security as
-  the isolation boundary, the Rust enforcement crates and the eBPF/XDP fast path,
-  the signed App-ID catalog, the efficacy harness, and the NoOps economics.
+  the isolation boundary, the Rust enforcement crates (including SWG add-on inline
+  DLP, AI governance, RBI, clientless ZTNA, and default-off DEM) and the eBPF/XDP
+  fast path, the signed App-ID catalog, the efficacy harness, and the NoOps
+  economics.
 - **The product leader** who wants the *decision behind* each of those: what bet
   it encodes, who it serves, what it costs, and how the incumbents (Zscaler,
   Palo Alto, Fortinet, Netskope, Cato) made the same call differently.
@@ -66,7 +68,8 @@ This series inherits the same four rules as the engineering series, because the
 
 By the end of the series you would understand how to assemble: a multi-tenant
 control plane with hard database-level isolation; a typed, compiled, signed
-policy model; a composable software data plane with a kernel fast path; a
+policy model that now also includes AI governance, RBI, inline DLP, clientless
+ZTNA, and DEM nodes; a composable software data plane with a kernel fast path; a
 signed, versioned application-identification catalog; a measured efficacy
 discipline with explicit false-positive budgets; the NoOps economics that make a
 trial-heavy fleet profitable; and an evidence harness that keeps every claim

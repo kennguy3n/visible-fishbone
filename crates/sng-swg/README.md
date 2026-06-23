@@ -36,7 +36,19 @@ ext-authz uses at runtime.
   dispatch, response render, telemetry emit. Envoy POSTs each
   candidate request to `/ext_authz`; the handler computes the
   verdict and replies with a JSON body Envoy maps onto allow / deny
-  / 429.
+  / 429 / 302.
+* `dlp_inline` — inline DLP classification engine for the ext-authz
+  path: `RegexSet` single-pass scan, MIP-label header inspection,
+  content-fingerprint matching, bounded `scan_ceiling_bytes`, and
+  `ArcSwap` hot-swap policy.
+* `ai_governance` — inline AI-app governance on the ext-authz path.
+  Destination classification for curated generative-AI apps and
+  heuristic long-tail detection; per-app / per-category / default /
+  suspected-app rules with actions allow, monitor, block, or redirect
+  to RBI.
+* `rbi` — remote browser isolation policy engine. Explicit isolate /
+  explicit bypass / isolate-uncategorised trigger rules produce a 302
+  redirect to an RBI proxy.
 * `config` — deterministic Envoy YAML renderer with SHA-256
   digest dedup. Mirrors `sng_fw::compile::render_script` (the
   nftables renderer): hand-rendered text, byte-identical output

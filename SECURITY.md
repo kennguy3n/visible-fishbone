@@ -17,8 +17,8 @@ The product surface this policy covers, for code that lives in
   VM image binary (`sng-edge`), the endpoint client binary
   (`sng-agent`), and every shared library crate (`sng-core`,
   `sng-pal`, `sng-comms`, `sng-policy-eval`, `sng-telemetry`,
-  `sng-fw`, `sng-ips`, `sng-dns`, `sng-swg`, `sng-ztna`,
-  `sng-sdwan`, `sng-updater`).
+  `sng-fw`, `sng-ips`, `sng-dns`, `sng-swg`, `sng-dlp`, `sng-ztna`,
+  `sng-sdwan`, `sng-dem`, `sng-updater`).
 - The Go control plane: `cmd/sng-control` (long-running API +
   worker), `cmd/sng-migrate` (one-shot migration runner), every
   package under `internal/`, the SQL migrations under
@@ -97,9 +97,10 @@ policy:
   model.
 - False positives or false negatives in the bundled policy
   templates, the DNS reputation feed, the SWG URL category feed,
-  or the IDS/IPS Suricata rule pack. Tune those in your tenant's
-  policy graph rather than reporting baseline coverage as a
-  vulnerability.
+  the inline DLP / AI governance / RBI classifiers, the DEM probe
+  scoring thresholds, or the IDS/IPS Suricata rule pack. Tune those
+  in your tenant's policy graph rather than reporting baseline
+  coverage as a vulnerability.
 - Performance issues without a security impact. File these as
   regular bugs.
 

@@ -26,6 +26,9 @@ authoritative per-file stamps.
   malware/ips adversarial legs) all score 100% catch / 0% FPR; `dlp_ml_ner`
   scores 97.4% catch / 97.9% accuracy / 0% FPR. The informational *wild* legs
   never gate and report honest misses (`malware_wild` 90.1% catch / 9.6% FPR).
+  The add-on capabilities (AI governance, inline DLP, RBI, clientless ZTNA,
+  DEM) are additionally covered by their crate unit tests — see
+  [`EVIDENCE_MANIFEST.md`](EVIDENCE_MANIFEST.md) §1.1 and §2.
   The per-function corpus sizes, throughput, and verdicts live in
   `efficacy-report.json` and are summarized in
   [`EVIDENCE_MANIFEST.md`](EVIDENCE_MANIFEST.md) §1.1.

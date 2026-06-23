@@ -24,7 +24,7 @@ the bill is predictable.
 | --- | --- | --- | --- |
 | 1 | Mara, MSP owner | "Trials shouldn't bleed money" | 10× fewer background visits + hibernation to near-zero |
 | 2 | Sam, SME IT lead | "Show me the apps I don't know about" | real CASB engine output with risk + recommended action |
-| 3 | Lena, analyst | "Stop AI leaks without a staff revolt" | coach-first DLP + a human review queue |
+| 3 | Lena, analyst | "Stop AI leaks without a staff revolt" | coach-first DLP + inline SWG DLP + AI governance + a human review queue |
 | 4 | Mara, MSP owner | "Onboard a tenant to a safe default, fast" | jurisdiction-correct templates across 5 regimes |
 | 5 | Tom, CFO | "Prove the spend and the posture" | per-tenant margin, a real loss-maker, honest competitive read |
 

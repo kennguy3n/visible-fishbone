@@ -10,7 +10,7 @@ collect → dedup → redact → enrich → egress (sng-comms)
 
 1. **Collect** — typed `TelemetryEvent`s arrive from every
    subsystem (DNS filter, firewall, IPS, SWG, ZTNA, SD-WAN,
-   updater, agent lifecycle). Subsystems implement
+   DEM, updater, agent lifecycle). Subsystems implement
    `EventSource` or push directly into a `PipelineHandle`.
 2. **Dedup** — a rolling window (`Dedup`) drops fingerprint-
    equal events observed within the configured TTL. The

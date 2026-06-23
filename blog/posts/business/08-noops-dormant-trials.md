@@ -32,6 +32,9 @@ metering — and instead of visiting all 5,000 tenants every cycle, it visits:
 - **idle** tenants 10× less often,
 - **dormant** tenants 100× less often.
 
+Default-off features follow the same principle: **DEM** (`sng-dem`) is inert when
+disabled, so a trial that isn't using it pays nothing for it.
+
 The [5,000-tenant capacity model](../../artifacts/capacity-plan-5000/report.md)
 puts numbers on it. With a realistic mix (400 active / 600 idle / 4,000 dormant),
 the background work drops **10× — from 5,000 to 500 tenant-visits per cycle, per

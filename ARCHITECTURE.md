@@ -9,7 +9,7 @@
 >
 > This document covers the entire SNG product. Both planes live
 > in this monorepo: the Rust enforcement plane (`sng-edge`,
-> `sng-agent`, and the twelve library crates under `crates/`)
+> `sng-agent`, and the library crates under `crates/`)
 > and the Go control plane (`cmd/sng-control`, `cmd/sng-migrate`,
 > packages under `internal/`, schema in `migrations/`, REST
 > surface in `api/openapi.yaml`). The broader SN360 multi-product
@@ -28,7 +28,9 @@ single control plane, a single typed policy graph, and a single
 telemetry fabric:
 
 1. **Branch / site edge virtual appliance** (`sng-edge`, Rust) —
-   carries NGFW + IDS/IPS, SWG, DNS security, and SD-WAN; enforces
+   carries NGFW + IDS/IPS, SWG (with inline DLP, AI governance, and RBI
+   verdict stages), DNS security, SD-WAN, ZTNA (agent-based and clientless
+   browser access), and default-off Digital Experience Monitoring (DEM); enforces
    compiled policy locally.
 2. **Lightweight endpoint client** (`sng-agent`, Rust, cross-platform
    Windows / macOS / Linux) — traffic steering, posture, ZTNA, VPN
@@ -54,7 +56,7 @@ graph TD
         Endpoints["Endpoints (Windows / macOS / Linux)"]
         Agent["sng-agent (Rust)"]
         Branch["Branch / Site"]
-        EdgeVM["sng-edge VM (Rust)<br/>NGFW + IPS + SWG + DNS + SD-WAN"]
+        EdgeVM["sng-edge VM (Rust)<br/>NGFW + IPS + SWG + DNS + SD-WAN + ZTNA + DEM"]
         Users --> Endpoints
         Endpoints --> Agent
         Branch --> EdgeVM
@@ -130,9 +132,10 @@ S3 (telemetry).
 ### 3.2 Policy Graph + Compiler
 
 - **Typed policy model.** One graph spans NGFW, SWG, DNS, ZTNA,
-  SD-WAN, and DLP. Vertices are subjects (user, device, app, site,
-  network) and predicates; edges are policy verbs (allow, deny,
-  inspect, steer, decrypt, log, suggest-only).
+  SD-WAN, DLP, inline DLP, AI governance, RBI, and DEM. Vertices are
+  subjects (user, device, app, site, network) and predicates; edges are
+  policy verbs (allow, deny, inspect, steer, decrypt, isolate, log,
+  suggest-only).
 - **Change simulation.** Every proposed change runs through a
   deterministic simulator that diffs the compiled bundle against
   the previous version and replays recent telemetry to estimate
@@ -350,16 +353,23 @@ verdicts feed the policy graph and telemetry fabric.
   data-classification taxonomy (`taxonomy.go`, `public` →
   `top_secret`) round it out. Served by `internal/handler/dlp.go`
   (`migrations/017_dlp.*`, `019_data_classification.*`). *Note: the
-  inline SWG ext-authz and out-of-band CASB-scan enforcement paths
-  named in early planning were not built; classification + MIP +
-  fingerprinting shipped instead.*
+  inline SWG ext-authz enforcement path is now built as
+  `crates/sng-swg/src/dlp_inline.rs`, running regex, MIP-label, and
+  content-fingerprint classification on the ext-authz hot path with a
+  bounded `scan_ceiling_bytes` cap. The out-of-band CASB-scan path was
+  not built; classification + MIP + fingerprinting shipped instead.*
 - **Browser protection** (`internal/service/browser/`). A single
   unified `BrowserPolicy` engine governs download / upload /
   clipboard / print / screenshot / URL-category rules per tenant
   (`(tenant_id, name)` unique, RLS-isolated), served by
   `internal/handler/browser.go` (`migrations/018_browser_policies.*`).
   *This replaced the separately-planned isolation-proxy /
-  extension-policy / phishing modules.*
+  extension-policy / phishing modules.* The SWG now also runs an
+  **RBI** verdict stage (`crates/sng-swg/src/rbi.rs`) that redirects
+  risky browsing to an RBI proxy, and an **AI governance** stage
+  (`crates/sng-swg/src/ai_governance.rs`) that classifies generative-AI
+  destinations and applies per-app / per-category rules (allow,
+  monitor, block, redirect to RBI).
 - **Config-as-code** (`internal/service/terraform/`). `provider.go`
   exports / imports a versioned, idempotent tenant configuration
   document; `drift.go` diffs a declared config against the live
@@ -491,6 +501,15 @@ resolver). Dual-bank image install allows safe rollback.
   default uses a 3rd-party feed, with a clean trait surface for
   swapping in a first-party engine later.
 - Malware verdict API for downloaded files.
+- **Inline DLP** verdict stage (`dlp_inline.rs`) — regex, MIP-label,
+  and content-fingerprint classification on the ext-authz path, with a
+  bounded `scan_ceiling_bytes` cap.
+- **AI governance** verdict stage (`ai_governance.rs`) — classifies
+  generative-AI destinations and applies per-app / per-category rules
+  (allow, monitor, block, redirect to RBI).
+- **RBI** verdict stage (`rbi.rs`) — remote browser isolation
+  redirect for explicit isolation, explicit bypass, and
+  uncategorised-site triggers.
 - TLS interception with operator-controlled bypass lists for
   sensitive categories (healthcare, finance) — defaults match
   industry-standard "do not decrypt" lists.
@@ -553,11 +572,25 @@ See `docs/TRAFFIC_CLASSIFICATION.md` for the full design.
 - Path scoring + app-aware steering rules from the compiled policy.
 - Failover with sub-second target on path loss.
 
+### 4.6a Digital Experience Monitoring (`sng-dem`)
+
+A default-off edge subsystem that runs bounded synthetic probes
+(DNS, TCP, HTTP/HTTPS) against critical SaaS targets. The
+`DemSubsystem` (`crates/sng-edge/src/subsystems/dem.rs`) wraps the
+`ProbeEngine` (`crates/sng-dem/src/probe.rs`). When disabled it is
+inert — no engine is constructed and no probes run. When enabled,
+`sweeps` run on a configurable interval with bounded concurrency,
+per-probe timeout, jitter, and max-target limits. Probe results are
+serialized to structured JSON matching the Go control-plane DTOs and
+logged via `tracing`. DEM is the edge measurement half of the
+experience-monitoring feature; the control plane owns scoring,
+alerting, and target configuration.
+
 ### 4.7 Local Policy Evaluator (`sng-policy-eval`)
 
 - Loads compiled policy bundles from `sng-comms`.
 - Evaluates verdicts for every requesting subsystem (firewall, SWG,
-  DNS, SD-WAN, IPS metadata).
+  DNS, SD-WAN, IPS metadata, ZTNA, DLP, AI governance, RBI, DEM).
 - Hot-swap atomically on bundle rotation (Arc-swap pattern).
 - Bundle versions are tracked; mismatch with control plane triggers
   re-pull.
@@ -610,13 +643,20 @@ mirror SDA.
 - Steering decisions are policy-driven and re-evaluated on network
   changes.
 
-### 5.3 ZTNA Client (`sng-ztna`)
+### 5.3 ZTNA (`sng-ztna`)
 
-- mTLS device identity (bound to TPM / TEE).
-- Per-app access — application identifier + policy predicate.
-- Posture is bound to the access grant: if posture fails, the
-  grant is revoked.
-- Replaces classic SSL-VPN — no implicit "whole-network" access.
+The ZTNA subsystem runs on the endpoint and on the edge:
+
+- **Agent-based path** (`sng-agent` + `sng-ztna`). mTLS device identity
+  (bound to TPM / TEE). Per-app access — application identifier + policy
+  predicate. Posture is bound to the access grant: if posture fails, the
+  grant is revoked. Replaces classic SSL-VPN — no implicit
+  "whole-network" access.
+- **Clientless browser path** (`sng-ztna/src/clientless.rs`). An
+  OIDC-authenticated browser path to internal web apps without an
+  endpoint agent. Includes a sharded session store, host-to-app
+  matching, and reverse-proxy target routing. The same `ZtnaService`
+  evaluates policy decisions for both paths.
 
 ### 5.4 VPN Replacement Tunnel
 
@@ -664,12 +704,14 @@ graph LR
         DNS["DNS events"]
         HTTP["HTTP / TLS events"]
         Ident["Identity events"]
+        DEM["DEM probe events"]
         Local["Local enrichment + redaction"]
         Ring["Short local PCAP ring"]
         Pkts --> Local
         DNS --> Local
         HTTP --> Local
         Ident --> Local
+        DEM --> Local
         Local --> Ring
     end
 

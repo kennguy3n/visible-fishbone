@@ -11,10 +11,11 @@ platform where the control plane operates itself: universal dormancy tiering,
 hibernation/scale-to-zero, tier-aware telemetry, auto-promotion, capacity and
 margin autopilots, a shared AI inference pool, a typed policy graph, a signed
 application-identification catalog, managed threat content, on-device DLP with
-OCR and document fingerprinting, lightweight digital-experience monitoring,
-continuous compliance evidence, and a policy recommendation engine. Every
-figure below is measured on the current codebase. Post 0 has the
-"what's actually wired" table.
+OCR and document fingerprinting, SWG **inline DLP** and **AI governance** and **RBI**
+verdict stages, **clientless ZTNA** browser access, **DEM** (Digital Experience
+Monitoring) with bounded synthetic probes, continuous compliance evidence, and a
+policy recommendation engine. Every figure below is measured on the current
+codebase. Post 0 has the "what's actually wired" table.
 
 ## The posts
 
@@ -25,9 +26,9 @@ figure below is measured on the current codebase. Post 0 has the
 | 2 | [Stand up a tenant, then run 5,000 cheaply](02-s1-multitenant-msp-dormancy.md) | Multi-tenant RLS + dormancy + active/active work distribution | Maya |
 | 3 | [Hibernation: a dormant trial that costs almost nothing](03-hibernation-scale-to-zero.md) | Scale-to-zero + tier-aware telemetry | Maya / Tom |
 | 4 | [Detection efficacy + managed threat content](04-s3-detection-efficacy-threat-intel.md) | Efficacy matrix + signed threat-content bundle | Lena |
-| 5 | [Retire the VPN: zero-trust, identity, and experience](05-s4-ztna-identity.md) | ZTNA + IdP breadth + digital-experience monitoring | Devraj |
-| 6 | [Keep regulated data in: DLP + CASB + RBI](06-s5-dlp-casb-rbi.md) | DLP (incl. OCR + document fingerprinting) + CASB + browser isolation | Lena / Tom |
-| 7 | [AI-assisted ops + shared inference](07-s6-ai-assisted-ops-shared-inference.md) | Verifier-checked AI + shared model + policy synthesis | Lena / Devraj |
+| 5 | [Retire the VPN: zero-trust, identity, and experience](05-s4-ztna-identity.md) | ZTNA (agent + clientless browser) + IdP breadth + DEM edge subsystem | Devraj |
+| 6 | [Keep regulated data in: DLP + CASB + RBI](06-s5-dlp-casb-rbi.md) | DLP (OCR + fingerprinting + inline SWG) + CASB + AI governance + RBI | Lena / Tom |
+| 7 | [AI-assisted ops + shared inference](07-s6-ai-assisted-ops-shared-inference.md) | Verifier-checked AI + shared model + policy synthesis + SWG AI governance | Lena / Devraj |
 | 8 | [NoOps self-operation: the control plane that operates itself](08-noops-self-operation.md) | Auto-promotion + capacity/margin autopilots + work distribution | Maya / Tom |
 | 9 | [Prove the spend and the posture + competitive critique](09-s7-cost-compliance-competitive.md) | Cost + continuous compliance evidence + critique | Tom |
 | 10 | [Six scenarios on one dev VM](10-six-scenarios-on-this-vm.md) | — | Devraj / Lena |

@@ -18,7 +18,7 @@ payload below is byte-for-byte reproducible across reseeds.
 | --- | --- | --- | --- | --- | --- |
 | 1 | **Route** | `steer` verb | `sdwan` | Policy editor / React-Flow graph | `payloads/s2-acme-policy-graph.json` → rule `sdwan-steer-saas` |
 | 2 | **Allow** | `allow` verb | `ngfw`, `ztna` | Policy editor (Simple "who→what→where") | `payloads/s2-acme-policy-graph.json` → `ngfw-allow-corp-apps`, `ztna-allow-posture` |
-| 3 | **Block** | `deny` verb | `ngfw`, `swg`, `dns` | Policy editor / Browser policies | `payloads/s2-acme-policy-graph.json` → `ngfw-deny-guest-apps`, `swg-deny-gambling`, `dns-deny-malware` |
+| 3 | **Block** | `deny` verb | `ngfw`, `swg`, `dns` (+ `swg_dlp_inline`, `swg_ai_governance`, `swg_rbi` verdicts) | Policy editor / Browser policies | `payloads/s2-acme-policy-graph.json` → `ngfw-deny-guest-apps`, `swg-deny-gambling`, `dns-deny-malware`; add-on crate unit tests for the SWG verdict stages |
 | 4 | **Prioritise** | `steer` + SLA class (`business-critical` / `real-time`) | `sdwan` | Policy editor (rule params) | `payloads/s2-acme-policy-graph.json` → `sdwan-steer-saas` (≤50 ms / ≤0.1 %), `sdwan-steer-voip` (≤15 ms jitter) |
 | 5 | **Throttle** | `Action::RateLimit` (token bucket → HTTP 429 + `Retry-After`) | `swg` (edge runtime) | n/a (data-plane verdict) | `payloads/s-throttle-swg-ratelimit.json` (real `sng-swg::RateLimiter` run) |
 | 6 | **Threat-protection** | `deny` + ClamAV/YARA/safe-browsing + IPS | `dns`, `swg`, IPS | Alerts / playbooks | `efficacy-report.json` (malware/dns/ips/adversarial), `payloads/s3-acme-alerts.json`, `payloads/s6-acme-playbooks.json` |

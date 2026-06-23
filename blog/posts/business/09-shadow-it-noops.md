@@ -22,7 +22,10 @@ critically — a **recommended action with a confidence level**. Read across:
 Microsoft 365 (risk 10, sanctioned → *Monitor*, 100%); WeTransfer (risk 70,
 unsanctioned → *Block*, 85%); ChatGPT (risk 60 → *Inspect via SWG*, 35%);
 Pastebin (risk 75 → *Block*, 30%). Sam doesn't have to be a security analyst to
-know what to do next — the platform already triaged it.
+know what to do next — the platform already triaged it. When ChatGPT or similar
+generative-AI apps are sanctioned, the SWG's **AI governance** stage can apply
+per-app rules (allow, monitor, block, or redirect to RBI) on the same ext-authz
+path.
 
 ## The recommendations are the product engine's, not a demo script
 

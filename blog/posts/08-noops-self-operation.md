@@ -20,8 +20,10 @@ with a kill switch. This is the post that ties the operations story together.
 ## Autopilot 1 — auto-promotion of default-OFF capabilities
 
 Every new enforcement surface ships **default-OFF** so upgrades are inert (the
-honesty contract, Post 0). The cost of that safety is toil: someone has to decide
-*when* each tenant is ready to move a capability off→monitor→enforce. SNG
+honesty contract, Post 0). The same default-off discipline applies to optional
+features: **DEM** (`sng-dem`) is inert when disabled, so a trial that isn't
+using it pays nothing for it. The cost of that safety is toil: someone has to
+decide *when* each tenant is ready to move a capability off→monitor→enforce. SNG
 automates that decision with guardrails.
 
 Each capability is a state machine — `off → monitor → enforce` — and the

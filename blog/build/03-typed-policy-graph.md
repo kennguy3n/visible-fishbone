@@ -17,10 +17,10 @@ operate safely at scale, because nothing can tell you when two tabs disagree.
 SNG models each tenant's intent as **one typed policy graph**
 (`internal/service/policy`, evaluated by the `sng-policy-eval` crate on the
 edge). The node types are the SASE primitives — `site`, `device`, `identity`,
-`app`, `network-policy`, `dlp-policy`, `threat-policy`, `steering-policy` — and
-edges express scope and precedence. NGFW, SWG, DNS, IPS, ZTNA, DLP, SD-WAN
-steering, and CASB are not separate subsystems; they are nodes and edges in the
-*same* graph.
+`app`, `network-policy`, `dlp-policy`, `threat-policy`, `steering-policy`,
+`ai-governance-policy`, `rbi-policy` — and edges express scope and precedence.
+NGFW, SWG, DNS, IPS, ZTNA, DLP, SD-WAN steering, CASB, inline DLP, AI governance,
+and RBI are not separate subsystems; they are nodes and edges in the *same* graph.
 
 The pipeline is the part that matters:
 

@@ -20,7 +20,9 @@ real architecture, not aspiration.
 ## 2. System description
 
 SNG is a multi-tenant SaaS network-security platform (NGFW, IDS/IPS,
-SWG, DNS security, ZTNA, SD-WAN, CASB/DLP) for ~5,000 SME tenants. It has
+SWG with inline DLP / AI governance / RBI, DNS security, ZTNA
+agent-based + clientless browser, SD-WAN, DEM, CASB/DLP) for ~5,000 SME
+tenants. It has
 three deployable software elements (see
 [`ARCHITECTURE.md`](../ARCHITECTURE.md)):
 

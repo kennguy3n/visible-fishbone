@@ -19,10 +19,11 @@ enforcement job, all consuming the same compiled policy bundle (Post 3):
 - `sng-fw` — stateful firewall.
 - `sng-ips` — Suricata-driven intrusion prevention.
 - `sng-swg` — secure web gateway: yara-x malware scanning, ClamAV INSTREAM,
-  safe-browsing / category filtering.
+  safe-browsing / category filtering, plus add-on **inline DLP**, **AI governance**, and **RBI** verdict stages on the ext-authz path.
 - `sng-dns` — threat-intel sinkhole + DNS-tunnelling detection.
-- `sng-ztna` — zero-trust session brokering.
+- `sng-ztna` — zero-trust session brokering, including agent-based and **clientless browser** access paths.
 - `sng-dlp` — on-device ML classifier + coach-first AI-app DLP (Posts 7, 9).
+- `sng-dem` — default-off Digital Experience Monitoring with bounded DNS / TCP / HTTP(S) synthetic probes.
 - `sng-appid` — the signed application-identification catalog (Post 6).
 - `sng-policy-eval` — the shared evaluator every crate calls, so a verdict means
   the same thing everywhere.

@@ -34,7 +34,12 @@ cargo test
 | --- | --- | --- | --- |
 | Firewall | `sng-fw` | `FirewallEngine::evaluate` + `RuleCompiler` → kernel `nft -c` validation | block-rate |
 | SWG | `sng-swg` | `ExtAuthzHandler` categorize → deny-list path | block-rate |
+| SWG inline DLP | `sng-swg` | `DlpInlineClassifier` on ext-authz path | block-rate |
+| SWG AI governance | `sng-swg` | `AiGovernanceClassifier` on ext-authz path | block-rate |
+| SWG RBI | `sng-swg` | `RbiClassifier` redirect verdict | block-rate |
 | ZTNA | `sng-ztna` | `ZtnaService::evaluate` brokering (device/identity/app/posture) | block-rate |
+| ZTNA clientless | `sng-ztna` | `ClientlessSession` access decision | block-rate |
+| DEM | `sng-dem` | `ProbeEngine::run_sweep` over DNS/TCP/HTTP targets | pass / timeout |
 | IPS | `sng-ips` | Suricata (IDS) over generated config → EVE → `EveAlert::to_ips_event` | detection-rate |
 
 Each driver runs the actual crate API — no mocks. The firewall additionally
@@ -51,8 +56,9 @@ cargo run --release -- --out efficacy-report.json --git-sha "$(git rev-parse --s
 ```
 
 Flags: `--out <path>` (default `efficacy-report.json`), `--git-sha <sha>`, and
-per-function toggles (`--firewall`, `--swg`, `--ztna`, `--ips`, `--dlp`,
-`--malware`, `--dns`, `--adversarial`, `--wild`) to run a subset. Exit code is
+per-function toggles (`--firewall`, `--swg`, `--swg-dlp-inline`,
+`--swg-ai-governance`, `--swg-rbi`, `--ztna`, `--ztna-clientless`, `--dem`,
+`--ips`, `--dlp`, `--malware`, `--dns`, `--adversarial`, `--wild`) to run a subset. Exit code is
 `0` only when every **gating** function PASSes, `2` otherwise (a `WARN` or
 `UNTESTED` overall verdict also exits `2`, so a half-run suite never reads as
 green to a CI gate). The `--wild` rows are *informational* and never affect the

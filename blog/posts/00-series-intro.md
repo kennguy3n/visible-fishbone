@@ -36,10 +36,12 @@ ShieldNet Gateway is a multi-tenant SASE platform with three moving parts:
   operations, metering, compliance, and audit.
 - **Edge** — Rust crates that enforce the compiled bundle: `sng-fw` (firewall),
   `sng-ips` (Suricata-driven IPS), `sng-swg` (secure web gateway + yara-x malware
-  scanning + ClamAV INSTREAM + safe-browsing/category filtering), `sng-dns`
-  (threat-intel sinkhole + tunnelling detection), `sng-ztna` (zero-trust
-  brokering), `sng-dlp` (on-device ML classifier + coach-first AI-app DLP).
-  Beneath the firewall sits an eBPF/XDP fast path — a tail-call-split in-kernel
+  scanning + ClamAV INSTREAM + safe-browsing/category filtering + inline DLP +
+  AI governance + RBI), `sng-dns` (threat-intel sinkhole + tunnelling detection),
+  `sng-ztna` (zero-trust brokering + clientless browser access), `sng-dlp`
+  (on-device ML classifier + coach-first AI-app DLP), `sng-dem` (default-off
+  Digital Experience Monitoring). Beneath the firewall sits an eBPF/XDP fast
+  path — a tail-call-split in-kernel
   pipeline with an LRU verdict cache that serves repeat flows before they reach
   userspace, failing open to nftables for anything it can't decide, and fans
   out across NIC RSS queues (Post 2 walks the scaling curve).
@@ -97,6 +99,10 @@ lever. Here is what each does and where this series walks it.
 | Managed threat content | Curated, signed threat-indicator bundle delivered with no per-tenant config | Post 4 | On (`THREAT_INTEL_ENABLED`) |
 | IdP / IGA directory sync | Directory federation + app registry breadth | Post 5 | Off (`IDP_DIRECTORY_SYNC_ENABLED`) |
 | Digital-experience monitoring | Lightweight ZDX-style per-target experience scores + degradation alerts | Post 5 | On |
+| Clientless ZTNA | Browser-based internal app access without an endpoint agent (OIDC + reverse proxy) | Post 5 | On |
+| SWG inline DLP | Regex / MIP-label / fingerprint classification on the ext-authz path for web/SaaS traffic | Post 6 | On |
+| SWG AI governance | Per-app / per-category rules for generative-AI apps (allow, monitor, block, redirect to RBI) | Post 6 | On |
+| SWG RBI | Remote browser isolation redirect for risky browsing | Post 6 | On |
 | DLP OCR + document fingerprinting | On-device classifier extended to image-borne data and document identity matching | Post 6 | On |
 | CASB NoOps | Shadow-IT discovery + recommended action with no manual tuning | Post 6 | On (`CASB_NOOPS_ENABLED`) |
 | Continuous compliance evidence | SOC 2 / ISO 27001 posture + downloadable evidence packs, collected on a schedule | Post 9 | On |
@@ -151,8 +157,8 @@ fleet runs at **≈50.9% blended margin** ([`s7-admin-cost-report.json`](../arti
 2. **Multi-tenant / MSP + universal dormancy tiering** — onboarding, RLS isolation, the active/active work distributor, and the cost lever that makes 5,000 tenants affordable.
 3. **Hibernation / scale-to-zero** — dormant trials cost almost nothing, and wake in under 5 seconds.
 4. **Detection efficacy + managed threat content** — the catch-rate / false-positive matrix, with adversarial + wild corpora, a real Suricata rule bundle, and a signed managed threat-content bundle.
-5. **Retire the VPN + identity + experience** — zero-trust access, IdP/IGA directory sync, and lightweight digital-experience monitoring.
-6. **Keep regulated data in** — DLP (including OCR and document fingerprinting) + CASB + browser isolation.
+5. **Retire the VPN + identity + experience** — zero-trust access (agent-based and clientless browser), IdP/IGA directory sync, and lightweight digital-experience monitoring.
+6. **Keep regulated data in** — DLP (OCR + document fingerprinting + inline SWG) + CASB + AI governance + browser isolation / RBI.
 7. **AI-assisted ops + shared inference** — the verifier-checked model, one pooled model serving the whole fleet, and policy synthesis from traffic.
 8. **NoOps self-operation** — auto-promotion, capacity autopilot, margin autopilot, and the work distributor: the platform that operates itself.
 9. **Prove the spend and the posture** — cost, continuous compliance evidence, and the consolidated competitive critique.
