@@ -83,6 +83,11 @@ pub struct EdgeConfig {
     /// entirely and the defaults are never read.
     #[serde(default)]
     pub pop: PopConfig,
+    /// Digital Experience Monitoring (DEM) settings. Default
+    /// disabled — an operator opts in by setting
+    /// `dem.enabled = true`.
+    #[serde(default)]
+    pub dem: DemConfig,
 }
 
 /// Edge operating mode — selects single-tenant (`site`) versus
@@ -661,6 +666,44 @@ pub struct SwgConfig {
     /// `scanner.unavailable` sentinel.
     #[serde(default = "default_true")]
     pub clamav_fail_open: bool,
+    /// Master switch for inline DLP enforcement in the ext-authz
+    /// verdict pipeline. Default **off**: when off the verdict engine
+    /// does not run inline DLP classification (out-of-band DLP via
+    /// the endpoint agent is unaffected). Only consulted when
+    /// [`Self::ext_authz_enabled`] is also true (the DLP engine is
+    /// a stage inside the listener's handler). When enabled, the
+    /// engine starts with an empty policy; the control plane hot-
+    /// swaps a real DLP policy bundle via
+    /// [`sng_swg::ExtAuthzHandler::install_dlp_policy`].
+    #[serde(default)]
+    pub dlp_inline_enabled: bool,
+    /// Master switch for Remote Browser Isolation in the ext-authz
+    /// verdict pipeline. Default **off**: when off the verdict engine
+    /// does not evaluate RBI trigger rules and never redirects to
+    /// the RBI proxy. Only consulted when [`Self::ext_authz_enabled`]
+    /// is also true (the RBI engine is a stage inside the listener's
+    /// handler). When enabled, the engine starts with an empty
+    /// policy; the control plane hot-swaps a real RBI policy bundle
+    /// via [`sng_swg::ExtAuthzHandler::install_rbi_policy`].
+    #[serde(default)]
+    pub rbi_enabled: bool,
+    /// Base URL of the RBI proxy (e.g. `https://rbi.example.com`).
+    /// The verdict engine constructs the redirect target as
+    /// `{base_url}/rbi/session/{session_id}`. Only consulted when
+    /// [`Self::rbi_enabled`] is true. When empty, RBI is treated as
+    /// disabled even if `rbi_enabled` is true.
+    #[serde(default)]
+    pub rbi_proxy_base_url: String,
+    /// Master switch for inline AI-app governance in the ext-authz
+    /// verdict pipeline. Default **off**: when off the verdict engine
+    /// does not evaluate AI-governance rules and never blocks or
+    /// redirects AI-app destinations. Only consulted when
+    /// [`Self::ext_authz_enabled`] is also true. When enabled, the
+    /// engine starts with a default (monitor-only) policy; the
+    /// control plane hot-swaps a real policy via
+    /// [`sng_swg::ExtAuthzHandler::install_ai_governance_policy`].
+    #[serde(default)]
+    pub ai_governance_enabled: bool,
 }
 
 impl Default for SwgConfig {
@@ -683,6 +726,10 @@ impl Default for SwgConfig {
             clamav_chunk_size: default_clamav_chunk_size(),
             clamav_timeout: default_clamav_timeout(),
             clamav_fail_open: default_true(),
+            dlp_inline_enabled: false,
+            rbi_enabled: false,
+            rbi_proxy_base_url: String::new(),
+            ai_governance_enabled: false,
         }
     }
 }
@@ -746,19 +793,109 @@ pub struct ZtnaConfig {
     /// permissive.
     #[serde(default)]
     pub user_subject_eval_enabled: bool,
+    /// Master gate for **clientless ZTNA** (browser-based
+    /// access without an endpoint agent). When **false**
+    /// (the default) the clientless evaluator is not
+    /// constructed and the edge behaves as before. When
+    /// **true** the edge instantiates a
+    /// [`sng_ztna::ClientlessEvaluator`] wired to the same
+    /// `ZtnaService` the agent-based path uses, plus a
+    /// session store and host matcher.
+    #[serde(default)]
+    pub clientless_enabled: bool,
+    /// OIDC authorize URL template for clientless ZTNA
+    /// redirects. Must contain the literal
+    /// `{redirect_uri}` placeholder which the evaluator
+    /// substitutes with the URL-encoded original request
+    /// URL. Only consulted when
+    /// [`Self::clientless_enabled`] is true.
+    #[serde(default)]
+    pub clientless_idp_authorize_url: String,
+    /// Session cookie name for clientless ZTNA. Defaults
+    /// to `sng_session`.
+    #[serde(default = "default_clientless_cookie_name")]
+    pub clientless_cookie_name: String,
+    /// Session lifetime in milliseconds for clientless
+    /// ZTNA sessions. Defaults to 8 hours
+    /// (28_800_000 ms).
+    #[serde(default = "default_clientless_session_ttl_ms")]
+    pub clientless_session_ttl_ms: u64,
+}
+
+fn default_clientless_cookie_name() -> String {
+    "sng_session".into()
+}
+
+fn default_clientless_session_ttl_ms() -> u64 {
+    28_800_000
 }
 
 impl Default for ZtnaConfig {
     fn default() -> Self {
         Self {
             max_inflight: default_ztna_max_inflight(),
-            // Default OFF / inert: continuous re-evaluation is an
-            // explicit operator opt-in (see field docs).
             reeval_enabled: false,
             reeval_interval_ms: 0,
-            // Default OFF / inert: full user-subject evaluation is
-            // an explicit operator opt-in (see field docs).
             user_subject_eval_enabled: false,
+            clientless_enabled: false,
+            clientless_idp_authorize_url: String::new(),
+            clientless_cookie_name: default_clientless_cookie_name(),
+            clientless_session_ttl_ms: default_clientless_session_ttl_ms(),
+        }
+    }
+}
+
+/// Digital Experience Monitoring (DEM) settings.
+///
+/// DEM runs bounded synthetic probes (DNS / TCP / HTTP(S))
+/// against a small set of critical SaaS targets on a
+/// configurable interval, emitting structured
+/// [`sng_dem::ProbeResult`]s through the telemetry pipeline.
+/// Default disabled — an operator opts in by setting
+/// `dem.enabled = true`.
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DemConfig {
+    /// Master gate. When **false** (the default) the DEM
+    /// subsystem is inert: no probe engine is constructed,
+    /// no sweep loop is spawned, and the edge behaves as
+    /// before. An operator opts in by setting this true.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Sweep interval in seconds. The probe engine runs
+    /// `probe_all` on this cadence. Default: 300 (5 min).
+    #[serde(default = "default_dem_interval_secs")]
+    pub interval_secs: u64,
+    /// Maximum concurrent probes. Default: 8.
+    #[serde(default = "default_dem_max_concurrency")]
+    pub max_concurrency: usize,
+    /// Default per-probe timeout in seconds. Default: 5.
+    #[serde(default = "default_dem_timeout_secs")]
+    pub timeout_secs: u64,
+    /// Startup jitter fraction (0.0–1.0). Smears probe
+    /// bursts across the fleet. Default: 0.5.
+    #[serde(default = "default_dem_jitter")]
+    pub jitter: f64,
+    /// Hard ceiling on targets per sweep. Default: 64.
+    #[serde(default = "default_dem_max_targets")]
+    pub max_targets: usize,
+}
+
+fn default_dem_interval_secs() -> u64 { 300 }
+fn default_dem_max_concurrency() -> usize { 8 }
+fn default_dem_timeout_secs() -> u64 { 5 }
+fn default_dem_jitter() -> f64 { 0.5 }
+fn default_dem_max_targets() -> usize { 64 }
+
+impl Default for DemConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            interval_secs: default_dem_interval_secs(),
+            max_concurrency: default_dem_max_concurrency(),
+            timeout_secs: default_dem_timeout_secs(),
+            jitter: default_dem_jitter(),
+            max_targets: default_dem_max_targets(),
         }
     }
 }

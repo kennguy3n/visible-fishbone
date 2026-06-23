@@ -40,11 +40,14 @@ use sng_core::{
     SubsystemHealth,
 };
 use sng_swg::{
-    BypassList, CategoryDenyPolicy, ClamdConfig, ClamdScanner, ContentScanner, ExtAuthzHandler,
-    ExtAuthzHandlerBuilder, ExtAuthzListener, ExtAuthzListenerConfig, LocalCategoryDb, RateLimiter,
+    BypassList, CategoryDenyPolicy, ClamdConfig, ClamdScanner, ContentScanner, DlpTelemetryEmitter,
+    ExtAuthzHandler, ExtAuthzHandlerBuilder, ExtAuthzListener, ExtAuthzListenerConfig,
+    DlpInlineEngine, LocalCategoryDb, RbiPolicyEngine, RbiProxyConfig, RateLimiter,
     StaticMalwareList, TelemetryEmitter, VerdictEvent,
+    AiGovernanceEngine,
 };
 use sng_telemetry::TelemetryEvent;
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -116,6 +119,45 @@ impl TelemetryEmitter for PipelineVerdictEmitter {
     }
 }
 
+/// DLP telemetry sink for the listener's handler. Publishes each
+/// inline DLP finding into the shared edge telemetry pipeline as a
+/// `TelemetryEvent::Dlp` — the same envelope the endpoint DLP agent
+/// uses. The `DlpEvent` is metadata-only by construction (no matched
+/// bytes, no user content), so it rides the same dedup / redact /
+/// batch path as every other event class.
+///
+/// **Hot-path safety.** Same drop-on-backpressure policy as
+/// [`PipelineVerdictEmitter`]: `try_send` on the shared channel,
+/// count + log on failure, never block the verdict.
+#[derive(Debug)]
+struct PipelineDlpEmitter {
+    telemetry: mpsc::Sender<TelemetryEvent>,
+    dropped: Arc<AtomicU64>,
+}
+
+impl PipelineDlpEmitter {
+    fn new(telemetry: mpsc::Sender<TelemetryEvent>, dropped: Arc<AtomicU64>) -> Self {
+        Self { telemetry, dropped }
+    }
+}
+
+impl DlpTelemetryEmitter for PipelineDlpEmitter {
+    fn emit_dlp(&self, event: sng_core::events::DlpEvent) {
+        if self
+            .telemetry
+            .try_send(TelemetryEvent::Dlp(event))
+            .is_err()
+        {
+            let total = self.dropped.fetch_add(1, Ordering::Relaxed) + 1;
+            tracing::warn!(
+                target: "sng_edge::ext_authz",
+                dropped_total = total,
+                "ext_authz dlp telemetry channel full/closed — dlp event dropped"
+            );
+        }
+    }
+}
+
 /// Edge-tier ext-authz verdict-listener subsystem.
 pub struct ExtAuthzSubsystem {
     enable: bool,
@@ -127,6 +169,15 @@ pub struct ExtAuthzSubsystem {
     /// Human-readable description of the wired content-scan posture,
     /// surfaced on the health report.
     scanner_detail: String,
+    /// Human-readable description of the inline DLP posture,
+    /// surfaced on the health report.
+    dlp_detail: String,
+    /// Human-readable description of the RBI posture,
+    /// surfaced on the health report.
+    rbi_detail: String,
+    /// Human-readable description of the AI-governance posture,
+    /// surfaced on the health report.
+    ai_governance_detail: String,
     /// Count of verdict telemetry events the emitter dropped under
     /// pipeline backpressure. Shared with the [`PipelineVerdictEmitter`]
     /// and surfaced on the health report. Stays `0` when disabled
@@ -141,6 +192,9 @@ impl std::fmt::Debug for ExtAuthzSubsystem {
             .field("socket", &self.listener_cfg.socket_path)
             .field("handler_set", &self.handler.is_some())
             .field("scanner", &self.scanner_detail)
+            .field("dlp", &self.dlp_detail)
+            .field("rbi", &self.rbi_detail)
+            .field("ai_governance", &self.ai_governance_detail)
             .field(
                 "telemetry_drops",
                 &self.telemetry_drops.load(Ordering::Relaxed),
@@ -177,16 +231,62 @@ impl ExtAuthzSubsystem {
                 listener_cfg,
                 handler: None,
                 scanner_detail: "disabled".into(),
+                dlp_detail: "disabled".into(),
+                rbi_detail: "disabled".into(),
+                ai_governance_detail: "disabled".into(),
                 telemetry_drops,
             };
         }
 
         let (scanner, scanner_detail) = build_scanner(cfg);
+
+        // Wire the inline DLP engine when the operator has opted in.
+        // The engine starts with an empty policy; the control plane
+        // hot-swaps a real policy via the policy bundle. The DLP
+        // telemetry emitter shares the same pipeline channel and
+        // drop counter as the verdict emitter so both event classes
+        // surface on the same health report.
+        let (dlp_engine, dlp_telemetry, dlp_detail) = if cfg.dlp_inline_enabled {
+            let engine = Arc::new(DlpInlineEngine::new());
+            let dlp_emitter: Arc<dyn DlpTelemetryEmitter> =
+                Arc::new(PipelineDlpEmitter::new(
+                    telemetry.clone(),
+                    Arc::clone(&telemetry_drops),
+                ));
+            (Some(engine), Some(dlp_emitter), "dlp=on".to_string())
+        } else {
+            (None, None, "dlp=off".to_string())
+        };
+
+        // Wire the RBI policy engine when the operator has opted in
+        // and configured a proxy base URL. The engine starts with an
+        // empty policy; the control plane hot-swaps a real policy via
+        // the policy bundle.
+        let (rbi_engine, rbi_detail) = if cfg.rbi_enabled && !cfg.rbi_proxy_base_url.is_empty() {
+            let engine = Arc::new(RbiPolicyEngine::new(RbiProxyConfig {
+                base_url: cfg.rbi_proxy_base_url.clone(),
+            }));
+            (Some(engine), "rbi=on".to_string())
+        } else {
+            (None, "rbi=off".to_string())
+        };
+
+        // Wire the AI-governance engine when the operator has opted
+        // in. The engine starts with a default (monitor-only) policy;
+        // the control plane hot-swaps a real policy via the policy
+        // bundle.
+        let (ai_governance_engine, ai_governance_detail) = if cfg.ai_governance_enabled {
+            let engine = Arc::new(AiGovernanceEngine::new());
+            (Some(engine), "ai_governance=on".to_string())
+        } else {
+            (None, "ai_governance=off".to_string())
+        };
+
         let emitter: Arc<dyn TelemetryEmitter> = Arc::new(PipelineVerdictEmitter::new(
             telemetry,
             Arc::clone(&telemetry_drops),
         ));
-        let handler = match build_handler(scanner, emitter) {
+        let handler = match build_handler(scanner, emitter, dlp_engine, dlp_telemetry, rbi_engine, ai_governance_engine) {
             Ok(h) => Some(h),
             Err(e) => {
                 // The deps we feed the builder are always present, so
@@ -207,6 +307,9 @@ impl ExtAuthzSubsystem {
             listener_cfg,
             handler,
             scanner_detail,
+            dlp_detail,
+            rbi_detail,
+            ai_governance_detail,
             telemetry_drops,
         }
     }
@@ -235,6 +338,10 @@ impl ExtAuthzSubsystem {
 fn build_handler(
     scanner: Option<Arc<dyn ContentScanner>>,
     telemetry: Arc<dyn TelemetryEmitter>,
+    dlp_engine: Option<Arc<DlpInlineEngine>>,
+    dlp_telemetry: Option<Arc<dyn DlpTelemetryEmitter>>,
+    rbi_engine: Option<Arc<RbiPolicyEngine>>,
+    ai_governance_engine: Option<Arc<AiGovernanceEngine>>,
 ) -> Result<ExtAuthzHandler, sng_swg::SwgError> {
     let mut builder = ExtAuthzHandlerBuilder::new()
         // Empty seed sets — the policy bundle hot-swaps real rules in.
@@ -250,6 +357,18 @@ fn build_handler(
         .with_deny_policy(CategoryDenyPolicy::safe_browsing_defaults());
     if let Some(scanner) = scanner {
         builder = builder.with_content_scanner(scanner);
+    }
+    if let Some(engine) = dlp_engine {
+        builder = builder.with_dlp_engine(engine);
+    }
+    if let Some(dlp_sink) = dlp_telemetry {
+        builder = builder.with_dlp_telemetry(dlp_sink);
+    }
+    if let Some(rbi) = rbi_engine {
+        builder = builder.with_rbi_engine(rbi);
+    }
+    if let Some(aig) = ai_governance_engine {
+        builder = builder.with_ai_governance_engine(aig);
     }
     builder.build()
 }
@@ -358,9 +477,10 @@ impl HealthCheck for ExtAuthzSubsystem {
             name,
             status: HealthStatus::Up,
             detail: Some(format!(
-                "socket={}, {}, telemetry_drops={}",
+                "socket={}, {}, {}, telemetry_drops={}",
                 self.listener_cfg.socket_path.display(),
                 self.scanner_detail,
+                self.dlp_detail,
                 self.telemetry_drops.load(Ordering::Relaxed)
             )),
         }
@@ -529,6 +649,7 @@ mod tests {
         assert!(sub.scanner_detail.contains("127.0.0.1:3310"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn enabled_subsystem_binds_and_serves_until_shutdown() {
         let dir = tempdir().unwrap();
@@ -581,6 +702,7 @@ mod tests {
         assert!(!socket.exists());
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn enabled_listener_publishes_verdict_into_pipeline() {
         let dir = tempdir().unwrap();

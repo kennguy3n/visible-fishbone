@@ -38,6 +38,10 @@ pub enum Action {
     /// The client is rate-limited. Envoy returns a 429 with the
     /// `Retry-After` value supplied in the verdict reason.
     RateLimit,
+    /// The request is redirected to an external service (e.g. the
+    /// RBI proxy) for isolated rendering. Envoy returns a 302 with
+    /// the `Location` header set to `Verdict::redirect_url`.
+    Redirect,
 }
 
 impl Action {
@@ -49,6 +53,7 @@ impl Action {
             Self::Deny => "deny",
             Self::Bypass => "bypass",
             Self::RateLimit => "rate_limit",
+            Self::Redirect => "redirect",
         }
     }
 }
@@ -87,6 +92,11 @@ pub struct Verdict {
     /// the rate limit in the first place.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after_secs: Option<u64>,
+    /// Redirect target URL. `Some` only when
+    /// `action == Action::Redirect`; `None` otherwise. Envoy
+    /// stamps this onto the `Location` header of the 302 response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_url: Option<String>,
 }
 
 impl Verdict {
@@ -101,6 +111,7 @@ impl Verdict {
             reason: reason.into(),
             category: None,
             retry_after_secs: None,
+            redirect_url: None,
         }
     }
 
@@ -124,6 +135,7 @@ impl Verdict {
             reason: format!("allow.{c}"),
             category: Some(c),
             retry_after_secs: None,
+            redirect_url: None,
         }
     }
 
@@ -136,6 +148,7 @@ impl Verdict {
             reason: reason.into(),
             category: None,
             retry_after_secs: None,
+            redirect_url: None,
         }
     }
 
@@ -148,6 +161,7 @@ impl Verdict {
             reason: format!("deny.{c}"),
             category: Some(c),
             retry_after_secs: None,
+            redirect_url: None,
         }
     }
 
@@ -159,6 +173,7 @@ impl Verdict {
             reason: reason.into(),
             category: None,
             retry_after_secs: None,
+            redirect_url: None,
         }
     }
 
@@ -181,6 +196,7 @@ impl Verdict {
             reason: reason.into(),
             category: None,
             retry_after_secs: Some(retry_after_secs),
+            redirect_url: None,
         }
     }
 
@@ -191,6 +207,20 @@ impl Verdict {
     #[must_use]
     pub const fn is_completing(&self) -> bool {
         matches!(self.action, Action::Allow | Action::Bypass)
+    }
+
+    /// Redirect verdict. The handler returns this when an RBI
+    /// policy triggers isolation — Envoy responds to the client
+    /// with a 302 and the `Location` header set to `url`.
+    #[must_use]
+    pub fn redirect(reason: impl Into<String>, url: impl Into<String>) -> Self {
+        Self {
+            action: Action::Redirect,
+            reason: reason.into(),
+            category: None,
+            retry_after_secs: None,
+            redirect_url: Some(url.into()),
+        }
     }
 }
 

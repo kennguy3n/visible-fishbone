@@ -39,6 +39,7 @@ sng-ztna = { workspace = true }
 sng-sdwan = { workspace = true }
 sng-ha = { workspace = true }
 sng-updater = { workspace = true }
+sng-dem = { workspace = true }
 
 tokio = { workspace = true, features = ["sync", "time", "macros", "rt-multi-thread", "signal"] }
 async-trait = { workspace = true }

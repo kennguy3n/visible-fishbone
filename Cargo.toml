@@ -399,6 +399,7 @@ sng-ips = { path = "crates/sng-ips" }
 sng-swg = { path = "crates/sng-swg" }
 sng-ztna = { path = "crates/sng-ztna" }
 sng-sdwan = { path = "crates/sng-sdwan" }
+sng-dem = { path = "crates/sng-dem" }
 sng-updater = { path = "crates/sng-updater" }
 sng-oidc = { path = "crates/sng-oidc" }
 sng-ha = { path = "crates/sng-ha" }

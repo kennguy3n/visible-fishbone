@@ -1,0 +1,12 @@
+# Fix linking for the `x86_64-pc-windows-gnu` target when the only
+# toolchain on PATH is llvm-mingw (UCRT-based, no libgcc).  Rust's gnu
+# target expects MSVCRT + libgcc, which the Rust toolchain ships in the
+# `self-contained` directory.  We use `ld.lld` (gnu-flavored, shipped
+# with the Rust toolchain) as the linker and point it at the
+# self-contained libs so -lgcc / -lgcc_eh / CRT objects resolve.
+[target.x86_64-pc-windows-gnu]
+linker = "C:/Users/Ken/.rustup/toolchains/stable-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/bin/ld.lld.exe"
+rustflags = [
+    "-L",
+    "C:/Users/Ken/.rustup/toolchains/stable-x86_64-pc-windows-gnu/lib/rustlib/x86_64-pc-windows-gnu/lib/self-contained",
+]

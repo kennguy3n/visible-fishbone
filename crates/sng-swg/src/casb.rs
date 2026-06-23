@@ -940,6 +940,7 @@ fn verdict_from_decision(d: &CasbDecision) -> Verdict {
             reason: format!("log.{category}"),
             category: Some(category),
             retry_after_secs: None,
+            redirect_url: None,
         },
     }
 }

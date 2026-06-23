@@ -19,6 +19,7 @@ use sng_ztna::{
     UserIdentity, ZtnaDecision, ZtnaError, ZtnaService, ZtnaServiceBuilder, ZtnaServiceConfig,
     ZtnaStats,
 };
+use sng_ztna::clientless::{ClientlessEvaluator, ClientlessOutcome, ClientlessSession};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task;
@@ -47,6 +48,14 @@ pub struct ZtnaSubsystem {
     /// boot-time provider and a subjectless request denies with
     /// `identity_not_found`, exactly as before.
     identities: Option<Arc<StaticIdentityProvider>>,
+    /// Clientless ZTNA evaluator. `Some` only when
+    /// `ztna.clientless_enabled` is set — the edge constructs a
+    /// [`ClientlessEvaluator`] wired to the same `ZtnaService` the
+    /// agent-based path uses. `None` keeps the access path unchanged.
+    clientless: Option<Arc<ClientlessEvaluator>>,
+    /// Session cookie name for clientless ZTNA. Defaults to
+    /// `sng_session`.
+    clientless_cookie_name: String,
 }
 
 impl std::fmt::Debug for ZtnaSubsystem {
@@ -58,6 +67,7 @@ impl std::fmt::Debug for ZtnaSubsystem {
             .field("max_sessions", &self.service.max_sessions())
             .field("stats", &self.stats.snapshot())
             .field("tracked_sessions", &self.sessions.as_ref().map(|t| t.len()))
+            .field("clientless_enabled", &self.clientless.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -95,12 +105,14 @@ impl ZtnaSubsystem {
             let provider: Arc<dyn IdentityProvider> = cache;
             builder = builder.with_identity(provider);
         }
-        let service = builder.build(telemetry);
+        let service = Arc::new(builder.build(telemetry));
         Self {
-            service: Arc::new(service),
+            service: Arc::clone(&service),
             stats,
             sessions: None,
             identities,
+            clientless: None,
+            clientless_cookie_name: "sng_session".into(),
         }
     }
 
@@ -131,6 +143,8 @@ impl ZtnaSubsystem {
             stats,
             sessions: None,
             identities: None,
+            clientless: None,
+            clientless_cookie_name: "sng_session".into(),
         }
     }
 
@@ -151,6 +165,8 @@ impl ZtnaSubsystem {
             stats,
             sessions: None,
             identities: Some(cache),
+            clientless: None,
+            clientless_cookie_name: "sng_session".into(),
         }
     }
 
@@ -270,6 +286,73 @@ impl ZtnaSubsystem {
     /// closed, or tracking disabled).
     pub fn close_session(&self, session_id: &str) -> Option<AccessGrant> {
         self.sessions.as_ref()?.remove(session_id)
+    }
+
+    /// Wire a clientless ZTNA evaluator. The edge supervisor
+    /// calls this when `ztna.clientless_enabled` is true, passing
+    /// an evaluator constructed with the same `ZtnaService` the
+    /// agent-based path uses.
+    #[must_use]
+    pub fn with_clientless(mut self, evaluator: ClientlessEvaluator, cookie_name: String) -> Self {
+        self.clientless = Some(Arc::new(evaluator));
+        self.clientless_cookie_name = cookie_name;
+        self
+    }
+
+    /// The clientless ZTNA evaluator, if wired. `None` when
+    /// `ztna.clientless_enabled` is false.
+    #[must_use]
+    pub fn clientless(&self) -> Option<&Arc<ClientlessEvaluator>> {
+        self.clientless.as_ref()
+    }
+
+    /// The session cookie name for clientless ZTNA.
+    #[must_use]
+    pub fn clientless_cookie_name(&self) -> &str {
+        &self.clientless_cookie_name
+    }
+
+    /// Evaluate a clientless (browser-based) access request.
+    /// Returns `None` when clientless ZTNA is not enabled.
+    #[must_use]
+    pub fn evaluate_clientless(
+        &self,
+        host: &str,
+        path: &str,
+        cookie: Option<&str>,
+        now_ms: u64,
+        redirect_uri: &str,
+    ) -> Option<ClientlessOutcome> {
+        self.clientless.as_ref().map(|eval| eval.evaluate(host, path, cookie, now_ms, redirect_uri))
+    }
+
+    /// Create a clientless session after a successful OIDC callback.
+    /// Returns `None` when clientless ZTNA is not enabled.
+    #[must_use]
+    pub fn create_clientless_session(
+        &self,
+        tenant_id: impl Into<String>,
+        app_id: impl Into<String>,
+        identity: UserIdentity,
+        now_ms: u64,
+        source_ip: Option<String>,
+    ) -> Option<ClientlessSession> {
+        self.clientless.as_ref().map(|eval| {
+            eval.create_session(tenant_id, app_id, identity, now_ms, source_ip, None)
+        })
+    }
+
+    /// Logout a clientless session by cookie value.
+    /// Returns the removed session, or `None` when clientless ZTNA
+    /// is not enabled or the session was not found.
+    pub fn logout_clientless(&self, session_id: &str) -> Option<ClientlessSession> {
+        self.clientless.as_ref()?.logout(session_id)
+    }
+
+    /// Purge expired clientless sessions. Returns the count purged,
+    /// or 0 when clientless ZTNA is not enabled.
+    pub fn purge_clientless_expired(&self, now_ms: u64) -> usize {
+        self.clientless.as_ref().map_or(0, |eval| eval.purge_expired(now_ms))
     }
 
     /// Whether full user-subject evaluation is wired (the

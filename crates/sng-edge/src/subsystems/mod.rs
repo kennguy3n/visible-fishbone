@@ -23,6 +23,7 @@
 //!   surface it through [`sng_core::DrainResult`].
 
 pub mod comms;
+pub mod dem;
 pub mod dns;
 pub mod extauthz;
 pub mod fw;
@@ -37,6 +38,7 @@ pub mod ztna;
 pub mod ztna_reeval;
 
 pub use comms::CommsSubsystem;
+pub use dem::DemSubsystem;
 pub use dns::DnsSubsystem;
 pub use extauthz::ExtAuthzSubsystem;
 pub use fw::FwSubsystem;

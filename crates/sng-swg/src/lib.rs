@@ -101,20 +101,26 @@ pub mod casb_rules;
 pub mod categorizer;
 pub mod clamd;
 pub mod config;
+pub mod dlp_inline;
 pub mod envoy_supervisor;
 pub mod error;
 pub mod health;
+#[cfg(unix)]
 pub mod listener;
+#[cfg(not(unix))]
+pub mod listener_stub;
 pub mod malware;
 pub mod manager;
 pub mod process;
+pub mod ai_governance;
 pub mod rate_limit;
+pub mod rbi;
 pub mod telemetry;
 pub mod url_ml;
 pub mod verdict;
 pub mod yara;
 
-pub use auth::{ExtAuthzHandler, ExtAuthzHandlerBuilder, ExtAuthzRequest, ExtAuthzResponse};
+pub use auth::{ExtAuthzHandler, ExtAuthzHandlerBuilder, ExtAuthzRequest, ExtAuthzResponse, DlpTelemetryEmitter};
 pub use bypass::{BypassDecision, BypassList, BypassReason};
 pub use casb::{
     AppCatalog, AppSignature, DetectedApp, InlineCasbInspector, PathRule, RequestSignals,
@@ -136,7 +142,10 @@ pub use envoy_supervisor::{
 };
 pub use error::SwgError;
 pub use health::{FailMode, HealthProbe, HealthReport, HealthState, ManagerHealth};
+#[cfg(unix)]
 pub use listener::{DEFAULT_SOCKET_PATH, ExtAuthzListener, ExtAuthzListenerConfig};
+#[cfg(not(unix))]
+pub use listener_stub::{DEFAULT_SOCKET_PATH, ExtAuthzListener, ExtAuthzListenerConfig};
 pub use malware::{
     ContentScanVerdict, ContentScanner, ContentVerdictCache, MalwareVerdict,
     MalwareVerdictProvider, ScanSkip, StaticMalwareList,
@@ -152,6 +161,16 @@ pub use url_ml::{
     DomainPattern, DomainPatternIndex, HybridUrlCategorizer, HybridUrlCategorizerBuilder,
     LocalLlmCategorizer, UrlMlClassifier, UrlModelBundle, UrlModelClaims, UrlModelSignature,
     UrlModelSigningKeyId, UrlModelVerifier,
+};
+pub use dlp_inline::{
+    DlpFingerprint, DlpInlineAction, DlpInlineEngine, DlpInlinePolicyDef, DlpInlineVerdict,
+    DlpRegexRule,
+};
+pub use rbi::{RbiPolicyDef, RbiPolicyEngine, RbiProxyConfig, RbiTriggerReason};
+pub use ai_governance::{
+    AiAppCategory, AiAppDestination, AiAppKind, AiGovernanceAction, AiGovernanceEngine,
+    AiGovernancePolicy, AiGovernanceReason, AiGovernanceRule, AiGovernanceVerdict,
+    classify_destination as classify_ai_destination, governance_to_verdict,
 };
 pub use verdict::{Action, CategoryDenyConfig, CategoryDenyPolicy, RequestContext, Verdict};
 pub use yara::{

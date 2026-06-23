@@ -87,7 +87,7 @@ fn map_action_to_verdict(a: Action) -> Verdict {
         // request did NOT reach the upstream. The SWG-specific
         // distinction (e.g. Retry-After) lives on the
         // accompanying VerdictEvent.swg_verdict context.
-        Action::Deny | Action::RateLimit => Verdict::Deny,
+        Action::Deny | Action::RateLimit | Action::Redirect => Verdict::Deny,
     }
 }
 

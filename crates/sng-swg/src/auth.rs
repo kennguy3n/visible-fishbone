@@ -32,9 +32,14 @@ use crate::bypass::BypassList;
 use crate::casb::{InlineCasbInspector, RequestSignals};
 use crate::casb_rules::CasbRuleSet;
 use crate::categorizer::UrlCategorizer;
+use crate::dlp_inline::{DlpInlineEngine, DlpInlinePolicyDef};
 use crate::error::SwgError;
 use crate::malware::{ContentScanVerdict, ContentScanner, MalwareVerdict, MalwareVerdictProvider};
 use crate::rate_limit::RateLimiter;
+use crate::ai_governance::{AiGovernanceEngine, AiGovernancePolicy, governance_to_verdict};
+use crate::rbi::{RbiPolicyDef, RbiPolicyEngine};
+#[cfg(test)]
+use crate::rbi::RbiProxyConfig;
 use crate::telemetry::{TelemetryEmitter, VerdictEvent};
 use crate::verdict::{Action, CategoryDenyConfig, CategoryDenyPolicy, RequestContext, Verdict};
 use crate::yara::{YaraEngine, YaraRuleBundle, YaraRuleVerifier, YaraSeverity};
@@ -197,10 +202,10 @@ impl ExtAuthzRequest {
 /// a field is fine; removing or renaming one is a wire break.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ExtAuthzResponse {
-    /// "allow" | "deny" | "bypass" | "rate_limit"
+    /// "allow" | "deny" | "bypass" | "rate_limit" | "redirect"
     pub action: String,
     /// HTTP status Envoy returns to the client on deny /
-    /// rate_limit. `None` on allow / bypass.
+    /// rate_limit / redirect. `None` on allow / bypass.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<u16>,
     /// Categorisation/deny reason — surfaces in operator
@@ -208,13 +213,19 @@ pub struct ExtAuthzResponse {
     pub reason: String,
     /// Bound on the value of `Retry-After` Envoy puts on a
     /// rate_limit response, in seconds. `None` on allow /
-    /// bypass / deny.
+    /// bypass / deny / redirect.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry_after_secs: Option<u64>,
     /// Optional category tag — surfaces on telemetry so a
     /// dashboard can drill into "% of requests by category".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// Redirect target URL. `Some` only when
+    /// `action == "redirect"`; `None` otherwise. Envoy stamps
+    /// this onto the `Location` header of the 302 response so
+    /// the client is sent to the RBI proxy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub redirect_url: Option<String>,
 }
 
 /// Serialize an [`ExtAuthzResponse`] to bytes.
@@ -247,6 +258,7 @@ impl ExtAuthzResponse {
                 reason: v.reason.clone(),
                 retry_after_secs: None,
                 category: v.category.clone(),
+                redirect_url: None,
             },
             Action::Bypass => Self {
                 action: "bypass".into(),
@@ -254,6 +266,7 @@ impl ExtAuthzResponse {
                 reason: v.reason.clone(),
                 retry_after_secs: None,
                 category: v.category.clone(),
+                redirect_url: None,
             },
             Action::Deny => Self {
                 action: "deny".into(),
@@ -261,22 +274,39 @@ impl ExtAuthzResponse {
                 reason: v.reason.clone(),
                 retry_after_secs: None,
                 category: v.category.clone(),
+                redirect_url: None,
             },
             Action::RateLimit => Self {
                 action: "rate_limit".into(),
                 status: Some(429),
                 reason: v.reason.clone(),
-                // Copy the verdict's retry timing verbatim onto
-                // the wire response so Envoy can stamp it onto
-                // the 429's `Retry-After` header. The verdict
-                // constructor guarantees `Some` on the RateLimit
-                // arm — falling back to `None` here would be a
-                // silent regression of the ext-authz contract.
                 retry_after_secs: v.retry_after_secs,
                 category: v.category.clone(),
+                redirect_url: None,
+            },
+            Action::Redirect => Self {
+                action: "redirect".into(),
+                status: Some(302),
+                reason: v.reason.clone(),
+                retry_after_secs: None,
+                category: v.category.clone(),
+                redirect_url: v.redirect_url.clone(),
             },
         }
     }
+}
+
+/// Telemetry emitter for inline DLP events. Mirrors
+/// [`TelemetryEmitter`] but for `DlpEvent` — the handler calls
+/// `emit_dlp` on every DLP match (Block, Log, or Redact) so the
+/// finding metadata reaches the control plane's DLP review queue
+/// through the shared telemetry pipeline. Implementations must be
+/// non-blocking on the hot path (drop-on-backpressure, same as
+/// [`TelemetryEmitter::emit`]).
+pub trait DlpTelemetryEmitter: Send + Sync + 'static {
+    /// Publish a DLP event. Called on the per-request verdict path;
+    /// implementations must not block.
+    fn emit_dlp(&self, event: sng_core::events::DlpEvent);
 }
 
 /// The handler. Wires the pluggable trait surfaces — categoriser,
@@ -359,6 +389,53 @@ struct HandlerInner {
     /// degrades to the pre-scan coverage rather than wedging the
     /// verdict. `None` leaves the pipeline unchanged.
     content_scanner: Option<Arc<dyn ContentScanner>>,
+    /// Optional inline DLP classification engine. When set, the
+    /// verdict pipeline runs the engine over the (base64-decoded)
+    /// body *after* the inline CASB stage and *before* URL
+    /// categorisation — so a DLP `Block` short-circuits to Deny
+    /// before any category or malware check. A DLP `Log` or `Redact`
+    /// does NOT short-circuit: it is carried forward in
+    /// `dlp_verdict` so the allow path can surface it on the verdict
+    /// telemetry, and a later malware or deny-category hit can still
+    /// override it with a Deny. `None` leaves the pipeline unchanged.
+    /// The engine is shared (`Arc`) and hot-swaps its own policy set
+    /// internally via `ArcSwap`, so the control plane can install a
+    /// new DLP policy bundle without rebuilding the handler.
+    dlp_engine: Option<Arc<DlpInlineEngine>>,
+    /// Telemetry sink for DLP events. When the DLP engine produces a
+    /// non-`None` verdict, a `DlpEvent` is published here in addition
+    /// to the normal `VerdictEvent` — so the control plane's DLP
+    /// review queue receives the finding metadata (redacted, no
+    /// matched bytes) alongside the HTTP verdict. `None` when no DLP
+    /// engine is wired; the verdict path never blocks on this sink
+    /// (it uses `try_send` / drop-on-backpressure, same as the
+    /// verdict emitter).
+    dlp_telemetry: Option<Arc<dyn DlpTelemetryEmitter>>,
+    /// Optional RBI policy engine. When set, the verdict pipeline
+    /// runs the engine after inline DLP and before URL
+    /// categorisation — so a DLP block still short-circuits first,
+    /// and an RBI trigger redirects before the categoriser's
+    /// deny-list is consulted. A trigger short-circuits to a
+    /// `Verdict::redirect` so Envoy returns a 302 to the RBI
+    /// proxy. `None` leaves the pipeline unchanged. The engine is
+    /// shared (`Arc`) and hot-swaps its own policy set internally
+    /// via `ArcSwap`, so the control plane can install a new RBI
+    /// policy without rebuilding the handler.
+    rbi_engine: Option<Arc<RbiPolicyEngine>>,
+    /// Optional AI-governance policy engine. When set, the
+    /// verdict pipeline runs the engine after RBI and before
+    /// the deny-list check — so a DLP block still
+    /// short-circuits first, an RBI trigger redirects first,
+    /// and then AI governance can block or redirect AI-app
+    /// destinations. A `Block` action short-circuits to a
+    /// `Verdict::deny`; a `Redirect` action short-circuits to
+    /// a `Verdict::redirect`; `Allow` and `Monitor` pass
+    /// through. `None` leaves the pipeline unchanged. The
+    /// engine is shared (`Arc`) and hot-swaps its own policy
+    /// set internally via `ArcSwap`, so the control plane can
+    /// install a new AI-governance policy without rebuilding
+    /// the handler.
+    ai_governance_engine: Option<Arc<AiGovernanceEngine>>,
 }
 
 impl std::fmt::Debug for ExtAuthzHandler {
@@ -392,6 +469,10 @@ pub struct ExtAuthzHandlerBuilder {
     casb: Option<Arc<InlineCasbInspector>>,
     yara: Option<Arc<YaraEngine>>,
     content_scanner: Option<Arc<dyn ContentScanner>>,
+    dlp_engine: Option<Arc<DlpInlineEngine>>,
+    dlp_telemetry: Option<Arc<dyn DlpTelemetryEmitter>>,
+    rbi_engine: Option<Arc<RbiPolicyEngine>>,
+    ai_governance_engine: Option<Arc<AiGovernanceEngine>>,
 }
 
 impl std::fmt::Debug for ExtAuthzHandlerBuilder {
@@ -408,6 +489,10 @@ impl std::fmt::Debug for ExtAuthzHandlerBuilder {
             .field("casb_set", &self.casb.is_some())
             .field("yara_set", &self.yara.is_some())
             .field("content_scanner_set", &self.content_scanner.is_some())
+            .field("dlp_engine_set", &self.dlp_engine.is_some())
+            .field("dlp_telemetry_set", &self.dlp_telemetry.is_some())
+            .field("rbi_engine_set", &self.rbi_engine.is_some())
+            .field("ai_governance_engine_set", &self.ai_governance_engine.is_some())
             .finish()
     }
 }
@@ -429,6 +514,10 @@ impl ExtAuthzHandlerBuilder {
             casb: None,
             yara: None,
             content_scanner: None,
+            dlp_engine: None,
+            dlp_telemetry: None,
+            rbi_engine: None,
+            ai_governance_engine: None,
         }
     }
 
@@ -576,6 +665,62 @@ impl ExtAuthzHandlerBuilder {
         self
     }
 
+    /// Install an inline DLP classification engine. Optional: a
+    /// handler built without one runs the verdict pipeline with no
+    /// inline DLP enforcement (out-of-band DLP via the endpoint agent
+    /// is unaffected). The engine's policy is hot-swappable
+    /// post-build via [`ExtAuthzHandler::install_dlp_policy`], so a
+    /// handler can be built with the engine wired (empty policy) and
+    /// have its rules installed later from the first policy bundle.
+    /// When `dlp_telemetry` is also wired, the handler publishes a
+    /// `DlpEvent` for every DLP match alongside the normal verdict
+    /// telemetry.
+    #[must_use]
+    pub fn with_dlp_engine(mut self, engine: Arc<DlpInlineEngine>) -> Self {
+        self.dlp_engine = Some(engine);
+        self
+    }
+
+    /// Wire the DLP telemetry emitter so DLP findings are published
+    /// to the shared telemetry pipeline. Optional: when `None`, DLP
+    /// matches still produce verdicts (Block → Deny, Log → Allow)
+    /// but no `DlpEvent` is emitted — the finding metadata is lost.
+    /// In practice this should always be set when a DLP engine is
+    /// wired.
+    #[must_use]
+    pub fn with_dlp_telemetry(mut self, emitter: Arc<dyn DlpTelemetryEmitter>) -> Self {
+        self.dlp_telemetry = Some(emitter);
+        self
+    }
+
+    /// Wire the RBI policy engine. When set, the verdict pipeline
+    /// evaluates RBI trigger rules after inline DLP and before URL
+    /// categorisation. A trigger short-circuits to a redirect
+    /// verdict so Envoy sends the client to the RBI proxy. The
+    /// engine hot-swaps its policy internally via `ArcSwap`, so the
+    /// control plane can install a new RBI policy without
+    /// rebuilding the handler.
+    #[must_use]
+    pub fn with_rbi_engine(mut self, engine: Arc<RbiPolicyEngine>) -> Self {
+        self.rbi_engine = Some(engine);
+        self
+    }
+
+    /// Wire the AI-governance policy engine. When set, the
+    /// verdict pipeline evaluates AI-app governance rules after
+    /// RBI and before the deny-list check. A `Block` action
+    /// short-circuits to a deny; a `Redirect` action
+    /// short-circuits to a redirect to the RBI proxy; `Allow`
+    /// and `Monitor` pass through. The engine hot-swaps its
+    /// policy internally via `ArcSwap`, so the control plane
+    /// can install a new AI-governance policy without
+    /// rebuilding the handler.
+    #[must_use]
+    pub fn with_ai_governance_engine(mut self, engine: Arc<AiGovernanceEngine>) -> Self {
+        self.ai_governance_engine = Some(engine);
+        self
+    }
+
     /// Build the handler. Returns an error when any required
     /// dep was not set.
     pub fn build(self) -> Result<ExtAuthzHandler, SwgError> {
@@ -606,6 +751,10 @@ impl ExtAuthzHandlerBuilder {
                 casb: self.casb,
                 yara: self.yara,
                 content_scanner: self.content_scanner,
+                dlp_engine: self.dlp_engine,
+                dlp_telemetry: self.dlp_telemetry,
+                rbi_engine: self.rbi_engine,
+                ai_governance_engine: self.ai_governance_engine,
             }),
         })
     }
@@ -670,6 +819,44 @@ impl ExtAuthzHandler {
         self.inner.yara.as_ref().and_then(|e| e.version())
     }
 
+    /// Hot-swap the inline DLP policy. No-op (returns `(0, 0)`) when
+    /// the handler was built without a DLP engine. Returns the number
+    /// of regex rules and fingerprints installed so the policy-bundle
+    /// controller can log it. The control plane calls this on every
+    /// bundle install with the DLP slice decoded from the bundle.
+    pub fn install_dlp_policy(&self, def: &DlpInlinePolicyDef) -> (usize, usize) {
+        match &self.inner.dlp_engine {
+            Some(engine) => engine.install(def),
+            None => (0, 0),
+        }
+    }
+
+    /// Hot-swap the RBI policy. No-op (returns `(0, 0)`) when
+    /// the handler was built without an RBI engine. Returns the
+    /// number of categories and explicit-isolate hosts installed
+    /// so the policy-bundle controller can log it. The control
+    /// plane calls this on every bundle install with the RBI slice
+    /// decoded from the bundle.
+    pub fn install_rbi_policy(&self, def: &RbiPolicyDef) -> (usize, usize) {
+        match &self.inner.rbi_engine {
+            Some(engine) => engine.install(def),
+            None => (0, 0),
+        }
+    }
+
+    /// Hot-swap the AI-governance policy. No-op (returns
+    /// `(0, 0)`) when the handler was built without an
+    /// AI-governance engine. Returns the number of rules
+    /// installed so the policy-bundle controller can log it.
+    /// The control plane calls this on every bundle install
+    /// with the AI-governance slice decoded from the bundle.
+    pub fn install_ai_governance_policy(&self, def: &AiGovernancePolicy) -> (usize, usize) {
+        match &self.inner.ai_governance_engine {
+            Some(engine) => engine.install(def),
+            None => (0, 0),
+        }
+    }
+
     /// Convenience: process a decoded JSON request envelope.
     /// Returns the response envelope ready for serialisation.
     pub async fn handle_request(&self, req: ExtAuthzRequest) -> Result<ExtAuthzResponse, SwgError> {
@@ -703,6 +890,7 @@ impl ExtAuthzHandler {
                     reason: format!("malformed ext_authz request: {e}"),
                     retry_after_secs: None,
                     category: None,
+                    redirect_url: None,
                 };
                 return serialize_response(&r);
             }
@@ -715,6 +903,7 @@ impl ExtAuthzHandler {
                 reason: format!("ext_authz decode: {msg}"),
                 retry_after_secs: None,
                 category: None,
+                redirect_url: None,
             },
             Err(other) => ExtAuthzResponse {
                 action: "deny".into(),
@@ -722,6 +911,7 @@ impl ExtAuthzHandler {
                 reason: format!("handler error: {other}"),
                 retry_after_secs: None,
                 category: None,
+                redirect_url: None,
             },
         };
         serialize_response(&resp)
@@ -738,6 +928,16 @@ impl ExtAuthzHandler {
     /// 2. Rate limit — protect the verdict pipeline from runaways
     /// 3. Inline CASB — block short-circuits; log/allow is carried
     ///    forward so a later deny still wins
+    /// 3b. Inline DLP — block short-circuits; log/redact is carried
+    ///    forward so a later deny still wins
+    /// 3c. RBI policy — redirect short-circuits to the RBI proxy
+    ///    when a trigger rule matches (runs after categorisation
+    ///    so the category is available)
+    /// 3d. AI governance — block short-circuits to deny, redirect
+    ///    short-circuits to the RBI proxy; allow/monitor passes
+    ///    through (runs after RBI so an RBI trigger wins over a
+    ///    governance redirect, and before the deny-list so a
+    ///    governance block wins over a category allow)
     /// 4. URL categorisation — operator deny-list wins; default allow
     /// 5. Malware verdict on the response body hash (when supplied)
     /// 6. YARA content scan on the response body (when supplied and
@@ -825,6 +1025,38 @@ impl ExtAuthzHandler {
             return v.clone();
         }
 
+        // 3b. Inline DLP classification. Runs after CASB (so a
+        //     CASB block short-circuits first) and before URL
+        //     categorisation — so a DLP block denies before any
+        //     category or malware check. A DLP `Log` or `Redact` is
+        //     carried forward in `dlp_verdict` so the allow path can
+        //     surface it on the verdict telemetry, and a later
+        //     malware or deny-category hit can still override it.
+        //     The scan runs over the same `scan_body` the YARA and
+        //     streaming content scanner stages use (the base64-
+        //     decoded response body Envoy forwarded). `None` (no
+        //     engine wired, no body forwarded, or no rules matched)
+        //     leaves the pipeline unchanged.
+        let dlp_verdict = if let Some(engine) = self.inner.dlp_engine.as_ref() {
+            scan_body.and_then(|body| {
+                let destination = ctx.host.as_str();
+                engine.classify(body, signals).map(|v| {
+                    // Emit DLP telemetry for every match (Block, Log, or Redact).
+                    if let Some(sink) = self.inner.dlp_telemetry.as_ref() {
+                        sink.emit_dlp(v.to_dlp_event(destination));
+                    }
+                    v
+                })
+            })
+        } else {
+            None
+        };
+        if let Some(v) = &dlp_verdict
+            && v.is_block()
+        {
+            return v.to_swg_verdict(&ctx.host);
+        }
+
         // 4. Categorise + apply deny list.
         //
         // The verdict's `category` field is canonicalised to
@@ -852,6 +1084,60 @@ impl ExtAuthzHandler {
             .categorize(&ctx.host, &ctx.path)
             .await
             .map(|c| c.0.to_ascii_lowercase());
+
+        // 3c. RBI policy evaluation. Runs after categorisation
+        //     (so the category and risk score are available for
+        //     the trigger rules) and before the deny-list check —
+        //     so an RBI trigger redirects the client to the
+        //     isolation proxy instead of hitting the deny-list or
+        //     proceeding to the upstream. A non-trigger leaves the
+        //     pipeline unchanged. When no RBI engine is wired, or
+        //     the proxy is not configured, this stage is a no-op.
+        if let Some(rbi) = self.inner.rbi_engine.as_ref() {
+            let risk = 0_u32; // TODO: wire risk score from categoriser when available
+            if let Some((reason, url)) =
+                rbi.evaluate(&ctx.host, category_canonical.as_deref(), risk)
+            {
+                return Verdict::redirect(
+                    format!("rbi.{}", reason.as_str()),
+                    url,
+                );
+            }
+        }
+
+        // 3d. AI-governance policy evaluation. Runs after RBI
+        //     (so an RBI trigger on the same host wins over a
+        //     governance redirect) and before the deny-list
+        //     check — so a governance block on an AI-app
+        //     destination denies even when the category is
+        //     allowed. A Block action short-circuits to deny;
+        //     a Redirect action short-circuits to redirect to
+        //     the RBI proxy (using the RBI proxy base URL from
+        //     the engine's config); Allow and Monitor pass
+        //     through. When no AI-governance engine is wired,
+        //     this stage is a no-op.
+        if let Some(aig) = self.inner.ai_governance_engine.as_ref() {
+            if let Some(gv) = aig.evaluate(&ctx.host, &ctx.path) {
+                match gv.action {
+                    crate::ai_governance::AiGovernanceAction::Block
+                    | crate::ai_governance::AiGovernanceAction::Redirect => {
+                        let rbi_url = self
+                            .inner
+                            .rbi_engine
+                            .as_ref()
+                            .and_then(|rbi| rbi.proxy_base_url());
+                        return governance_to_verdict(&gv, rbi_url);
+                    }
+                    // Allow and Monitor: pass through. The
+                    // governance verdict is recorded in
+                    // telemetry via the reason on the final
+                    // verdict — the pipeline continues.
+                    crate::ai_governance::AiGovernanceAction::Allow
+                    | crate::ai_governance::AiGovernanceAction::Monitor => {}
+                }
+            }
+        }
+
         // The policy denies a category by an exact operator rule
         // *or* a dotted-subtree group rule (e.g. a `security` group
         // denies `security.malware`). The verdict still reports the
@@ -961,6 +1247,15 @@ impl ExtAuthzHandler {
         // dashboards group on. Falling through to the categoriser
         // allow would drop that signal. When no CASB verdict was
         // produced, behaviour is identical to the pre-CASB pipeline.
+        // A carried-forward DLP `Log` or `Redact` verdict wins
+        // over a plain categoriser allow: it is the higher-signal
+        // decision (specific DLP finding the operator asked to log)
+        // and carries the `dlp.inline.log.<destination>` reason the
+        // DLP dashboards group on. When no DLP verdict was produced,
+        // behaviour is identical to the pre-DLP pipeline.
+        if let Some(v) = &dlp_verdict {
+            return v.to_swg_verdict(&ctx.host);
+        }
         if let Some(v) = casb_verdict {
             return v;
         }
@@ -982,11 +1277,16 @@ mod tests {
     use super::*;
     use crate::bypass::{BypassEntry, BypassList};
     use crate::categorizer::{Category, CategoryEntry, LocalCategoryDb};
+    use crate::dlp_inline::{DlpRegexRule, DlpInlineAction, DlpInlinePolicyDef};
     use crate::malware::{NullMalwareProvider, StaticMalwareList};
     use crate::rate_limit::{RateLimiter, TestClock};
+    use crate::ai_governance::{
+        AiGovernanceAction, AiGovernanceEngine, AiGovernancePolicy, AiGovernanceRule,
+    };
     use crate::telemetry::{SwgEventSource, TelemetryEmitter, VerdictEvent};
     use parking_lot::Mutex;
     use pretty_assertions::assert_eq;
+    use sng_core::events::DlpFindingKind;
     use sng_telemetry::EventSource;
     use std::time::Duration;
 
@@ -2294,5 +2594,628 @@ mod tests {
             )])),
             0
         );
+    }
+
+    // ─── Inline DLP integration tests ───
+
+    /// A capturing DLP telemetry emitter for tests.
+    #[derive(Debug, Default)]
+    struct CapturingDlpEmitter {
+        events: Mutex<Vec<sng_core::events::DlpEvent>>,
+    }
+    impl DlpTelemetryEmitter for CapturingDlpEmitter {
+        fn emit_dlp(&self, event: sng_core::events::DlpEvent) {
+            self.events.lock().push(event);
+        }
+    }
+
+    /// Build a handler with a DLP engine wired (empty policy) and a
+    /// capturing DLP telemetry emitter. The rate limiter is generous
+    /// so multi-request tests don't trip it.
+    fn make_dlp_handler() -> (
+        ExtAuthzHandler,
+        Arc<CapturingEmitter>,
+        Arc<CapturingDlpEmitter>,
+    ) {
+        let cap = Arc::new(CapturingEmitter::default());
+        let dlp_cap = Arc::new(CapturingDlpEmitter::default());
+        let bypass = Arc::new(BypassList::new(vec![]));
+        let cats = LocalCategoryDb::new(vec![CategoryEntry {
+            host: "upload.example".into(),
+            path_prefix: None,
+            category: Category("business.saas".into()),
+        }]);
+        let mal = Arc::new(NullMalwareProvider);
+        let clock = Arc::new(TestClock::new());
+        let rl = RateLimiter::new(100.0, 1.0, clock);
+        let dlp_engine = Arc::new(DlpInlineEngine::new());
+        let h = ExtAuthzHandlerBuilder::new()
+            .with_categorizer(Arc::new(cats))
+            .with_malware(mal)
+            .with_bypass(bypass)
+            .with_rate_limiter(rl)
+            .with_telemetry(cap.clone() as Arc<dyn TelemetryEmitter>)
+            .with_dlp_engine(dlp_engine)
+            .with_dlp_telemetry(dlp_cap.clone() as Arc<dyn DlpTelemetryEmitter>)
+            .with_deny_categories(Vec::new())
+            .build()
+            .unwrap();
+        (h, cap, dlp_cap)
+    }
+
+    #[tokio::test]
+    async fn dlp_block_denies_request() {
+        let (h, _cap, dlp_cap) = make_dlp_handler();
+        // Install a DLP policy that blocks SSNs.
+        h.install_dlp_policy(&DlpInlinePolicyDef {
+            regex_rules: vec![DlpRegexRule {
+                rule_id: "ssn_us".into(),
+                pattern: r"\b\d{3}-\d{2}-\d{4}\b".into(),
+                action: DlpInlineAction::Block,
+                severity: "high".into(),
+                finding_kind: DlpFindingKind::Pii,
+            }],
+            fingerprints: vec![],
+            scan_ceiling_bytes: 0,
+        });
+        let body = b"SSN: 123-45-6789";
+        let req = req_with_body("upload.example", body);
+        let resp = h.handle_request(req).await.unwrap();
+        assert_eq!(resp.action, "deny");
+        // DLP telemetry was emitted.
+        let dlp_events = dlp_cap.events.lock();
+        assert_eq!(dlp_events.len(), 1);
+        assert_eq!(dlp_events[0].action, sng_core::events::DlpAction::Block);
+    }
+
+    #[tokio::test]
+    async fn dlp_log_allows_request_but_emits_telemetry() {
+        let (h, _cap, dlp_cap) = make_dlp_handler();
+        h.install_dlp_policy(&DlpInlinePolicyDef {
+            regex_rules: vec![DlpRegexRule {
+                rule_id: "email".into(),
+                pattern: r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b".into(),
+                action: DlpInlineAction::Log,
+                severity: "low".into(),
+                finding_kind: DlpFindingKind::Pii,
+            }],
+            fingerprints: vec![],
+            scan_ceiling_bytes: 0,
+        });
+        let body = b"Contact: alice@example.com";
+        let req = req_with_body("upload.example", body);
+        let resp = h.handle_request(req).await.unwrap();
+        assert_eq!(resp.action, "allow");
+        // DLP telemetry was still emitted.
+        let dlp_events = dlp_cap.events.lock();
+        assert_eq!(dlp_events.len(), 1);
+        assert_eq!(dlp_events[0].action, sng_core::events::DlpAction::Monitor);
+    }
+
+    #[tokio::test]
+    async fn dlp_no_match_allows_and_no_telemetry() {
+        let (h, _cap, dlp_cap) = make_dlp_handler();
+        h.install_dlp_policy(&DlpInlinePolicyDef {
+            regex_rules: vec![DlpRegexRule {
+                rule_id: "ssn_us".into(),
+                pattern: r"\b\d{3}-\d{2}-\d{4}\b".into(),
+                action: DlpInlineAction::Block,
+                severity: "high".into(),
+                finding_kind: DlpFindingKind::Pii,
+            }],
+            fingerprints: vec![],
+            scan_ceiling_bytes: 0,
+        });
+        let body = b"Clean content, no sensitive data.";
+        let req = req_with_body("upload.example", body);
+        let resp = h.handle_request(req).await.unwrap();
+        assert_eq!(resp.action, "allow");
+        // No DLP telemetry emitted.
+        assert!(dlp_cap.events.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dlp_no_engine_behaves_unchanged() {
+        // A handler built without a DLP engine must behave identically
+        // to the pre-DLP pipeline.
+        let (h, _cap) = make_handler(vec![]);
+        let body = b"SSN: 123-45-6789";
+        let req = req_with_body("upload.example", body);
+        let resp = h.handle_request(req).await.unwrap();
+        // No DLP engine → no DLP verdict → normal allow.
+        assert_eq!(resp.action, "allow");
+    }
+
+    #[tokio::test]
+    async fn dlp_install_policy_is_noop_without_engine() {
+        let (h, _cap) = make_handler(vec![]);
+        let (n_regex, n_fp) = h.install_dlp_policy(&DlpInlinePolicyDef {
+            regex_rules: vec![DlpRegexRule {
+                rule_id: "ssn".into(),
+                pattern: r"\d{3}-\d{2}-\d{4}".into(),
+                action: DlpInlineAction::Block,
+                severity: "high".into(),
+                finding_kind: DlpFindingKind::Pii,
+            }],
+            fingerprints: vec![],
+            scan_ceiling_bytes: 0,
+        });
+        assert_eq!(n_regex, 0);
+        assert_eq!(n_fp, 0);
+    }
+
+    #[tokio::test]
+    async fn dlp_hot_swap_replaces_rules() {
+        let (h, _cap, _dlp_cap) = make_dlp_handler();
+        // Install a blocking rule.
+        h.install_dlp_policy(&DlpInlinePolicyDef {
+            regex_rules: vec![DlpRegexRule {
+                rule_id: "ssn".into(),
+                pattern: r"\b\d{3}-\d{2}-\d{4}\b".into(),
+                action: DlpInlineAction::Block,
+                severity: "high".into(),
+                finding_kind: DlpFindingKind::Pii,
+            }],
+            fingerprints: vec![],
+            scan_ceiling_bytes: 0,
+        });
+        let body = b"SSN: 123-45-6789";
+        let req = req_with_body("upload.example", body);
+        assert_eq!(h.handle_request(req).await.unwrap().action, "deny");
+
+        // Hot-swap to empty policy → same request now allowed.
+        h.install_dlp_policy(&DlpInlinePolicyDef::default());
+        let req2 = req_with_body("upload.example", body);
+        assert_eq!(h.handle_request(req2).await.unwrap().action, "allow");
+    }
+
+    // ---- RBI integration tests ----
+
+    /// Build a handler with an RBI engine wired and a category DB
+    /// that maps `casino.example` → `gambling` and `safe.example`
+    /// → `business.saas`. Rate limiter is generous so multi-request
+    /// tests don't trip.
+    fn make_rbi_handler() -> ExtAuthzHandler {
+        let cap = Arc::new(CapturingEmitter::default());
+        let bypass = Arc::new(BypassList::new(vec![]));
+        let cats = LocalCategoryDb::new(vec![
+            CategoryEntry {
+                host: "casino.example".into(),
+                path_prefix: None,
+                category: Category("gambling".into()),
+            },
+            CategoryEntry {
+                host: "safe.example".into(),
+                path_prefix: None,
+                category: Category("business.saas".into()),
+            },
+        ]);
+        let mal = Arc::new(NullMalwareProvider);
+        let clock = Arc::new(TestClock::new());
+        let rl = RateLimiter::new(100.0, 1.0, clock);
+        let rbi = Arc::new(RbiPolicyEngine::new(RbiProxyConfig {
+            base_url: "https://rbi.test".into(),
+        }));
+        ExtAuthzHandlerBuilder::new()
+            .with_categorizer(Arc::new(cats))
+            .with_malware(mal)
+            .with_bypass(bypass)
+            .with_rate_limiter(rl)
+            .with_telemetry(cap as Arc<dyn TelemetryEmitter>)
+            .with_rbi_engine(rbi)
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn rbi_category_match_produces_redirect() {
+        let h = make_rbi_handler();
+        h.install_rbi_policy(&RbiPolicyDef {
+            categories: vec!["gambling".into()],
+            ..Default::default()
+        });
+        let resp = h
+            .handle_request(req("casino.example", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "redirect");
+        assert_eq!(resp.status, Some(302));
+        assert!(resp.reason.starts_with("rbi."));
+        assert!(resp.redirect_url.is_some());
+        assert!(
+            resp.redirect_url
+                .as_ref()
+                .unwrap()
+                .starts_with("https://rbi.test/rbi/session/")
+        );
+    }
+
+    #[tokio::test]
+    async fn rbi_no_trigger_falls_through_to_allow() {
+        let h = make_rbi_handler();
+        h.install_rbi_policy(&RbiPolicyDef {
+            categories: vec!["gambling".into()],
+            ..Default::default()
+        });
+        let resp = h
+            .handle_request(req("safe.example", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "allow");
+        assert!(resp.redirect_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn rbi_explicit_isolate_triggers_redirect() {
+        let h = make_rbi_handler();
+        h.install_rbi_policy(&RbiPolicyDef {
+            explicit_isolate: vec!["evil.example".into()],
+            ..Default::default()
+        });
+        let resp = h
+            .handle_request(req("evil.example", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "redirect");
+        assert_eq!(resp.status, Some(302));
+    }
+
+    #[tokio::test]
+    async fn rbi_explicit_bypass_overrides_category_match() {
+        let h = make_rbi_handler();
+        h.install_rbi_policy(&RbiPolicyDef {
+            categories: vec!["gambling".into()],
+            explicit_bypass: vec!["casino.example".into()],
+            ..Default::default()
+        });
+        let resp = h
+            .handle_request(req("casino.example", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "allow");
+        assert!(resp.redirect_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn rbi_dlp_block_takes_precedence_over_redirect() {
+        // DLP block (step 3b) runs before RBI (step 3c), so a DLP
+        // block on the same host that RBI would match should deny,
+        // not redirect.
+        let cap = Arc::new(CapturingEmitter::default());
+        let dlp_cap = Arc::new(CapturingDlpEmitter::default());
+        let bypass = Arc::new(BypassList::new(vec![]));
+        let cats = LocalCategoryDb::new(vec![CategoryEntry {
+            host: "casino.example".into(),
+            path_prefix: None,
+            category: Category("gambling".into()),
+        }]);
+        let mal = Arc::new(NullMalwareProvider);
+        let clock = Arc::new(TestClock::new());
+        let rl = RateLimiter::new(100.0, 1.0, clock);
+        let dlp_engine = Arc::new(DlpInlineEngine::new());
+        let rbi = Arc::new(RbiPolicyEngine::new(RbiProxyConfig {
+            base_url: "https://rbi.test".into(),
+        }));
+        let h = ExtAuthzHandlerBuilder::new()
+            .with_categorizer(Arc::new(cats))
+            .with_malware(mal)
+            .with_bypass(bypass)
+            .with_rate_limiter(rl)
+            .with_telemetry(cap as Arc<dyn TelemetryEmitter>)
+            .with_dlp_engine(dlp_engine)
+            .with_dlp_telemetry(dlp_cap as Arc<dyn DlpTelemetryEmitter>)
+            .with_rbi_engine(rbi)
+            .build()
+            .unwrap();
+        // Install both a DLP block rule and an RBI category rule.
+        h.install_dlp_policy(&DlpInlinePolicyDef {
+            regex_rules: vec![DlpRegexRule {
+                rule_id: "ssn".into(),
+                pattern: r"\b\d{3}-\d{2}-\d{4}\b".into(),
+                action: DlpInlineAction::Block,
+                severity: "high".into(),
+                finding_kind: DlpFindingKind::Pii,
+            }],
+            fingerprints: vec![],
+            scan_ceiling_bytes: 0,
+        });
+        h.install_rbi_policy(&RbiPolicyDef {
+            categories: vec!["gambling".into()],
+            ..Default::default()
+        });
+        // Request with a body that triggers DLP block on a gambling host.
+        let body = b"SSN: 123-45-6789";
+        let resp = h
+            .handle_request(req_with_body("casino.example", body))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "deny");
+        assert_eq!(resp.status, Some(403));
+        assert!(resp.redirect_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn rbi_hot_swap_replaces_rules() {
+        let h = make_rbi_handler();
+        h.install_rbi_policy(&RbiPolicyDef {
+            categories: vec!["gambling".into()],
+            ..Default::default()
+        });
+        // Gambling host triggers redirect.
+        let resp = h
+            .handle_request(req("casino.example", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "redirect");
+
+        // Hot-swap to empty policy → same host now allowed.
+        h.install_rbi_policy(&RbiPolicyDef::default());
+        let resp2 = h
+            .handle_request(req("casino.example", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp2.action, "allow");
+    }
+
+    #[tokio::test]
+    async fn rbi_uncategorised_isolate_triggers_on_unknown_host() {
+        let h = make_rbi_handler();
+        h.install_rbi_policy(&RbiPolicyDef {
+            isolate_uncategorised: true,
+            ..Default::default()
+        });
+        let resp = h
+            .handle_request(req("totally-unknown.example", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "redirect");
+        assert_eq!(resp.status, Some(302));
+    }
+
+    #[tokio::test]
+    async fn rbi_no_engine_falls_through() {
+        // Handler without RBI engine — no redirect ever.
+        let (h, _cap) = make_handler(vec![]);
+        let resp = h
+            .handle_request(req("casino.example", "/", None, None))
+            .await
+            .unwrap();
+        assert_ne!(resp.action, "redirect");
+    }
+
+    // ---- AI governance integration tests ----
+
+    /// Build a handler with an AI-governance engine wired (and an
+    /// RBI engine for redirect tests). Category DB maps
+    /// `chatgpt.com` → `business.saas` so the deny-list doesn't
+    /// interfere.
+    fn make_ai_governance_handler() -> ExtAuthzHandler {
+        let cap = Arc::new(CapturingEmitter::default());
+        let bypass = Arc::new(BypassList::new(vec![]));
+        let cats = LocalCategoryDb::new(vec![CategoryEntry {
+            host: "chatgpt.com".into(),
+            path_prefix: None,
+            category: Category("business.saas".into()),
+        }]);
+        let mal = Arc::new(NullMalwareProvider);
+        let clock = Arc::new(TestClock::new());
+        let rl = RateLimiter::new(100.0, 1.0, clock);
+        let rbi = Arc::new(RbiPolicyEngine::new(RbiProxyConfig {
+            base_url: "https://rbi.test".into(),
+        }));
+        let aig = Arc::new(AiGovernanceEngine::new());
+        ExtAuthzHandlerBuilder::new()
+            .with_categorizer(Arc::new(cats))
+            .with_malware(mal)
+            .with_bypass(bypass)
+            .with_rate_limiter(rl)
+            .with_telemetry(cap as Arc<dyn TelemetryEmitter>)
+            .with_rbi_engine(rbi)
+            .with_ai_governance_engine(aig)
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn ai_governance_block_produces_deny() {
+        let h = make_ai_governance_handler();
+        h.install_ai_governance_policy(&AiGovernancePolicy {
+            rules: vec![AiGovernanceRule {
+                app: Some("chatgpt".into()),
+                category: None,
+                action: AiGovernanceAction::Block,
+            }],
+            ..Default::default()
+        });
+        let resp = h
+            .handle_request(req("chatgpt.com", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "deny");
+        assert_eq!(resp.status, Some(403));
+        assert!(resp.reason.contains("ai_governance"));
+    }
+
+    #[tokio::test]
+    async fn ai_governance_allow_passes_through() {
+        let h = make_ai_governance_handler();
+        h.install_ai_governance_policy(&AiGovernancePolicy {
+            rules: vec![AiGovernanceRule {
+                app: Some("chatgpt".into()),
+                category: None,
+                action: AiGovernanceAction::Allow,
+            }],
+            ..Default::default()
+        });
+        let resp = h
+            .handle_request(req("chatgpt.com", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "allow");
+    }
+
+    #[tokio::test]
+    async fn ai_governance_monitor_passes_through() {
+        let h = make_ai_governance_handler();
+        // Default policy is monitor — no rules installed.
+        let resp = h
+            .handle_request(req("chatgpt.com", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "allow");
+    }
+
+    #[tokio::test]
+    async fn ai_governance_redirect_produces_redirect() {
+        let h = make_ai_governance_handler();
+        h.install_ai_governance_policy(&AiGovernancePolicy {
+            rules: vec![AiGovernanceRule {
+                app: Some("chatgpt".into()),
+                category: None,
+                action: AiGovernanceAction::Redirect,
+            }],
+            ..Default::default()
+        });
+        let resp = h
+            .handle_request(req("chatgpt.com", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "redirect");
+        assert_eq!(resp.status, Some(302));
+        assert!(resp.redirect_url.is_some());
+        assert!(
+            resp.redirect_url
+                .as_ref()
+                .unwrap()
+                .starts_with("https://rbi.test/rbi/session/")
+        );
+    }
+
+    #[tokio::test]
+    async fn ai_governance_category_rule_blocks_all_chatbots() {
+        let h = make_ai_governance_handler();
+        h.install_ai_governance_policy(&AiGovernancePolicy {
+            rules: vec![AiGovernanceRule {
+                app: None,
+                category: Some("chatbot".into()),
+                action: AiGovernanceAction::Block,
+            }],
+            ..Default::default()
+        });
+        // chatgpt.com is a known chatbot.
+        let resp = h
+            .handle_request(req("chatgpt.com", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "deny");
+    }
+
+    #[tokio::test]
+    async fn ai_governance_per_app_overrides_category() {
+        let h = make_ai_governance_handler();
+        h.install_ai_governance_policy(&AiGovernancePolicy {
+            rules: vec![
+                AiGovernanceRule {
+                    app: Some("chatgpt".into()),
+                    category: None,
+                    action: AiGovernanceAction::Allow,
+                },
+                AiGovernanceRule {
+                    app: None,
+                    category: Some("chatbot".into()),
+                    action: AiGovernanceAction::Block,
+                },
+            ],
+            ..Default::default()
+        });
+        let resp = h
+            .handle_request(req("chatgpt.com", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "allow");
+    }
+
+    #[tokio::test]
+    async fn ai_governance_no_engine_falls_through() {
+        // Handler without AI governance engine — no block.
+        let (h, _cap) = make_handler(vec![]);
+        let resp = h
+            .handle_request(req("chatgpt.com", "/", None, None))
+            .await
+            .unwrap();
+        assert_ne!(resp.action, "deny");
+    }
+
+    #[tokio::test]
+    async fn ai_governance_hot_swap_replaces_rules() {
+        let h = make_ai_governance_handler();
+        h.install_ai_governance_policy(&AiGovernancePolicy {
+            rules: vec![AiGovernanceRule {
+                app: Some("chatgpt".into()),
+                category: None,
+                action: AiGovernanceAction::Block,
+            }],
+            ..Default::default()
+        });
+        let resp = h
+            .handle_request(req("chatgpt.com", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "deny");
+
+        // Hot-swap to empty policy → default monitor → allow.
+        h.install_ai_governance_policy(&AiGovernancePolicy::default());
+        let resp2 = h
+            .handle_request(req("chatgpt.com", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp2.action, "allow");
+    }
+
+    #[tokio::test]
+    async fn ai_governance_non_ai_app_passes_through() {
+        let h = make_ai_governance_handler();
+        h.install_ai_governance_policy(&AiGovernancePolicy {
+            rules: vec![AiGovernanceRule {
+                app: None,
+                category: Some("chatbot".into()),
+                action: AiGovernanceAction::Block,
+            }],
+            ..Default::default()
+        });
+        // Non-AI host — governance doesn't match.
+        let resp = h
+            .handle_request(req("example.com", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "allow");
+    }
+
+    #[tokio::test]
+    async fn ai_governance_rbi_wins_over_governance_redirect() {
+        // When both RBI and AI governance would redirect, RBI
+        // runs first (step 3c before 3d) and wins.
+        let h = make_ai_governance_handler();
+        // RBI policy: isolate chatgpt.com explicitly.
+        h.install_rbi_policy(&RbiPolicyDef {
+            explicit_isolate: vec!["chatgpt.com".into()],
+            ..Default::default()
+        });
+        // Governance policy: redirect chatgpt.
+        h.install_ai_governance_policy(&AiGovernancePolicy {
+            rules: vec![AiGovernanceRule {
+                app: Some("chatgpt".into()),
+                category: None,
+                action: AiGovernanceAction::Redirect,
+            }],
+            ..Default::default()
+        });
+        let resp = h
+            .handle_request(req("chatgpt.com", "/", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.action, "redirect");
+        // RBI reason starts with "rbi.", governance with "ai_governance."
+        assert!(resp.reason.starts_with("rbi."));
     }
 }

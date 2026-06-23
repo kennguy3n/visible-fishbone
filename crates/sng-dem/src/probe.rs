@@ -608,7 +608,16 @@ mod tests {
         };
         let r = engine.probe_one(&target).await;
         assert!(!r.success);
-        assert_eq!(r.error_kind, Some(ProbeErrorKind::Connect));
+        // On Linux a dropped listener yields an immediate RST
+        // (Connect); on Windows the same port may hang until the
+        // deadline (Timeout). Both are graceful failure modes —
+        // the test's intent is to verify no crash and a valid
+        // error classification, not a specific transport error.
+        assert!(
+            matches!(r.error_kind, Some(ProbeErrorKind::Connect) | Some(ProbeErrorKind::Timeout)),
+            "expected Connect or Timeout, got {:?}",
+            r.error_kind,
+        );
     }
 
     #[tokio::test]

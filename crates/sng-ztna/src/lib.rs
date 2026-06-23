@@ -120,6 +120,7 @@
 )]
 
 pub mod app;
+pub mod clientless;
 pub mod device;
 pub mod error;
 pub mod identity;
@@ -132,6 +133,12 @@ pub mod session;
 pub mod stats;
 
 pub use app::{App, AppCatalogProvider, StaticAppCatalog};
+pub use clientless::{
+    ClientlessError, ClientlessEvaluator, ClientlessOutcome, ClientlessSession,
+    ClientlessSessionStore, HostMatcher, ProxyTarget, ProxyTargetTable,
+    generate_session_id, render_clear_cookie, render_set_cookie,
+    DEFAULT_SESSION_SHARDS, DEFAULT_SESSION_TTL_MS,
+};
 pub use device::{
     ArcSwapDeviceTrustProvider, CertificateHealth, DevicePosture, DeviceTrust, DeviceTrustProvider,
     StaticDeviceTrustProvider,

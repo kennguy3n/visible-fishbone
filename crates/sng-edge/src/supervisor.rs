@@ -52,8 +52,9 @@ use crate::cli::{Cli, DataPathSelection, PalBackend, UpdaterBackend};
 use crate::commodity::{CommodityProfile, SpecAssessment};
 use crate::config::EdgeConfig;
 use crate::subsystems::{
-    CommsSubsystem, DnsSubsystem, ExtAuthzSubsystem, FwSubsystem, HaSubsystem, IpsSubsystem,
-    PolicyEvalSubsystem, SdwanSubsystem, SwgSubsystem, TelemetrySubsystem, UpdaterSubsystem,
+    CommsSubsystem, DemSubsystem, DnsSubsystem, ExtAuthzSubsystem, FwSubsystem, HaSubsystem,
+    IpsSubsystem, PolicyEvalSubsystem, SdwanSubsystem, SwgSubsystem, TelemetrySubsystem,
+    UpdaterSubsystem,
     comms::{BundlePublisher, CommsBuildError},
     telemetry::TelemetryBuildError,
     updater::UpdaterSubsystemError,
@@ -159,6 +160,8 @@ pub struct BuiltEdge {
     pub ha: Arc<HaSubsystem>,
     /// Updater adapter.
     pub updater: Arc<UpdaterSubsystem>,
+    /// DEM adapter. Default-off; idles unless `dem.enabled` is set.
+    pub dem: Arc<DemSubsystem>,
     /// The resolved data-path backend (`auto` already collapsed to
     /// `ebpf`/`nftables` via the one-time XDP capability probe).
     /// Carried here so `run_edge` can size the commodity profile
@@ -170,7 +173,7 @@ impl std::fmt::Debug for BuiltEdge {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BuiltEdge")
             .field("supervisor", &"Supervisor { .. }")
-            .field("subsystems", &13_usize)
+            .field("subsystems", &14_usize)
             .finish_non_exhaustive()
     }
 }
@@ -395,6 +398,15 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
         } else {
             ztna
         };
+        let ztna = if cfg.ztna.clientless_enabled {
+            let evaluator = sng_ztna::clientless::ClientlessEvaluator::new(
+                Arc::clone(ztna.service()),
+                cfg.ztna.clientless_idp_authorize_url.clone(),
+            );
+            ztna.with_clientless(evaluator, cfg.ztna.clientless_cookie_name.clone())
+        } else {
+            ztna
+        };
         Arc::new(ztna)
     };
 
@@ -423,6 +435,11 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
     // 11. Updater.
     let updater = Arc::new(UpdaterSubsystem::default_in_memory(&cfg.updater)?);
 
+    // 12. DEM (Digital Experience Monitoring). Default-off; the
+    //     subsystem idles (no engine, no sweep loop) unless
+    //     `dem.enabled` is set.
+    let dem = Arc::new(DemSubsystem::new(&cfg.dem));
+
     // Register subsystems onto the builder we created above.
     // Boot order matters: telemetry + comms first so producer
     // subsystems have a live channel + bundle source by the
@@ -440,6 +457,7 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
     builder = builder.with_subsystem(Arc::clone(&sdwan));
     builder = builder.with_subsystem(Arc::clone(&ha));
     builder = builder.with_subsystem(Arc::clone(&updater));
+    builder = builder.with_subsystem(Arc::clone(&dem));
 
     let supervisor = builder.build();
 
@@ -458,6 +476,7 @@ pub fn build_edge(cli: &Cli, cfg: &EdgeConfig) -> Result<BuiltEdge, EdgeBuildErr
         sdwan,
         ha,
         updater,
+        dem,
         datapath,
     })
 }
@@ -571,6 +590,7 @@ pub async fn run_edge(cli: Cli, cfg: EdgeConfig) -> Result<SupervisorReport, Edg
         sdwan,
         ha,
         updater,
+        dem,
         // Plain Copy enum, no Arc to release; already consumed by
         // the commodity preflight above.
         datapath: _,
@@ -588,6 +608,7 @@ pub async fn run_edge(cli: Cli, cfg: EdgeConfig) -> Result<SupervisorReport, Edg
     drop(sdwan);
     drop(ha);
     drop(updater);
+    drop(dem);
     supervisor.run().await.map_err(EdgeBuildError::from)
 }
 

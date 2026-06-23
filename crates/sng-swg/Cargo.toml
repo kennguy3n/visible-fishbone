@@ -72,6 +72,12 @@ yara-x = { workspace = true }
 # envelope without a binary side-channel.
 base64 = { workspace = true }
 
+# Inline DLP engine: RegexSet for single-pass multi-pattern matching.
+# The regex crate is already in the workspace dependency graph
+# (tracing-subscriber's env-filter uses regex transitively), so
+# pinning it here adds no new transitive crates.
+regex = { workspace = true }
+
 # Note: the rate limiter's `SystemClock` anchor uses
 # `std::sync::LazyLock<Instant>` (stabilised in Rust 1.80) so we
 # do not need `once_cell` for the monotonic-clock epoch. If a
