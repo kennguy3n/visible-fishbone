@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "profile": "branch-small",
+  "mode": "concurrent-flows",
+  "unix_time_secs": 1783938872,
+  "git_sha": "06e6c88ea739aa4f9061c3535d4ae3766691fb96",
+  "dimensions": {
+    "packet_size": 1500,
+    "policy_rules": 100,
+    "inspection": "url-cat"
+  },
+  "concurrent_flows": {
+    "max_active_flows": 94629120
+  },
+  "resources": {
+    "mean_cpu_busy_pct": 25.147422461568958,
+    "peak_rss_bytes": 4460544
+  },
+  "target_gbps": 0.8
+}
