@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "profile": "branch-small",
+  "mode": "throughput",
+  "unix_time_secs": 1784542754,
+  "git_sha": "9f6b093aeb34bf2e621d3162529391e16cfa47d7",
+  "dimensions": {
+    "packet_size": 1500,
+    "policy_rules": 100,
+    "inspection": "url-cat"
+  },
+  "throughput": {
+    "max_pps": 6198582.589455921,
+    "max_gbps": 74.38299107347106,
+    "mean_gbps": 74.27048510124301
+  },
+  "resources": {
+    "mean_cpu_busy_pct": 26.15847654851414,
+    "peak_rss_bytes": 4349952
+  },
+  "target_gbps": 0.8,
+  "competitor_comparison": {
+    "sng_measured_gbps": 74.38299107347106,
+    "feature": "NGFW (URL filtering + app-id) throughput",
+    "rows": [
+      {
+        "competitor": "Fortinet FortiGate 40F",
+        "published_gbps": 0.6,
+        "delta_pct": 12297.165178911846,
+        "verdict": "SNG 74.38 Gbps (software, VM) vs Fortinet FortiGate 40F 0.60 Gbps published (+12297%) — informative, not apples-to-apples: SoC4-accelerated fixed appliance; SNG is software-only on a generic x86 VM"
+      }
+    ]
+  }
+}
