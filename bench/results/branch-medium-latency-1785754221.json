@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "profile": "branch-medium",
+  "mode": "latency",
+  "unix_time_secs": 1785754221,
+  "git_sha": "86eb9242161a08ba04ca23c7abe970161126db40",
+  "dimensions": {
+    "packet_size": 1500,
+    "policy_rules": 100,
+    "inspection": "url-cat"
+  },
+  "latency": {
+    "p50_ns": 180,
+    "p95_ns": 260,
+    "p99_ns": 271,
+    "max_ns": 71924,
+    "clamped": 0
+  },
+  "resources": {
+    "mean_cpu_busy_pct": 25.268282425374274,
+    "peak_rss_bytes": 4374528
+  },
+  "target_gbps": 5.0
+}
